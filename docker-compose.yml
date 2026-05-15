@@ -76,7 +76,7 @@ services:
       - robomp_internal
     volumes:
       - ${PI_ROOT:-/work/pi}:/work/pi:ro
-      - ./data:/data
+      - robomp_data:/data
       # Host agent config is mounted read-only under /srv/agent-home-stage
       # with host-controlled permissions. The entrypoint copies it into
       # root-owned, world-readable files under /srv/agent-home; the agent
@@ -130,7 +130,7 @@ services:
     volumes:
       # Shared workspace pool/worktrees so the proxy can drive git operations
       # against the same per-issue worktrees the orchestrator builds.
-      - ./data:/data
+      - robomp_data:/data
 
 networks:
   # External-facing bridge: webhook ingress (8080) and the orchestrator's
@@ -140,3 +140,7 @@ networks:
   # ingress from outside the compose project.
   robomp_internal:
     internal: true
+
+volumes:
+  # Docker-managed Linux volume so UID/GID permissions on /data are enforced.
+  robomp_data: {}

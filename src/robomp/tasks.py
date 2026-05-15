@@ -486,6 +486,17 @@ async def handle_pr_conversation(
         sandbox.remove_workspace(repo=issue_row.repo, number=issue_row.number)
         db.upsert_issue(key=issue_row.key, repo=issue_row.repo, number=issue_row.number, state="reproducing")
         issue_row = db.get_issue(issue_row.key) or issue_row
+    # Bare @mention with no request body — the route stashes an empty
+    # _robomp_directive; _directive_from_payload rejects it but the key
+    # being present tells us a mention happened. Reply cheaply without omp.
+    if directive is None and payload.get("_robomp_directive") is not None:
+        comment = _comment_from_payload(payload)
+        log.info("bare mention, prompting for request", extra={"repo": repo_full, "pr": pr_number, "author": comment.author})
+        try:
+            await github.post_comment(repo_full, pr_number, persona.bare_mention_reply())
+        except GitHubError as exc:
+            log.warning("bare mention reply failed", extra={"err": str(exc)})
+        return
     try:
         repo = await github.get_repo(repo_full)
         issue = await github.get_issue(repo_full, issue_row.number)

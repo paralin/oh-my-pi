@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
+import stat
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from robomp.sandbox import SandboxManager, _chown_workspace, make_branch, workspace_key
+from robomp.sandbox import SandboxManager, _chown_workspace, _share_git_metadata_with_slots, make_branch, workspace_key
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -128,6 +129,99 @@ def test_chown_workspace_runs_chown_and_chmod_as_root_on_linux(tmp_path: Path, m
         (["chown", "-R", "0:2001", str(tmp_path)], True),
         (["chmod", "-R", "u=rwX,g=rwX,o=", str(tmp_path)], True),
     ]
+
+
+def test_share_git_metadata_keeps_pool_writable_for_retry_slot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo_dir = tmp_path / "workspaces" / "octo__widget__43" / "repo"
+    repo_dir.mkdir(parents=True)
+    common_dir = tmp_path / "workspaces" / "_pool" / "octo__widget" / ".git"
+    git_dir = common_dir / "worktrees" / "repo"
+    git_dir.mkdir(parents=True)
+    (repo_dir / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+    (git_dir / "commondir").write_text("../..\n", encoding="utf-8")
+
+    object_dir = common_dir / "objects" / "ab"
+    object_dir.mkdir(parents=True)
+    object_file = object_dir / "object"
+    object_file.write_text("object\n", encoding="utf-8")
+    object_file.chmod(0o600)
+
+    ref_dir = common_dir / "refs" / "heads"
+    ref_dir.mkdir(parents=True)
+    ref_file = ref_dir / "farm"
+    ref_file.write_text("sha\n", encoding="utf-8")
+    ref_file.chmod(0o600)
+
+    log_dir = common_dir / "logs" / "refs" / "heads"
+    log_dir.mkdir(parents=True)
+    log_file = log_dir / "farm"
+    log_file.write_text("sha sha bot <bot@example.invalid> commit\n", encoding="utf-8")
+    log_file.chmod(0o600)
+
+    index_file = git_dir / "index"
+    index_file.write_text("index\n", encoding="utf-8")
+    index_file.chmod(0o600)
+
+    chowns: list[tuple[Path, int, int]] = []
+    monkeypatch.setattr("robomp.sandbox.platform.system", lambda: "Linux")
+    monkeypatch.setattr("robomp.sandbox.os.geteuid", lambda: 0)
+    monkeypatch.setattr("robomp.sandbox.os.chown", lambda path, uid, gid: chowns.append((Path(path), uid, gid)))
+
+    _share_git_metadata_with_slots(repo_dir, 2002)
+
+    assert object_dir.stat().st_mode & stat.S_IWGRP
+    assert object_dir.stat().st_mode & stat.S_ISGID
+    assert object_file.stat().st_mode & stat.S_IRGRP
+    assert not object_file.stat().st_mode & stat.S_IWGRP
+    assert ref_file.stat().st_mode & stat.S_IWGRP
+    assert log_file.stat().st_mode & stat.S_IWGRP
+    assert index_file.stat().st_mode & stat.S_IWGRP
+    assert (git_dir, -1, 2000) in chowns
+
+
+def test_ensure_workspace_refreshes_permissions_for_retry_slot_and_session(
+    tmp_path: Path, upstream_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    chowns: list[tuple[Path, int | None]] = []
+    shared: list[tuple[Path, int | None]] = []
+
+    monkeypatch.setattr("robomp.sandbox._chown_workspace", lambda root, slot_uid: chowns.append((root, slot_uid)))
+    monkeypatch.setattr(
+        "robomp.sandbox._share_git_metadata_with_slots",
+        lambda repo_dir, slot_uid: shared.append((repo_dir, slot_uid)),
+    )
+
+    mgr = SandboxManager(tmp_path / "workspaces")
+    ws1 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=44,
+        title="retry me",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        slot_uid=2001,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+    transcript = ws1.session_dir / "turn.jsonl"
+    transcript.write_text("{}\n", encoding="utf-8")
+    ws2 = mgr.ensure_workspace(
+        repo="octo/widget",
+        number=44,
+        title="retry me",
+        clone_url=str(upstream_repo),
+        default_branch="main",
+        existing_branch=ws1.branch,
+        slot_uid=2002,
+        author_name="robomp-bot",
+        author_email="robomp-bot@example.invalid",
+    )
+
+    assert ws2.repo_dir == ws1.repo_dir
+    assert ws2.session_dir == ws1.session_dir
+    assert transcript.is_file()
+    assert ws2.branch == ws1.branch
+    assert shared == [(ws1.repo_dir, 2001), (ws1.repo_dir, 2002)]
+    assert chowns == [(ws1.root, 2001), (ws1.root, 2002)]
 
 
 def test_ensure_workspace_invokes_slot_chown(

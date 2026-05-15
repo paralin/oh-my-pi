@@ -19,6 +19,7 @@ import platform
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -195,8 +196,99 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> subprocess.CompletedProc
     return proc
 
 
+_SHARED_OMP_GID = 2000
+
+
+def _slot_permissions_active(slot_uid: int | None) -> bool:
+    return slot_uid is not None and platform.system() == "Linux" and os.geteuid() == 0
+
+
+def _grant_group_bits(path: Path, *, gid: int, bits: int) -> None:
+    try:
+        st = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(st.st_mode):
+        return
+    os.chown(path, -1, gid)
+    path.chmod(stat.S_IMODE(st.st_mode) | bits)
+
+
+def _grant_tree(path: Path, *, gid: int, files_group_writable: bool) -> None:
+    if not path.exists():
+        return
+    if path.is_file():
+        bits = stat.S_IRGRP | (stat.S_IWGRP if files_group_writable else 0)
+        _grant_group_bits(path, gid=gid, bits=bits)
+        return
+    for root, dirs, files in os.walk(path, followlinks=False):
+        root_path = Path(root)
+        _grant_group_bits(root_path, gid=gid, bits=stat.S_IRWXG | stat.S_ISGID)
+        for dirname in dirs:
+            _grant_group_bits(root_path / dirname, gid=gid, bits=stat.S_IRWXG | stat.S_ISGID)
+        file_bits = stat.S_IRGRP | (stat.S_IWGRP if files_group_writable else 0)
+        for filename in files:
+            _grant_group_bits(root_path / filename, gid=gid, bits=file_bits)
+
+
+def _resolve_worktree_git_dirs(repo_dir: Path) -> tuple[Path, Path] | None:
+    marker = repo_dir / ".git"
+    if marker.is_dir():
+        return marker, marker
+    try:
+        text = marker.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir:"
+    if not text.startswith(prefix):
+        return None
+    raw_git_dir = text[len(prefix) :].strip()
+    git_dir = Path(raw_git_dir)
+    if not git_dir.is_absolute():
+        git_dir = (repo_dir / git_dir).resolve()
+    try:
+        raw_common_dir = (git_dir / "commondir").read_text(encoding="utf-8").strip()
+    except OSError:
+        return git_dir, git_dir
+    common_dir = Path(raw_common_dir)
+    if not common_dir.is_absolute():
+        common_dir = (git_dir / common_dir).resolve()
+    return git_dir, common_dir
+
+
+def _share_git_metadata_with_slots(repo_dir: Path, slot_uid: int | None) -> None:
+    """Keep shared Git metadata writable by whichever slot gets the retry.
+
+    The worktree checkout itself is slot-private, but `.git` in a Git worktree
+    points back into the shared clone pool. A retry may run as a different
+    `omp-N` user, so the pool-side worktree gitdir, refs, reflogs, and object
+    directories must stay writable through the shared `omp` group.
+    """
+    if not _slot_permissions_active(slot_uid):
+        return
+    dirs = _resolve_worktree_git_dirs(repo_dir)
+    if dirs is None:
+        return
+    git_dir, common_dir = dirs
+    gid = _SHARED_OMP_GID
+    _grant_tree(git_dir, gid=gid, files_group_writable=True)
+    _grant_group_bits(common_dir, gid=gid, bits=stat.S_IRWXG | stat.S_ISGID)
+    for rel, files_group_writable in (
+        ("objects", False),
+        ("refs", True),
+        ("logs", True),
+        ("worktrees", True),
+    ):
+        _grant_tree(common_dir / rel, gid=gid, files_group_writable=files_group_writable)
+    for rel in ("config", "packed-refs", "HEAD", "FETCH_HEAD", "ORIG_HEAD"):
+        _grant_tree(common_dir / rel, gid=gid, files_group_writable=True)
+
+
 # slot_uid is also the slot-private GID created by entrypoint.sh. Do not use
-# the shared omp group here; that would let every slot read every workspace.
+# the shared omp group for the workspace tree; that would let every slot read
+# every other slot's checkout, artifacts, context, and .omp-session. A retry may
+# acquire a different slot, so we recursively hand the private workspace tree to
+# the current slot before launching `omp --continue`.
 def _chown_workspace(ws_root: Path, slot_uid: int | None) -> None:
     if slot_uid is None:
         return
@@ -323,6 +415,7 @@ class SandboxManager:
         # Identity is set on the worktree's shared config; idempotent.
         _safe_run(["git", "config", "user.email", author_email], cwd=repo_dir)
         _safe_run(["git", "config", "user.name", author_name], cwd=repo_dir)
+        _share_git_metadata_with_slots(repo_dir, slot_uid)
         _chown_workspace(ws_root, slot_uid)
         return Workspace(
             root=ws_root,
