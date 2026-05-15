@@ -7,6 +7,11 @@
 # proxy role does NOT need a $PI_ROOT pi checkout — it never runs omp.
 set -euo pipefail
 
+# Shared git metadata under /data/workspaces/_pool is intentionally group
+# writable by the `omp` group so interrupted work can resume on a different
+# slot user. Keep new files and directories compatible with that model.
+umask 0002
+
 # Detect the proxy role by inspecting the command. Compose passes `command:`
 # as $@ here (after tini --), so $1=python, $2=-m, $3=robomp.proxy is the
 # canonical shape; we also accept a single concatenated arg for safety.

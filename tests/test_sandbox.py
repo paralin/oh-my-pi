@@ -129,6 +129,32 @@ def test_rename_workspace_branch_renames_local_branch(tmp_path: Path) -> None:
     assert head == "refs/heads/farm/abc12345/fix-json-bom"
 
 
+def test_rename_workspace_branch_refreshes_shared_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = tmp_path / "ws"
+    repo_dir = root / "repo"
+    initial = "farm/abc12345/some-issue"
+    _init_worktree_repo(repo_dir, initial)
+    ws = Workspace(
+        root=root,
+        repo_dir=repo_dir,
+        session_dir=root / ".omp-session",
+        context_dir=root / "context",
+        artifacts_dir=root / "artifacts",
+        branch=initial,
+        repo_full_name="octo/widget",
+        issue_number=1,
+    )
+    calls: list[tuple[Path, int | None]] = []
+    monkeypatch.setattr(
+        "robomp.sandbox._share_git_metadata_with_slots",
+        lambda repo_dir, slot_uid: calls.append((repo_dir, slot_uid)),
+    )
+
+    rename_workspace_branch(ws, "fix-json-bom", slot_uid=2004)
+
+    assert calls == [(repo_dir, 2004)]
+
+
 def test_rename_workspace_branch_is_idempotent_when_slug_unchanged(tmp_path: Path) -> None:
     root = tmp_path / "ws"
     repo_dir = root / "repo"

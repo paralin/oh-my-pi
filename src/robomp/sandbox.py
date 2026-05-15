@@ -111,6 +111,7 @@ def rename_workspace_branch(
     new_slug: str,
     *,
     pr_number: int | None = None,
+    slot_uid: int | None = None,
 ) -> str:
     """Rename the workspace's local branch to ``farm/<hex>/<new_slug>``.
 
@@ -157,6 +158,7 @@ def rename_workspace_branch(
             proc.stdout,
             proc.stderr,
         )
+    _share_git_metadata_with_slots(workspace.repo_dir, slot_uid)
     workspace.branch = new_branch
     return new_branch
 
