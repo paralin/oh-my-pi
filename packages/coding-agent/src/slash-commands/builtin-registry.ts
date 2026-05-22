@@ -72,6 +72,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
+			if (command.args) runtime.ctx.editor.addToHistory(command.text);
 			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
 			runtime.ctx.editor.setText("");
 		},
