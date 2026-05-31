@@ -83,6 +83,13 @@
         "@huggingface/transformers": "catalog:",
       },
     },
+    "packages/dstui": {
+      "name": "@oh-my-pi/pi-dstui",
+      "version": "15.7.2",
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/hashline": {
       "name": "@oh-my-pi/hashline",
       "version": "15.7.2",
@@ -638,6 +645,8 @@
     "@oh-my-pi/pi-ai": ["@oh-my-pi/pi-ai@workspace:packages/ai"],
 
     "@oh-my-pi/pi-coding-agent": ["@oh-my-pi/pi-coding-agent@workspace:packages/coding-agent"],
+
+    "@oh-my-pi/pi-dstui": ["@oh-my-pi/pi-dstui@workspace:packages/dstui"],
 
     "@oh-my-pi/pi-mnemosyne": ["@oh-my-pi/pi-mnemosyne@workspace:packages/mnemosyne"],
 
