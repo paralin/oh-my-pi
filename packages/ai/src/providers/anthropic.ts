@@ -2301,8 +2301,10 @@ function buildParams(
 	disableThinkingIfToolChoiceForced(params);
 	ensureMaxTokensForThinking(params, model);
 	applyPromptCaching(params, cacheControl);
-	optimizeAnthropicCacheAlignment(params, model, options);
+	// Strip excess breakpoints before the optimizer pads, so it never appends
+	// alignment text to blocks whose cache_control is about to be removed.
 	enforceCacheControlLimit(params, 4);
+	optimizeAnthropicCacheAlignment(params, model, options);
 	normalizeCacheControlTtlOrdering(params);
 
 	return params;
