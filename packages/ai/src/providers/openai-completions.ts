@@ -231,7 +231,12 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 	const content = delta.content;
 	if (typeof content === "string" ? content.length > 0 : Array.isArray(content) && content.length > 0) return true;
 	if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return true;
-	if (choice.delta.function_call) return true;
+	if (
+		(typeof delta.function_call?.name === "string" && delta.function_call.name.length > 0) ||
+		(typeof delta.function_call?.arguments === "string" && delta.function_call.arguments.length > 0)
+	) {
+		return true;
+	}
 	if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
 	if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
 	if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) return true;

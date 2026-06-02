@@ -187,6 +187,23 @@ describe("isOpenAICompletionsProgressChunk", () => {
 				}),
 			).toBe(false);
 		});
+		it("rejects empty deprecated function_call deltas", () => {
+			expect(
+				isOpenAICompletionsProgressChunk({
+					choices: [{ delta: { function_call: {} } }],
+				}),
+			).toBe(false);
+			expect(
+				isOpenAICompletionsProgressChunk({
+					choices: [{ delta: { function_call: { arguments: "" } } }],
+				}),
+			).toBe(false);
+			expect(
+				isOpenAICompletionsProgressChunk({
+					choices: [{ delta: { function_call: { name: "" } } }],
+				}),
+			).toBe(false);
+		});
 	});
 
 	describe("progress chunks (MUST reset the watchdog)", () => {
