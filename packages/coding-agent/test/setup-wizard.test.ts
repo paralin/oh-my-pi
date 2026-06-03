@@ -11,6 +11,11 @@ import {
 	selectSetupScenes,
 } from "../src/modes/setup-wizard";
 import { WebSearchTab } from "../src/modes/setup-wizard/scenes/web-search";
+import {
+	SEARCH_PROVIDER_OPTIONS,
+	SEARCH_PROVIDER_ORDER,
+	SEARCH_PROVIDER_PREFERENCES,
+} from "../src/web/search/provider";
 import { initTheme, theme } from "../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../src/modes/types";
 
@@ -195,6 +200,26 @@ describe("setup wizard web search tab", () => {
 		const expected = SETTINGS_SCHEMA["providers.webSearch"].ui.options[1].value;
 		expect(expected).not.toBe("auto");
 		expect(settings.get("providers.webSearch")).toBe(expected);
+	});
+
+	it("offers auto plus every registered provider in chain order", () => {
+		const expected: string[] = ["auto", ...SEARCH_PROVIDER_ORDER];
+		const schemaValues: string[] = [...SETTINGS_SCHEMA["providers.webSearch"].values];
+		const schemaOptionValues: string[] = SETTINGS_SCHEMA["providers.webSearch"].ui.options.map(
+			o => o.value,
+		);
+
+		expect(schemaValues).toEqual(expected);
+		expect(schemaOptionValues).toEqual(expected);
+		expect<string[]>([...SEARCH_PROVIDER_PREFERENCES]).toEqual(expected);
+		expect(SEARCH_PROVIDER_OPTIONS.map<string>(o => o.value)).toEqual(expected);
+
+		// Every option carries a non-empty label and description so the TUI never
+		// renders a blank row for a newly registered provider.
+		for (const option of SEARCH_PROVIDER_OPTIONS) {
+			expect(option.label.length).toBeGreaterThan(0);
+			expect(option.description.length).toBeGreaterThan(0);
+		}
 	});
 });
 

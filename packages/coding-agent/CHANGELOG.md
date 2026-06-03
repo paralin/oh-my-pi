@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed the TUI/CLI web-search provider selector silently omitting and mis-ordering registered providers when its hand-maintained options list drifted from the provider registry. `providers.webSearch` schema values and `ui.options`, the setup wizard's selector, and the `omp web-search --provider` choices are now derived from a single `PROVIDER_META` table in `web/search/provider.ts` (with a compile-time exhaustiveness check), so registering a new web-search provider exposes it in every UI surface in chain order ([#1756](https://github.com/can1357/oh-my-pi/issues/1756)).
 - Fixed `/review`'s uncommitted-change mode in Jujutsu repositories to read `jj diff --git` from the current workspace, so non-default JJ workspaces include their working-copy changes instead of falling back to the colocated Git checkout.
 - Fixed empty assistant stop retry continuations preserving auto-retry state until a non-empty assistant turn completes or recovery reaches its retry cap.
 
