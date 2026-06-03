@@ -6,6 +6,7 @@ import {
 	acquireTinyRuntimeInstallLock,
 	compiledTransformersEntrypoint,
 	createRuntimeInstallCommand,
+	patchCompiledRuntimeRequires,
 	resolveTransformersVersionSpecFromManifest,
 	rewriteCompiledRuntimeRequires,
 } from "../src/tiny/worker";
@@ -116,6 +117,54 @@ describe("acquireTinyRuntimeInstallLock", () => {
 		} finally {
 			await release();
 			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("patchCompiledRuntimeRequires", () => {
+	it("rewrites bare runtime requires recursively under installed dist directories", async () => {
+		const runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-tiny-runtime-"));
+
+		const layout: Record<string, { main: string; files: Record<string, string> }> = {
+			"@huggingface/transformers": {
+				main: "dist/transformers.node.cjs",
+				files: { "dist/transformers.node.cjs": 'require("onnxruntime-node"); require("sharp");' },
+			},
+			"onnxruntime-node": {
+				main: "dist/index.js",
+				files: {
+					"dist/index.js": 'require("./backend"); require("onnxruntime-common");',
+					"dist/backend.js": 'require("./binding"); require("onnxruntime-common");',
+					"dist/binding.js": 'require("onnxruntime-common");',
+				},
+			},
+			"onnxruntime-common": { main: "dist/cjs/index.js", files: { "dist/cjs/index.js": "" } },
+			sharp: { main: "lib/index.js", files: { "lib/index.js": "" } },
+		};
+
+		try {
+			for (const [name, pkg] of Object.entries(layout)) {
+				const packageDir = path.join(runtimeDir, "node_modules", ...name.split("/"));
+				await fs.mkdir(packageDir, { recursive: true });
+				await Bun.write(path.join(packageDir, "package.json"), JSON.stringify({ main: pkg.main }));
+				for (const [relativePath, contents] of Object.entries(pkg.files)) {
+					const filePath = path.join(packageDir, relativePath);
+					await fs.mkdir(path.dirname(filePath), { recursive: true });
+					await Bun.write(filePath, contents);
+				}
+			}
+
+			await patchCompiledRuntimeRequires(runtimeDir);
+
+			const backend = await Bun.file(
+				path.join(runtimeDir, "node_modules", "onnxruntime-node", "dist", "backend.js"),
+			).text();
+			expect(backend).toContain(
+				`require(${JSON.stringify(path.join(runtimeDir, "node_modules", "onnxruntime-common", "dist", "cjs", "index.js"))})`,
+			);
+			expect(backend).not.toContain('require("onnxruntime-common")');
+		} finally {
+			await fs.rm(runtimeDir, { recursive: true, force: true });
 		}
 	});
 });

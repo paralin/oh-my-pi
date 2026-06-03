@@ -220,17 +220,35 @@ async function patchRuntimeRequireFile(filePath: string, runtimeDir: string): Pr
 	if (rewritten !== source) await Bun.write(filePath, rewritten);
 }
 
-async function patchCompiledRuntimeRequires(runtimeDir: string): Promise<void> {
+const RUNTIME_PATCH_ROOTS: readonly string[] = [
+	path.join("node_modules", "@huggingface", "transformers", "dist"),
+	path.join("node_modules", "onnxruntime-node", "dist"),
+];
+const RUNTIME_PATCH_EXTENSIONS: ReadonlySet<string> = new Set([".js", ".cjs", ".mjs"]);
+
+async function* walkRuntimeJsFiles(root: string): AsyncGenerator<string> {
+	let entries: nodeFs.Dirent[];
+	try {
+		entries = await fs.readdir(root, { withFileTypes: true });
+	} catch (error: unknown) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+		throw error;
+	}
+	for (const entry of entries) {
+		const entryPath = path.join(root, entry.name);
+		if (entry.isDirectory()) yield* walkRuntimeJsFiles(entryPath);
+		else if (entry.isFile() && RUNTIME_PATCH_EXTENSIONS.has(path.extname(entry.name))) yield entryPath;
+	}
+}
+
+export async function patchCompiledRuntimeRequires(runtimeDir: string): Promise<void> {
 	await Bun.write(compiledSharpStubEntrypoint(runtimeDir), "module.exports = {};\n");
-	await patchRuntimeRequireFile(compiledTransformersEntrypoint(runtimeDir), runtimeDir);
-	await patchRuntimeRequireFile(
-		path.join(runtimeDir, "node_modules", "onnxruntime-node", "dist", "index.js"),
-		runtimeDir,
-	);
-	await patchRuntimeRequireFile(
-		path.join(runtimeDir, "node_modules", "onnxruntime-node", "dist", "binding.js"),
-		runtimeDir,
-	);
+	for (const relativeRoot of RUNTIME_PATCH_ROOTS) {
+		const root = path.join(runtimeDir, relativeRoot);
+		for await (const filePath of walkRuntimeJsFiles(root)) {
+			await patchRuntimeRequireFile(filePath, runtimeDir);
+		}
+	}
 }
 
 async function isCompiledRuntimeInstalled(runtimeDir: string): Promise<boolean> {
