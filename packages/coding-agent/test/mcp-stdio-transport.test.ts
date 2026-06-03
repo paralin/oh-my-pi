@@ -29,7 +29,7 @@ function trackUnhandled(): { release: () => unknown[]; capture: () => unknown[] 
 // ---------------------------------------------------------------------------
 
 describe("writeFrame", () => {
-	it("writes and flushes, returning true on success", () => {
+	it("writes and flushes, returning true on success", async () => {
 		const sink = {
 			writes: [] as string[],
 			flushed: 0,
@@ -41,12 +41,12 @@ describe("writeFrame", () => {
 			},
 		};
 
-		expect(writeFrame(sink, '{"k":1}\n')).toBe(true);
+		expect(await writeFrame(sink, '{"k":1}\n')).toBe(true);
 		expect(sink.writes).toEqual(['{"k":1}\n']);
 		expect(sink.flushed).toBe(1);
 	});
 
-	it("returns false when write() throws synchronously (broken pipe)", () => {
+	it("returns false when write() throws synchronously (broken pipe)", async () => {
 		const sink = {
 			flushed: 0,
 			write() {
@@ -57,11 +57,11 @@ describe("writeFrame", () => {
 			},
 		};
 
-		expect(writeFrame(sink, "anything\n")).toBe(false);
+		expect(await writeFrame(sink, "anything\n")).toBe(false);
 		expect(sink.flushed).toBe(0);
 	});
 
-	it("returns false when flush() throws after a successful write", () => {
+	it("returns false when flush() throws after a successful write", async () => {
 		const sink = {
 			writes: [] as string[],
 			write(chunk: string) {
@@ -72,11 +72,11 @@ describe("writeFrame", () => {
 			},
 		};
 
-		expect(writeFrame(sink, "anything\n")).toBe(false);
+		expect(await writeFrame(sink, "anything\n")).toBe(false);
 		expect(sink.writes).toEqual(["anything\n"]);
 	});
 
-	it("does not propagate non-Error throws either", () => {
+	it("does not propagate non-Error throws either", async () => {
 		const sink = {
 			write() {
 				throw "string-thrown-non-error";
@@ -84,7 +84,7 @@ describe("writeFrame", () => {
 			flush() {},
 		};
 
-		expect(writeFrame(sink, "x")).toBe(false);
+		expect(await writeFrame(sink, "x")).toBe(false);
 	});
 
 	// Deferred-rejection path — issue #1741. On Windows, Bun's FileSink may
@@ -106,9 +106,8 @@ describe("writeFrame", () => {
 
 		const failures: Error[] = [];
 		try {
-			expect(writeFrame(sink, "frame\n", err => failures.push(err))).toBe(true);
-			// Drain the microtask queue + give the unhandledRejection event
-			// a chance to fire.
+			expect(await writeFrame(sink, "frame\n", err => failures.push(err))).toBe(false);
+			// Give the unhandledRejection event a chance to fire.
 			await Bun.sleep(20);
 			expect(failures).toHaveLength(1);
 			expect(failures[0]?.message).toContain("EPIPE");
@@ -132,7 +131,7 @@ describe("writeFrame", () => {
 
 		const failures: Error[] = [];
 		try {
-			expect(writeFrame(sink, "frame\n", err => failures.push(err))).toBe(true);
+			expect(await writeFrame(sink, "frame\n", err => failures.push(err))).toBe(false);
 			await Bun.sleep(20);
 			expect(failures).toHaveLength(1);
 			expect(failures[0]?.message).toContain("EPIPE");
@@ -142,7 +141,7 @@ describe("writeFrame", () => {
 		}
 	});
 
-	it("silently swallows the deferred rejection when no onAsyncFailure is provided", async () => {
+	it("returns false and swallows the deferred rejection when no onFailure is provided", async () => {
 		// Best-effort writers (e.g. #sendResponse to a dead subprocess) don't
 		// care about the failure — but the rejection still MUST NOT escape
 		// as an unhandled rejection. This is the bare-minimum #1741 contract.
@@ -157,7 +156,7 @@ describe("writeFrame", () => {
 		};
 
 		try {
-			expect(writeFrame(sink, "frame\n")).toBe(true);
+			expect(await writeFrame(sink, "frame\n")).toBe(false);
 			await Bun.sleep(20);
 			expect(tracker.capture()).toEqual([]);
 		} finally {
