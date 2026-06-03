@@ -90,3 +90,54 @@ it("forces specific tool, then transitions to none, then clears", () => {
 it("throws when forcing a non-active tool", () => {
 	expect(() => session.setForcedToolChoice("read")).toThrow('Tool "read" is not currently active.');
 });
+
+it("rejects (and lets the directive requeue) a queued named choice whose tool is filtered out of active state.tools", () => {
+	// Regression for #1707 review: queue lifecycle must NOT advance a forced choice
+	// the model never saw. AgentSession's `/force` pushes a [forced, "none"] sequence
+	// with `onRejected: () => "requeue"`. If the forced tool is filtered out of
+	// `agent.state.tools` mid-flight (MCP-scoped / subagent / restricted-toolset
+	// turn), `nextToolChoice` must reject the head yield so the directive replays —
+	// not return it (would cause a self-inconsistent wire body, #1701) and not
+	// silently resolve it on turn_end (would discard the directive).
+	session.setForcedToolChoice("write");
+	// Filter `write` out of the active per-turn tool set BEFORE nextToolChoice runs.
+	session.agent.setTools(session.agent.state.tools.filter(tool => tool.name !== "write"));
+
+	const first = session.nextToolChoice();
+	expect(first).toBeUndefined();
+	expect(session.toolChoiceQueue.hasInFlight).toBe(false);
+
+	// Restore `write` to the active set — the directive's onRejected: "requeue" must
+	// have replayed the lost yield, so the next call serves the forced choice.
+	session.agent.setTools([
+		...session.agent.state.tools,
+		{
+			name: "write",
+			label: "Write",
+			description: "Mock write tool",
+			parameters: z.object({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+		},
+	]);
+	const second = session.nextToolChoice();
+	expect(second).toEqual({ type: "tool", name: "write" });
+});
+
+it("drops a queued named choice whose directive policy is 'drop' when its tool is filtered out", () => {
+	// Eager-todo pushes with default reject policy (drop). When `todo_write` is
+	// filtered out of active tools by the time nextToolChoice runs, the directive
+	// must be discarded — no requeue, no resolve — and the queue must drain so
+	// subsequent turns do not see a stale in-flight entry.
+	session.toolChoiceQueue.pushOnce({ type: "tool", name: "todo_write" }, { label: "eager-todo" });
+	expect(session.nextToolChoice()).toBeUndefined();
+	expect(session.toolChoiceQueue.hasInFlight).toBe(false);
+	expect(session.nextToolChoice()).toBeUndefined();
+});
+
+it("passes through string-mode tool choices unchanged regardless of active tools", () => {
+	// "none" / "auto" / "any" / "required" are not named, so the active-tool gate
+	// must not touch them. Otherwise a `/btw`-style `"none"` directive would be
+	// silently dropped whenever the per-turn tool set is filtered.
+	session.toolChoiceQueue.pushOnce("none", { label: "btw" });
+	expect(session.nextToolChoice()).toBe("none");
+});

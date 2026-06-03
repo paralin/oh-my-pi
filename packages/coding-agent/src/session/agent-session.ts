@@ -207,7 +207,7 @@ import { parseCommandArgs } from "../utils/command-args";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
-import { buildNamedToolChoice } from "../utils/tool-choice";
+import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
@@ -1238,9 +1238,24 @@ export class AgentSession {
 		return this.#modelRegistry;
 	}
 
-	/** Advance the tool-choice queue and return the next directive for the upcoming LLM call. */
+	/**
+	 * Advance the tool-choice queue and return the next directive for the upcoming LLM call.
+	 *
+	 * Filters dequeued named choices against the per-turn active tool set: if the head
+	 * directive's yield targets a tool that is not in `agent.state.tools`, reject it with
+	 * reason `"unavailable"` so the directive's `onRejected` policy (typically `requeue`
+	 * for `/force` and pending-action reminders) can decide whether to replay on a later
+	 * turn or drop. Returning the unservable choice would name a tool absent from the
+	 * serialized `tools` array — the exact wire-shape contract violation tracked in
+	 * #1701 — and resolving it via the normal `turn_end` path would silently discard
+	 * the directive (PR #1707 review).
+	 */
 	nextToolChoice(): ToolChoice | undefined {
-		return this.#toolChoiceQueue.nextToolChoice();
+		const choice = this.#toolChoiceQueue.nextToolChoice();
+		if (choice === undefined) return undefined;
+		if (isToolChoiceActive(choice, this.agent.state.tools)) return choice;
+		this.#toolChoiceQueue.reject("unavailable");
+		return undefined;
 	}
 
 	/**

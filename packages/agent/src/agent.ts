@@ -913,8 +913,14 @@ export class Agent {
 					}
 				: undefined;
 
+		// The session-driven `#getToolChoice` hook is responsible for filtering its
+		// own yields against the active per-turn tools — running them through
+		// `refreshToolChoiceForActiveTools` here would consume the queued directive
+		// and resolve it on turn_end even though the model never saw the choice
+		// (PR #1707 review). The fallback caller-passed `options?.toolChoice` has
+		// no queue lifecycle, so it stays gated by the refresh.
 		const getToolChoice = () =>
-			refreshToolChoiceForActiveTools(this.#getToolChoice?.() ?? options?.toolChoice, this.#state.tools);
+			this.#getToolChoice?.() ?? refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 
 		const config: AgentLoopConfig = {
 			model,

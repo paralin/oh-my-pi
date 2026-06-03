@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed eager-todo enforcement forcing `tool_choice: todo_write` on turns whose serialized tools omit `todo_write` (MCP-scoped, restricted-toolset, and subagent turns). The prelude now gates on the per-turn `agent.state.tools` rather than the global `#toolRegistry`, so it no longer queues a forced choice that produces a self-inconsistent request body (`tool_choice` naming a function absent from `tools`) and trips spec-strict OpenAI-compatible providers with `400 invalid_parameter_error: The tool specified in tool_choice does not match any of the specified tools` ([#1701](https://github.com/can1357/oh-my-pi/issues/1701)).
+- Fixed eager-todo enforcement forcing `tool_choice: todo_write` on turns whose serialized tools omit `todo_write` (MCP-scoped, restricted-toolset, and subagent turns). The prelude now gates on the per-turn `agent.state.tools` rather than the global `#toolRegistry`, and `AgentSession.nextToolChoice` filters dequeued named choices against the same active tool set — rejecting them with reason `"unavailable"` so the directive's `onRejected` policy (e.g. `/force` and pending-action reminders) can requeue rather than silently discard. Together these stop the queue from yielding a self-inconsistent request body (`tool_choice` naming a function absent from `tools`) and trip spec-strict OpenAI-compatible providers with `400 invalid_parameter_error: The tool specified in tool_choice does not match any of the specified tools` ([#1701](https://github.com/can1357/oh-my-pi/issues/1701)).
 
 ## [15.8.0] - 2026-06-02
 

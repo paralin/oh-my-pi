@@ -31,3 +31,24 @@ export function buildNamedToolChoice(toolName: string, model?: Model<Api>): Tool
 
 	return undefined;
 }
+
+/**
+ * Whether the given tool-choice can be served against the per-turn active tool set.
+ * Non-named choices ("auto", "none", "any", "required", undefined) are always servable;
+ * named choices ({type:"tool",name} / {type:"function",name|function.name}) require the
+ * named tool to be present. Used by `AgentSession.nextToolChoice` to filter dequeued
+ * directives whose target tool isn't in the current turn's serialized tools (issue #1701).
+ */
+export function isToolChoiceActive(
+	toolChoice: ToolChoice | undefined,
+	tools: ReadonlyArray<{ name: string }>,
+): boolean {
+	if (!toolChoice || typeof toolChoice === "string") return true;
+	const name =
+		toolChoice.type === "tool"
+			? toolChoice.name
+			: "function" in toolChoice
+				? toolChoice.function.name
+				: toolChoice.name;
+	return tools.some(tool => tool.name === name);
+}

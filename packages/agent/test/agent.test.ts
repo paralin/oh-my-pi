@@ -198,48 +198,6 @@ describe("Agent", () => {
 		]);
 	});
 
-	it("prompt() drops queued forced toolChoice when its tool is absent from active state.tools", async () => {
-		// Regression for #1701. Eager-todo / `/force <name>` / yield reminders all
-		// push a forced `tool_choice` into AgentSession's toolChoiceQueue, which the
-		// Agent reads via `getToolChoice`. When the per-turn active tool set is a
-		// filtered subset that does not include the forced tool, the queued choice
-		// must be refreshed away — otherwise the wire body names a tool that is not
-		// in `params.tools`, which spec-strict OpenAI-compatible endpoints reject
-		// with a 400 invalid_parameter_error.
-		const toolSchema = z.object({ value: z.string() });
-		type Details = { value: string };
-
-		const betaTool: AgentTool<typeof toolSchema, Details> = {
-			name: "beta",
-			label: "Beta",
-			description: "Beta tool",
-			parameters: toolSchema,
-			async execute(_toolCallId, params) {
-				return { content: [{ type: "text", text: `beta:${params.value}` }], details: { value: params.value } };
-			},
-		};
-
-		const mock = createMockModel({ responses: [{ content: ["done"] }] });
-
-		// Queue a forced choice for a tool that is NOT in state.tools — the
-		// subagent / MCP-scoped scenario the bug describes.
-		const agent = new Agent({
-			initialState: {
-				model: mock.model,
-				tools: [betaTool],
-				messages: [],
-			},
-			streamFn: mock.stream,
-			getToolChoice: () => ({ type: "function", name: "todo_write" }),
-		});
-
-		await agent.prompt("subagent turn");
-
-		expect(mock.calls).toHaveLength(1);
-		expect(mock.calls[0]?.options?.toolChoice).toBeUndefined();
-		expect((mock.calls[0]?.context.tools ?? []).map(tool => tool.name)).toEqual(["beta"]);
-	});
-
 	it("re-reads thinking level for each model call within a run", async () => {
 		const toolSchema = z.object({ value: z.string() });
 		type Details = { value: string };
