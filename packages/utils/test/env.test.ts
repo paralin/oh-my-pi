@@ -6,6 +6,7 @@ import { filterProcessEnv, parseEnvFile } from "../src/env";
 
 const tempDirs: string[] = [];
 const envModulePath = path.resolve(import.meta.dir, "../src/env.ts");
+const canReadInitialProcessEnv = fs.existsSync("/proc/self/environ");
 
 afterEach(() => {
 	for (const dir of tempDirs.splice(0)) {
@@ -111,6 +112,36 @@ describe("project .env loading", () => {
 			"process=missing\nchild=missing\nalias=missing\n",
 		);
 	});
+
+	it.skipIf(!canReadInitialProcessEnv)("scrubs Bun-autoloaded project variables when opted out", () => {
+		const cwd = makeTempProjectEnv("PROJECT_ONLY=from-project\n");
+
+		expect(runEnvProbe(cwd, { OMP_NO_PROJECT_ENV: "1" }, true)).toBe(
+			"process=missing\nchild=missing\nalias=missing\n",
+		);
+	});
+
+	it.skipIf(!canReadInitialProcessEnv)(
+		"honors user env file opt-out when scrubbing Bun-autoloaded project env",
+		() => {
+			const cwd = makeTempProjectEnv("PROJECT_ONLY=from-project\n");
+
+			expect(runEnvProbe(cwd, {}, true, "OMP_NO_PROJECT_ENV=1\n")).toBe(
+				"process=missing\nchild=missing\nalias=missing\n",
+			);
+		},
+	);
+
+	it.skipIf(!canReadInitialProcessEnv)(
+		"preserves matching explicit values when scrubbing Bun-autoloaded project env",
+		() => {
+			const cwd = makeTempProjectEnv("PROJECT_ONLY=same-value\n");
+
+			expect(runEnvProbe(cwd, { OMP_NO_PROJECT_ENV: "1", PROJECT_ONLY: "same-value" }, true)).toBe(
+				"process=same-value\nchild=same-value\nalias=missing\n",
+			);
+		},
+	);
 
 	it("keeps explicit environment values when project loading is opted out", () => {
 		const cwd = makeTempProjectEnv("PROJECT_ONLY=from-project\n");

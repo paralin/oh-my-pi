@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Added `OMP_NO_PROJECT_ENV=1` so omp no longer merges `$PWD/.env` into its process and subprocess environments. Compiled binaries get a complete off-switch; source installs may additionally need `bun --no-env-file` (or `bunfig.toml env = false`) because Bun autoloads project `.env` before any user code runs ([#1804](https://github.com/can1357/oh-my-pi/issues/1804)).
+- Added `OMP_NO_PROJECT_ENV=1` so omp skips its `$PWD/.env` merge and scrubs Bun-autoloaded project keys without deleting explicit parent environment values ([#1804](https://github.com/can1357/oh-my-pi/issues/1804)).
 
 ## [15.7.3] - 2026-05-31
 ### Added

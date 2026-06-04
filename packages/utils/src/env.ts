@@ -126,17 +126,49 @@ function seedEnvValue(name: string, files: Record<string, string>[]): void {
 	}
 }
 
+function readInitialProcessEnv(): Record<string, string> | undefined {
+	try {
+		const result: Record<string, string> = {};
+		const raw = fs.readFileSync("/proc/self/environ", "utf8");
+		for (const entry of raw.split("\0")) {
+			if (!entry) continue;
+			const eqIndex = entry.indexOf("=");
+			if (eqIndex <= 0) continue;
+			result[entry.slice(0, eqIndex)] = entry.slice(eqIndex + 1);
+		}
+		return result;
+	} catch {
+		return undefined;
+	}
+}
+
+function scrubAutoloadedProjectEnv(
+	projectEnv: Record<string, string>,
+	initialEnv: Record<string, string> | undefined,
+): void {
+	if (!initialEnv) return;
+	for (const key in projectEnv) {
+		if (key === PROJECT_ENV_OPT_OUT_NAME || initialEnv[key] !== undefined) continue;
+		if (Bun.env[key] === projectEnv[key]) {
+			delete Bun.env[key];
+		}
+	}
+}
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd).
 // `OMP_NO_PROJECT_ENV=1` opts out of merging `$PWD/.env` into omp's process
-// (and therefore every bash-tool subprocess). Compiled binaries already pass
-// `--no-compile-autoload-dotenv`, so the flag is a complete off-switch there;
-// source installs may additionally need `bun --no-env-file` (or `bunfig.toml
-// env = false`) because Bun autoloads `$PWD/.env` before any user code runs.
+// (and therefore every bash-tool subprocess). Source installs run under Bun,
+// which autoloads `$PWD/.env` before user code; when the original exec
+// environment is available, matching autoloaded project keys are scrubbed
+// without deleting explicit parent-provided values.
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
 seedEnvValue(PROJECT_ENV_OPT_OUT_NAME, [agentEnv, piEnv, homeEnv]);
-const projectEnv = $flag(PROJECT_ENV_OPT_OUT_NAME) ? {} : parseEnvFile(path.join(process.cwd(), ".env"));
+const projectEnv = parseEnvFile(path.join(process.cwd(), ".env"));
+const shouldLoadProjectEnv = !$flag(PROJECT_ENV_OPT_OUT_NAME);
+if (!shouldLoadProjectEnv) {
+	scrubAutoloadedProjectEnv(projectEnv, readInitialProcessEnv());
+}
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];
@@ -145,7 +177,7 @@ for (const key of Object.keys(Bun.env)) {
 	}
 }
 
-for (const file of [projectEnv, agentEnv, piEnv, homeEnv]) {
+for (const file of [shouldLoadProjectEnv ? projectEnv : {}, agentEnv, piEnv, homeEnv]) {
 	for (const key in file) {
 		if (!Bun.env[key]) {
 			Bun.env[key] = file[key];
