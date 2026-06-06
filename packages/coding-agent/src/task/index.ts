@@ -168,10 +168,7 @@ export function isReadOnlyAgent(agent: AgentDefinition): boolean {
 // includes tools with persistent side effects (`memory_edit`, `retain`,
 // `reflect`, `checkpoint`, `rewind`, `todo`, `job`). Plan mode must stay
 // side-effect-free, so only genuinely read-only specialty tools belong here.
-export const PLAN_MODE_EXTRA_TOOLS: ReadonlySet<string> = new Set([
-	"ast_grep",
-	"report_finding",
-]);
+export const PLAN_MODE_EXTRA_TOOLS: ReadonlySet<string> = new Set(["ast_grep", "report_finding"]);
 
 /**
  * Render the tool description from a cached agent list and current settings.
