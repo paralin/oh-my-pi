@@ -18,6 +18,19 @@ function createReasoningOllamaModel() {
 	});
 }
 
+function getHeader(headers: RequestInit["headers"], name: string): string | undefined {
+	if (!headers) return undefined;
+	if (headers instanceof Headers) return headers.get(name) ?? undefined;
+	if (Array.isArray(headers)) {
+		for (const [key, value] of headers) {
+			if (key.toLowerCase() === name.toLowerCase()) return value;
+		}
+		return undefined;
+	}
+	const value = headers[name];
+	return typeof value === "string" ? value : value?.[0];
+}
+
 describe("Ollama chat thinking controls", () => {
 	it("sends think false when reasoning is explicitly disabled", async () => {
 		let payload: object | undefined;
@@ -42,5 +55,27 @@ describe("Ollama chat thinking controls", () => {
 		}).result();
 
 		expect(payload ? Reflect.get(payload, "think") : undefined).toBe(false);
+	});
+
+	it("forwards per-call headers to the chat request", async () => {
+		let requestHeaders: RequestInit["headers"];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			requestHeaders = init?.headers;
+			return new Response('{"message":{"content":"ok"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "Ping", timestamp: 0 }],
+		};
+
+		await streamOllama(createReasoningOllamaModel(), context, {
+			apiKey: "test-key",
+			headers: { "X-Proxy-Token": "proxy-token" },
+			fetch: fetchMock,
+		}).result();
+
+		expect(getHeader(requestHeaders, "X-Proxy-Token")).toBe("proxy-token");
+		expect(getHeader(requestHeaders, "Authorization")).toBe("Bearer test-key");
 	});
 });

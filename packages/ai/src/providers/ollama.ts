@@ -400,6 +400,8 @@ function mapDoneReason(doneReason: string | undefined, output: AssistantMessage)
 	return "stop";
 }
 
+const OLLAMA_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
+
 export const streamOllama: StreamFunction<"ollama-chat"> = (
 	model: Model<"ollama-chat">,
 	context: Context,
@@ -541,14 +543,15 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 					method: "POST",
 					headers: {
 						...model.headers,
+						...options.headers,
 						Authorization: `Bearer ${apiKey}`,
 						"Content-Type": "application/json",
-						Accept: "application/x-ndjson",
 					},
 					body: JSON.stringify(body),
 					signal: preResponseTimeout.signal,
 					fetch: options.fetch,
 					timeout: false,
+					defaultDelayMs: OLLAMA_RETRY_DELAYS_MS,
 				});
 			} finally {
 				preResponseTimeout.clear();
