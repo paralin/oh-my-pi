@@ -68,10 +68,20 @@ function shouldStoreSlashCommandHistory(ctx: InteractiveModeContext): boolean {
 	return ctx.settings === undefined || ctx.settings.get("tui.slashHistory") !== false;
 }
 
-function addSlashCommandToHistory(text: string, runtime: BuiltinSlashCommandRuntime): void {
+function slashCommandHistoryText(command: ParsedSlashCommand): string | undefined {
+	if (command.name !== "login") return command.text;
+	const args = command.args.trim();
+	if (!args) return command.text;
+	if (getOAuthProviders().some(provider => provider.id === args)) return command.text;
+	return undefined;
+}
+
+function addSlashCommandToHistory(command: ParsedSlashCommand, runtime: BuiltinSlashCommandRuntime): void {
+	const historyText = slashCommandHistoryText(command);
+	if (historyText === undefined) return;
 	const addToHistory = runtime.ctx.editor.addToHistory;
 	if (shouldStoreSlashCommandHistory(runtime.ctx) && typeof addToHistory === "function") {
-		addToHistory.call(runtime.ctx.editor, text);
+		addToHistory.call(runtime.ctx.editor, historyText);
 	}
 }
 
@@ -2286,12 +2296,12 @@ export async function executeBuiltinSlashCommand(
 	if (runtime.ctx.collabGuest && !COLLAB_GUEST_ALLOWED_COMMANDS[command.name]) {
 		runtime.ctx.showStatus(`/${command.name} is host-only during a collab session`);
 		runtime.ctx.editor.setText("");
-		addSlashCommandToHistory(text, runtime);
+		addSlashCommandToHistory(parsed, runtime);
 		return true;
 	}
 	if (command.handleTui) {
 		const result = await command.handleTui(parsed, runtime);
-		addSlashCommandToHistory(text, runtime);
+		addSlashCommandToHistory(parsed, runtime);
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;
 	}
@@ -2321,7 +2331,7 @@ export async function executeBuiltinSlashCommand(
 		};
 		const result = await command.handle(parsed, adapted);
 		ctx.editor.setText("");
-		addSlashCommandToHistory(text, runtime);
+		addSlashCommandToHistory(parsed, runtime);
 		if (result && typeof result === "object" && "prompt" in result) return result.prompt;
 		return true;
 	}

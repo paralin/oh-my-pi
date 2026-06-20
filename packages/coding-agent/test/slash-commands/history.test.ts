@@ -7,16 +7,25 @@ function createRuntime(slashHistory: boolean | undefined = undefined) {
 	const setText = vi.fn();
 	const showSettingsSelector = vi.fn();
 	const get = vi.fn((path: string) => (path === "tui.slashHistory" ? slashHistory : undefined));
+	const submit = vi.fn(() => true);
+	const showStatus = vi.fn();
+	const showWarning = vi.fn();
 
 	return {
 		addToHistory,
 		setText,
 		showSettingsSelector,
+		showStatus,
+		showWarning,
+		submit,
 		runtime: {
 			ctx: {
 				editor: { addToHistory, setText },
+				oauthManualInput: { hasPending: vi.fn(() => false), pendingProviderId: undefined, submit },
 				settings: { get },
 				showSettingsSelector,
+				showStatus,
+				showWarning,
 			} as unknown as InteractiveModeContext,
 		},
 	};
@@ -38,6 +47,17 @@ describe("slash command history", () => {
 
 		expect(await executeBuiltinSlashCommand("/settings", harness.runtime)).toBe(true);
 
+		expect(harness.addToHistory).not.toHaveBeenCalled();
+	});
+
+	it("does not store OAuth redirect URLs submitted through /login", async () => {
+		const harness = createRuntime();
+		const callbackUrl = "http://localhost:1455/callback?code=secret-code&state=secret-state";
+
+		expect(await executeBuiltinSlashCommand(`/login ${callbackUrl}`, harness.runtime)).toBe(true);
+
+		expect(harness.submit).toHaveBeenCalledWith(callbackUrl);
+		expect(harness.showStatus).toHaveBeenCalledWith("OAuth callback received; completing login…");
 		expect(harness.addToHistory).not.toHaveBeenCalled();
 	});
 });
