@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Fixed returning from `/settings` while an `ask` tool prompt is pending so focus returns to the ask selector instead of the main prompt editor ([#3203](https://github.com/can1357/oh-my-pi/issues/3203)).
+
 - Fixed Codex image reads re-encoding to WebP and then failing the next request with an invalid `input_image.image_url`; Codex-bound images now stay in PNG/JPEG-compatible formats.
 
 - Fixed the `/model` thinking picker labeling the OpenAI GPT-5.5 top effort as `max` instead of the catalog-declared `xhigh` ([#3194](https://github.com/can1357/oh-my-pi/issues/3194)).

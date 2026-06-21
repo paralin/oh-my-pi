@@ -17,6 +17,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
+import { getEditorSurfaceFocusTarget } from "./editor-surface-focus";
 import {
 	getAvailableThemes,
 	getSymbolTheme,
@@ -109,7 +110,7 @@ export class SelectorController {
 			let overlayHandle: OverlayHandle | undefined;
 			const done = () => {
 				overlayHandle?.hide();
-				this.ctx.ui.setFocus(this.ctx.editor);
+				this.ctx.ui.setFocus(getEditorSurfaceFocusTarget(this.ctx));
 				this.ctx.ui.requestRender();
 			};
 			const selector = new SettingsSelectorComponent(
