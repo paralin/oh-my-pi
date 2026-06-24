@@ -28,6 +28,9 @@ export interface Args {
 	slow?: string;
 	plan?: string;
 	maxTime?: number;
+	contextStopPercent?: number;
+	contextStopTokens?: number;
+	scratchHandoffFile?: string;
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;

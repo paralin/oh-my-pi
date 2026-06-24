@@ -114,3 +114,21 @@ describe("parseArgs @file parsing with quotes", () => {
 		expect(result.fileArgs).toEqual(["foo bar.png"]);
 	});
 });
+
+describe("parseArgs context budget stop flags", () => {
+	it("parses context stop and scratch handoff flags", () => {
+		const result = parseArgs([
+			"--context-stop-percent",
+			"90",
+			"--context-stop-tokens=120000",
+			"--scratch-handoff-file",
+			".tmp/handoff.org",
+			"run it",
+		]);
+
+		expect(result.contextStopPercent).toBe(90);
+		expect(result.contextStopTokens).toBe(120000);
+		expect(result.scratchHandoffFile).toBe(".tmp/handoff.org");
+		expect(result.messages).toEqual(["run it"]);
+	});
+});

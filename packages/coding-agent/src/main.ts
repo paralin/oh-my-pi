@@ -1423,6 +1423,11 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				printThoughts: initialArgs.printThoughts,
+				contextBudgetStop: {
+					stopAtPercent: parsedArgs.contextStopPercent,
+					stopAtTokens: parsedArgs.contextStopTokens,
+					scratchHandoffFile: parsedArgs.scratchHandoffFile,
+				},
 			});
 			if ($env.PI_TIMING) {
 				logger.printTimings();

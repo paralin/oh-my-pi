@@ -129,6 +129,25 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			deps.logger.warn("Invalid seconds passed to --max-time", { value });
 		}
 	},
+	"--context-stop-percent": (result, value, deps) => {
+		const percent = Number(value);
+		if (Number.isFinite(percent) && percent > 0) {
+			result.contextStopPercent = percent;
+		} else {
+			deps.logger.warn("Invalid percent passed to --context-stop-percent", { value });
+		}
+	},
+	"--context-stop-tokens": (result, value, deps) => {
+		const tokens = Number(value);
+		if (Number.isInteger(tokens) && tokens > 0) {
+			result.contextStopTokens = tokens;
+		} else {
+			deps.logger.warn("Invalid token count passed to --context-stop-tokens", { value });
+		}
+	},
+	"--scratch-handoff-file": (result, value) => {
+		result.scratchHandoffFile = value;
+	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
