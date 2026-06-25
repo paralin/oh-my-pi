@@ -404,10 +404,12 @@ export class GoalRuntime {
 		validateTokenBudget(input.tokenBudget);
 		return await this.#withAccounting(async () => {
 			const existing = this.#host.getState();
-			if (!existing?.enabled || !isAccountingStatus(existing.goal)) {
+			if (!existing?.goal || existing.goal.status === "dropped" || existing.goal.status === "complete") {
 				throw new Error("cannot replace goal because no goal is active");
 			}
-			await this.#flushUsageLocked("suppressed");
+			if (existing.enabled && isAccountingStatus(existing.goal)) {
+				await this.#flushUsageLocked("suppressed");
+			}
 			const state = this.#createGoalState(objective, input.tokenBudget);
 			this.#budgetReportedFor = undefined;
 			this.#markActiveAccounting(state.goal);

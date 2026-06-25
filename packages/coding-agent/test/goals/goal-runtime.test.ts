@@ -415,6 +415,26 @@ describe("goal runtime", () => {
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
 	});
 
+	it("replaces a paused goal with a fresh active goal", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "active",
+				goal: createGoal({ objective: "Paused", status: "paused", tokenBudget: 100, tokensUsed: 30 }),
+			},
+		});
+
+		const next = await harness.runtime.replaceGoal({ objective: "Second", tokenBudget: 25 });
+
+		expect(next.enabled).toBe(true);
+		expect(next.goal.objective).toBe("Second");
+		expect(next.goal.status).toBe("active");
+		expect(next.goal.tokenBudget).toBe(25);
+		expect(next.goal.tokensUsed).toBe(0);
+		expect(next.goal.id).not.toBe("goal-1");
+		expect(harness.persists.at(-1)?.mode).toBe("goal");
+	});
+
 	it("allows creating a new goal after the previous one is complete", async () => {
 		const harness = createHarness({
 			state: {

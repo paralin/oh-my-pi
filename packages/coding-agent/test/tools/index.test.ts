@@ -82,6 +82,7 @@ describe("createTools", () => {
 		expect(names).toContain("todo");
 		expect(names).toContain("web_search");
 		expect(names).toContain("resolve");
+		expect(names).toContain("goal");
 		expect(names).not.toContain("fetch");
 		expect(names).not.toContain("vim");
 	});
