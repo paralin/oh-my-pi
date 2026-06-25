@@ -127,6 +127,81 @@ describe("GoalTool", () => {
 		});
 	});
 
+	it("sets a new goal when no goal is active", async () => {
+		const harness = createRuntimeHarness();
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const result = await tool.execute("call-set", {
+			op: "set",
+			objective: "  Set from tool  ",
+			token_budget: 25,
+		});
+
+		expect(result.details).toMatchObject({
+			op: "set",
+			goal: { objective: "Set from tool", status: "active", tokenBudget: 25 },
+			remainingTokens: 25,
+		});
+		expect(harness.getState()?.enabled).toBe(true);
+	});
+
+	it("replaces the active goal with op=set", async () => {
+		const harness = createRuntimeHarness({
+			enabled: true,
+			mode: "active",
+			goal: createGoal({ objective: "Old goal", tokenBudget: 10 }),
+		});
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const result = await tool.execute("call-set", {
+			op: "set",
+			objective: "New goal",
+			token_budget: undefined,
+		});
+
+		expect(result.details?.goal).toMatchObject({
+			objective: "New goal",
+			status: "active",
+			tokenBudget: undefined,
+		});
+		expect(harness.getState()?.goal.objective).toBe("New goal");
+	});
+
+	it("replaces a paused goal with op=set", async () => {
+		const harness = createRuntimeHarness({
+			enabled: false,
+			mode: "active",
+			goal: createGoal({ objective: "Paused", status: "paused" }),
+		});
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const result = await tool.execute("call-set", { op: "set", objective: "New goal" });
+
+		expect(result.details?.goal).toMatchObject({
+			objective: "New goal",
+			status: "active",
+			tokenBudget: undefined,
+		});
+		const state = harness.getState();
+		expect(state?.enabled).toBe(true);
+		expect(state?.goal.objective).toBe("New goal");
+	});
+
 	it("rejects create when a goal already exists", async () => {
 		const harness = createRuntimeHarness({
 			enabled: true,

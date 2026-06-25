@@ -15,7 +15,7 @@ import { completionBudgetReport, remainingTokens } from "../runtime";
 import type { Goal, GoalStatus, GoalToolDetails } from "../state";
 
 const goalSchema = type({
-	op: type("'create' | 'get' | 'complete' | 'resume' | 'drop'").describe("goal operation"),
+	op: type("'set' | 'create' | 'get' | 'complete' | 'resume' | 'drop'").describe("goal operation"),
 	"objective?": type("string").describe("goal objective"),
 	"token_budget?": type("number.integer").describe("token budget"),
 });
@@ -43,10 +43,13 @@ export function buildGoalToolResponse(
 	};
 }
 
-function validateCreateParams(params: GoalToolInput): { objective: string; tokenBudget?: number } {
+function validateObjectiveParams(
+	params: GoalToolInput,
+	op: "create" | "set",
+): { objective: string; tokenBudget?: number } {
 	const objective = params.objective?.trim();
 	if (!objective) {
-		throw new ToolError("objective is required when op=create");
+		throw new ToolError(`objective is required when op=${op}`);
 	}
 	const tokenBudget = params.token_budget;
 	if (tokenBudget !== undefined && (!Number.isInteger(tokenBudget) || tokenBudget <= 0)) {
@@ -81,9 +84,19 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 		}
 
 		let response: GoalToolResponse;
+
 		if (params.op === "create") {
-			const created = await runtime.createGoal(validateCreateParams(params));
+			const created = await runtime.createGoal(validateObjectiveParams(params, "create"));
 			response = buildGoalToolResponse(created.goal);
+		} else if (params.op === "set") {
+			const state = this.#session.getGoalModeState?.();
+			if (state?.goal && state.goal.status !== "dropped" && state.goal.status !== "complete") {
+				const updated = await runtime.replaceGoal(validateObjectiveParams(params, "set"));
+				response = buildGoalToolResponse(updated.goal);
+			} else {
+				const created = await runtime.createGoal(validateObjectiveParams(params, "set"));
+				response = buildGoalToolResponse(created.goal);
+			}
 		} else if (params.op === "get") {
 			const state = this.#session.getGoalModeState?.();
 			response = buildGoalToolResponse(state?.goal ?? null);
@@ -126,6 +139,7 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 
 function describeOp(op: string | undefined): string {
 	switch (op) {
+		case "set":
 		case "create":
 			return "set";
 		case "complete":

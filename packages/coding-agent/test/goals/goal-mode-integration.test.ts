@@ -70,7 +70,7 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		"plan.enabled": true,
 	});
 	const bootstrapToolSession = createToolSession(tempDir.path(), settings);
-	const initialTools = await createTools(bootstrapToolSession, ["read"]);
+	const initialTools = await createTools(bootstrapToolSession);
 	const toolRegistry = new Map<string, Tool>(initialTools.map(tool => [tool.name, tool] as const));
 
 	const session = new AgentSession({
@@ -162,8 +162,8 @@ describe("InteractiveMode goal mode integration", () => {
 		await harness.cleanup();
 	});
 
-	it("toggles goal tool exposure when goal mode enters and pauses", async () => {
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+	it("keeps goal tool available before, during, and after a paused goal", async () => {
+		expect(await toolNamesFor(harness)).toContain("goal");
 
 		await harness.mode.handleGoalModeCommand("Ship the release");
 
@@ -177,7 +177,21 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(harness.mode.goalModePaused).toBe(true);
 		expect(harness.session.getGoalModeState()?.goal.status).toBe("paused");
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
+	});
+
+	it("lets the goal tool start a goal from an ordinary session", async () => {
+		const tool = new GoalTool(harness.toolSession);
+
+		await tool.execute("call-set", {
+			op: "set",
+			objective: "Ship from the tool",
+			token_budget: undefined,
+		});
+
+		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Ship from the tool");
+		expect(await toolNamesFor(harness)).toContain("goal");
 	});
 
 	it("replaces the active goal via /goal set", async () => {
@@ -403,12 +417,10 @@ describe("InteractiveMode goal mode integration", () => {
 		);
 		expect(completionText).toContain("Goal achieved. Report final budget usage to the user: tokens used: 0 of 50.");
 		expect(harness.session.getGoalModeState()?.mode).toBe("exiting");
-		// Per fix #1: completeGoalFromTool clears state.enabled so subsequent createTools
-		// calls (e.g. mid-turn refreshes) no longer advertise the goal tool. The model's
-		// existing toolset for the in-flight turn is unaffected — what we care about here
-		// is that the next createTools observation reflects the deactivation.
+		// Completion clears active goal state, but sessions that had the goal tool
+		// before goal mode keep it so a later assistant can set the next goal.
 		expect(harness.session.getGoalModeState()?.enabled).toBe(false);
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
 
 		const nextTurn = harness.mode.getUserInput();
 		// getUserInput observes mode === "exiting" and awaits #exitGoalMode before
@@ -419,7 +431,7 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(harness.mode.goalModePaused).toBe(false);
 		expect(harness.session.getGoalModeState()).toBeUndefined();
-		expect(await toolNamesFor(harness)).not.toContain("goal");
+		expect(await toolNamesFor(harness)).toContain("goal");
 		expect(appendCustomEntry).toHaveBeenCalledWith(
 			"goal-completed",
 			expect.objectContaining({
