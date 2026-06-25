@@ -112,6 +112,12 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--model": (result, value) => {
 		result.model = value;
 	},
+	"--codex-home": (result, value) => {
+		result.codexHome = value;
+	},
+	"--codex-home-chain": (result, value) => {
+		result.codexHomeChain = value;
+	},
 	"--smol": (result, value) => {
 		result.smol = value;
 	},
@@ -127,6 +133,17 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			result.maxTime = seconds;
 		} else {
 			deps.logger.warn("Invalid seconds passed to --max-time", { value });
+		}
+	},
+	"--goal": (result, value) => {
+		result.goal = value;
+	},
+	"--goal-budget": (result, value, deps) => {
+		const tokens = Number(value);
+		if (Number.isInteger(tokens) && tokens > 0) {
+			result.goalBudget = tokens;
+		} else {
+			deps.logger.warn("Invalid token count passed to --goal-budget", { value });
 		}
 	},
 	"--context-stop-percent": (result, value, deps) => {

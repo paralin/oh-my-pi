@@ -279,9 +279,15 @@ export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
 
+export interface CodexHomeSettingsEntry {
+	name?: string;
+	path: string;
+}
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_CODEX_HOMES: CodexHomeSettingsEntry[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
@@ -4307,6 +4313,10 @@ export const SETTINGS_SCHEMA = {
 			label: "Excluded Web Search Providers",
 			description: "Providers that web_search should never use, even as fallbacks",
 		},
+	},
+	"providers.codexHomes": {
+		type: "array",
+		default: EMPTY_CODEX_HOMES,
 	},
 	"providers.antigravityEndpoint": {
 		type: "enum",

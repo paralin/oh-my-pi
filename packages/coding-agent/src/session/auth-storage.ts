@@ -17,6 +17,7 @@ export type {
 	ResetCreditAccountStatus,
 	ResetCreditRedeemOutcome,
 	ResetCreditTarget,
+	RuntimeApiKeyChainCredential,
 	SerializedAuthStorage,
 	StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";

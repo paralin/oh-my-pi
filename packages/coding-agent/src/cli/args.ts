@@ -23,11 +23,15 @@ export interface Args {
 	allowHome?: boolean;
 	provider?: string;
 	model?: string;
+	codexHome?: string;
+	codexHomeChain?: string;
 	config?: string[];
 	smol?: string;
 	slow?: string;
 	plan?: string;
 	maxTime?: number;
+	goal?: string;
+	goalBudget?: number;
 	contextStopPercent?: number;
 	contextStopTokens?: number;
 	scratchHandoffFile?: string;
@@ -314,6 +318,7 @@ export function getExtraHelpText(): string {
   CLAUDE_CODE_CLIENT_KEY     - Client private key (PEM path or inline PEM) for mTLS
   NODE_EXTRA_CA_CERTS        - CA bundle path (or inline PEM) for server certificate validation
   OPENAI_API_KEY             - OpenAI GPT models
+  CODEX_HOME                 - Codex home whose auth.json can seed OpenAI Codex OAuth auth
   GEMINI_API_KEY             - Google Gemini models
   COPILOT_GITHUB_TOKEN      - GitHub Copilot
 

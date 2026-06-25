@@ -23,6 +23,7 @@ import {
 import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
+import { applyCodexHomeAuthChain, type CodexHomeCredential } from "./cli/codex-home";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -65,7 +66,7 @@ import {
 	loadSessionExtensions,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
-import type { AuthStorage } from "./session/auth-storage";
+import type { AuthStorage, RuntimeApiKeyChainCredential } from "./session/auth-storage";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
@@ -951,6 +952,16 @@ interface RunRootCommandDependencies {
 	forceSetupWizard?: boolean;
 }
 
+function toRuntimeCodexHomeChain(credentials: CodexHomeCredential[]): RuntimeApiKeyChainCredential[] {
+	return credentials.map(credential => ({
+		key: credential.accessToken,
+		label: credential.name ?? credential.path,
+		accountId: credential.accountId,
+		email: credential.email,
+		usageType: "oauth",
+	}));
+}
+
 export async function runRootCommand(
 	parsed: Args,
 	rawArgs: string[],
@@ -965,11 +976,18 @@ export async function runRootCommand(
 
 	const parsedArgs = parsed;
 	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
+	const startupCodexHomeAuth = applyCodexHomeAuthChain({
+		codexHomeFlag: parsedArgs.codexHome,
+		codexHomeChainFlag: parsedArgs.codexHomeChain,
+	});
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
 
 	// Create AuthStorage and ModelRegistry upfront
 	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
+	if (startupCodexHomeAuth.credentials.length > 0) {
+		authStorage.setRuntimeApiKeyChain("openai-codex", toRuntimeCodexHomeChain(startupCodexHomeAuth.credentials));
+	}
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	if (parsedArgs.version) {
@@ -1022,6 +1040,14 @@ export async function runRootCommand(
 	let cwd = getProjectDir();
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+	const codexHomeAuth = applyCodexHomeAuthChain({
+		codexHomeFlag: parsedArgs.codexHome,
+		codexHomeChainFlag: parsedArgs.codexHomeChain,
+		configuredHomes: settingsInstance.get("providers.codexHomes"),
+	});
+	if (codexHomeAuth.credentials.length > 0) {
+		authStorage.setRuntimeApiKeyChain("openai-codex", toRuntimeCodexHomeChain(codexHomeAuth.credentials));
+	}
 	if (parsedArgs.approvalMode) {
 		// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 		// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
@@ -1423,6 +1449,13 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				printThoughts: initialArgs.printThoughts,
+				goal:
+					parsedArgs.goal !== undefined
+						? {
+								objective: parsedArgs.goal,
+								tokenBudget: parsedArgs.goalBudget,
+							}
+						: undefined,
 				contextBudgetStop: {
 					stopAtPercent: parsedArgs.contextStopPercent,
 					stopAtTokens: parsedArgs.contextStopTokens,

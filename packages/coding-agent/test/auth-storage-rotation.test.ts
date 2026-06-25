@@ -12,11 +12,13 @@ describe("AuthStorage account rotation", () => {
 	let tempDir: string;
 	let authStorage: AuthStorage;
 	let usageExhausted = false;
+	let exhaustedAccounts: Set<string>;
 
 	const usageProvider: UsageProvider = {
 		id: "openai-codex",
 		async fetchUsage(params) {
 			const accountId = params.credential.accountId ?? "unknown";
+			const exhausted = usageExhausted || exhaustedAccounts.has(accountId);
 			return {
 				provider: "openai-codex",
 				fetchedAt: Date.now(),
@@ -25,8 +27,8 @@ describe("AuthStorage account rotation", () => {
 						id: `requests-${accountId}`,
 						label: "Requests",
 						scope: { provider: "openai-codex", accountId },
-						amount: { unit: "requests", used: usageExhausted ? 100 : 10, limit: 100 },
-						status: usageExhausted ? "exhausted" : "ok",
+						amount: { unit: "requests", used: exhausted ? 100 : 10, limit: 100 },
+						status: exhausted ? "exhausted" : "ok",
 					},
 				],
 			};
@@ -37,6 +39,7 @@ describe("AuthStorage account rotation", () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-auth-rotation-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		usageExhausted = false;
+		exhaustedAccounts = new Set();
 
 		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"), {
 			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
@@ -94,5 +97,23 @@ describe("AuthStorage account rotation", () => {
 
 		const exhaustedFallbackKey = await authStorage.getApiKey("openai-codex", sessionId);
 		expect(exhaustedFallbackKey).toMatch(/^api-acct-/);
+	});
+
+	test("rotates configured runtime Codex credential chains in configured order", async () => {
+		authStorage.setRuntimeApiKeyChain("openai-codex", [
+			{ key: "runtime-token-1", accountId: "acct-1", label: "primary", usageType: "oauth" },
+			{ key: "runtime-token-2", accountId: "acct-2", label: "secondary", usageType: "oauth" },
+		]);
+
+		const sessionId = "runtime-codex-chain-session";
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("runtime-token-1");
+		expect(authStorage.getOAuthAccountIdentity("openai-codex", sessionId)?.accountId).toBe("acct-1");
+
+		exhaustedAccounts.add("acct-1");
+		const { switched } = await authStorage.markUsageLimitReached("openai-codex", sessionId);
+		expect(switched).toBe(true);
+
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("runtime-token-2");
+		expect(authStorage.getOAuthAccountIdentity("openai-codex", sessionId)?.accountId).toBe("acct-2");
 	});
 });
