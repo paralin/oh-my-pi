@@ -44,6 +44,11 @@ export interface PrintModeOptions {
 	initialImages?: ImageContent[];
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
+	/** Optional headless goal objective. When set, print mode keeps continuing until the goal settles. */
+	goal?: {
+		objective: string;
+		tokenBudget?: number;
+	};
 	/** Optional headless guard that stops before the context window is exhausted. */
 	contextBudgetStop?: ContextBudgetStopOptions;
 }
@@ -131,7 +136,7 @@ async function writeFinalAssistantText(session: AgentSession, printThoughts: boo
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
-	const { mode, messages = [], initialMessage, initialImages, printThoughts, contextBudgetStop } = options;
+	const { mode, messages = [], initialMessage, initialImages, printThoughts, goal, contextBudgetStop } = options;
 	let textOutputWritten = false;
 
 	const stopIfBudgetReached = async (): Promise<boolean> => {
@@ -189,6 +194,17 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 	});
 
+	if (goal) {
+		await session.goalRuntime.createGoal({
+			objective: goal.objective,
+			tokenBudget: goal.tokenBudget,
+		});
+		const activeTools = session.getActiveToolNames();
+		if (!activeTools.includes("goal")) {
+			await session.setActiveToolsByName([...activeTools, "goal"]);
+		}
+	}
+
 	// Send initial message with attachments
 	if (initialMessage !== undefined) {
 		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
@@ -201,6 +217,24 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Send remaining messages
 	for (const message of messages) {
 		await logger.time("print:prompt:next", () => session.prompt(message));
+		if (await stopIfBudgetReached()) {
+			await session.dispose();
+			return;
+		}
+	}
+
+	while (goal) {
+		const state = session.getGoalModeState();
+		if (!state?.enabled || state.goal.status !== "active") break;
+		const continuation = session.goalRuntime.buildContinuationPrompt();
+		if (!continuation) break;
+		await logger.time("print:prompt:goal-continuation", () =>
+			session.promptCustomMessage({
+				customType: "goal-continuation",
+				content: continuation,
+				display: false,
+			}),
+		);
 		if (await stopIfBudgetReached()) {
 			await session.dispose();
 			return;
