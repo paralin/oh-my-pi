@@ -39,9 +39,9 @@ Anything below → `eval` cell, not bash:
 {{#if asyncEnabled}}
 # Timeout and async
 
-- `timeout` (seconds) caps wall-clock duration; the process is killed on elapse.
-- `async: true` defers only reporting — it does NOT extend the timeout; a daemon run with `async: true` is still killed when `timeout` elapses.
-- Long-running daemons (dev servers, watchers): pass a large explicit `timeout`. The shell session persists across calls, so `cmd &` keeps running between bash calls.
+- `timeout` (seconds) caps wall-clock duration; the process is killed on elapse. Set `timeout: 0` only for commands that must run until completion or explicit cancellation.
+- `async: true` defers only reporting — it does NOT extend a nonzero timeout; use `timeout: 0` when a daemon or watcher must be cancellation-owned.
+- Long-running daemons (dev servers, watchers): use `async: true` with `timeout: 0` when you need the process to stay alive until you cancel it. The shell session persists across calls, so `cmd &` keeps running between bash calls.
 {{/if}}
 {{#if autoBackgroundEnabled}}
 
