@@ -158,6 +158,45 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("keeps the goal tool active before a goal exists", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("goal");
+			const goalTool = session.agent.state.tools.find(tool => tool.name === "goal");
+			expect(goalTool).toBeDefined();
+
+			await goalTool!.execute("goal-set", {
+				op: "set",
+				objective: "Ship the goal tool availability fix.",
+			});
+
+			expect(session.getGoalModeState()?.enabled).toBe(true);
+			expect(session.getGoalModeState()?.goal.objective).toBe("Ship the goal tool availability fix.");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("force-includes the goal tool into explicit toolNames lists", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "goal"]));
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("normalizes legacy builtin toolNames before selecting the active SDK tools", async () => {
 		const tempDir = makeTempDir();
 

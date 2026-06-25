@@ -2307,6 +2307,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		) {
 			explicitlyRequestedToolNames.push("yield");
 		}
+		if (explicitlyRequestedToolNames && settings.get("goal.enabled") && toolRegistry.has("goal")) {
+			if (!explicitlyRequestedToolNames.includes("goal")) explicitlyRequestedToolNames.push("goal");
+		}
 		// Auto-learn builtins are force-included into the registry by `createTools`
 		// for enabled top-level sessions (tools/index.ts), but — like `yield` above —
 		// an explicit `toolNames` list would otherwise drop them from the ACTIVE set,
@@ -2328,7 +2331,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const defaultInactiveToolNames = new Set(
 			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		const requestedActiveToolNames = normalizedRequested;
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
