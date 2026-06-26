@@ -79,6 +79,7 @@ import {
 	setActiveSkills,
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
+import { createGladosBossExtension, GLADOS_BOSS_EXTENSION_ID } from "./glados/boss-extension";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -653,6 +654,22 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
 	return discoverAndLoadExtensions([], resolvedCwd);
 }
 
+const BUILTIN_SESSION_EXTENSIONS: Array<{ name: string; factory: ExtensionFactory }> = [
+	{ name: GLADOS_BOSS_EXTENSION_ID, factory: createGladosBossExtension },
+];
+
+async function loadBuiltinSessionExtensions(
+	result: LoadExtensionsResult,
+	cwd: string,
+	eventBus: EventBus,
+): Promise<void> {
+	for (const extension of BUILTIN_SESSION_EXTENSIONS) {
+		result.extensions.push(
+			await loadExtensionFromFactory(extension.factory, cwd, eventBus, result.runtime, extension.name),
+		);
+	}
+}
+
 /**
  * Path-only counterpart of {@link loadSessionExtensions}: the FS-heavy scan
  * without the per-session module load. Subagents reuse the parent's path list
@@ -690,6 +707,9 @@ export async function loadSessionExtensions(
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
 	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus);
+	if (!options.disableExtensionDiscovery) {
+		await loadBuiltinSessionExtensions(result, cwd, eventBus);
+	}
 	for (const { path, error } of result.errors) {
 		logger.error("Failed to load extension", { path, error });
 	}
@@ -1839,11 +1859,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				...options.preloadedExtensions,
 				extensions: [...options.preloadedExtensions.extensions],
 			};
-			// Capture paths for downstream forwarding; filter inline-factory
-			// entries (`<inline-N>`) — those are per-session, not source paths.
-			extensionPaths = extensionsResult.extensions
-				.map(ext => ext.resolvedPath)
-				.filter(p => !p.startsWith("<inline"));
+			// Capture paths for downstream forwarding; filter synthetic factory
+			// entries (`<...>`) because subagents cannot import them from disk.
+			extensionPaths = extensionsResult.extensions.map(ext => ext.resolvedPath).filter(p => !p.startsWith("<"));
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
 			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
@@ -1859,6 +1877,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				logger.error("Failed to load extension", { path, error });
 			}
 		}
+		if (!options.preloadedExtensions && !options.disableExtensionDiscovery) {
+			await loadBuiltinSessionExtensions(extensionsResult, cwd, eventBus);
+		}
+
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;
