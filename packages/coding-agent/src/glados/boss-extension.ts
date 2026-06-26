@@ -1,6 +1,7 @@
 import { ThinkingLevel, type ThinkingLevel as ThinkingLevelValue } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ExtensionFactory } from "../extensibility/extensions/types";
+import { buildSkillPromptMessage, getActiveSkills } from "../extensibility/skills";
 
 export const GLADOS_BOSS_EXTENSION_ID = "<builtin:glados-boss>";
 export const GLADOS_BOSS_EXTENSION_VERSION = 1;
@@ -11,8 +12,10 @@ export const GLADOS_BOSS_MODEL_SELECTOR = `${GLADOS_BOSS_PROVIDER}/${GLADOS_BOSS
 export const GLADOS_BOSS_MARKER_TYPE = "glados:boss-mode";
 export const GLADOS_BOSS_PROVIDER_DECISION_TYPE = "glados:boss-provider-decision";
 export const GLADOS_BOSS_STATUS_TOOL = "glados_boss_status";
+export const GLADOS_BOSS_AUTOLOAD_SKILLS = ["orient", "quorra", "quorra-auto", "boss"] as const;
 
 const GLADOS_BOSS_THINKING_LEVEL: ThinkingLevelValue = ThinkingLevel.XHigh;
+let gladosBossSkillContextCache: { key: string; value: string | undefined } | undefined;
 
 const GLADOS_BOSS_SYSTEM_PROMPT = `# GLaDOS Boss mode
 
@@ -54,6 +57,27 @@ function registerBossProvider(pi: Parameters<ExtensionFactory>[0]): void {
 			},
 		],
 	});
+}
+
+async function loadGladosBossSkillContext(): Promise<string | undefined> {
+	const activeSkills = new Map(getActiveSkills().map(skill => [skill.name, skill]));
+	const selectedSkills = GLADOS_BOSS_AUTOLOAD_SKILLS.map(name => activeSkills.get(name)).filter(
+		skill => skill !== undefined,
+	);
+	const cacheKey = selectedSkills.map(skill => `${skill.name}\0${skill.filePath}`).join("\0");
+	if (gladosBossSkillContextCache?.key === cacheKey) {
+		return gladosBossSkillContextCache.value;
+	}
+
+	const sections: string[] = [];
+	for (const skill of selectedSkills) {
+		const built = await buildSkillPromptMessage(skill, "");
+		sections.push(`<boss-skill name="${skill.name}">\n${built.message}\n</boss-skill>`);
+	}
+
+	const value = sections.length === 0 ? undefined : ["# GLaDOS Boss preloaded skills", ...sections].join("\n\n");
+	gladosBossSkillContextCache = { key: cacheKey, value };
+	return value;
 }
 
 export const createGladosBossExtension: ExtensionFactory = pi => {
@@ -128,13 +152,16 @@ export const createGladosBossExtension: ExtensionFactory = pi => {
 		});
 	});
 
-	pi.on("before_agent_start", event => {
+	pi.on("before_agent_start", async event => {
 		if (pi.getFlag(GLADOS_BOSS_FLAG) !== true) {
 			return;
 		}
 
+		const skillContext = await loadGladosBossSkillContext();
 		return {
-			systemPrompt: [...event.systemPrompt, GLADOS_BOSS_SYSTEM_PROMPT],
+			systemPrompt: skillContext
+				? [...event.systemPrompt, GLADOS_BOSS_SYSTEM_PROMPT, skillContext]
+				: [...event.systemPrompt, GLADOS_BOSS_SYSTEM_PROMPT],
 		};
 	});
 };

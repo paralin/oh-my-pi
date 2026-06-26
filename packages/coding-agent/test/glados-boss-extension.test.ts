@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { ThinkingLevel, type ThinkingLevel as ThinkingLevelValue } from "@oh-my-pi/pi-agent-core";
 import { AuthStorage, type Model } from "@oh-my-pi/pi-ai";
 import { parseArgs, reportUnrecognizedFlags } from "@oh-my-pi/pi-coding-agent/cli/args";
@@ -7,8 +9,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
 	createGladosBossExtension,
+	GLADOS_BOSS_AUTOLOAD_SKILLS,
 	GLADOS_BOSS_EXTENSION_ID,
 	GLADOS_BOSS_FLAG,
 	GLADOS_BOSS_MARKER_TYPE,
@@ -24,6 +28,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 
 afterEach(() => {
 	resetSettingsForTest();
+	resetActiveSkillsForTests();
 });
 
 describe("GLaDOS Boss extension", () => {
@@ -111,6 +116,31 @@ describe("GLaDOS Boss extension", () => {
 		}
 	});
 
+	it("preloads orient, quorra, quorra-auto, and boss skill bodies into Boss prompt context", async () => {
+		const tempDir = await TempDir.create("@glados-boss-skills-");
+		expect(GLADOS_BOSS_AUTOLOAD_SKILLS).toEqual(["orient", "quorra", "quorra-auto", "boss"]);
+		const skills = await Promise.all(GLADOS_BOSS_AUTOLOAD_SKILLS.map(name => writeSkill(tempDir.path(), name)));
+		setActiveSkills(skills);
+		const harness = await createHarness({ boss: true, auth: true });
+		try {
+			const before = await harness.runner.emitBeforeAgentStart("hello", undefined, ["base prompt"]);
+			const promptText = before?.systemPrompt?.join("\n") ?? "";
+
+			expect(promptText).toContain("GLaDOS Boss preloaded skills");
+			const orientIndex = promptText.indexOf("Skill body for orient.");
+			const quorraIndex = promptText.indexOf("Skill body for quorra.");
+			const quorraAutoIndex = promptText.indexOf("Skill body for quorra-auto.");
+			const bossIndex = promptText.indexOf("Skill body for boss.");
+			expect(orientIndex).toBeGreaterThan(-1);
+			expect(quorraIndex).toBeGreaterThan(orientIndex);
+			expect(quorraAutoIndex).toBeGreaterThan(quorraIndex);
+			expect(bossIndex).toBeGreaterThan(quorraAutoIndex);
+		} finally {
+			await harness.close();
+			await tempDir.remove();
+		}
+	});
+
 	it("records a provider decision entry when Boss auth is unavailable", async () => {
 		const harness = await createHarness({ boss: true, auth: false });
 		try {
@@ -129,6 +159,17 @@ describe("GLaDOS Boss extension", () => {
 		}
 	});
 });
+
+async function writeSkill(root: string, name: string): Promise<Skill> {
+	const baseDir = path.join(root, name);
+	const filePath = path.join(baseDir, "SKILL.md");
+	await fs.mkdir(baseDir, { recursive: true });
+	await Bun.write(
+		filePath,
+		`---\nname: ${name}\ndescription: ${name} skill\n---\n# ${name}\n\nSkill body for ${name}.`,
+	);
+	return { name, description: `${name} skill`, filePath, baseDir, source: "test" };
+}
 
 async function createHarness(options: { boss: boolean; auth: boolean }) {
 	const tempDir = await TempDir.create("@glados-boss-runtime-");
