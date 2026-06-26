@@ -95,34 +95,52 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 	return { ctx, streamState, statusContainer, workingLoaders, setProgress };
 }
 
-const AGENT_START = { type: "agent_start" } as unknown as AgentSessionEvent;
-const AGENT_END = { type: "agent_end" } as unknown as AgentSessionEvent;
-const COMPACTION_START = {
+type AgentStartEvent = Extract<AgentSessionEvent, { type: "agent_start" }>;
+type AgentEndEvent = Extract<AgentSessionEvent, { type: "agent_end" }>;
+type AutoCompactionStartEvent = Extract<AgentSessionEvent, { type: "auto_compaction_start" }>;
+type AutoCompactionEndEvent = Extract<AgentSessionEvent, { type: "auto_compaction_end" }>;
+
+const AGENT_START: AgentStartEvent = { type: "agent_start" };
+const AGENT_END: AgentEndEvent = { type: "agent_end", messages: [] };
+const COMPACTION_START: AutoCompactionStartEvent = {
 	type: "auto_compaction_start",
 	reason: "overflow",
 	action: "context-full",
-} as unknown as AgentSessionEvent;
-const COMPACTION_END = {
+};
+const COMPACTION_END: AutoCompactionEndEvent = {
 	type: "auto_compaction_end",
 	action: "context-full",
-	result: { summary: "s", shortSummary: "s", tokensBefore: 10, details: {}, firstKeptEntryId: undefined },
+	result: { summary: "s", shortSummary: "s", tokensBefore: 10, details: {}, firstKeptEntryId: "entry-1" },
+	aborted: false,
 	willRetry: true,
-} as unknown as AgentSessionEvent;
-const RETRY_START = {
+};
+const RETRY_START: Extract<AgentSessionEvent, { type: "auto_retry_start" }> = {
 	type: "auto_retry_start",
 	attempt: 1,
 	maxAttempts: 3,
 	delayMs: 1000,
 	errorMessage: "overloaded",
-} as unknown as AgentSessionEvent;
-const TASK_TOOL_EXECUTION_END = {
+};
+const TASK_TOOL_EXECUTION_END: Extract<AgentSessionEvent, { type: "tool_execution_end" }> = {
 	type: "tool_execution_end",
 	toolCallId: "call-task-1",
 	toolName: "task",
 	args: {},
 	result: { content: [], details: {} },
 	isError: false,
-} as unknown as AgentSessionEvent;
+};
+const SCRATCH_HANDOFF_START: AutoCompactionStartEvent = {
+	type: "auto_compaction_start",
+	reason: "threshold",
+	action: "scratch-handoff",
+};
+const SCRATCH_HANDOFF_END: AutoCompactionEndEvent = {
+	type: "auto_compaction_end",
+	action: "scratch-handoff",
+	result: undefined,
+	aborted: false,
+	willRetry: false,
+};
 
 describe("EventController loader recovery after overflow maintenance", () => {
 	beforeAll(async () => {
@@ -234,6 +252,28 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		// post-turn idle state.
 		expect(ctx.loadingAnimation).toBeUndefined();
 		expect(statusContainer.children).toHaveLength(0);
+	});
+
+	it("shows hidden Boss scratch handoff as transient maintenance, not chat", async () => {
+		const { ctx, statusContainer } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(SCRATCH_HANDOFF_START);
+
+		expect(statusContainer.children).toHaveLength(1);
+		const loader = statusContainer.children[0] as { render(width: number): readonly string[] };
+		const rendered = Bun.stripANSI(loader.render(80).join("\n"));
+		expect(rendered).toContain("Context pressure: syncing scratch");
+		expect(rendered).toContain("esc to cancel");
+		expect(ctx.showStatus).not.toHaveBeenCalled();
+
+		await controller.handleEvent(SCRATCH_HANDOFF_END);
+
+		expect(statusContainer.children).toHaveLength(0);
+		expect(ctx.showStatus).not.toHaveBeenCalled();
+		expect(ctx.showWarning).not.toHaveBeenCalled();
+		expect(ctx.statusLine.invalidate).toHaveBeenCalled();
+		expect(ctx.updateEditorTopBorder).toHaveBeenCalled();
 	});
 
 	it("mirrors agent and auto-compaction activity to OSC 9;4 when enabled", async () => {

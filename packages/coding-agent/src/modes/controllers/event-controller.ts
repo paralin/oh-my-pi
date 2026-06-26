@@ -1108,23 +1108,32 @@ export class EventController {
 					: event.reason === "idle"
 						? "Idle "
 						: "";
-		const actionLabel =
-			event.action === "handoff"
-				? "Auto-handoff"
-				: event.action === "shake"
-					? "Auto-shake"
-					: event.action === "snapcompact"
-						? "Auto-snapcompact"
-						: "Auto context-full maintenance";
+		const actionLabel = this.#maintenanceActionLabel(event.action);
+		const prefix = event.action === "scratch-handoff" ? "Context pressure: " : reasonText;
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
-			`${reasonText}${actionLabel}…${this.#maintenanceEscHint()}`,
+			`${prefix}${actionLabel}…${this.#maintenanceEscHint()}`,
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
 		this.ctx.ui.requestRender();
+	}
+
+	#maintenanceActionLabel(action: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>["action"]): string {
+		switch (action) {
+			case "handoff":
+				return "Auto-handoff";
+			case "shake":
+				return "Auto-shake";
+			case "snapcompact":
+				return "Auto-snapcompact";
+			case "scratch-handoff":
+				return "syncing scratch";
+			case "context-full":
+				return "Auto context-full maintenance";
+		}
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
@@ -1139,15 +1148,18 @@ export class EventController {
 		const isHandoffAction = event.action === "handoff";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		const isScratchHandoffAction = event.action === "scratch-handoff";
 		if (event.aborted) {
 			this.ctx.showStatus(
-				isHandoffAction
-					? "Auto-handoff cancelled"
-					: isShakeAction
-						? "Auto-shake cancelled"
-						: isSnapcompactAction
-							? "Auto-snapcompact cancelled"
-							: "Auto context-full maintenance cancelled",
+				isScratchHandoffAction
+					? "Scratch handoff cancelled"
+					: isHandoffAction
+						? "Auto-handoff cancelled"
+						: isShakeAction
+							? "Auto-shake cancelled"
+							: isSnapcompactAction
+								? "Auto-snapcompact cancelled"
+								: "Auto context-full maintenance cancelled",
 			);
 		} else if (isShakeAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
@@ -1175,6 +1187,11 @@ export class EventController {
 			this.ctx.updateEditorTopBorder();
 		} else if (event.errorMessage) {
 			this.ctx.showWarning(event.errorMessage);
+		} else if (isScratchHandoffAction) {
+			// Hidden Boss scratch-handoff is operator-visible only while it is active;
+			// success should not leave a transcript breadcrumb or resemble a user turn.
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorTopBorder();
 		} else if (isHandoffAction) {
 			this.ctx.chatContainer.clear();
 			this.ctx.lastAssistantUsage = undefined;
