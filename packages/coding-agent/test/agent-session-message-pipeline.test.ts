@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type Api,
+	type AssistantMessage,
 	type Context,
 	clearCustomApis,
 	type ImageContent,
@@ -17,6 +18,8 @@ import {
 	registerCustomApi,
 	type SimpleStreamOptions,
 	type TextContent,
+	type ThinkingContent,
+	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -1246,5 +1249,150 @@ describe("AgentSession message pipeline", () => {
 		expect(result.replyText).toBe("Here is text");
 		expect(result.assistantMessage.content.some(block => block.type === "toolCall")).toBe(false);
 		expect(result.assistantMessage.content.every(block => block.type !== "toolCall")).toBe(true);
+	});
+
+	it("routes extension-registered streamSimple events through the root agent loop", async () => {
+		using tempDir = TempDir.createSync("@glados-stream-parity-");
+		const api = "test-glados-stream-parity-api";
+		const provider = "glados-stream-parity";
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const streamCalls: string[] = [];
+		const toolExecutions: unknown[] = [];
+
+		modelRegistry.registerProvider(
+			provider,
+			{
+				baseUrl: "https://example.com/v1",
+				apiKey: "literal-test-key",
+				api,
+				streamSimple: () => {
+					streamCalls.push(`turn-${streamCalls.length + 1}`);
+					const stream = new AssistantMessageEventStream();
+					queueMicrotask(() => {
+						if (streamCalls.length === 1) {
+							const text: TextContent = { type: "text", text: "" };
+							const thinking: ThinkingContent = { type: "thinking", thinking: "" };
+							const toolCall: ToolCall = {
+								type: "toolCall",
+								id: "call_glados_probe",
+								name: "glados_probe",
+								arguments: { value: "ok" },
+							};
+							const partial: AssistantMessage = {
+								...createAssistantMessage(""),
+								api,
+								provider,
+								model: "codex-boss-test",
+								content: [text, thinking, toolCall],
+								stopReason: "toolUse",
+							};
+							stream.push({ type: "start", partial });
+							stream.push({ type: "text_start", contentIndex: 0, partial });
+							text.text = "hello";
+							stream.push({ type: "text_delta", contentIndex: 0, delta: text.text, partial });
+							stream.push({ type: "text_end", contentIndex: 0, content: text.text, partial });
+							stream.push({ type: "thinking_start", contentIndex: 1, partial });
+							thinking.thinking = "route";
+							stream.push({ type: "thinking_delta", contentIndex: 1, delta: thinking.thinking, partial });
+							stream.push({ type: "thinking_end", contentIndex: 1, content: thinking.thinking, partial });
+							stream.push({ type: "toolcall_start", contentIndex: 2, partial });
+							stream.push({
+								type: "toolcall_delta",
+								contentIndex: 2,
+								delta: JSON.stringify(toolCall.arguments),
+								partial,
+							});
+							stream.push({ type: "toolcall_end", contentIndex: 2, toolCall, partial });
+							stream.push({ type: "done", reason: "toolUse", message: partial });
+							return;
+						}
+
+						const message = createAssistantMessage("complete");
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "complete", partial: message });
+						stream.push({ type: "done", reason: "stop", message });
+					});
+					return stream;
+				},
+				models: [
+					{
+						id: "codex-boss-test",
+						name: "Codex Boss Test",
+						api,
+						reasoning: true,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 2048,
+						maxTokens: 256,
+					},
+				],
+			},
+			"<builtin:glados-boss-test>",
+		);
+		const model = modelRegistry.find(provider, "codex-boss-test");
+		if (!model) {
+			throw new Error("Expected runtime provider model");
+		}
+		const tool: AgentTool = {
+			name: "glados_probe",
+			label: "GLaDOS Probe",
+			description: "Records root-loop tool execution.",
+			parameters: {
+				type: "object",
+				properties: { value: { type: "string" } },
+				required: ["value"],
+			},
+			execute: async (_toolCallId, params) => {
+				toolExecutions.push(params);
+				return { content: [{ type: "text", text: `probe:${(params as { value: string }).value}` }] };
+			},
+		};
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [tool],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+		sessions.push(session);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("prove stream parity", { expandPromptTemplates: false });
+		const assistantEventTypes = events
+			.filter(
+				(event): event is Extract<AgentSessionEvent, { type: "message_update" }> => event.type === "message_update",
+			)
+			.map(event => event.assistantMessageEvent.type);
+		expect(assistantEventTypes).toEqual(
+			expect.arrayContaining([
+				"text_start",
+				"text_delta",
+				"text_end",
+				"thinking_start",
+				"thinking_delta",
+				"thinking_end",
+				"toolcall_start",
+				"toolcall_delta",
+				"toolcall_end",
+			]),
+		);
+		expect(toolExecutions).toEqual([{ value: "ok" }]);
+		expect(streamCalls).toEqual(["turn-1", "turn-2"]);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "tool_execution_end",
+				toolCallId: "call_glados_probe",
+				toolName: "glados_probe",
+				isError: false,
+			}),
+		);
+		authStorage.close();
 	});
 });
