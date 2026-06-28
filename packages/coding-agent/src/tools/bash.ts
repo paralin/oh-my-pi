@@ -28,6 +28,7 @@ import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-intera
 import { checkBashInterception } from "./bash-interceptor";
 import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
+import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
@@ -394,6 +395,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			),
 		);
 		this.parameters = this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
+		const evalBackends = resolveEvalBackends(this.session);
 		this.description = prompt.render(bashDescription, {
 			asyncEnabled: this.#asyncEnabled,
 			autoBackgroundEnabled: this.#autoBackgroundEnabled,
@@ -402,6 +404,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasAstEdit: this.session.settings.get("astEdit.enabled"),
 			hasGrep: this.session.settings.get("grep.enabled"),
 			hasGlob: this.session.settings.get("glob.enabled"),
+			hasEval: evalBackends.python || evalBackends.js || evalBackends.ruby || evalBackends.julia,
 		});
 	}
 

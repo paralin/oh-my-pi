@@ -6,13 +6,21 @@ Bash invokes **real binaries** with simple args. It is NOT a scripting surface.
 
 Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a fact (`wc -l`, `sort | uniq -c`, `comm`, `diff`, a checksum, `git status`).
 
-Anything below → `eval` cell, not bash:
+{{#if hasEval}}Anything below → `eval` cell, not bash:
 - Inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists for that language
 - Heredocs (`<<EOF`), `while`/`for`/`if`/`case` shell control flow
 - `$(…)` command substitution nested inside another command
 - Pipelines with more than two stages, or stages that need control flow or quote/JSON escaping
 - Multiline commands, `&&`-chains mixing control flow
 - Quote/JSON escaping that fights the shell
+{{else}}Anything below means you are writing a shell program, not invoking one. Prefer a purpose-built tool, a checked-in script, or a single repo command instead:
+- Inline interpreter scripts (`-e`/`-c`/`--eval`)
+- Heredocs (`<<EOF`), `while`/`for`/`if`/`case` shell control flow
+- `$(…)` command substitution nested inside another command
+- Pipelines with more than two stages, or stages that need control flow or quote/JSON escaping
+- Multiline commands, `&&`-chains mixing control flow
+- Quote/JSON escaping that fights the shell
+{{/if}}
 
 <instruction>
 - `cwd` sets the working dir, not `cd dir && …`
@@ -28,7 +36,10 @@ Anything below → `eval` cell, not bash:
 </instruction>
 
 <critical>
-- Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists, several piped stages, or quote/JSON escaping mean you're writing a program → use `eval` cells: restartable, stateful, and free of shell-quoting traps.
+{{#if hasEval}}- Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists, several piped stages, or quote/JSON escaping mean you're writing a program → use `eval` cells: restartable, stateful, and free of shell-quoting traps.{{else}}- Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts, several piped stages, or quote/JSON escaping mean you're writing a shell program; use a purpose-built tool or checked-in script instead.{{/if}}
+- NEVER shell out to search content or files: `grep/rg` → `grep`.
+- NEVER use `ls` or `find` to list or locate files — `ls` → `read` (a directory path lists entries), `find` → the `glob` tool (globbing). This is non-negotiable, even for a single quick listing.
+- Avoid head/tail/redirections: stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`.
 </critical>
 
 <output>
