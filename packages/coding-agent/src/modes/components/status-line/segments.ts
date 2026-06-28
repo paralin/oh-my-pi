@@ -401,6 +401,19 @@ const costSegment: StatusLineSegment = {
 		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
 		if (usingSubscription) billingParts.push("(sub)");
 
+		// When the active account comes from a credential chain (e.g. --codex-home
+		// / codexHomes), name which entry is in use so an auto-switch is visible.
+		if (state.model) {
+			const chainLabel = ctx.session.modelRegistry.authStorage.getActiveRuntimeChainLabel(
+				state.model.provider,
+				ctx.session.sessionId,
+			);
+			if (chainLabel) {
+				const providerTag = state.model.provider === "openai-codex" ? "codex" : state.model.provider;
+				billingParts.push(`(${providerTag}: ${chainLabel})`);
+			}
+		}
+
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},
 };

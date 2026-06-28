@@ -1925,6 +1925,21 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Label of the runtime API key chain credential the session is currently
+	 * bound to for a provider — the `--codex-home` / `codexHomes` entry name (or
+	 * its email/account id when unnamed). Returns undefined when the provider has
+	 * no runtime chain, so callers can surface the active account only while a
+	 * chain is in use.
+	 */
+	getActiveRuntimeChainLabel(provider: string, sessionId?: string): string | undefined {
+		const chain = this.#runtimeApiKeyChains.get(provider);
+		if (!chain || chain.length === 0) return undefined;
+		const index = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+		const credential = chain[index] ?? chain[0];
+		return credential.label ?? credential.email ?? credential.accountId;
+	}
+
+	/**
 	 * Get all credentials.
 	 */
 	getAll(): AuthStorageData {

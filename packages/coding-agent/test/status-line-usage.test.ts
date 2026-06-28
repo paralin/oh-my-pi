@@ -319,6 +319,47 @@ describe("usage status-line segment", () => {
 		expect(content).not.toContain("7d");
 	});
 
+	it("names the active credential chain entry in the cost segment", () => {
+		const result = renderSegment("cost", {
+			usageStats: { cost: 0.23, premiumRequests: 0 },
+			session: {
+				sessionId: "s1",
+				state: { model: { provider: "openai-codex" } },
+				modelRegistry: {
+					isUsingOAuth: () => true,
+					authStorage: {
+						getActiveRuntimeChainLabel: (provider: string) =>
+							provider === "openai-codex" ? "personal" : undefined,
+					},
+				},
+			},
+		} as unknown as SegmentContext);
+		const content = stripVTControlCharacters(result.content);
+
+		expect(result.visible).toBe(true);
+		expect(content).toContain("$0.23");
+		expect(content).toContain("(sub)");
+		expect(content).toContain("(codex: personal)");
+	});
+
+	it("omits the chain entry when no credential chain is active", () => {
+		const result = renderSegment("cost", {
+			usageStats: { cost: 0.23, premiumRequests: 0 },
+			session: {
+				sessionId: "s1",
+				state: { model: { provider: "openai-codex" } },
+				modelRegistry: {
+					isUsingOAuth: () => true,
+					authStorage: { getActiveRuntimeChainLabel: () => undefined },
+				},
+			},
+		} as unknown as SegmentContext);
+		const content = stripVTControlCharacters(result.content);
+
+		expect(content).toContain("(sub)");
+		expect(content).not.toContain("codex:");
+	});
+
 	it("uses a distinct error color at the eighty-percent threshold", () => {
 		const high = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
 		const low = renderSegment("usage", { usage: { fiveHour: { percent: 24 } } } as unknown as SegmentContext);
