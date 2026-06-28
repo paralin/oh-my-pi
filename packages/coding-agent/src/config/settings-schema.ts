@@ -1363,6 +1363,28 @@ export const SETTINGS_SCHEMA = {
 				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows).",
 		},
 	},
+	"retry.waitForUsageReset": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Wait For Usage Reset",
+			description:
+				"When every configured account is rate-limited and the provider reports a concrete reset time, sleep until an account regains capacity and auto-resume (with a live countdown) instead of failing fast. Bounded by Max Usage Reset Wait.",
+		},
+	},
+	"retry.maxUsageResetWaitMs": {
+		type: "number",
+		default: 6 * 60 * 60 * 1000,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Max Usage Reset Wait",
+			description:
+				"Upper bound, in ms, on how long Wait For Usage Reset will sleep for an account's window to reset. A known reset further out than this falls back to failing fast.",
+		},
+	},
 	"retry.modelFallback": {
 		type: "boolean",
 		default: true,
@@ -5044,6 +5066,8 @@ export interface RetrySettings {
 	maxRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
+	waitForUsageReset: boolean;
+	maxUsageResetWaitMs: number;
 	modelFallback: boolean;
 }
 

@@ -28,7 +28,7 @@ export class Loader extends Text {
 		ui: TUI,
 		private spinnerColorFn: ColorFn,
 		private messageColorFn: LoaderMessageColorFn,
-		private message: string = "Loading...",
+		private message: string | (() => string) = "Loading...",
 		spinnerFrames?: string[],
 	) {
 		super("", 1, 0);
@@ -81,7 +81,7 @@ export class Loader extends Text {
 		this.stop();
 	}
 
-	setMessage(message: string) {
+	setMessage(message: string | (() => string)) {
 		if (message === this.message) {
 			return;
 		}
@@ -91,7 +91,10 @@ export class Loader extends Text {
 
 	#updateDisplay() {
 		const frame = this.#frames[this.#currentFrame];
-		const text = `${this.spinnerColorFn(frame)} ${this.messageColorFn(this.message)}`;
+		// A function message is re-evaluated every spinner tick so live content
+		// (e.g. a countdown) advances without the caller pushing updates.
+		const message = typeof this.message === "function" ? this.message() : this.message;
+		const text = `${this.spinnerColorFn(frame)} ${this.messageColorFn(message)}`;
 		if (this.setText(text) && this.#ui) {
 			// Component-scoped: a spinner tick changes only this component, so
 			// the TUI may reuse every other root subtree instead of re-walking

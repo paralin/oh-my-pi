@@ -368,6 +368,38 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(apiKey).toBe("api-acct-solo");
 	});
 
+	test("reports resumeAtMs from the account's own window when the only account is exhausted", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [{ type: "oauth", ...createCredential("acct-solo", "solo@example.com") }]);
+		usageByAccount.set(
+			"acct-solo",
+			createCodexUsageReport({
+				accountId: "acct-solo",
+				primary: { usedFraction: 1, resetInMs: 5 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 15 * 60 * 1000 },
+			}),
+		);
+
+		const sessionId = "session-solo-exhausted";
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("api-acct-solo");
+
+		const before = Date.now();
+		const outcome = await authStorage.markUsageLimitReached("openai-codex", sessionId, {
+			retryAfterMs: 30 * 60 * 1000,
+		});
+
+		// No sibling to switch to, but both exhausted windows report a reset; the
+		// account is usable only once the later (secondary) window resets, so
+		// resumeAtMs is the max of the two — and well under the 30m provider
+		// retry-after, letting a caller wait the real window instead of failing.
+		expect(outcome.switched).toBe(false);
+		expect(outcome.retryAtMs).toBeUndefined();
+		const resumeInMs = (outcome.resumeAtMs ?? 0) - before;
+		expect(resumeInMs).toBeGreaterThan(14 * 60 * 1000);
+		expect(resumeInMs).toBeLessThan(16 * 60 * 1000);
+	});
+
 	test("prefers Pro accounts for codex spark models over Plus accounts", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

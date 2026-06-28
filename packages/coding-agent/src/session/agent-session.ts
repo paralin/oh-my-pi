@@ -397,6 +397,12 @@ export type AgentSessionEvent =
 			delayMs: number;
 			errorMessage: string;
 			errorId?: number;
+			/**
+			 * Epoch ms the retry is sleeping until because every configured account
+			 * is rate-limited and the provider reported a concrete reset. Set only
+			 * for usage-reset waits; the UI renders a live countdown to this time.
+			 */
+			usageResetAtMs?: number;
 	  }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
@@ -12547,6 +12553,10 @@ export class AgentSession {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		// Set when the wait is sleeping until a known usage-window reset (every
+		// account rate-limited, concrete reset time): bypasses the fail-fast cap
+		// and drives the countdown UI. Carries the absolute resume target.
+		let usageResetAtMs: number | undefined;
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#resetCurrentResponsesProviderSession("stale replay error");
@@ -12587,6 +12597,18 @@ export class AgentSession {
 					const siblingWaitMs = Math.max(0, outcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
 					if (siblingWaitMs < usageLimitWaitMs) {
 						usageLimitWaitMs = siblingWaitMs;
+					}
+				}
+				// Every account is rate-limited. When the provider's usage report
+				// gives a concrete reset time and the user opted in, sleep until the
+				// account actually regains capacity and auto-resume, instead of the
+				// blunt provider retry-after or the fail-fast surface below. Bounded
+				// by retry.maxUsageResetWaitMs so a stale/absurd reset can't hang.
+				if (retrySettings.waitForUsageReset && outcome.resumeAtMs !== undefined) {
+					const resumeWaitMs = Math.max(0, outcome.resumeAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+					if (resumeWaitMs <= retrySettings.maxUsageResetWaitMs) {
+						usageLimitWaitMs = resumeWaitMs;
+						usageResetAtMs = Date.now() + resumeWaitMs;
 					}
 				}
 				if (usageLimitWaitMs > delayMs) {
@@ -12639,8 +12661,17 @@ export class AgentSession {
 		// subagent (or interactive session) silently hung. The original
 		// assistant error message is preserved in agent state so the caller
 		// can act on it.
+		// A usage-reset wait (usageResetAtMs set) has a known, bounded resume time
+		// the user opted into, so it bypasses the cap; the cap still guards blunt
+		// provider retry-after windows with nowhere to switch.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+		if (
+			maxDelayMs > 0 &&
+			delayMs > maxDelayMs &&
+			!switchedCredential &&
+			!switchedModel &&
+			usageResetAtMs === undefined
+		) {
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
 			await this.#emitSessionEvent({
@@ -12660,6 +12691,7 @@ export class AgentSession {
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,
+			usageResetAtMs,
 		});
 
 		// Remove the failed assistant message from active context before retrying.

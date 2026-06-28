@@ -59,6 +59,18 @@ function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknow
 	return typeof tool.renderCall === "function";
 }
 
+/** Formats a remaining duration as a compact `1h 23m 04s` / `4m 12s` / `38s` countdown. */
+function formatResumeCountdown(remainingMs: number): string {
+	const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	const pad = (value: number) => value.toString().padStart(2, "0");
+	if (hours > 0) return `${hours}h ${pad(minutes)}m ${pad(seconds)}s`;
+	if (minutes > 0) return `${minutes}m ${pad(seconds)}s`;
+	return `${seconds}s`;
+}
+
 type AgentSessionEventHandlers = {
 	[E in AgentSessionEventKind]: (event: Extract<AgentSessionEvent, { type: E }>) => Promise<void>;
 };
@@ -1224,11 +1236,20 @@ export class EventController {
 			this.ctx.clearPinnedError();
 		}
 		const delaySeconds = Math.round(event.delayMs / 1000);
+		const escHint = this.#maintenanceEscHint();
+		const resetAtMs = event.usageResetAtMs;
+		// When every account is rate-limited and a concrete reset is known, show a
+		// live countdown to auto-resume; the function message re-evaluates each
+		// spinner tick so the remaining time ticks down without further events.
+		const message =
+			resetAtMs !== undefined
+				? () => `All accounts rate-limited. Resuming in ${formatResumeCountdown(resetAtMs - Date.now())}…${escHint}`
+				: `Retrying (${event.attempt}/${event.maxAttempts}) in ${delaySeconds}s…${escHint}`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
-			`Retrying (${event.attempt}/${event.maxAttempts}) in ${delaySeconds}s…${this.#maintenanceEscHint()}`,
+			message,
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(this.ctx.retryLoader);

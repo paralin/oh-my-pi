@@ -584,10 +584,19 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
  * multi-hour) retry-after when it is sooner. `retryAtMs` is `undefined` when
  * no sibling credentials exist at all, or when the session has no tracked
  * credential to rotate away from.
+ *
+ * `resumeAtMs` (epoch ms) is the soonest moment any account in the pool regains
+ * capacity, derived from the provider's usage report: the current account's own
+ * window reset (uncapped by the default backoff) combined with `retryAtMs`. It
+ * is set even for a single-account pool, so a caller with nowhere to switch can
+ * sleep until the account itself resets and auto-resume instead of failing on
+ * the provider's blunt retry-after. `undefined` when no usage report makes a
+ * concrete reset time known.
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
 	retryAtMs?: number;
+	resumeAtMs?: number;
 }
 
 type UsageCacheEntry<T> = {
@@ -2751,6 +2760,26 @@ export class AuthStorage {
 		return Math.min(...candidates);
 	}
 
+	/**
+	 * Returns the epoch ms at which an account regains capacity: the latest reset
+	 * among its exhausted windows that report one. An account is usable only once
+	 * every exhausted window has reset, so this takes the max, unlike
+	 * {@link #getUsageResetAtMs} which returns the soonest reset for block timing.
+	 * Exhausted windows with no known reset are skipped — the wait targets the
+	 * windows we can time and a post-resume retry re-checks and waits again if the
+	 * account is still limited.
+	 */
+	#getUsageUsableAtMs(limits: UsageLimit[], nowMs: number): number | undefined {
+		let usableAt: number | undefined;
+		for (const limit of limits) {
+			if (!this.#isUsageLimitExhausted(limit)) continue;
+			const resetsAt = limit.window?.resetsAt;
+			if (resetsAt === undefined || !(resetsAt > nowMs)) continue;
+			if (usableAt === undefined || resetsAt > usableAt) usableAt = resetsAt;
+		}
+		return usableAt;
+	}
+
 	async #getUsageReport(
 		provider: Provider,
 		credential: OAuthCredential,
@@ -3083,6 +3112,7 @@ export class AuthStorage {
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		let currentResumeAtMs: number | undefined;
 
 		if (sessionCredential.type === "oauth" && strategy) {
 			const credential = this.#getCredentialsForProvider(provider)[sessionCredential.index];
@@ -3095,6 +3125,7 @@ export class AuthStorage {
 						if (resetAtMs && resetAtMs > blockedUntil) {
 							blockedUntil = resetAtMs;
 						}
+						currentResumeAtMs = this.#getUsageUsableAtMs(scopedLimits, now);
 					}
 				}
 			}
@@ -3115,7 +3146,14 @@ export class AuthStorage {
 			if (candidateBlockedUntil === undefined) return { switched: true };
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
 		}
-		return { switched: false, retryAtMs };
+		return { switched: false, retryAtMs, resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs) };
+	}
+
+	/** Returns the smaller of two optional epoch-ms values, or whichever is defined. */
+	#soonestDefined(a: number | undefined, b: number | undefined): number | undefined {
+		if (a === undefined) return b;
+		if (b === undefined) return a;
+		return Math.min(a, b);
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -3441,6 +3479,7 @@ export class AuthStorage {
 		const blockScope = strategy?.blockScope?.(rankingContext);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		let currentResumeAtMs: number | undefined;
 		if (strategy) {
 			const report = await this.#getUsageReportForRuntimeApiKey(provider, credentials[index], options);
 			if (report) {
@@ -3450,6 +3489,7 @@ export class AuthStorage {
 					if (resetAtMs && resetAtMs > blockedUntil) {
 						blockedUntil = resetAtMs;
 					}
+					currentResumeAtMs = this.#getUsageUsableAtMs(scopedLimits, now);
 				}
 			}
 		}
@@ -3463,7 +3503,7 @@ export class AuthStorage {
 			if (candidateBlockedUntil === undefined) return { switched: true };
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
 		}
-		return { switched: false, retryAtMs };
+		return { switched: false, retryAtMs, resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs) };
 	}
 
 	/**
