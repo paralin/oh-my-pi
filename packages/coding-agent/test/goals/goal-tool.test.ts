@@ -89,9 +89,8 @@ describe("GoalTool", () => {
 		const created = await tool.execute("call-create", {
 			op: "create",
 			objective: "  Create route  ",
-			token_budget: 10,
 		});
-		expect(runtime.createGoal).toHaveBeenCalledWith({ objective: "Create route", tokenBudget: 10 });
+		expect(runtime.createGoal).toHaveBeenCalledWith({ objective: "Create route" });
 		expect(created.details).toMatchObject({
 			op: "create",
 			goal: createGoalState.goal,
@@ -99,7 +98,7 @@ describe("GoalTool", () => {
 			completionBudgetReport: null,
 		});
 
-		const fetched = await tool.execute("call-get", { op: "get", objective: undefined, token_budget: undefined });
+		const fetched = await tool.execute("call-get", { op: "get", objective: undefined });
 		expect(getGoalModeState).toHaveBeenCalledTimes(1);
 		expect(fetched.details).toMatchObject({
 			op: "get",
@@ -112,7 +111,6 @@ describe("GoalTool", () => {
 		const completed = await tool.execute("call-complete", {
 			op: "complete",
 			objective: undefined,
-			token_budget: undefined,
 		});
 		expect(runtime.completeGoalFromTool).toHaveBeenCalledTimes(1);
 		expect(completed.details).toMatchObject({
@@ -139,13 +137,12 @@ describe("GoalTool", () => {
 		const result = await tool.execute("call-set", {
 			op: "set",
 			objective: "  Set from tool  ",
-			token_budget: 25,
 		});
 
 		expect(result.details).toMatchObject({
 			op: "set",
-			goal: { objective: "Set from tool", status: "active", tokenBudget: 25 },
-			remainingTokens: 25,
+			goal: { objective: "Set from tool", status: "active", tokenBudget: undefined },
+			remainingTokens: null,
 		});
 		expect(harness.getState()?.enabled).toBe(true);
 	});
@@ -166,7 +163,6 @@ describe("GoalTool", () => {
 		const result = await tool.execute("call-set", {
 			op: "set",
 			objective: "New goal",
-			token_budget: undefined,
 		});
 
 		expect(result.details?.goal).toMatchObject({
@@ -215,9 +211,9 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		await expect(
-			tool.execute("call-create", { op: "create", objective: "New goal", token_budget: 10 }),
-		).rejects.toThrow("cannot create a new goal because this session already has a goal");
+		await expect(tool.execute("call-create", { op: "create", objective: "New goal" })).rejects.toThrow(
+			"cannot create a new goal because this session already has a goal",
+		);
 	});
 
 	it("rejects complete when no goal is active", async () => {
@@ -229,9 +225,9 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		await expect(
-			tool.execute("call-complete", { op: "complete", objective: undefined, token_budget: undefined }),
-		).rejects.toThrow("cannot complete goal because no goal is active");
+		await expect(tool.execute("call-complete", { op: "complete", objective: undefined })).rejects.toThrow(
+			"cannot complete goal because no goal is active",
+		);
 	});
 
 	it("rejects op=create when the objective is missing or only whitespace", async () => {
@@ -243,26 +239,8 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		await expect(
-			tool.execute("call-empty", { op: "create", objective: "   \t\n", token_budget: undefined }),
-		).rejects.toThrow("objective is required when op=create");
-		expect(harness.getState()).toBeUndefined();
-	});
-
-	it("rejects op=create when the token_budget is zero or negative", async () => {
-		const harness = createRuntimeHarness();
-		const tool = new GoalTool(
-			createToolSession({
-				getGoalRuntime: () => harness.runtime,
-				getGoalModeState: () => harness.getState(),
-			}),
-		);
-
-		await expect(tool.execute("call-zero", { op: "create", objective: "Ship it", token_budget: 0 })).rejects.toThrow(
-			"token_budget must be a positive integer when provided",
-		);
-		await expect(tool.execute("call-neg", { op: "create", objective: "Ship it", token_budget: -5 })).rejects.toThrow(
-			"token_budget must be a positive integer when provided",
+		await expect(tool.execute("call-empty", { op: "create", objective: "   \t\n" })).rejects.toThrow(
+			"objective is required when op=create",
 		);
 		expect(harness.getState()).toBeUndefined();
 	});
@@ -280,7 +258,6 @@ describe("GoalTool", () => {
 		const result = await tool.execute("call-complete", {
 			op: "complete",
 			objective: undefined,
-			token_budget: undefined,
 		});
 
 		expect(result.details).toMatchObject({ op: "complete" });
@@ -307,7 +284,6 @@ describe("GoalTool", () => {
 		const result = await tool.execute("call-complete", {
 			op: "complete",
 			objective: undefined,
-			token_budget: undefined,
 		});
 		expect(result.details?.goal?.status).toBe("complete");
 		expect(harness.getState()?.goal.status).toBe("complete");
@@ -330,7 +306,6 @@ describe("GoalTool", () => {
 		const result = await tool.execute("call-create", {
 			op: "create",
 			objective: "Next goal",
-			token_budget: undefined,
 		});
 		expect(result.details?.goal?.objective).toBe("Next goal");
 		expect(result.details?.goal?.status).toBe("active");
@@ -349,7 +324,7 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		const result = await tool.execute("call-get", { op: "get", objective: undefined, token_budget: undefined });
+		const result = await tool.execute("call-get", { op: "get", objective: undefined });
 		expect(result.details?.goal?.status).toBe("paused");
 		expect(result.details?.goal?.objective).toBe("Ship it");
 	});
@@ -367,7 +342,7 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		const result = await tool.execute("call-resume", { op: "resume", objective: undefined, token_budget: undefined });
+		const result = await tool.execute("call-resume", { op: "resume", objective: undefined });
 		expect(result.details?.op).toBe("resume");
 		expect(result.details?.goal?.status).toBe("active");
 		expect(harness.getState()?.enabled).toBe(true);
@@ -386,7 +361,7 @@ describe("GoalTool", () => {
 			}),
 		);
 
-		const result = await tool.execute("call-drop", { op: "drop", objective: undefined, token_budget: undefined });
+		const result = await tool.execute("call-drop", { op: "drop", objective: undefined });
 		expect(result.details?.op).toBe("drop");
 		expect(result.details?.goal?.status).toBe("dropped");
 		expect(harness.getState()).toBeUndefined();

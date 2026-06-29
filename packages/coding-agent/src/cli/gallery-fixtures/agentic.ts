@@ -328,7 +328,6 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		args: {
 			op: "create",
 			objective: "Ship the auth hardening pass: per-account rate limits and sliding session expiry.",
-			token_budget: 500_000,
 		},
 		result: {
 			content: [
