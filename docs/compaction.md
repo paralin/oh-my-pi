@@ -295,6 +295,18 @@ After summary generation (or hook-provided summary), agent session:
 4. Synchronizes active todo phases from the rebuilt branch and closes provider sessions whose history was rewritten.
 5. Emits `session_compact` hook event.
 
+### Maintenance trace visibility
+
+Automatic context maintenance emits `maintenance_trace_*` events around the legacy `auto_compaction_start` / `auto_compaction_end` events. These trace events are UI-only; they are not session entries and are not converted into future LLM context.
+
+`compaction.maintenanceTrace` controls how much of that trace is shown:
+
+- `"loader"` keeps the historical compacting loader only. Interactive mode still updates loader phases, and JSON print mode suppresses `maintenance_trace_*` events while keeping the coarse auto-compaction events.
+- `"assistant"` is the default. Interactive mode mounts a maintenance card for LLM-backed handoff/context-full work and streams assistant-visible text deltas into that card. Scratch handoff uses the same card for file/reset/read phases, but it does not invent assistant output. JSON print mode emits the structured trace events. Text print mode remains final-answer-only.
+- `"debug"` keeps the assistant card behavior and, for LLM-backed maintenance, adds `debugArtifactId` and `debugLogRef` on the terminal trace event when the session raw-SSE debug buffer has captured provider frames. The raw frames are saved as a session artifact such as `artifact://7`; they are not inlined into chat, JSON text fields, or future model context.
+
+Full HTTP request/response payload capture is separate: set `PI_REQ_DEBUG=1` to write `rr-session-*.json` request dumps and `rr-session-*.res.log` response logs in the process working directory. Those files are not session entries and are not attached to model context.
+
 ## Branch summarization pipeline
 
 Branch summarization is tied to tree navigation, not token overflow.
@@ -435,6 +447,7 @@ From `settings-schema.ts`:
 - `compaction.midTurnEnabled` = `true`
 - `compaction.remoteEnabled` = `true`
 - `compaction.remoteEndpoint` = `undefined`
+- `compaction.maintenanceTrace` = `"assistant"` (`"loader"` hides trace cards/events; `"debug"` adds raw-SSE artifact refs)
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`
 - `compaction.idleEnabled` = `false`
 - `scratchHandoff.enabled` = `false`

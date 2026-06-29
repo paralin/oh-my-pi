@@ -18,6 +18,7 @@ export * from "./hook-selector";
 export * from "./keybinding-hints";
 export * from "./login-dialog";
 export * from "./logout-account-selector";
+export * from "./maintenance-trace-card";
 export * from "./model-selector";
 export * from "./oauth-selector";
 export * from "./queue-mode-selector";

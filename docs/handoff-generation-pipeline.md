@@ -81,6 +81,7 @@ Important generation properties:
 - `toolChoice: "none"` prevents intentional tool dispatch.
 - The returned assistant content is filtered to text blocks and joined with `\n`; stray tool-call blocks are ignored if a provider does not honor `toolChoice: "none"`.
 - `stopReason === "error"` throws a generation error.
+- When `compaction.maintenanceTrace` is `"assistant"` or `"debug"`, the same side stream emits assistant-visible text deltas as UI-only `maintenance_trace_delta` events before final document extraction. The final handoff document still comes from `stream.result()`, and trace text is not appended to the old session transcript.
 
 No agent-loop events are used for capture. The handoff path no longer waits for `agent_end` and no longer scans the latest assistant message.
 
@@ -185,6 +186,8 @@ Auto-triggered handoffs can additionally write a timestamped `handoff-*.md` arti
 - Stops the loader, clears the status container, and requests render at end.
 
 Manual `/handoff` no longer streams the generated document into chat. A cancellable loader remains visible while the oneshot request runs, and the chat is rebuilt after generation completes.
+
+Automatic context-maintenance handoffs can show a UI-only maintenance trace while the request runs. The default `compaction.maintenanceTrace: "assistant"` shows assistant-visible generation deltas in a maintenance card; `"loader"` keeps only the compacting loader; `"debug"` also links raw-SSE session artifacts on the terminal trace event when frames were captured. These traces are display/event data, not session messages.
 
 ## Cancellation semantics
 

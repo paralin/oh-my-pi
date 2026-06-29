@@ -9,6 +9,7 @@ import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
+import { MaintenanceTraceCard } from "../../modes/components/maintenance-trace-card";
 import {
 	ReadToolGroupComponent,
 	readArgsHaveTarget,
@@ -76,6 +77,7 @@ type AgentSessionEventHandlers = {
 };
 
 export class EventController {
+	#maintenanceTraceCards = new Map<string, MaintenanceTraceCard>();
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
 	// already seen in the current streaming message. A newly appearing one breaks
@@ -146,10 +148,10 @@ export class EventController {
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
-			maintenance_trace_start: async () => {},
+			maintenance_trace_start: async e => this.#handleMaintenanceTraceStart(e),
 			maintenance_trace_phase: async e => this.#handleMaintenanceTracePhase(e),
-			maintenance_trace_delta: async () => {},
-			maintenance_trace_end: async () => {},
+			maintenance_trace_delta: async e => this.#handleMaintenanceTraceDelta(e),
+			maintenance_trace_end: async e => this.#handleMaintenanceTraceEnd(e),
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
@@ -1108,12 +1110,55 @@ export class EventController {
 		return this.ctx.focusedAgentId ? "" : " (esc to cancel)";
 	}
 
+	#maintenanceTraceVisibility(): "loader" | "assistant" | "debug" {
+		return this.ctx.settings.get("compaction.maintenanceTrace");
+	}
+
+	#shouldShowMaintenanceTraceCard(): boolean {
+		return this.#maintenanceTraceVisibility() !== "loader";
+	}
+
+	#handleMaintenanceTraceStart(event: Extract<AgentSessionEvent, { type: "maintenance_trace_start" }>): void {
+		if (!this.#shouldShowMaintenanceTraceCard()) return;
+		this.#maintenanceTraceCards.get(event.traceId)?.finish();
+		const card = new MaintenanceTraceCard({
+			action: event.action,
+			reason: event.reason,
+			fallbackCause: event.fallbackCause,
+			targetPath: event.targetPath,
+			canCancel: this.#maintenanceEscHint() !== "",
+		});
+		this.#maintenanceTraceCards.set(event.traceId, card);
+		this.ctx.present(card);
+	}
+
 	#handleMaintenanceTracePhase(event: Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }>): void {
+		const card = this.#maintenanceTraceCards.get(event.traceId);
+		card?.updatePhase(event.phase, event.targetPath);
 		if (event.action !== "scratch-handoff" || !this.ctx.autoCompactionLoader) return;
 		this.ctx.autoCompactionLoader.setMessage(
 			`${this.#scratchHandoffTracePhaseLabel(event.phase)}${this.#scratchHandoffTraceTarget(event.targetPath)}…${this.#maintenanceEscHint()}`,
 		);
 		this.ctx.ui.requestRender();
+	}
+
+	#handleMaintenanceTraceDelta(event: Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }>): void {
+		if (!this.#shouldShowMaintenanceTraceCard()) return;
+		this.#maintenanceTraceCards.get(event.traceId)?.appendTraceDelta(event.content, event.delta);
+	}
+
+	#handleMaintenanceTraceEnd(event: Extract<AgentSessionEvent, { type: "maintenance_trace_end" }>): void {
+		const card = this.#maintenanceTraceCards.get(event.traceId);
+		if (!card) return;
+		if (!this.ctx.chatContainer.children.includes(card)) {
+			this.ctx.present(card);
+		}
+		card.complete(event.terminalResult, {
+			errorMessage: event.errorMessage,
+			willRetry: event.willRetry,
+			debugLogRef: event.debugLogRef,
+		});
+		this.#maintenanceTraceCards.delete(event.traceId);
 	}
 
 	#scratchHandoffTracePhaseLabel(

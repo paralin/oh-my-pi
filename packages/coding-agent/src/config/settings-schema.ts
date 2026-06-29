@@ -1945,6 +1945,36 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.maintenanceTrace": {
+		type: "enum",
+		values: ["loader", "assistant", "debug"] as const,
+		default: "assistant",
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Maintenance Trace",
+			description:
+				"Choose compact loaders, UI-only assistant-visible maintenance cards, or explicit debug artifacts for raw provider frames",
+			options: [
+				{
+					value: "loader",
+					label: "Loader",
+					description: "Show only the compact context-maintenance loader",
+				},
+				{
+					value: "assistant",
+					label: "Assistant",
+					description: "Show assistant-visible maintenance text in a UI-only card",
+				},
+				{
+					value: "debug",
+					label: "Debug",
+					description: "Show the UI-only card and save raw provider frames as debug artifacts",
+				},
+			],
+		},
+	},
+
 	"compaction.thresholdPercent": {
 		type: "number",
 		default: -1,
@@ -5054,6 +5084,7 @@ export type Personality = SettingValue<"personality">;
 export interface CompactionSettings {
 	enabled: boolean;
 	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	maintenanceTrace: "loader" | "assistant" | "debug";
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number;

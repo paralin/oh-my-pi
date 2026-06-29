@@ -220,6 +220,7 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type {
 	AutoCompactionAction,
 	AutoCompactionReason,
+	MaintenanceTraceDeltaContent,
 	MaintenanceTraceDeltaEvent,
 	MaintenanceTraceEndEvent,
 	MaintenanceTraceFallbackCause,
@@ -354,7 +355,7 @@ import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions } from "./s
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import { formatShakeSummary, type ShakeMode, type ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -2970,13 +2971,17 @@ export class AgentSession {
 		});
 	}
 
-	async #emitMaintenanceTraceDelta(trace: MaintenanceTraceState, delta: string): Promise<void> {
+	async #emitMaintenanceTraceDelta(
+		trace: MaintenanceTraceState,
+		content: MaintenanceTraceDeltaContent,
+		delta: string,
+	): Promise<void> {
 		if (delta.length === 0) return;
 		const event: MaintenanceTraceDeltaEvent = {
 			...this.#maintenanceTraceBase(trace),
 			type: "maintenance_trace_delta",
 			phase: "stream",
-			content: "assistant_text",
+			content,
 			delta,
 		};
 		this.#emit(event);
@@ -2995,7 +3000,7 @@ export class AgentSession {
 	): Promise<void> {
 		for await (const event of stream) {
 			if (event.type === "text_delta") {
-				await this.#emitMaintenanceTraceDelta(trace, event.delta);
+				await this.#emitMaintenanceTraceDelta(trace, "assistant_text", event.delta);
 			}
 		}
 	}
@@ -3026,6 +3031,7 @@ export class AgentSession {
 		terminalResult: MaintenanceTraceTerminalResult,
 		options: { errorMessage?: string; willRetry?: boolean } = {},
 	): Promise<void> {
+		const debugArtifactId = await this.#saveMaintenanceDebugArtifact(trace);
 		const event: MaintenanceTraceEndEvent = {
 			...this.#maintenanceTraceBase(trace),
 			type: "maintenance_trace_end",
@@ -3034,7 +3040,26 @@ export class AgentSession {
 			willRetry: options.willRetry ?? false,
 		};
 		if (options.errorMessage !== undefined) event.errorMessage = options.errorMessage;
+		if (debugArtifactId !== undefined) {
+			event.debugArtifactId = debugArtifactId;
+			event.debugLogRef = `artifact://${debugArtifactId}`;
+		}
 		await this.#emitSessionEvent(event);
+	}
+
+	async #saveMaintenanceDebugArtifact(trace: MaintenanceTraceState): Promise<string | undefined> {
+		if (this.settings.get("compaction.maintenanceTrace") !== "debug") return undefined;
+		if (trace.action !== "context-full" && trace.action !== "handoff") return undefined;
+		const rawSseText = this.rawSseDebugBuffer.toRawText();
+		if (rawSseText.trim().length === 0) return undefined;
+		try {
+			return await this.sessionManager.saveArtifact(rawSseText, "maintenance-raw-sse");
+		} catch (error) {
+			logger.warn("Failed to save maintenance debug artifact", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
 	}
 
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
@@ -9477,6 +9502,53 @@ export class AgentSession {
 	}
 
 	/**
+	 * Manual `/compact` clean-break path: reset into the scratch successor session
+	 * instead of summarizing. Mirrors `compact()`'s disconnect/abort/reconnect
+	 * setup, then drives the same `#startScratchHandoffSession` reset the auto
+	 * maintenance path uses under a `manual` maintenance reason. No auto-continue:
+	 * the operator issued `/compact` and drives the next turn.
+	 */
+	async #runManualScratchHandoffCompaction(): Promise<CompactionResult> {
+		if (this.#compactionAbortController) {
+			throw new Error("Compaction already in progress");
+		}
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) {
+			throw new Error("Scratch handoff is not active for this session.");
+		}
+		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
+		const compactionAbortController = new AbortController();
+		this.#compactionAbortController = compactionAbortController;
+		try {
+			this.#disconnectFromAgent();
+			await this.abort({ goalReason: "internal", preserveCompaction: true });
+			const trace = this.#createMaintenanceTrace("scratch-handoff", "manual", undefined, scratchPath);
+			await this.#emitMaintenanceTraceStart(trace);
+			await this.#emitMaintenanceTraceDelta(trace, "activity", "Started scratch handoff from the current session.");
+			await this.#emitSessionEvent({ type: "auto_compaction_start", reason: "manual", action: "scratch-handoff" });
+			await this.#startScratchHandoffSession(trace);
+			await this.#emitSessionEvent({
+				type: "auto_compaction_end",
+				action: "scratch-handoff",
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+			});
+			await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
+			return {
+				summary: `Scratch handoff: reset into a successor session carrying ${scratchPath}.`,
+				firstKeptEntryId: this.sessionManager.getEntries()[0]?.id ?? "",
+				tokensBefore,
+			};
+		} finally {
+			if (this.#compactionAbortController === compactionAbortController) {
+				this.#compactionAbortController = undefined;
+			}
+			this.#reconnectToAgent();
+		}
+	}
+
+	/**
 	 * Ask the active memory backend for an extra-context block to splice into
 	 * the compaction summary prompt. Both the manual and auto compaction paths
 	 * funnel through this helper so the behaviour stays identical.
@@ -9681,6 +9753,13 @@ export class AgentSession {
 					timestamp: Date.now(),
 				},
 			];
+			if (this.#handoffMaintenanceTrace) {
+				await this.#emitMaintenanceTraceDelta(
+					this.#handoffMaintenanceTrace,
+					"activity",
+					"Building auto-handoff request from live context.",
+				);
+			}
 			const handoffLlmMessages = await this.convertMessagesToLlm(handoffSnapshot, handoffSignal);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the handoff seeds a fresh session and must not carry prompt-specific
@@ -9705,6 +9784,13 @@ export class AgentSession {
 				{
 					streamOptions: handoffStreamOptions,
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
+						if (this.#handoffMaintenanceTrace) {
+							await this.#emitMaintenanceTraceDelta(
+								this.#handoffMaintenanceTrace,
+								"activity",
+								`LLM request: ${formatModelStringWithRouting(requestModel)}.`,
+							);
+						}
 						const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
 						return this.#consumeSideStreamResult(stream, this.#handoffMaintenanceTrace);
 					},
@@ -11693,6 +11779,7 @@ export class AgentSession {
 			// a message typed as the compaction loader appears must land in the compaction
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
 			await this.#emitMaintenanceTraceStart(trace);
+			await this.#emitMaintenanceTraceDelta(trace, "activity", `Started ${action} maintenance for ${reason}.`);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (action === "scratch-handoff") {
 				await this.#startScratchHandoffSession(trace);
@@ -11763,6 +11850,7 @@ export class AgentSession {
 			}
 
 			if (!this.model) {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Skipped: no active model is available.");
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -11777,6 +11865,11 @@ export class AgentSession {
 
 			const availableModels = this.#modelRegistry.getAvailable();
 			if (availableModels.length === 0) {
+				await this.#emitMaintenanceTraceDelta(
+					trace,
+					"activity",
+					"Skipped: no configured compaction models are available.",
+				);
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -11797,6 +11890,7 @@ export class AgentSession {
 			);
 			const preparation = prepareCompaction(pathEntries, compactionSettings, autoCompactionCandidates);
 			if (!preparation) {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Skipped: nothing eligible for maintenance.");
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -11816,12 +11910,18 @@ export class AgentSession {
 				}
 				return COMPACTION_CHECK_NONE;
 			}
+			await this.#emitMaintenanceTraceDelta(
+				trace,
+				"activity",
+				`Prepared ${preparation.messagesToSummarize.length + preparation.turnPrefixMessages.length} message(s) for maintenance; keeping ${preparation.recentMessages.length} recent message(s).`,
+			);
 
 			let hookCompaction: CompactionResult | undefined;
 			let fromExtension = false;
 			let preserveData: Record<string, unknown> | undefined;
 
 			if (this.#extensionRunner?.hasHandlers("session_before_compact")) {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Running session_before_compact extension hook.");
 				const hookResult = (await this.#extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -11845,6 +11945,7 @@ export class AgentSession {
 				if (hookResult?.compaction) {
 					hookCompaction = hookResult.compaction;
 					fromExtension = true;
+					await this.#emitMaintenanceTraceDelta(trace, "activity", "Extension supplied the compaction result.");
 				}
 			}
 
@@ -11869,6 +11970,7 @@ export class AgentSession {
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			let snapcompactBlocker: string | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Snapcompact: scanning transcript renderability.");
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
 				);
@@ -11896,6 +11998,11 @@ export class AgentSession {
 						snapcompactBlocker =
 							"snapcompact: kept history alone exceeds the context budget; using context-full auto-compaction instead.";
 					} else {
+						await this.#emitMaintenanceTraceDelta(
+							trace,
+							"activity",
+							`Snapcompact: rendering archive with at most ${maxFrames} frame(s).`,
+						);
 						snapcompactResult = await snapcompact.compact(preparation, {
 							convertToLlm,
 							model: this.model,
@@ -11912,6 +12019,13 @@ export class AgentSession {
 							snapcompactBlocker =
 								"snapcompact produced too much standing image payload; using context-full auto-compaction instead.";
 							snapcompactResult = undefined;
+						}
+						if (snapcompactResult) {
+							await this.#emitMaintenanceTraceDelta(
+								trace,
+								"activity",
+								`Snapcompact: ${snapcompactResult.shortSummary ?? "archive rendered"}.`,
+							);
 						}
 						if (snapcompactResult) {
 							const ctxWindow = this.model?.contextWindow ?? 0;
@@ -11935,6 +12049,7 @@ export class AgentSession {
 				}
 				if (snapcompactBlocker) {
 					this.emitNotice("warning", snapcompactBlocker, "compaction");
+					await this.#emitMaintenanceTraceDelta(trace, "activity", snapcompactBlocker);
 					action = "context-full";
 					trace.action = action;
 					trace.fallbackCause = "snapcompact-fallback";
@@ -11943,6 +12058,7 @@ export class AgentSession {
 			}
 
 			if (compactionPrep.kind === "fromHook") {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Using extension-provided compaction output.");
 				summary = compactionPrep.summary;
 				shortSummary = compactionPrep.shortSummary;
 				firstKeptEntryId = compactionPrep.firstKeptEntryId;
@@ -11972,6 +12088,11 @@ export class AgentSession {
 					let attempt = 0;
 					while (true) {
 						try {
+							await this.#emitMaintenanceTraceDelta(
+								trace,
+								"activity",
+								`${attempt === 0 ? "Starting" : "Retrying"} compaction with ${formatModelStringWithRouting(candidate)}.`,
+							);
 							compactResult = await compact(
 								this.#obfuscatePreparationForProvider(preparation),
 								candidate,
@@ -11995,6 +12116,11 @@ export class AgentSession {
 									sessionId: this.sessionId,
 									promptCacheKey: this.sessionId,
 									completeImpl: async (requestModel, requestContext, requestOptions) => {
+										await this.#emitMaintenanceTraceDelta(
+											trace,
+											"activity",
+											`LLM request: ${formatModelStringWithRouting(requestModel)}.`,
+										);
 										const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
 										return this.#consumeSideStreamResult(stream, trace);
 									},
@@ -12063,6 +12189,11 @@ export class AgentSession {
 								error: message,
 								model: `${candidate.provider}/${candidate.id}`,
 							});
+							await this.#emitMaintenanceTraceDelta(
+								trace,
+								"activity",
+								`Retrying compaction after ${formatDuration(delayMs)}.`,
+							);
 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
 						}
 					}
@@ -12099,6 +12230,7 @@ export class AgentSession {
 				return COMPACTION_CHECK_NONE;
 			}
 
+			await this.#emitMaintenanceTraceDelta(trace, "activity", "Writing compacted context into session history.");
 			this.sessionManager.appendCompaction(
 				summary,
 				shortSummary,
@@ -12111,6 +12243,7 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			await this.#emitMaintenanceTraceDelta(trace, "activity", "Rebuilt live model context from compacted history.");
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
@@ -12303,6 +12436,11 @@ export class AgentSession {
 		const trace = this.#createMaintenanceTrace(action, reason, undefined);
 		try {
 			await this.#emitMaintenanceTraceStart(trace);
+			await this.#emitMaintenanceTraceDelta(
+				trace,
+				"activity",
+				"Scanning for shakeable tool results and large blocks.",
+			);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			if (signal.aborted) {
@@ -12317,6 +12455,7 @@ export class AgentSession {
 				return COMPACTION_CHECK_NONE;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			await this.#emitMaintenanceTraceDelta(trace, "activity", formatShakeSummary(result));
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
 			// fires, shake runs, but residual context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing

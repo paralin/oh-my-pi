@@ -212,7 +212,7 @@ export interface TurnEndEvent {
 // Auto-compaction / Auto-retry Events
 // ============================================================================
 
-export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete";
+export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete" | "manual";
 
 export type AutoCompactionAction = "context-full" | "handoff" | "shake" | "snapcompact" | "scratch-handoff";
 
@@ -239,7 +239,7 @@ export type MaintenanceTraceFallbackCause =
 
 export type MaintenanceTraceTerminalResult = "done" | "cancelled" | "failed" | "skipped" | "no-progress";
 
-export type MaintenanceTraceDeltaContent = "assistant_text";
+export type MaintenanceTraceDeltaContent = "activity" | "assistant_text";
 
 export interface MaintenanceTraceEventBase {
 	traceId: string;
@@ -263,9 +263,11 @@ export interface MaintenanceTracePhaseEvent extends MaintenanceTraceEventBase {
 }
 
 /**
- * MaintenanceTraceDeltaEvent carries assistant-visible text deltas from an
- * LLM-backed maintenance side request. Thinking, tool-call deltas, request
- * payloads, and provider frames are not part of the default trace contract.
+ * MaintenanceTraceDeltaEvent carries live maintenance progress. `activity`
+ * entries are operator-facing process steps; `assistant_text` entries are the
+ * visible text streamed by an LLM-backed maintenance side request. Thinking,
+ * tool-call deltas, request payloads, and provider frames are not part of the
+ * default trace contract.
  */
 export interface MaintenanceTraceDeltaEvent extends MaintenanceTraceEventBase {
 	type: "maintenance_trace_delta";
@@ -281,6 +283,10 @@ export interface MaintenanceTraceEndEvent extends MaintenanceTraceEventBase {
 	terminalResult: MaintenanceTraceTerminalResult;
 	errorMessage?: string;
 	willRetry: boolean;
+	/** Present only when compaction.maintenanceTrace is debug and raw provider frames were saved. */
+	debugArtifactId?: string;
+	/** Human-readable reference for debug output, e.g. artifact://<id>. */
+	debugLogRef?: string;
 }
 
 /** Fired when auto-compaction starts */

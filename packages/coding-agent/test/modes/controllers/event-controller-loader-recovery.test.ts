@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ChatBlock } from "@oh-my-pi/pi-coding-agent/modes/components/chat-block";
+import { MaintenanceTraceCard } from "@oh-my-pi/pi-coding-agent/modes/components/maintenance-trace-card";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -24,9 +26,12 @@ interface FakeWorkingLoader {
  * kept streaming. The fix tears the working loader down (stop + dereference) so
  * the next `agent_start` recreates and re-attaches it.
  */
-function createContext(options: { terminalProgress?: boolean } = {}) {
+function createContext(
+	options: { terminalProgress?: boolean; maintenanceTrace?: "loader" | "assistant" | "debug" } = {},
+) {
 	const streamState = { isStreaming: false };
 	const children: unknown[] = [];
+	const chatChildren: unknown[] = [];
 	const statusContainer = {
 		children,
 		clear() {
@@ -40,12 +45,30 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 			if (index !== -1) children.splice(index, 1);
 		},
 	};
+	const chatContainer = {
+		children: chatChildren,
+		clear() {
+			chatChildren.length = 0;
+		},
+		addChild(child: unknown) {
+			chatChildren.push(child);
+		},
+		removeChild(child: unknown) {
+			const index = chatChildren.indexOf(child);
+			if (index !== -1) chatChildren.splice(index, 1);
+		},
+		isWithinLiveRegion: () => true,
+	};
 	const workingLoaders: FakeWorkingLoader[] = [];
 	const setProgress = vi.fn();
 	const ctx = {
 		isInitialized: true,
 		settings: {
-			get: (path: string) => path === "terminal.showProgress" && options.terminalProgress === true,
+			get: (path: string) => {
+				if (path === "terminal.showProgress") return options.terminalProgress === true;
+				if (path === "compaction.maintenanceTrace") return options.maintenanceTrace ?? "assistant";
+				return undefined;
+			},
 		},
 		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
@@ -59,7 +82,15 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		statusContainer,
-		chatContainer: { removeChild: vi.fn(), clear: vi.fn() },
+		chatContainer,
+		present: vi.fn((content: unknown) => {
+			const items = Array.isArray(content) ? content : [content];
+			for (const item of items) {
+				chatContainer.addChild(item);
+				if (item instanceof ChatBlock) item.mount({ requestRender: ctx.ui.requestRender });
+			}
+			ctx.ui.requestRender();
+		}),
 		flushPendingModelSwitch: vi.fn(async () => {}),
 		flushCompactionQueue: vi.fn(async () => {}),
 		rebuildChatFromMessages: vi.fn(),
@@ -99,6 +130,10 @@ type AgentStartEvent = Extract<AgentSessionEvent, { type: "agent_start" }>;
 type AgentEndEvent = Extract<AgentSessionEvent, { type: "agent_end" }>;
 type AutoCompactionStartEvent = Extract<AgentSessionEvent, { type: "auto_compaction_start" }>;
 type AutoCompactionEndEvent = Extract<AgentSessionEvent, { type: "auto_compaction_end" }>;
+type MaintenanceTraceStartEvent = Extract<AgentSessionEvent, { type: "maintenance_trace_start" }>;
+type MaintenanceTracePhaseEvent = Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }>;
+type MaintenanceTraceDeltaEvent = Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }>;
+type MaintenanceTraceEndEvent = Extract<AgentSessionEvent, { type: "maintenance_trace_end" }>;
 
 const AGENT_START: AgentStartEvent = { type: "agent_start" };
 const AGENT_END: AgentEndEvent = { type: "agent_end", messages: [] };
@@ -140,6 +175,53 @@ const SCRATCH_HANDOFF_END: AutoCompactionEndEvent = {
 	result: undefined,
 	aborted: false,
 	willRetry: false,
+};
+const SCRATCH_HANDOFF_TRACE_TARGET: MaintenanceTracePhaseEvent = {
+	type: "maintenance_trace_phase",
+	traceId: "session:maintenance:1",
+	reason: "threshold",
+	action: "scratch-handoff",
+	visibility: "ui-only",
+	phase: "scratch-target-resolved",
+	targetPath: "agent/current.org",
+};
+const SCRATCH_HANDOFF_TRACE_READ: MaintenanceTracePhaseEvent = {
+	...SCRATCH_HANDOFF_TRACE_TARGET,
+	phase: "scratch-read-injected",
+};
+const HANDOFF_TRACE_START: MaintenanceTraceStartEvent = {
+	type: "maintenance_trace_start",
+	traceId: "session:maintenance:2",
+	reason: "threshold",
+	action: "handoff",
+	visibility: "ui-only",
+	phase: "start",
+};
+const HANDOFF_TRACE_DELTA: MaintenanceTraceDeltaEvent = {
+	...HANDOFF_TRACE_START,
+	type: "maintenance_trace_delta",
+	phase: "stream",
+	content: "assistant_text",
+	delta: "Preparing a compact handoff.",
+};
+const HANDOFF_TRACE_ACTIVITY: MaintenanceTraceDeltaEvent = {
+	...HANDOFF_TRACE_START,
+	type: "maintenance_trace_delta",
+	phase: "stream",
+	content: "activity",
+	delta: "LLM request: anthropic/claude-sonnet-4-5.",
+};
+const HANDOFF_TRACE_END: MaintenanceTraceEndEvent = {
+	...HANDOFF_TRACE_START,
+	type: "maintenance_trace_end",
+	phase: "terminal",
+	terminalResult: "done",
+	willRetry: false,
+};
+const HANDOFF_TRACE_DEBUG_END: MaintenanceTraceEndEvent = {
+	...HANDOFF_TRACE_END,
+	debugArtifactId: "7",
+	debugLogRef: "artifact://7",
 };
 
 describe("EventController loader recovery after overflow maintenance", () => {
@@ -267,6 +349,17 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(rendered).toContain("esc to cancel");
 		expect(ctx.showStatus).not.toHaveBeenCalled();
 
+		await controller.handleEvent(SCRATCH_HANDOFF_TRACE_TARGET);
+		const targetRendered = Bun.stripANSI(loader.render(120).join("\n"));
+		expect(targetRendered).toContain("Context pressure: scratch target resolved");
+		expect(targetRendered).toContain("agent/current.org");
+		expect(targetRendered).toContain("esc to cancel");
+
+		await controller.handleEvent(SCRATCH_HANDOFF_TRACE_READ);
+		const readRendered = Bun.stripANSI(loader.render(80).join("\n"));
+		expect(readRendered).toContain("Context pressure: scratch state loaded");
+		expect(readRendered).toContain("agent/current.org");
+
 		await controller.handleEvent(SCRATCH_HANDOFF_END);
 
 		expect(statusContainer.children).toHaveLength(0);
@@ -274,6 +367,97 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(ctx.showWarning).not.toHaveBeenCalled();
 		expect(ctx.statusLine.invalidate).toHaveBeenCalled();
 		expect(ctx.updateEditorTopBorder).toHaveBeenCalled();
+	});
+
+	it("mounts a UI-only maintenance card for handoff trace deltas", async () => {
+		const { ctx } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(HANDOFF_TRACE_START);
+
+		expect(ctx.present).toHaveBeenCalledTimes(1);
+		expect(ctx.chatContainer.children).toHaveLength(1);
+		const card = ctx.chatContainer.children[0];
+		expect(card).toBeInstanceOf(MaintenanceTraceCard);
+		if (!(card instanceof MaintenanceTraceCard)) throw new Error("Expected maintenance trace card");
+		const started = Bun.stripANSI(card.render(100).join("\n"));
+		expect(started).toContain("Maintenance model: auto-handoff");
+		expect(started).toContain("UI-only");
+		expect(started).toContain("Esc cancels this maintenance run");
+
+		await controller.handleEvent(HANDOFF_TRACE_ACTIVITY);
+		await controller.handleEvent(HANDOFF_TRACE_DELTA);
+		const streamed = Bun.stripANSI(card.render(100).join("\n"));
+		expect(streamed).toContain("Process:");
+		expect(streamed).toContain("LLM request: anthropic/claude-sonnet-4-5.");
+		expect(streamed).toContain("LLM output:");
+		expect(streamed).toContain("Preparing a compact handoff.");
+		expect(streamed).not.toContain("Shows selected context-maintenance progress");
+
+		ctx.chatContainer.clear();
+		await controller.handleEvent(HANDOFF_TRACE_END);
+		const terminal = Bun.stripANSI(card.render(100).join("\n"));
+		expect(ctx.chatContainer.children).toContain(card);
+		expect(terminal).toContain("Done.");
+	});
+
+	it("preserves loader-only visibility without mounting a maintenance card", async () => {
+		const { ctx } = createContext({ maintenanceTrace: "loader" });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(HANDOFF_TRACE_START);
+		await controller.handleEvent(HANDOFF_TRACE_DELTA);
+		await controller.handleEvent(HANDOFF_TRACE_END);
+
+		expect(ctx.present).not.toHaveBeenCalled();
+		expect(ctx.chatContainer.children).toHaveLength(0);
+	});
+
+	it("renders debug artifact references without inline raw provider frames", async () => {
+		const { ctx } = createContext({ maintenanceTrace: "debug" });
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent(HANDOFF_TRACE_START);
+		const card = ctx.chatContainer.children[0];
+		expect(card).toBeInstanceOf(MaintenanceTraceCard);
+		if (!(card instanceof MaintenanceTraceCard)) throw new Error("Expected maintenance trace card");
+		await controller.handleEvent(HANDOFF_TRACE_DELTA);
+		await controller.handleEvent(HANDOFF_TRACE_DEBUG_END);
+		const rendered = Bun.stripANSI(card.render(120).join("\n"));
+
+		expect(rendered).toContain("Preparing a compact handoff.");
+		expect(rendered).toContain("Debug raw provider frames: artifact://7");
+		expect(rendered).not.toContain("event: message");
+		expect(rendered).not.toContain("raw provider payload");
+	});
+
+	it("renders scratch trace phases in the maintenance card without assistant output", async () => {
+		const { ctx } = createContext();
+		const controller = new EventController(ctx);
+
+		await controller.handleEvent({
+			type: "maintenance_trace_start",
+			traceId: SCRATCH_HANDOFF_TRACE_TARGET.traceId,
+			reason: "threshold",
+			action: "scratch-handoff",
+			visibility: "ui-only",
+			phase: "start",
+			targetPath: "agent/current.org",
+		});
+		const card = ctx.chatContainer.children[0];
+		expect(card).toBeInstanceOf(MaintenanceTraceCard);
+		if (!(card instanceof MaintenanceTraceCard)) throw new Error("Expected maintenance trace card");
+
+		await controller.handleEvent(SCRATCH_HANDOFF_TRACE_TARGET);
+		await controller.handleEvent(SCRATCH_HANDOFF_TRACE_READ);
+		const rendered = Bun.stripANSI(card.render(100).join("\n"));
+
+		expect(rendered).toContain("Maintenance: scratch continuity");
+		expect(rendered).toContain("agent/current.org");
+		expect(rendered).toContain("Scratch continuity:");
+		expect(rendered).toContain("target resolved");
+		expect(rendered).toContain("scratch read injected");
+		expect(rendered).not.toContain("LLM output:");
 	});
 
 	it("mirrors agent and auto-compaction activity to OSC 9;4 when enabled", async () => {

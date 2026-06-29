@@ -82,10 +82,13 @@ describe("AgentSession maintenance trace events", () => {
 			extensionRunner?: ExtensionRunner;
 			sideStreamFn?: StreamFn;
 			stubCompaction?: boolean;
+			persistSession?: boolean;
 		} = {},
 	): Harness {
 		const model = options.model ?? anthropicModel;
-		const sessionManager = SessionManager.inMemory(tempDir.path());
+		const sessionManager = options.persistSession
+			? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "sessions"))
+			: SessionManager.inMemory(tempDir.path());
 		const { user, assistant } = seedMessages(model);
 		sessionManager.appendMessage(user);
 		const firstKeptEntryId = sessionManager.appendMessage(assistant);
@@ -273,6 +276,33 @@ describe("AgentSession maintenance trace events", () => {
 		);
 	});
 
+	it("writes raw provider frames to an explicit debug artifact when debug visibility is configured", async () => {
+		const { session, sessionManager, events } = createHarness({ strategy: "context-full", persistSession: true });
+		session.settings.set("compaction.maintenanceTrace", "debug");
+		session.rawSseDebugBuffer.recordEvent(
+			{
+				event: "message",
+				data: '{"type":"raw_provider_frame"}',
+				raw: ["event: message", 'data: {"type":"raw_provider_frame"}'],
+			},
+			anthropicModel,
+		);
+
+		await session.runIdleCompaction();
+
+		const traceEnd = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
+				event.type === "maintenance_trace_end",
+		);
+		expect(traceEnd?.debugArtifactId).toBeDefined();
+		expect(traceEnd?.debugLogRef).toBe(`artifact://${traceEnd?.debugArtifactId}`);
+		const artifactPath = await sessionManager.getArtifactPath(traceEnd!.debugArtifactId!);
+		expect(artifactPath).toBeDefined();
+		const artifactText = await Bun.file(artifactPath!).text();
+		expect(artifactText).toContain("event: message");
+		expect(artifactText).toContain("raw_provider_frame");
+	});
+
 	it("correlates handoff no-document fallback through the same trace", async () => {
 		const { session, events } = createHarness({ strategy: "handoff" });
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("");
@@ -413,15 +443,18 @@ describe("AgentSession maintenance trace events", () => {
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
 				event.type === "maintenance_trace_delta",
 		);
+		const assistantDeltas = deltas.filter(event => event.content === "assistant_text");
+		const activityDeltas = deltas.filter(event => event.content === "activity");
 		const traceEnd = events.find(
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
 				event.type === "maintenance_trace_end",
 		);
 		const compactionEntry = sessionManager.getEntries().find(entry => entry.type === "compaction");
 
-		expect(deltas.map(event => event.delta)).toEqual(["Visible context summary", "Visible short summary"]);
+		expect(assistantDeltas.map(event => event.delta)).toEqual(["Visible context summary", "Visible short summary"]);
 		expect(deltas.every(event => event.traceId === traceStart?.traceId)).toBe(true);
-		expect(deltas.every(event => event.visibility === "ui-only" && event.content === "assistant_text")).toBe(true);
+		expect(assistantDeltas.every(event => event.visibility === "ui-only")).toBe(true);
+		expect(activityDeltas.some(event => event.delta.includes("LLM request: anthropic/claude-sonnet-4-5"))).toBe(true);
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("hidden reasoning");
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("tool-raw");
 		expect(compactionEntry).toMatchObject({
@@ -499,6 +532,7 @@ describe("AgentSession maintenance trace events", () => {
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
 				event.type === "maintenance_trace_delta",
 		);
+		const assistantDeltas = deltas.filter(event => event.content === "assistant_text");
 		const traceEnd = events.find(
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
 				event.type === "maintenance_trace_end",
@@ -508,8 +542,8 @@ describe("AgentSession maintenance trace events", () => {
 				event.type === "auto_compaction_end",
 		);
 
-		expect(deltas.length).toBeGreaterThanOrEqual(1);
-		expect(deltas.every(event => event.delta === "Visible before failure")).toBe(true);
+		expect(assistantDeltas.length).toBeGreaterThanOrEqual(1);
+		expect(assistantDeltas.every(event => event.delta === "Visible before failure")).toBe(true);
 		expect(deltas.every(event => event.traceId === traceStart?.traceId)).toBe(true);
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("hidden failure reasoning");
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("provider frame");

@@ -307,6 +307,8 @@ describe("AgentSession handoff", () => {
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
 				event.type === "maintenance_trace_delta",
 		);
+		const assistantDeltas = deltas.filter(event => event.content === "assistant_text");
+		const activityDeltas = deltas.filter(event => event.content === "activity");
 		const traceStart = events.find(
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_start" }> =>
 				event.type === "maintenance_trace_start",
@@ -319,9 +321,10 @@ describe("AgentSession handoff", () => {
 			return entry.type === "custom_message" && entry.customType === "handoff";
 		});
 
-		expect(deltas.map(event => event.delta).join("")).toBe(handoffText);
+		expect(assistantDeltas.map(event => event.delta).join("")).toBe(handoffText);
 		expect(deltas.every(event => event.traceId === traceStart?.traceId)).toBe(true);
-		expect(deltas.every(event => event.visibility === "ui-only" && event.content === "assistant_text")).toBe(true);
+		expect(assistantDeltas.every(event => event.visibility === "ui-only")).toBe(true);
+		expect(activityDeltas.some(event => event.delta.includes("LLM request: anthropic/claude-sonnet-4-5"))).toBe(true);
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("hidden handoff thinking");
 		expect(traceEnd).toMatchObject({
 			traceId: traceStart?.traceId,
@@ -429,6 +432,7 @@ describe("AgentSession handoff", () => {
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
 				event.type === "maintenance_trace_delta",
 		);
+		const assistantDeltas = deltas.filter(event => event.content === "assistant_text");
 		const traceEnd = events.find(
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
 				event.type === "maintenance_trace_end",
@@ -437,7 +441,7 @@ describe("AgentSession handoff", () => {
 			return entry.type === "custom_message" && entry.customType === "handoff";
 		});
 
-		expect(deltas.map(event => event.delta)).toEqual(["Visible handoff before failure"]);
+		expect(assistantDeltas.map(event => event.delta)).toEqual(["Visible handoff before failure"]);
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("hidden handoff failure thinking");
 		expect(deltas.map(event => event.delta).join("\n")).not.toContain("handoff-tool-raw");
 		expect(traceEnd).toMatchObject({
@@ -536,6 +540,7 @@ describe("AgentSession handoff", () => {
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
 				event.type === "maintenance_trace_delta",
 		);
+		const assistantDeltas = deltas.filter(event => event.content === "assistant_text");
 		const traceEnd = events.find(
 			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
 				event.type === "maintenance_trace_end",
@@ -544,7 +549,7 @@ describe("AgentSession handoff", () => {
 			return entry.type === "custom_message" && entry.customType === "handoff";
 		});
 
-		expect(deltas.map(event => event.delta)).toEqual(["Visible handoff before cancel"]);
+		expect(assistantDeltas.map(event => event.delta)).toEqual(["Visible handoff before cancel"]);
 		expect(traceEnd).toMatchObject({ action: "handoff", terminalResult: "cancelled" });
 		expect(events).toContainEqual(
 			expect.objectContaining({
@@ -1160,6 +1165,7 @@ describe("AgentSession handoff", () => {
 		);
 		expect(maintenanceEvents.map(event => event.type)).toEqual([
 			"maintenance_trace_start",
+			"maintenance_trace_delta",
 			"maintenance_trace_phase",
 			"maintenance_trace_phase",
 			"maintenance_trace_phase",
@@ -1174,7 +1180,7 @@ describe("AgentSession handoff", () => {
 			"scratch-session-rebuilt",
 			"scratch-todo-synced",
 		]);
-		expect(traceDeltas).toHaveLength(0);
+		expect(traceDeltas.map(event => event.content)).toEqual(["activity"]);
 		expect(maintenanceEvents.every(event => event.traceId === traceStart.traceId)).toBe(true);
 		expect(maintenanceEvents.every(event => event.targetPath === scratchPath)).toBe(true);
 		expect(traceEnd).toMatchObject({

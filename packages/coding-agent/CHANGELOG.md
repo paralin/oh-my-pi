@@ -137,6 +137,9 @@
 - Resolved status inconsistencies between `/extensions`, `/mcp list`, and the dashboard, ensuring MCP server states, allowlists/denylists, and configuration files (like `mcp.json`) stay fully synchronized.
 - Improved branch-mode task merges to preserve the agent's original commit history (messages and authors) and fixed a bug where merges were rejected due to unrelated dirty changes in the parent checkout.
 - Fixed an issue where the `Working...` loader spinner would prematurely disappear or fail to re-arm after a subagent (`task`) tool completed or during transient overlays (such as auto-compaction or auto-retry).
+### Fixed
+
+- Fixed context-maintenance cards showing explanatory placeholder copy instead of the live maintenance process, including LLM side-request activity and streamed maintenance output.
 
 ## [16.2.6] - 2026-06-29
 

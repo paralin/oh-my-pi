@@ -7,7 +7,7 @@
  */
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { AgentSession } from "../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
 import { initializeExtensions } from "./runtime-init";
@@ -112,6 +112,20 @@ async function writeFinalAssistantText(session: AgentSession, printThoughts: boo
 	}
 }
 
+function isMaintenanceTraceEvent(event: AgentSessionEvent): boolean {
+	return (
+		event.type === "maintenance_trace_start" ||
+		event.type === "maintenance_trace_phase" ||
+		event.type === "maintenance_trace_delta" ||
+		event.type === "maintenance_trace_end"
+	);
+}
+
+function shouldPrintJsonEvent(session: AgentSession, event: AgentSessionEvent): boolean {
+	if (!isMaintenanceTraceEvent(event)) return true;
+	return session.settings.get("compaction.maintenanceTrace") !== "loader";
+}
+
 /**
  * Run in print (single-shot) mode.
  * Sends prompts to the agent and outputs the result.
@@ -170,7 +184,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
 		// In JSON mode, output all events
-		if (mode === "json") {
+		if (mode === "json" && shouldPrintJsonEvent(session, event)) {
 			process.stdout.write(`${JSON.stringify(event)}\n`);
 		}
 	});

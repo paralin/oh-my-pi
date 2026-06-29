@@ -8,8 +8,10 @@
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -34,17 +36,42 @@ function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): Assist
 }
 
 /** Minimal mock of AgentSession for print-mode text output path */
-function createMockSession(messages: AssistantMessage[]): AgentSession {
+function createMockSession(
+	messages: AssistantMessage[],
+	options: {
+		maintenanceTrace?: "loader" | "assistant" | "debug";
+		onPrompt?: (emit: (event: AgentSessionEvent) => void) => void | Promise<void>;
+	} = {},
+): AgentSession {
+	const subscription: { callback?: (event: AgentSessionEvent) => void } = {};
 	return {
 		state: { messages },
 		sessionManager: {
 			getHeader: () => undefined,
 		},
 		extensionRunner: undefined,
-		subscribe: () => () => {},
-		prompt: async () => {},
+		settings: Settings.isolated({
+			"compaction.maintenanceTrace": options.maintenanceTrace ?? "assistant",
+		}),
+		subscribe: (callback: (event: AgentSessionEvent) => void) => {
+			subscription.callback = callback;
+			return () => {
+				subscription.callback = undefined;
+			};
+		},
+		prompt: async () => {
+			await options.onPrompt?.(event => subscription.callback?.(event));
+		},
 		dispose: async () => {},
 	} as unknown as AgentSession;
+}
+
+function parseJsonEventType(line: string): string {
+	const parsed: unknown = JSON.parse(line);
+	if (typeof parsed !== "object" || parsed === null || !("type" in parsed) || typeof parsed.type !== "string") {
+		throw new Error("Expected JSON event with string type");
+	}
+	return parsed.type;
 }
 
 describe("Print-mode silent-abort regression", () => {
@@ -137,5 +164,67 @@ describe("Print-mode silent-abort regression", () => {
 		stdoutOutput = [];
 		await runPrintMode(createMockSession([message]), { mode: "text", printThoughts: true });
 		expect(stdoutOutput.join("")).toBe("inspect hidden branch\nfinal answer\n");
+	});
+
+	it("defaults maintenance traces to assistant visibility", () => {
+		expect(getDefault("compaction.maintenanceTrace")).toBe("assistant");
+		expect(Settings.isolated().get("compaction.maintenanceTrace")).toBe("assistant");
+	});
+
+	it("filters maintenance trace JSON events only in loader visibility", async () => {
+		const traceEvents: AgentSessionEvent[] = [
+			{
+				type: "maintenance_trace_start",
+				traceId: "trace-1",
+				reason: "threshold",
+				action: "handoff",
+				visibility: "ui-only",
+				phase: "start",
+			},
+			{ type: "auto_compaction_start", reason: "threshold", action: "handoff" },
+			{
+				type: "maintenance_trace_delta",
+				traceId: "trace-1",
+				reason: "threshold",
+				action: "handoff",
+				visibility: "ui-only",
+				phase: "stream",
+				content: "assistant_text",
+				delta: "visible maintenance text",
+			},
+			{
+				type: "maintenance_trace_end",
+				traceId: "trace-1",
+				reason: "threshold",
+				action: "handoff",
+				visibility: "ui-only",
+				phase: "terminal",
+				terminalResult: "done",
+				willRetry: false,
+			},
+		];
+		const emitTraceEvents = (emit: (event: AgentSessionEvent) => void) => {
+			for (const event of traceEvents) emit(event);
+		};
+
+		await runPrintMode(createMockSession([], { maintenanceTrace: "loader", onPrompt: emitTraceEvents }), {
+			mode: "json",
+			initialMessage: "go",
+		});
+		const loaderLines = stdoutOutput.join("").split("\n").filter(Boolean).map(parseJsonEventType);
+		expect(loaderLines).toEqual(["auto_compaction_start"]);
+
+		stdoutOutput = [];
+		await runPrintMode(createMockSession([], { maintenanceTrace: "assistant", onPrompt: emitTraceEvents }), {
+			mode: "json",
+			initialMessage: "go",
+		});
+		const assistantLines = stdoutOutput.join("").split("\n").filter(Boolean).map(parseJsonEventType);
+		expect(assistantLines).toEqual([
+			"maintenance_trace_start",
+			"auto_compaction_start",
+			"maintenance_trace_delta",
+			"maintenance_trace_end",
+		]);
 	});
 });
