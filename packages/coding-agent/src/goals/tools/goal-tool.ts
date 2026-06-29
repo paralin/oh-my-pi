@@ -17,7 +17,6 @@ import type { Goal, GoalStatus, GoalToolDetails } from "../state";
 const goalSchema = type({
 	op: type("'set' | 'create' | 'get' | 'complete' | 'resume' | 'drop'").describe("goal operation"),
 	"objective?": type("string").describe("goal objective"),
-	"token_budget?": type("number.integer").describe("token budget"),
 });
 
 export type GoalToolInput = typeof goalSchema.infer;
@@ -43,19 +42,15 @@ export function buildGoalToolResponse(
 	};
 }
 
-function validateObjectiveParams(
-	params: GoalToolInput,
-	op: "create" | "set",
-): { objective: string; tokenBudget?: number } {
+function validateObjectiveParams(params: GoalToolInput, op: "create" | "set"): { objective: string } {
 	const objective = params.objective?.trim();
 	if (!objective) {
 		throw new ToolError(`objective is required when op=${op}`);
 	}
-	const tokenBudget = params.token_budget;
-	if (tokenBudget !== undefined && (!Number.isInteger(tokenBudget) || tokenBudget <= 0)) {
-		throw new ToolError("token_budget must be a positive integer when provided");
-	}
-	return { objective, tokenBudget };
+	// The agent sets only the objective and runs until done; token budgets are an
+	// operator concern (`/goal budget`, CLI `--goal-budget`) because the model
+	// cannot estimate token cost reliably.
+	return { objective };
 }
 
 export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
@@ -172,7 +167,6 @@ function goalBadgeColor(status: GoalStatus): ThemeColor {
 interface GoalRenderArgs {
 	op?: GoalToolInput["op"];
 	objective?: string;
-	token_budget?: number;
 }
 
 export const goalToolRenderer = {
@@ -183,9 +177,6 @@ export const goalToolRenderer = {
 		if (args.op === "create" && trimmedObjective) {
 			const objective = truncateToWidth(trimmedObjective, TRUNCATE_LENGTHS.TITLE);
 			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${objective}"`)));
-		}
-		if (args.op === "create" && args.token_budget !== undefined) {
-			meta.push(`budget ${formatNumber(args.token_budget)}`);
 		}
 		return new Text(renderStatusLine({ icon: "pending", title: "Goal", description, meta }, uiTheme), 0, 0);
 	},

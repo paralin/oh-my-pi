@@ -186,7 +186,6 @@ describe("InteractiveMode goal mode integration", () => {
 		await tool.execute("call-set", {
 			op: "set",
 			objective: "Ship from the tool",
-			token_budget: undefined,
 		});
 
 		expect(harness.session.getGoalModeState()?.enabled).toBe(true);
