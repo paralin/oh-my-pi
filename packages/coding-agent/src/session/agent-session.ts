@@ -1507,6 +1507,15 @@ export class AgentSession {
 	 *  used as the open barrier for the next build so two writers never share a file. */
 	#advisorRecorderClosed: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
+	// Lifecycle of the goal budget-limit steer relative to the model's turns:
+	// "armed" when the steer is queued on the flip, "delivered" once a later turn
+	// has started and the model has seen it. The runtime budget closeout fires
+	// only after delivery, so it takes over the model's wrap-up final rather than
+	// the flip turn that queued the steer.
+	#budgetLimitSteer: "idle" | "armed" | "delivered" = "idle";
+	// Goal id whose budget-limited terminal the runtime has already owned, so a
+	// parked notice or scratch reset fires once per budget-limited episode.
+	#budgetCloseoutHandledForGoalId: string | undefined;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
 	#clientBridge: ClientBridge | undefined;
@@ -2105,6 +2114,13 @@ export class AgentSession {
 				}
 			},
 			sendHiddenMessage: async message => {
+				// Arm the runtime budget closeout. The steer injects on the next turn;
+				// turn_start promotes "armed" to "delivered" once the model has seen it,
+				// and the assistant final from that delivered turn is the wrap-up the
+				// runtime budget closeout takes over from.
+				if (message.customType === "goal-budget-limit") {
+					this.#budgetLimitSteer = "armed";
+				}
 				await this.sendCustomMessage(
 					{
 						customType: message.customType,
@@ -3377,6 +3393,10 @@ export class AgentSession {
 		}
 
 		if (event.type === "turn_start") {
+			// A turn starting after the budget-limit steer was queued is the turn that
+			// delivers it to the model. Mark it delivered so the budget closeout fires
+			// from this turn's wrap-up final, not the flip turn that queued the steer.
+			if (this.#budgetLimitSteer === "armed") this.#budgetLimitSteer = "delivered";
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
 				input: usage.input,
@@ -3847,14 +3867,25 @@ export class AgentSession {
 				return;
 			}
 			if (msg.stopReason !== "error") {
-				if (this.#enforceRewindBeforeYield()) {
+				const budgetCloseout = await this.#runBudgetLimitedScratchCloseout();
+				if (budgetCloseout === "reset") {
+					maintenanceRoute("budget-limited-scratch-reset");
 					await emitAgentEndNotification();
 					return;
 				}
-				const todoContinuationScheduled = await this.#checkTodoCompletion();
-				if (todoContinuationScheduled) {
-					await emitAgentEndNotification();
-					return;
+				// A parked budget terminal skips the rewind/todo reminder passes (which
+				// previously pressured the model into dropping todos) but still runs
+				// session-stop hooks below so the parked state notifies normally.
+				if (budgetCloseout === "none") {
+					if (this.#enforceRewindBeforeYield()) {
+						await emitAgentEndNotification();
+						return;
+					}
+					const todoContinuationScheduled = await this.#checkTodoCompletion();
+					if (todoContinuationScheduled) {
+						await emitAgentEndNotification();
+						return;
+					}
 				}
 			}
 			await this.#emitSessionStopEvent(settledMessages, msg);
@@ -10737,6 +10768,66 @@ export class AgentSession {
 		if (task) nudges.push(task);
 		return nudges;
 	}
+
+	/**
+	 * Own the terminal transition for a goal that crossed its token budget.
+	 *
+	 * A budget-limited goal previously left closeout to the model: the budget
+	 * steer asked it to wrap up, the todo reminder then pressured it, and the
+	 * model could satisfy the reminder by dropping unfinished todos and stopping
+	 * with prose. When scratch handoff is enabled the runtime owns the terminal
+	 * instead. Under the handoff compaction strategy it resets into a scratch
+	 * successor session with todos preserved; otherwise it parks in the typed
+	 * budget-limited state, keeping todos and pointing at the scratch file.
+	 *
+	 * Fires once per budget-limited episode and only after the model has had its
+	 * wrap-up turn (the steer is "delivered", set at the turn_start that injected
+	 * it), never on the flip turn that queued the steer. Budget is spent, so
+	 * neither path auto-continues into an immediately re-limited turn.
+	 *
+	 * Returns "reset" when it reset into a successor session (the caller
+	 * short-circuits the closeout tail), "parked" when it parked in place (the
+	 * caller skips the todo reminder but still runs session-stop hooks), or
+	 * "none" when not engaged.
+	 */
+	async #runBudgetLimitedScratchCloseout(): Promise<"reset" | "parked" | "none"> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return "none";
+		const goalState = this.#goalModeState;
+		if (!goalState?.enabled || goalState.goal.status !== "budget-limited") {
+			this.#budgetCloseoutHandledForGoalId = undefined;
+			return "none";
+		}
+		if (this.#budgetLimitSteer !== "delivered") return "none";
+		if (this.#budgetCloseoutHandledForGoalId === goalState.goal.id) return "none";
+		this.#budgetCloseoutHandledForGoalId = goalState.goal.id;
+		this.#budgetLimitSteer = "idle";
+
+		const compaction = this.settings.getGroup("compaction");
+		if (compaction.strategy === "handoff" && compaction.enabled) {
+			// Reuse the scratch-handoff maintenance path with no auto-continue: it
+			// preserves todos, resets into the successor session, and emits the
+			// maintenance trace under the budget reason.
+			await this.#runAutoCompaction("budget", false, true, false, { autoContinue: false });
+			return "reset";
+		}
+
+		// Typed parked state: keep the budget-limited status and todos, and surface
+		// the durable continuity location instead of relying on assistant prose.
+		this.#syncTodoPhasesFromBranch();
+		const incompleteTodos = this.getTodoPhases()
+			.flatMap(phase => phase.tasks)
+			.filter(task => task.status === "pending" || task.status === "in_progress").length;
+		const todoNote =
+			incompleteTodos > 0 ? `${incompleteTodos} unfinished todo item(s) preserved; ` : "todos preserved; ";
+		this.emitNotice(
+			"info",
+			`Goal token budget reached. Work parked. ${todoNote}continuity state is in ${scratchPath}.`,
+			"goal",
+		);
+		return "parked";
+	}
+
 	/**
 	 * Check if agent stopped with incomplete todos and prompt to continue.
 	 */
@@ -11677,7 +11768,7 @@ export class AgentSession {
 	 * @returns whether auto-compaction scheduled a follow-up turn.
 	 */
 	async #runAutoCompaction(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		deferred = false,
 		allowDefer = true,
@@ -12421,7 +12512,7 @@ export class AgentSession {
 	 * the oversized input still gets resolved. Returns `"handled"` otherwise.
 	 */
 	async #runAutoShake(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		generation: number,
 		autoContinue: boolean,

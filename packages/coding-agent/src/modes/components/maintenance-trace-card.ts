@@ -190,6 +190,8 @@ export class MaintenanceTraceCard extends ChatBlock {
 				return "idle";
 			case "incomplete":
 				return "incomplete response";
+			case "budget":
+				return "goal budget";
 		}
 	}
 

@@ -26,7 +26,7 @@ import type * as PiCodingAgent from "../../index";
 import type { Theme } from "../../modes/theme/theme";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import type { TodoItem } from "../../tools/todo";
-import type { AutoCompactionAction } from "../shared-events";
+import type { AutoCompactionAction, AutoCompactionReason } from "../shared-events";
 import type * as TypeBox from "../typebox";
 
 /** Alias for clarity */
@@ -110,7 +110,7 @@ export type CustomToolSessionEvent =
 	  }
 	| {
 			reason: "auto_compaction_start";
-			trigger: "threshold" | "overflow" | "idle" | "incomplete";
+			trigger: AutoCompactionReason;
 			action: AutoCompactionAction;
 	  }
 	| {
