@@ -1321,6 +1321,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				parentServiceTier: this.session.getServiceTierByFamily
 					? (this.session.getServiceTierByFamily() ?? null)
 					: undefined,
+				parentScratchHandoffDisplayPath: this.session.getScratchHandoffDisplayPath?.(),
 			};
 
 			const runTask = async (): Promise<SingleResult> => {

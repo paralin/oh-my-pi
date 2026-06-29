@@ -278,6 +278,8 @@ export interface ExecutorOptions {
 	/** Specialist role/expertise for this spawn; drives the system-prompt preamble, display name, and telemetry identity. */
 	role?: string;
 	index: number;
+	/** Parent session scratch handoff file linked from this subagent's scratch file. */
+	parentScratchHandoffDisplayPath?: string;
 	id: string;
 	parentToolCallId?: string;
 	/**
@@ -2155,6 +2157,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
 				agentId: id,
+				parentScratchHandoffDisplayPath: options.parentScratchHandoffDisplayPath,
 				agentDisplayName: subagentDisplayName,
 				enableLsp: lspEnabled,
 				skipPythonPreflight,

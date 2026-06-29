@@ -331,6 +331,7 @@ import {
 	stripImagesFromMessage,
 	USER_INTERRUPT_LABEL,
 } from "./messages";
+import { SCRATCH_HANDOFF_READ_CUSTOM_TYPE } from "./scratch-handoff";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -370,6 +371,83 @@ function sanitizeAssistantForReparentedHistory(message: AssistantMessage): Assis
 		content.push(block);
 	}
 	return { ...message, content, providerPayload: undefined };
+}
+
+export function resolveAutoCompactionAction(input: {
+	strategy: CompactionSettings["strategy"];
+	reason: "threshold" | "overflow" | "idle" | "incomplete";
+	suppressHandoff: boolean;
+	hasScratchHandoff: boolean;
+}): AutoCompactionAction {
+	if (input.strategy === "snapcompact") return "snapcompact";
+	if (input.strategy === "handoff" && input.hasScratchHandoff) return "scratch-handoff";
+	if (input.strategy === "handoff" && input.reason !== "overflow" && !input.suppressHandoff) return "handoff";
+	return "context-full";
+}
+
+function isScratchSafeReadToolCall(toolCall: ToolCall): boolean {
+	return isScratchSafeReadTool(toolCall.name, toolCall.arguments);
+}
+
+function isScratchSafeReadTool(toolName: string, args: Record<string, unknown> | undefined): boolean {
+	switch (toolName) {
+		case "read":
+		case "grep":
+		case "glob":
+		case "ast_grep":
+		case "web_search":
+			return true;
+		case "lsp": {
+			const action = args?.action;
+			return (
+				action === "capabilities" ||
+				action === "definition" ||
+				action === "diagnostics" ||
+				action === "hover" ||
+				action === "implementation" ||
+				action === "references" ||
+				action === "status" ||
+				action === "symbols" ||
+				action === "type_definition"
+			);
+		}
+		default:
+			return false;
+	}
+}
+
+function assistantMessageToolCallsAreScratchSafeReads(assistantMessage: AssistantMessage): boolean {
+	const toolCalls = assistantMessage.content.filter((content): content is ToolCall => content.type === "toolCall");
+	return toolCalls.length > 0 && toolCalls.every(isScratchSafeReadToolCall);
+}
+
+export function assistantToolUseCanScratchHandoff(
+	assistantMessage: AssistantMessage,
+	messages: readonly AgentMessage[],
+	hasRecentMutation: boolean,
+): boolean {
+	if (!assistantMessage.content.some(content => content.type === "toolCall")) return true;
+	if (!assistantMessageToolCallsAreScratchSafeReads(assistantMessage)) return false;
+	if (hasRecentMutation) return false;
+
+	const assistantIndex = messages.lastIndexOf(assistantMessage);
+	if (assistantIndex === -1) return false;
+	for (let index = assistantIndex - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role === "assistant") break;
+		if (message?.role === "toolResult" && !isScratchSafeReadTool(message.toolName, undefined)) return false;
+	}
+	return true;
+}
+
+function isScratchSafeReadToolName(toolName: string): boolean {
+	return (
+		toolName === "read" ||
+		toolName === "grep" ||
+		toolName === "glob" ||
+		toolName === "ast_grep" ||
+		toolName === "web_search"
+	);
 }
 
 /** Session-specific events that extend the core AgentEvent */
@@ -633,6 +711,8 @@ export interface AgentSessionConfig {
 	 *  prelude gating so a top-level session created with a custom `agentId` still
 	 *  receives the always-mode reminder. Defaults to "main". */
 	agentKind?: "main" | "sub";
+	/** Current session scratch handoff file, if scratch handoff is enabled. */
+	scratchHandoffDisplayPath?: string;
 	/**
 	 * Override the provider-facing session ID for all API requests from this session.
 	 * When absent, `sessionManager.getSessionId()` is used. Needed when benchmark or
@@ -1460,6 +1540,7 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#scratchHandoffDisplayPath: string | undefined;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#isDisposed = false;
@@ -1554,6 +1635,7 @@ export class AgentSession {
 	#postPromptTasksAbortController = new AbortController();
 
 	#streamingEditAbortTriggered = false;
+	#mutatingToolUseNeedsContinuation = false;
 	#streamingEditCheckedLineCounts = new Map<string, number>();
 
 	#streamingEditPrecheckedToolCallIds = new Set<string>();
@@ -1940,6 +2022,7 @@ export class AgentSession {
 		this.#obfuscator = config.obfuscator;
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#scratchHandoffDisplayPath = config.scratchHandoffDisplayPath;
 		this.#providerSessionId = config.providerSessionId;
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			const event: AgentEvent = {
@@ -2560,6 +2643,10 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	getScratchHandoffDisplayPath(): string | undefined {
+		return this.#scratchHandoffDisplayPath;
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -3089,6 +3176,13 @@ export class AgentSession {
 
 		const messageEndPersistence =
 			event.type === "message_end" ? this.#createMessageEndPersistenceSlot(event.message) : undefined;
+		if (
+			event.type === "message_end" &&
+			event.message.role === "toolResult" &&
+			!isScratchSafeReadTool(event.message.toolName, undefined)
+		) {
+			this.#mutatingToolUseNeedsContinuation = true;
+		}
 
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
 		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
@@ -3148,6 +3242,9 @@ export class AgentSession {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
 				await this.#goalRuntime.onToolCompleted(event.toolName);
+			}
+			if (!isScratchSafeReadTool(event.toolName, undefined)) {
+				this.#mutatingToolUseNeedsContinuation = true;
 			}
 		}
 		if (event.type === "tool_execution_end" && event.toolName === "yield" && !event.isError) {
@@ -3425,6 +3522,11 @@ export class AgentSession {
 			}
 
 			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
+			const toolUseCanScratchHandoff = hasToolCalls
+				? assistantToolUseCanScratchHandoff(msg, settledMessages, this.#mutatingToolUseNeedsContinuation)
+				: true;
+			const toolUseIsScratchSafeReadOnly = hasToolCalls ? assistantMessageToolCallsAreScratchSafeReads(msg) : false;
 			// A successful `yield` in this run is terminal for execution purposes.
 			// Suppress empty-stop retry, unexpected-stop retry, queued-message drain,
 			// and compaction-driven continuations for the rest of this prompt cycle:
@@ -3439,7 +3541,9 @@ export class AgentSession {
 							? "successful-yield-active-goal-checkCompaction"
 							: "post-yield-trailing-stop-active-goal-checkCompaction",
 					);
-					const compactionTask = this.#checkCompaction(successfulYieldMessage);
+					const compactionTask = this.#checkCompaction(successfulYieldMessage, true, true, true, {
+						suppressHandoff: !toolUseCanScratchHandoff,
+					});
 					this.#trackPostPromptTask(compactionTask);
 					await compactionTask;
 				} else if (successfulYieldMessage) {
@@ -3538,15 +3642,19 @@ export class AgentSession {
 			this.#resolveRetry();
 
 			if (!checkedCompaction) {
-				maintenanceRoute("bottom-checkCompaction");
-				const compactionTask = this.#checkCompaction(msg);
+				maintenanceRoute("bottom-checkCompaction", { toolUseCanScratchHandoff });
+				const compactionTask = this.#checkCompaction(msg, true, true, true, {
+					suppressHandoff: !toolUseCanScratchHandoff,
+				});
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 			}
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
-			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
 				await emitAgentEndNotification();
+				if (toolUseIsScratchSafeReadOnly) {
+					this.#mutatingToolUseNeedsContinuation = false;
+				}
 				return;
 			}
 			// When compaction queued recovery or hit a deliberate dead-end, skip the
@@ -9270,6 +9378,68 @@ export class AgentSession {
 		return this.#handoffAbortController !== undefined;
 	}
 
+	#scratchHandoffMessageContent(): CustomMessage["content"] {
+		if (this.#scratchHandoffDisplayPath) {
+			try {
+				const scratchPath = resolveToCwd(this.#scratchHandoffDisplayPath, this.sessionManager.getCwd());
+				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
+				return [
+					{
+						type: "text",
+						text: `Synthetic read(path="${this.#scratchHandoffDisplayPath}") loaded the scratch handoff file for this session.\n<scratch-handoff-context>\nPath: ${this.#scratchHandoffDisplayPath}\n\n${scratchText}\n</scratch-handoff-context>`,
+					},
+				];
+			} catch {
+				// Fall back to the launch snapshot if the scratch file was moved or deleted.
+			}
+		}
+		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
+			const message = this.agent.state.messages[index];
+			if (message?.role === "custom" && message.customType === SCRATCH_HANDOFF_READ_CUSTOM_TYPE) {
+				return message.content;
+			}
+		}
+		return [
+			{
+				type: "text",
+				text: `Scratch handoff file: ${this.#scratchHandoffDisplayPath ?? "(unknown)"}. Continue from the current scratch file and live launch prompt.`,
+			},
+		];
+	}
+
+	async #startScratchHandoffSession(): Promise<void> {
+		const scratchContent = this.#scratchHandoffMessageContent();
+		const previousSessionFile = this.sessionFile;
+		await this.sessionManager.flush();
+		this.#cancelOwnAsyncJobs();
+		await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
+		const preservedSteering = this.agent.peekSteeringQueue().slice();
+		const preservedFollowUp = this.agent.peekFollowUpQueue().slice();
+		this.agent.reset();
+		this.agent.replaceQueues(preservedSteering, preservedFollowUp);
+		this.#freshProviderSessionId = undefined;
+		this.#syncAgentSessionId();
+		this.#rekeyHindsightMemoryForCurrentSessionId();
+		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		await this.#resetMemoryContextForNewTranscript();
+		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#todoReminderCount = 0;
+		this.#todoReminderAwaitingProgress = false;
+		this.sessionManager.appendCustomMessageEntry(
+			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+			scratchContent,
+			false,
+			{ path: this.#scratchHandoffDisplayPath },
+			"agent",
+		);
+		await this.sessionManager.ensureOnDisk();
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#resetAllAdvisorRuntimes();
+		this.#syncTodoPhasesFromBranch();
+	}
+
 	/**
 	 * Generate a handoff document with a oneshot LLM call, then start a new session with it.
 	 *
@@ -9636,6 +9806,7 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		allowDefer = true,
 		autoContinue = true,
+		options: { suppressHandoff?: boolean } = {},
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
@@ -9792,6 +9963,7 @@ export class AgentSession {
 			if (!promoted) {
 				return await this.#runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
+					suppressHandoff: options.suppressHandoff,
 					triggerContextTokens: postMaintenanceContextTokens,
 				});
 			}
@@ -11307,15 +11479,15 @@ export class AgentSession {
 			return COMPACTION_CHECK_DEFERRED_HANDOFF;
 		}
 
-		// "overflow" forces context-full because the input itself is broken — a handoff
-		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
-		// so a handoff request on the existing context is still viable.
-		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
-				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
-					? "handoff"
-					: "context-full";
+		// Scratch handoff is the configured clean-break path: the agent has already
+		// been instructed to keep a durable scratch file current, so auto maintenance
+		// can reset into that file without a second LLM summarization call.
+		let action = resolveAutoCompactionAction({
+			strategy: compactionSettings.strategy,
+			reason,
+			suppressHandoff,
+			hasScratchHandoff: this.#scratchHandoffDisplayPath !== undefined,
+		});
 		if (action === "snapcompact" && this.model && !this.model.input.includes("image")) {
 			this.emitNotice(
 				"warning",
@@ -11336,6 +11508,22 @@ export class AgentSession {
 			// a message typed as the compaction loader appears must land in the compaction
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
+			if (action === "scratch-handoff") {
+				await this.#startScratchHandoffSession();
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
+				const continuationScheduled = !autoCompactionSignal.aborted && reason !== "idle" && shouldAutoContinue;
+				if (continuationScheduled) {
+					this.#scheduleAutoContinuePrompt(generation);
+				}
+				return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+			}
+
 			if (action === "handoff") {
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
 				const handoffResult = await this.handoff(handoffFocus, {

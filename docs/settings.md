@@ -201,6 +201,10 @@ compaction:
   strategy: snapcompact
   thresholdPercent: 80
 
+scratchHandoff:
+  enabled: true
+  rootDir: agent
+
 theme:
   dark: titanium
 ```

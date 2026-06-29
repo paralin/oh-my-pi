@@ -96,6 +96,7 @@ export function createPersistedSubagentReviverFactory(
 				agentDisplayName: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
+				parentScratchHandoffDisplayPath: ctx.session.getScratchHandoffDisplayPath?.(),
 				taskDepth,
 				toolNames: init.tools,
 				outputSchema: init.outputSchema,

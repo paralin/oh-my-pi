@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
@@ -10,7 +11,12 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRunner, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	assistantToolUseCanScratchHandoff,
+	resolveAutoCompactionAction,
+	type AgentSessionEvent,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -668,6 +674,201 @@ describe("AgentSession handoff", () => {
 			await localSession.dispose();
 			await localTempDir.remove();
 		}
+	});
+
+	it("keeps scratch handoff local even when LLM handoff generation is suppressed", () => {
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "handoff",
+				reason: "threshold",
+				suppressHandoff: true,
+				hasScratchHandoff: true,
+			}),
+		).toBe("scratch-handoff");
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "handoff",
+				reason: "overflow",
+				suppressHandoff: true,
+				hasScratchHandoff: true,
+			}),
+		).toBe("scratch-handoff");
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "handoff",
+				reason: "threshold",
+				suppressHandoff: true,
+				hasScratchHandoff: false,
+			}),
+		).toBe("context-full");
+	});
+
+	it("refreshes scratch handoff content from disk before resetting", async () => {
+		await session.dispose();
+		const scratchPath = "agent/current.org";
+		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
+		fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
+		fs.writeFileSync(scratchAbsolutePath, "Fresh scratch objective", "utf8");
+		const staleScratch: AgentMessage = {
+			role: "custom",
+			customType: "scratch-handoff-read",
+			content: [{ type: "text", text: "stale launch snapshot" }],
+			display: false,
+			timestamp: Date.now() - 1,
+		};
+		const readAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "src/file.ts" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "toolUse",
+			usage: {
+				input: 10_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 10_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [staleScratch, readAssistant],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"compaction.thresholdPercent": 1,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			scratchHandoffDisplayPath: scratchPath,
+		});
+		session.subscribe(event => events.push(event));
+
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [readAssistant] });
+		await waitFor(() => events.some(event => event.type === "auto_compaction_end"));
+
+		const scratchEntry = sessionManager.getEntries().find(entry => {
+			return entry.type === "custom_message" && entry.customType === "scratch-handoff-read";
+		});
+		expect(scratchEntry?.type).toBe("custom_message");
+		if (scratchEntry?.type !== "custom_message") throw new Error("missing scratch handoff entry");
+		expect(scratchEntry.content).toEqual([
+			expect.objectContaining({ text: expect.stringContaining("Fresh scratch objective") }),
+		]);
+		expect(scratchEntry.content).not.toEqual([
+			expect.objectContaining({ text: expect.stringContaining("stale launch snapshot") }),
+		]);
+	});
+
+	it("uses scratch handoff for read-only threshold tool turns", async () => {
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"compaction.thresholdPercent": 1,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			scratchHandoffDisplayPath: "agent/current.org",
+		});
+		session.subscribe(event => events.push(event));
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "src/file.ts" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "toolUse",
+			usage: {
+				input: 10_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 10_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		session.agent.replaceMessages([assistantMessage]);
+
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		await waitFor(() => events.some(event => event.type === "auto_compaction_end"));
+
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
+	});
+
+	it("keeps scratch handoff out of verification reads after a write", () => {
+		const editAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_edit", name: "edit", arguments: { path: "src/file.ts" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "toolUse",
+			usage: {
+				input: 1_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 1_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now() - 1,
+		};
+		const readAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_read", name: "read", arguments: { path: "src/file.ts" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "toolUse",
+			usage: {
+				input: 10_000,
+				output: 100,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 10_100,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+		const editResult: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "call_edit",
+			toolName: "edit",
+			content: [{ type: "text", text: "Edited src/file.ts" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		expect(assistantToolUseCanScratchHandoff(readAssistant, [editAssistant, editResult, readAssistant], false)).toBe(
+			false,
+		);
+		expect(assistantToolUseCanScratchHandoff(readAssistant, [readAssistant], true)).toBe(false);
 	});
 
 	it("runs context maintenance before sending an oversized pending prompt", async () => {

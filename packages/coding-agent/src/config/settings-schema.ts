@@ -2002,6 +2002,29 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"scratchHandoff.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Scratch Handoff",
+			label: "Scratch Handoff",
+			description:
+				"Create a per-session scratch handoff file and inject continuity instructions into the system prompt",
+		},
+	},
+
+	"scratchHandoff.rootDir": {
+		type: "string",
+		default: "agent",
+		ui: {
+			tab: "context",
+			group: "Scratch Handoff",
+			label: "Scratch Handoff Directory",
+			description: "Directory where per-session scratch handoff org files are created",
+		},
+	},
+
 	"compaction.remoteEnabled": {
 		type: "boolean",
 		default: true,

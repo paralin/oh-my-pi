@@ -1242,6 +1242,7 @@ export async function runRootCommand(
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
+	sessionOptions.scratchHandoffFile = parsedArgs.scratchHandoffFile;
 
 	// OTEL: register the global OTLP trace exporter when an OTLP endpoint is
 	// configured via env, then switch on the agent loop's telemetry so its

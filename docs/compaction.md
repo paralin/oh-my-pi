@@ -7,6 +7,11 @@ Compaction and branch summaries are the two mechanisms that keep long sessions u
 
 Both are persisted as session entries and converted back into user-context messages when rebuilding LLM input.
 
+Scratch handoff is a companion continuity path, not a history rewrite. When
+`scratchHandoff.enabled` is true, startup creates a per-session org file and
+adds instructions that tell the agent to keep that file current before context
+pressure can force maintenance.
+
 ## Key implementation files
 
 - `packages/agent/src/compaction/compaction.ts` (context-full summarization and handoff generation)
@@ -15,6 +20,7 @@ Both are persisted as session entries and converted back into user-context messa
 - `packages/agent/src/compaction/pruning.ts`
 - `packages/agent/src/compaction/utils.ts`
 - `packages/agent/src/compaction/openai.ts`
+- `packages/coding-agent/src/session/scratch-handoff.ts`
 - `packages/coding-agent/src/session/session-manager.ts`
 - `packages/coding-agent/src/session/agent-session.ts`
 - `packages/coding-agent/src/session/messages.ts`
@@ -350,6 +356,22 @@ Branch summarization:
 
 Result is stored as `BranchSummaryEntry` with optional details (`readFiles`, `modifiedFiles`).
 
+## Scratch handoff
+
+Scratch handoff is configured separately from `compaction.strategy` because it
+does not compact the transcript by itself. On startup, a main session with
+`scratchHandoff.enabled: true`:
+
+1. Resolves `scratchHandoff.rootDir` relative to the session cwd when it is not
+   absolute.
+2. Creates `agent/YYYYMMDD/<session-id>.org` by default.
+3. Appends the scratch compaction protocol to the system prompt, including the
+   current scratch file content.
+
+In-process task subagents do not get their own scratch file. A headless worker
+launched as a top-level OMP process does, so Boss/worker runs can keep the same
+scratch-sidecar shape as explicit `--scratch-handoff-file` launches.
+
 ## Extension and hook touchpoints
 
 ### `session_before_compact`
@@ -415,6 +437,8 @@ From `settings-schema.ts`:
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`
 - `compaction.idleEnabled` = `false`
+- `scratchHandoff.enabled` = `false`
+- `scratchHandoff.rootDir` = `"agent"`; relative paths resolve from the session cwd and create `agent/YYYYMMDD/<session-id>.org`
 - `compaction.idleThresholdTokens` = `200000`
 - `compaction.idleTimeoutSeconds` = `300`
 - `branchSummary.enabled` = `false`

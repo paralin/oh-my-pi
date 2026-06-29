@@ -7,7 +7,6 @@
  */
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import scratchHandoffStopTemplate from "../prompts/system/scratch-handoff-stop.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
@@ -18,7 +17,7 @@ export interface ContextBudgetStopOptions {
 	stopAtPercent?: number;
 	/** Stop when context usage reaches this token count. */
 	stopAtTokens?: number;
-	/** Write a generated handoff document here before stopping. */
+	/** Scratch handoff document the agent has been instructed to keep current before stopping. */
 	scratchHandoffFile?: string;
 }
 
@@ -53,16 +52,6 @@ export interface PrintModeOptions {
 	contextBudgetStop?: ContextBudgetStopOptions;
 }
 
-function renderScratchHandoffStopPrompt(stop: ContextBudgetStop): string {
-	const values: Record<string, string> = {
-		contextTokens: String(stop.tokens),
-		contextWindow: String(stop.contextWindow),
-		limitTokens: String(stop.limitTokens),
-		scratchHandoffFile: stop.scratchHandoffFile ?? "(not configured)",
-	};
-	return scratchHandoffStopTemplate.replaceAll(/{{([a-zA-Z0-9_]+)}}/g, (_match, key: string) => values[key] ?? "");
-}
-
 function resolveContextBudgetStop(
 	session: AgentSession,
 	options: ContextBudgetStopOptions | undefined,
@@ -90,14 +79,6 @@ function resolveContextBudgetStop(
 		limitTokens,
 		scratchHandoffFile: options.scratchHandoffFile,
 	};
-}
-
-async function writeScratchHandoff(session: AgentSession, stop: ContextBudgetStop): Promise<string | undefined> {
-	if (!stop.scratchHandoffFile) return undefined;
-	const result = await session.handoff(renderScratchHandoffStopPrompt(stop));
-	if (!result?.document) return undefined;
-	await Bun.write(stop.scratchHandoffFile, `${result.document.trimEnd()}\n`, { createPath: true });
-	return stop.scratchHandoffFile;
 }
 
 async function writeFinalAssistantText(session: AgentSession, printThoughts: boolean | undefined): Promise<void> {
@@ -146,7 +127,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			await writeFinalAssistantText(session, printThoughts);
 			textOutputWritten = true;
 		}
-		const scratchPath = await writeScratchHandoff(session, stop);
+		const scratchPath = stop.scratchHandoffFile?.trim() || undefined;
 		const event = {
 			type: "context_budget_stop",
 			contextUsage: {
@@ -160,7 +141,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		if (mode === "json") {
 			process.stdout.write(`${JSON.stringify(event)}\n`);
 		} else if (scratchPath) {
-			process.stderr.write(`Context budget stop: wrote scratch handoff to ${scratchPath}\n`);
+			process.stderr.write(`Context budget stop: using scratch handoff at ${scratchPath}\n`);
 		} else {
 			process.stderr.write("Context budget stop: no scratch handoff file configured\n");
 		}

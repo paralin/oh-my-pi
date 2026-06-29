@@ -8,7 +8,15 @@ import {
 	filterProviderReplayMessages,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import type { Context, CredentialDisabledEvent, Message, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import type {
+	AssistantMessage,
+	Context,
+	CredentialDisabledEvent,
+	Message,
+	Model,
+	SimpleStreamOptions,
+	ToolResultMessage,
+} from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
@@ -113,11 +121,19 @@ import type { AuthStorage } from "./session/auth-storage";
 import {
 	type CustomMessage,
 	convertToLlm,
+	createCustomMessage,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
 import { clampProviderContextImages } from "./session/provider-image-budget";
+import {
+	buildScratchHandoffContext,
+	renderScratchHandoffSyntheticRead,
+	resolveScratchHandoffPathSelection,
+	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+	type ScratchHandoffContext,
+} from "./session/scratch-handoff";
 import { getRestorableSessionModels } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
@@ -512,6 +528,10 @@ export interface CreateAgentSessionOptions {
 	 * top-level "Main" session, which has no parent.
 	 */
 	parentAgentId?: string;
+	/** Parent session scratch handoff file linked from this subagent's scratch file. */
+	parentScratchHandoffDisplayPath?: string;
+	/** Explicit scratch handoff file for this session. Overrides scratchHandoff.rootDir naming. */
+	scratchHandoffFile?: string;
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
 
@@ -1491,13 +1511,43 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				})
 			: undefined;
 
+	const buildScratchContextMessage = (context: ScratchHandoffContext): CustomMessage => {
+		return createCustomMessage(
+			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+			[{ type: "text", text: renderScratchHandoffSyntheticRead(context) }],
+			false,
+			{ path: context.displayPath, parentPath: context.parentDisplayPath },
+			new Date().toISOString(),
+			"agent",
+		);
+	};
+
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
+
 	const agentKind = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? ("sub" as const) : ("main" as const);
+	const scratchHandoffPathSelection = resolveScratchHandoffPathSelection({
+		entries: existingBranch,
+		scratchFile: options.scratchHandoffFile,
+		parentScratchDisplayPath: options.parentScratchHandoffDisplayPath,
+	});
+	const scratchHandoffContext = await logger.time("scratchHandoff", () =>
+		buildScratchHandoffContext({
+			cwd,
+			sessionId: sessionManager.getSessionId(),
+			agentId: resolvedAgentId,
+			scratchFile: scratchHandoffPathSelection.scratchFile,
+			settings: {
+				enabled: settings.get("scratchHandoff.enabled"),
+				rootDir: settings.get("scratchHandoff.rootDir"),
+			},
+			parentScratchDisplayPath: scratchHandoffPathSelection.parentScratchDisplayPath,
+		}),
+	);
 	/**
 	 * Forget the agent ref on teardown — unless the agent is being parked (or is
 	 * already parked). Parking disposes the session but keeps the ref addressable
@@ -1551,6 +1601,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			getScratchHandoffDisplayPath: () => session?.getScratchHandoffDisplayPath(),
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			getSessionSpawns: () => options.spawns ?? "*",
@@ -2269,6 +2320,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Owned/in-band tool dialects (non-native) require the catalog as `# Tool:`
 			// sections; native tool calling lets the compact name list suffice.
 			const nativeTools = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model) === undefined;
+			if (scratchHandoffContext?.prompt) {
+				appendPrompt = appendPrompt
+					? `${appendPrompt}\n\n${scratchHandoffContext.prompt}`
+					: scratchHandoffContext.prompt;
+			}
 			if (options.appendSystemPrompt) {
 				appendPrompt = appendPrompt
 					? `${appendPrompt}\n\n${options.appendSystemPrompt}`
@@ -2661,6 +2717,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				sessionManager.appendServiceTierChange(initialServiceTierByFamily);
 			}
 		}
+		if (scratchHandoffContext) {
+			agent.replaceMessages([...agent.state.messages, buildScratchContextMessage(scratchHandoffContext)]);
+		}
 
 		// Full toolset for the advisor, built unconditionally so it can be toggled at
 		// runtime. Bound to a DISTINCT ToolSession (its own `-advisor` session id +
@@ -2766,6 +2825,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			scratchHandoffDisplayPath: scratchHandoffContext?.displayPath,
 			providerSessionId: options.providerSessionId,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
