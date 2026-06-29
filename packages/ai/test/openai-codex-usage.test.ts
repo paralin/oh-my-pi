@@ -8,7 +8,7 @@
  */
 import { describe, expect, it } from "bun:test";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
-import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
+import { codexRankingStrategy, openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 
 const accessTokenFixture = (() => {
 	const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
@@ -290,5 +290,69 @@ describe("openai-codex usage parser", () => {
 			{ fetch: fetchImpl },
 		);
 		expect(requested).toEqual(["https://chatgpt.com/backend-api/wham/usage"]);
+	});
+
+	// Over-block regression: Codex returns a single account-level
+	// `rate_limit.limit_reached`. Threading it into every window marked a window
+	// with real headroom `exhausted`, which over-blocked sibling accounts during
+	// credential selection so a usage-limited turn never switched to a sibling
+	// that still had capacity. Each window's status must reflect only its own use.
+	it("does not mark a window with headroom exhausted from the shared limit_reached flag", async () => {
+		const payload = makePayload();
+		payload.rate_limit.limit_reached = true;
+		payload.rate_limit.primary_window.used_percent = 100;
+		payload.rate_limit.secondary_window.used_percent = 30;
+		const report = await openaiCodexUsageProvider.fetchUsage(
+			{
+				provider: "openai-codex",
+				credential: { type: "oauth", accessToken: accessTokenFixture, accountId: "acct-1", email: "u@example.com" },
+			},
+			{ fetch: fakeFetch(payload) },
+		);
+		const primary = report?.limits.find(l => l.id === "openai-codex:primary");
+		const secondary = report?.limits.find(l => l.id === "openai-codex:secondary");
+		expect(primary?.status).toBe("exhausted");
+		expect(secondary?.status).toBe("ok");
+	});
+
+	describe("scopeLimits", () => {
+		async function fetchReport(payload: unknown) {
+			return openaiCodexUsageProvider.fetchUsage(
+				{
+					provider: "openai-codex",
+					credential: {
+						type: "oauth",
+						accessToken: accessTokenFixture,
+						accountId: "acct-1",
+						email: "u@example.com",
+					},
+				},
+				{ fetch: fakeFetch(payload) },
+			);
+		}
+
+		it("gates a normal Codex request on the chat windows only, excluding the Spark meter", async () => {
+			const report = await fetchReport(makePayload());
+			const scoped = codexRankingStrategy.scopeLimits?.(report!, { modelId: "gpt-5.3-codex" }) ?? [];
+			expect(scoped.map(l => l.id)).toEqual(["openai-codex:primary", "openai-codex:secondary"]);
+		});
+
+		it("gates a Spark request on the Spark meter only, excluding the chat windows", async () => {
+			const report = await fetchReport(makePayload());
+			const scoped = codexRankingStrategy.scopeLimits?.(report!, { modelId: "gpt-5.3-codex-spark" }) ?? [];
+			expect(scoped.map(l => l.id)).toEqual(["openai-codex:spark:primary", "openai-codex:spark:secondary"]);
+		});
+
+		it("keeps an account with only a Spark block selectable for a normal request", async () => {
+			const payload = makePayload();
+			payload.additional_rate_limits[0].rate_limit.limit_reached = true;
+			payload.additional_rate_limits[0].rate_limit.primary_window.used_percent = 100;
+			payload.additional_rate_limits[0].rate_limit.secondary_window.used_percent = 100;
+			const report = await fetchReport(payload);
+			const scoped = codexRankingStrategy.scopeLimits?.(report!, { modelId: "gpt-5.3-codex" }) ?? [];
+			// Only the chat windows gate the request, and both have headroom, so the
+			// account is not blocked despite the exhausted Spark meter.
+			expect(scoped.every(l => l.status === "ok")).toBe(true);
+		});
 	});
 });

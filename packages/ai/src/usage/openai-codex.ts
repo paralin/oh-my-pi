@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type {
+	CredentialRankingContext,
 	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
@@ -275,7 +276,6 @@ function buildUsageLimit(args: {
 	window: ParsedUsageWindow;
 	accountId?: string;
 	planType?: string;
-	limitReached?: boolean;
 	nowMs: number;
 }): UsageLimit {
 	const usageWindow = buildUsageWindow(args.window, args.key, args.nowMs);
@@ -292,7 +292,16 @@ function buildUsageLimit(args: {
 		},
 		window: usageWindow,
 		amount,
-		status: buildUsageStatus(amount.usedFraction, args.limitReached),
+		// Each chat window's status reflects ONLY its own usage. The account-level
+		// `rate_limit.limit_reached` flag is intentionally not applied here: Codex
+		// returns a single shared flag for the whole account, so threading it into
+		// both the primary (5h) and secondary (weekly) windows marked a window with
+		// real headroom `exhausted` purely because a different window (or a separate
+		// metered feature) was at its limit, which over-blocked sibling accounts
+		// during credential selection. `usedFraction >= 1` already marks a window
+		// that is genuinely full; a real enforced limit not reflected in
+		// `used_percent` is caught when the live request returns usage_limit_reached.
+		status: buildUsageStatus(amount.usedFraction),
 	};
 }
 function additionalLimitSlug(args: { limitName?: string; meteredFeature?: string }): string {
@@ -404,7 +413,6 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					window: parsed.primary,
 					accountId,
 					planType,
-					limitReached: parsed.limitReached,
 					nowMs,
 				}),
 			);
@@ -416,7 +424,6 @@ export const openaiCodexUsageProvider: UsageProvider = {
 					window: parsed.secondary,
 					accountId,
 					planType,
-					limitReached: parsed.limitReached,
 					nowMs,
 				}),
 			);
@@ -506,7 +513,25 @@ export const openaiCodexUsageProvider: UsageProvider = {
 
 const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
 
+// A Codex request gates only on the chat windows it actually consumes. A
+// "-spark" model spends the separate Spark meter; every other Codex model spends
+// the 5h/weekly chat windows. Scoping the gating set this way keeps an exhausted
+// Spark meter from blocking a normal chat request (and vice versa), instead of
+// OR-ing every window and meter in the report into one provider-wide block.
+function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRankingContext): UsageLimit[] {
+	const isSparkRequest = (context?.modelId ?? "").toLowerCase().includes("-spark");
+	return report.limits.filter(limit => {
+		if (limit.id === "openai-codex:primary" || limit.id === "openai-codex:secondary") {
+			return !isSparkRequest;
+		}
+		// Additional metered features have ids of the form `openai-codex:<slug>:<key>`.
+		const slug = limit.id.split(":")[1];
+		return slug === "spark" ? isSparkRequest : false;
+	});
+}
+
 export const codexRankingStrategy: CredentialRankingStrategy = {
+	scopeLimits: scopeCodexLimitsForRequest,
 	findWindowLimits(report) {
 		const findLimit = (key: "primary" | "secondary"): UsageLimit | undefined => {
 			const direct = report.limits.find(l => l.id === `openai-codex:${key}`);
