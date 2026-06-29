@@ -19,6 +19,10 @@ import type {
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
 	ContextEvent,
+	MaintenanceTraceDeltaEvent,
+	MaintenanceTraceEndEvent,
+	MaintenanceTracePhaseEvent,
+	MaintenanceTraceStartEvent,
 	SessionBeforeBranchEvent,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactEvent,
@@ -293,6 +297,10 @@ export type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	MaintenanceTraceDeltaEvent,
+	MaintenanceTraceEndEvent,
+	MaintenanceTracePhaseEvent,
+	MaintenanceTraceStartEvent,
 	TodoReminderEvent,
 	TtsrTriggeredEvent,
 	TurnEndEvent,
@@ -397,6 +405,10 @@ export type HookEvent =
 	| TurnEndEvent
 	| AutoCompactionStartEvent
 	| AutoCompactionEndEvent
+	| MaintenanceTraceStartEvent
+	| MaintenanceTracePhaseEvent
+	| MaintenanceTraceDeltaEvent
+	| MaintenanceTraceEndEvent
 	| AutoRetryStartEvent
 	| AutoRetryEndEvent
 	| TtsrTriggeredEvent
@@ -505,6 +517,10 @@ export interface HookAPI {
 	on(event: "turn_end", handler: HookHandler<TurnEndEvent>): void;
 	on(event: "auto_compaction_start", handler: HookHandler<AutoCompactionStartEvent>): void;
 	on(event: "auto_compaction_end", handler: HookHandler<AutoCompactionEndEvent>): void;
+	on(event: "maintenance_trace_start", handler: HookHandler<MaintenanceTraceStartEvent>): void;
+	on(event: "maintenance_trace_phase", handler: HookHandler<MaintenanceTracePhaseEvent>): void;
+	on(event: "maintenance_trace_delta", handler: HookHandler<MaintenanceTraceDeltaEvent>): void;
+	on(event: "maintenance_trace_end", handler: HookHandler<MaintenanceTraceEndEvent>): void;
 	on(event: "auto_retry_start", handler: HookHandler<AutoRetryStartEvent>): void;
 	on(event: "auto_retry_end", handler: HookHandler<AutoRetryEndEvent>): void;
 	on(event: "ttsr_triggered", handler: HookHandler<TtsrTriggeredEvent>): void;

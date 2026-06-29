@@ -13,9 +13,9 @@ import { ExtensionRunner, loadExtensions } from "@oh-my-pi/pi-coding-agent/exten
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import {
 	AgentSession,
+	type AgentSessionEvent,
 	assistantToolUseCanScratchHandoff,
 	resolveAutoCompactionAction,
-	type AgentSessionEvent,
 } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -232,6 +232,331 @@ describe("AgentSession handoff", () => {
 		expect(result?.document).toBe(handoffText);
 		expect(sideStreamCalls).toBe(1);
 		expect(capturedSideSessionId).toStartWith(`${preHandoffSessionId}:side:`);
+	});
+
+	it("emits auto-handoff visible text deltas while preserving the handoff reset", async () => {
+		await session.dispose();
+		events = [];
+		const handoffText = "## Goal\nContinue with streamed handoff";
+		const sideStreamFn: StreamFn = requestModel => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: handoffText }],
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					stopReason: "stop",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "## Goal\n", partial: message });
+				stream.push({
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "Continue with streamed handoff",
+					partial: message,
+				});
+				stream.push({
+					type: "thinking_delta",
+					contentIndex: 1,
+					delta: "hidden handoff thinking",
+					partial: message,
+				});
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			sideStreamFn,
+		});
+		session.subscribe(event => {
+			events.push(event);
+		});
+		const previousSessionId = session.sessionId;
+		const previousSessionFile = session.sessionFile;
+
+		await session.runIdleCompaction();
+
+		const deltas = events.filter(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
+				event.type === "maintenance_trace_delta",
+		);
+		const traceStart = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_start" }> =>
+				event.type === "maintenance_trace_start",
+		);
+		const traceEnd = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
+				event.type === "maintenance_trace_end",
+		);
+		const handoffEntry = sessionManager.getEntries().find(entry => {
+			return entry.type === "custom_message" && entry.customType === "handoff";
+		});
+
+		expect(deltas.map(event => event.delta).join("")).toBe(handoffText);
+		expect(deltas.every(event => event.traceId === traceStart?.traceId)).toBe(true);
+		expect(deltas.every(event => event.visibility === "ui-only" && event.content === "assistant_text")).toBe(true);
+		expect(deltas.map(event => event.delta).join("\n")).not.toContain("hidden handoff thinking");
+		expect(traceEnd).toMatchObject({
+			traceId: traceStart?.traceId,
+			action: "handoff",
+			terminalResult: "done",
+		});
+		expect(session.sessionId).not.toBe(previousSessionId);
+		expect(session.sessionFile).not.toBe(previousSessionFile);
+		expect(handoffEntry).toMatchObject({
+			type: "custom_message",
+			customType: "handoff",
+			display: true,
+			content: expect.stringContaining(handoffText),
+		});
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "idle", action: "handoff" });
+		expect(events).toContainEqual(
+			expect.objectContaining({ type: "auto_compaction_end", action: "handoff", aborted: false }),
+		);
+	});
+
+	it("keeps auto-handoff failure semantics while observing visible text only", async () => {
+		await session.dispose();
+		events = [];
+		const sideStreamFn: StreamFn = requestModel => {
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [
+						{ type: "text", text: "Visible handoff before failure" },
+						{ type: "thinking", thinking: "hidden handoff failure thinking" },
+					],
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					stopReason: "error",
+					errorMessage: "provider failed",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now(),
+				};
+				const toolCall: ToolCall = {
+					type: "toolCall",
+					id: "handoff-tool-raw",
+					name: "read",
+					arguments: { path: "secret.txt" },
+				};
+				stream.push({
+					type: "thinking_delta",
+					contentIndex: 1,
+					delta: "hidden handoff failure thinking",
+					partial: message,
+				});
+				stream.push({
+					type: "toolcall_delta",
+					contentIndex: 2,
+					delta: JSON.stringify(toolCall),
+					partial: message,
+				});
+				stream.push({
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "Visible handoff before failure",
+					partial: message,
+				});
+				stream.push({ type: "error", reason: "error", error: message });
+			});
+			return stream;
+		};
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			sideStreamFn,
+		});
+		session.subscribe(event => {
+			events.push(event);
+		});
+		const previousSessionId = session.sessionId;
+		const previousSessionFile = session.sessionFile;
+
+		await session.runIdleCompaction();
+
+		const deltas = events.filter(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
+				event.type === "maintenance_trace_delta",
+		);
+		const traceEnd = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
+				event.type === "maintenance_trace_end",
+		);
+		const handoffEntry = sessionManager.getEntries().find(entry => {
+			return entry.type === "custom_message" && entry.customType === "handoff";
+		});
+
+		expect(deltas.map(event => event.delta)).toEqual(["Visible handoff before failure"]);
+		expect(deltas.map(event => event.delta).join("\n")).not.toContain("hidden handoff failure thinking");
+		expect(deltas.map(event => event.delta).join("\n")).not.toContain("handoff-tool-raw");
+		expect(traceEnd).toMatchObject({
+			action: "handoff",
+			terminalResult: "failed",
+			errorMessage: expect.stringContaining("Auto-compaction failed"),
+		});
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "auto_compaction_end",
+				action: "handoff",
+				aborted: false,
+				willRetry: false,
+				errorMessage: expect.stringContaining("Auto-compaction failed"),
+			}),
+		);
+		expect(session.sessionId).toBe(previousSessionId);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(handoffEntry).toBeUndefined();
+	});
+
+	it("keeps auto-handoff cancellation semantics while observing prior visible text", async () => {
+		await session.dispose();
+		events = [];
+		const streamStarted = Promise.withResolvers<void>();
+		const sideStreamFn: StreamFn = (requestModel, _context, options) => {
+			const stream = new AssistantMessageEventStream();
+			const message: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "Visible handoff before cancel" }],
+				api: requestModel.api,
+				provider: requestModel.provider,
+				model: requestModel.id,
+				stopReason: "error",
+				errorMessage: "aborted",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			options?.signal?.addEventListener(
+				"abort",
+				() => {
+					stream.push({ type: "error", reason: "aborted", error: message });
+				},
+				{ once: true },
+			);
+			queueMicrotask(() => {
+				stream.push({
+					type: "text_delta",
+					contentIndex: 0,
+					delta: "Visible handoff before cancel",
+					partial: message,
+				});
+				streamStarted.resolve();
+			});
+			return stream;
+		};
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			sideStreamFn,
+		});
+		session.subscribe(event => {
+			events.push(event);
+		});
+		const previousSessionId = session.sessionId;
+		const previousSessionFile = session.sessionFile;
+
+		const compactionPromise = session.runIdleCompaction();
+		await streamStarted.promise;
+		session.abortCompaction();
+		await compactionPromise;
+
+		const deltas = events.filter(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
+				event.type === "maintenance_trace_delta",
+		);
+		const traceEnd = events.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
+				event.type === "maintenance_trace_end",
+		);
+		const handoffEntry = sessionManager.getEntries().find(entry => {
+			return entry.type === "custom_message" && entry.customType === "handoff";
+		});
+
+		expect(deltas.map(event => event.delta)).toEqual(["Visible handoff before cancel"]);
+		expect(traceEnd).toMatchObject({ action: "handoff", terminalResult: "cancelled" });
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "auto_compaction_end",
+				action: "handoff",
+				aborted: true,
+				willRetry: false,
+			}),
+		);
+		expect(session.sessionId).toBe(previousSessionId);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(handoffEntry).toBeUndefined();
 	});
 
 	it("preserves queued steering and follow-up messages across the handoff reset", async () => {
@@ -709,6 +1034,24 @@ describe("AgentSession handoff", () => {
 		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
 		fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
 		fs.writeFileSync(scratchAbsolutePath, "Fresh scratch objective", "utf8");
+		sessionManager.appendMessage({
+			role: "toolResult",
+			toolCallId: "todo_init",
+			toolName: "todo",
+			isError: false,
+			content: [{ type: "text", text: "todo initialized" }],
+			details: {
+				op: "init",
+				storage: "session",
+				phases: [
+					{
+						name: "Carryover",
+						tasks: [{ content: "Reuse existing todo list", status: "in_progress" }],
+					},
+				],
+			},
+			timestamp: Date.now() - 1,
+		});
 		const staleScratch: AgentMessage = {
 			role: "custom",
 			customType: "scratch-handoff-read",
@@ -757,7 +1100,7 @@ describe("AgentSession handoff", () => {
 		session.subscribe(event => events.push(event));
 
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [readAssistant] });
-		await waitFor(() => events.some(event => event.type === "auto_compaction_end"));
+		await waitFor(() => events.some(event => event.type === "maintenance_trace_end"));
 
 		const scratchEntry = sessionManager.getEntries().find(entry => {
 			return entry.type === "custom_message" && entry.customType === "scratch-handoff-read";
@@ -767,9 +1110,80 @@ describe("AgentSession handoff", () => {
 		expect(scratchEntry.content).toEqual([
 			expect.objectContaining({ text: expect.stringContaining("Fresh scratch objective") }),
 		]);
+		expect(scratchEntry.content).toEqual([
+			expect.objectContaining({
+				text: expect.stringContaining("Current scratch continuity state for this session."),
+			}),
+		]);
+		const scratchText = Array.isArray(scratchEntry.content)
+			? scratchEntry.content.map(block => (block.type === "text" ? block.text : "")).join("\n")
+			: scratchEntry.content;
+		expect(scratchText).not.toContain("Synthetic read");
 		expect(scratchEntry.content).not.toEqual([
 			expect.objectContaining({ text: expect.stringContaining("stale launch snapshot") }),
 		]);
+		expect(session.getTodoPhases()).toEqual([
+			{
+				name: "Carryover",
+				tasks: [{ content: "Reuse existing todo list", status: "in_progress" }],
+			},
+		]);
+		type MaintenanceEvent = Extract<
+			AgentSessionEvent,
+			| { type: "maintenance_trace_start" }
+			| { type: "maintenance_trace_phase" }
+			| { type: "maintenance_trace_delta" }
+			| { type: "maintenance_trace_end" }
+		>;
+		const isMaintenanceEvent = (event: AgentSessionEvent): event is MaintenanceEvent =>
+			event.type === "maintenance_trace_start" ||
+			event.type === "maintenance_trace_phase" ||
+			event.type === "maintenance_trace_delta" ||
+			event.type === "maintenance_trace_end";
+		const maintenanceEvents = events.filter(isMaintenanceEvent);
+		const traceStart = maintenanceEvents.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_start" }> =>
+				event.type === "maintenance_trace_start",
+		);
+		if (!traceStart) throw new Error("missing scratch maintenance trace start");
+		const tracePhases = maintenanceEvents.filter(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }> =>
+				event.type === "maintenance_trace_phase",
+		);
+		const traceDeltas = maintenanceEvents.filter(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }> =>
+				event.type === "maintenance_trace_delta",
+		);
+		const traceEnd = maintenanceEvents.find(
+			(event): event is Extract<AgentSessionEvent, { type: "maintenance_trace_end" }> =>
+				event.type === "maintenance_trace_end",
+		);
+		expect(maintenanceEvents.map(event => event.type)).toEqual([
+			"maintenance_trace_start",
+			"maintenance_trace_phase",
+			"maintenance_trace_phase",
+			"maintenance_trace_phase",
+			"maintenance_trace_phase",
+			"maintenance_trace_phase",
+			"maintenance_trace_end",
+		]);
+		expect(tracePhases.map(event => event.phase)).toEqual([
+			"scratch-target-resolved",
+			"scratch-successor-session-reset",
+			"scratch-read-injected",
+			"scratch-session-rebuilt",
+			"scratch-todo-synced",
+		]);
+		expect(traceDeltas).toHaveLength(0);
+		expect(maintenanceEvents.every(event => event.traceId === traceStart.traceId)).toBe(true);
+		expect(maintenanceEvents.every(event => event.targetPath === scratchPath)).toBe(true);
+		expect(traceEnd).toMatchObject({
+			traceId: traceStart.traceId,
+			action: "scratch-handoff",
+			targetPath: scratchPath,
+			terminalResult: "done",
+			willRetry: false,
+		});
 	});
 
 	it("uses scratch handoff for read-only threshold tool turns", async () => {

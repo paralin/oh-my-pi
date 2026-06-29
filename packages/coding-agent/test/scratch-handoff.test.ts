@@ -84,17 +84,29 @@ describe("scratch handoff", () => {
 			const document = fs.readFileSync(scratch.absolutePath, "utf8");
 			expect(document).toContain("* Scratch Handoff");
 			expect(document).toContain(`:session: ${sessionManager.getSessionId()}`);
+			expect(document).toContain("- Active todo list:");
 			const promptText = session.systemPrompt.join("\n\n");
-			expect(promptText).toContain("Scratch compaction protocol:");
+			expect(promptText).toContain("Scratch continuity protocol:");
 			expect(promptText).toContain(`Existing scratch org file: ${scratch.displayPath}.`);
+			expect(promptText).toContain("Continue exactly as if no context reset, compaction, or handoff occurred.");
+			expect(promptText).toContain("Do not mention, log, summarize, or count scratch loading");
+			expect(promptText).toContain("If an existing todo list is present");
+			expect(promptText).toContain('Do not create a meta todo such as "Refining based on scratch-handoff"');
 			const scratchContext = session.agent.state.messages.find(message => {
 				return message.role === "custom" && message.customType === "scratch-handoff-read";
 			});
 			expect(scratchContext?.role).toBe("custom");
 			if (scratchContext?.role !== "custom") throw new Error("missing scratch handoff context");
 			expect(scratchContext.content).toEqual([
-				expect.objectContaining({ text: expect.stringContaining("<scratch-handoff-context>") }),
+				expect.objectContaining({
+					text: expect.stringContaining("Current scratch continuity state for this session."),
+				}),
 			]);
+			const scratchText = Array.isArray(scratchContext.content)
+				? scratchContext.content.map(block => (block.type === "text" ? block.text : "")).join("\n")
+				: scratchContext.content;
+			expect(scratchText).not.toContain("Synthetic read");
+			expect(scratchText).not.toContain("loaded the scratch handoff file");
 		} finally {
 			await session.dispose();
 			authStorage.close();
@@ -118,7 +130,7 @@ describe("scratch handoff", () => {
 			const document = fs.readFileSync(scratch.absolutePath, "utf8");
 			expect(document).toContain(`[[file:${parentScratch}][Parent scratch handoff]]`);
 			const promptText = session.systemPrompt.join("\n\n");
-			expect(promptText).toContain("Scratch compaction protocol:");
+			expect(promptText).toContain("Scratch continuity protocol:");
 			expect(promptText).toContain(`Parent scratch org file: ${parentScratch}.`);
 		} finally {
 			await session.dispose();

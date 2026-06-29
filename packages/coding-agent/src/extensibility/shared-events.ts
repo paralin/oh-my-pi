@@ -212,12 +212,81 @@ export interface TurnEndEvent {
 // Auto-compaction / Auto-retry Events
 // ============================================================================
 
+export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete";
+
 export type AutoCompactionAction = "context-full" | "handoff" | "shake" | "snapcompact" | "scratch-handoff";
+
+export type MaintenanceTraceVisibility = "ui-only";
+
+export type MaintenanceTracePhase =
+	| "start"
+	| "stream"
+	| "action-fallback"
+	| "scratch-target-resolved"
+	| "scratch-successor-session-reset"
+	| "scratch-read-injected"
+	| "scratch-session-rebuilt"
+	| "scratch-todo-synced"
+	| "terminal";
+
+export type MaintenanceTraceFallbackCause =
+	| "overflow"
+	| "mid-turn-handoff-suppressed"
+	| "snapcompact-fallback"
+	| "no-document-handoff-fallback"
+	| "idle"
+	| "incomplete-response";
+
+export type MaintenanceTraceTerminalResult = "done" | "cancelled" | "failed" | "skipped" | "no-progress";
+
+export type MaintenanceTraceDeltaContent = "assistant_text";
+
+export interface MaintenanceTraceEventBase {
+	traceId: string;
+	reason: AutoCompactionReason;
+	action: AutoCompactionAction;
+	visibility: MaintenanceTraceVisibility;
+	fallbackCause?: MaintenanceTraceFallbackCause;
+	targetPath?: string;
+}
+
+/** Fired when a UI-only maintenance trace starts. */
+export interface MaintenanceTraceStartEvent extends MaintenanceTraceEventBase {
+	type: "maintenance_trace_start";
+	phase: "start";
+}
+
+/** Fired when a UI-only maintenance trace changes maintenance phase. */
+export interface MaintenanceTracePhaseEvent extends MaintenanceTraceEventBase {
+	type: "maintenance_trace_phase";
+	phase: Exclude<MaintenanceTracePhase, "start" | "stream" | "terminal">;
+}
+
+/**
+ * MaintenanceTraceDeltaEvent carries assistant-visible text deltas from an
+ * LLM-backed maintenance side request. Thinking, tool-call deltas, request
+ * payloads, and provider frames are not part of the default trace contract.
+ */
+export interface MaintenanceTraceDeltaEvent extends MaintenanceTraceEventBase {
+	type: "maintenance_trace_delta";
+	phase: "stream";
+	content: MaintenanceTraceDeltaContent;
+	delta: string;
+}
+
+/** Fired when a UI-only maintenance trace reaches a terminal state. */
+export interface MaintenanceTraceEndEvent extends MaintenanceTraceEventBase {
+	type: "maintenance_trace_end";
+	phase: "terminal";
+	terminalResult: MaintenanceTraceTerminalResult;
+	errorMessage?: string;
+	willRetry: boolean;
+}
 
 /** Fired when auto-compaction starts */
 export interface AutoCompactionStartEvent {
 	type: "auto_compaction_start";
-	reason: "threshold" | "overflow" | "idle" | "incomplete";
+	reason: AutoCompactionReason;
 	action: AutoCompactionAction;
 }
 

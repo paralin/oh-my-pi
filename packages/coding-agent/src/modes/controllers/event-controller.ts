@@ -24,7 +24,7 @@ import type { PlanApprovalDetails } from "../../plan-mode/approved-plan";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
-import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import type { ResolveToolDetails } from "../../tools/resolve";
 import { nextActionableTask } from "../../tools/todo";
 import { vocalizer } from "../../tts/vocalizer";
@@ -146,6 +146,10 @@ export class EventController {
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
+			maintenance_trace_start: async () => {},
+			maintenance_trace_phase: async e => this.#handleMaintenanceTracePhase(e),
+			maintenance_trace_delta: async () => {},
+			maintenance_trace_end: async () => {},
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
@@ -1102,6 +1106,38 @@ export class EventController {
 	 */
 	#maintenanceEscHint(): string {
 		return this.ctx.focusedAgentId ? "" : " (esc to cancel)";
+	}
+
+	#handleMaintenanceTracePhase(event: Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }>): void {
+		if (event.action !== "scratch-handoff" || !this.ctx.autoCompactionLoader) return;
+		this.ctx.autoCompactionLoader.setMessage(
+			`${this.#scratchHandoffTracePhaseLabel(event.phase)}${this.#scratchHandoffTraceTarget(event.targetPath)}…${this.#maintenanceEscHint()}`,
+		);
+		this.ctx.ui.requestRender();
+	}
+
+	#scratchHandoffTracePhaseLabel(
+		eventPhase: Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }>["phase"],
+	): string {
+		switch (eventPhase) {
+			case "scratch-target-resolved":
+				return "Context pressure: scratch target resolved";
+			case "scratch-successor-session-reset":
+				return "Context pressure: scratch session reset";
+			case "scratch-read-injected":
+				return "Context pressure: scratch state loaded";
+			case "scratch-session-rebuilt":
+				return "Context pressure: session rebuilt";
+			case "scratch-todo-synced":
+				return "Context pressure: todos synced";
+			case "action-fallback":
+				return "Context pressure: maintenance fallback";
+		}
+	}
+
+	#scratchHandoffTraceTarget(targetPath: string | undefined): string {
+		if (!targetPath) return "";
+		return ` (${previewLine(shortenPath(targetPath), TRUNCATE_LENGTHS.SHORT)})`;
 	}
 
 	async #handleAutoCompactionStart(

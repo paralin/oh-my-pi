@@ -18,7 +18,7 @@ export interface ScratchHandoffContext {
 	absolutePath: string;
 	/** Developer instruction block appended to the system prompt. */
 	prompt: string;
-	/** Current scratch file body loaded into context through a synthetic read result. */
+	/** Current scratch file body provided as continuation state. */
 	scratchText: string;
 	/** Parent session scratch file, linked from subagent scratch files. */
 	parentDisplayPath?: string;
@@ -166,14 +166,16 @@ function initialScratchHandoffDocument(input: {
 	const parentLine = input.parentScratchDisplayPath
 		? `- Parent scratch: [[file:${input.parentScratchDisplayPath}][Parent scratch handoff]]\n`
 		: "";
-	return `#+TITLE: OMP Scratch Handoff ${input.sessionId}\n#+DATE: ${isoDate}\n\n* Scratch Handoff\n:PROPERTIES:\n:session: ${input.sessionId}\n:path: ${input.displayPath}\n:END:\n\n${parentLine}- Current objective: \n- Work completed: \n- Files changed: \n- Verification: \n- Blockers or risks: \n- Next action: \n- Source refs: \n`;
+	return `#+TITLE: OMP Scratch Handoff ${input.sessionId}\n#+DATE: ${isoDate}\n\n* Scratch Handoff\n:PROPERTIES:\n:session: ${input.sessionId}\n:path: ${input.displayPath}\n:END:\n\n${parentLine}- Current objective: \n- Active todo list: \n- Work completed: \n- Files changed: \n- Verification: \n- Blockers or risks: \n- Next action: \n- Source refs: \n`;
 }
 
 function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPath: string | undefined): string {
 	const lines = [
-		"Scratch compaction protocol:",
-		`- Existing scratch org file: ${displayPath}. A synthetic read tool result has loaded its current contents into this session; inspect or update the file only when live state diverges.`,
+		"Scratch continuity protocol:",
+		`- Existing scratch org file: ${displayPath}. Its current contents are already in context as continuation state; inspect or update the file only when live state diverges.`,
+		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
 		"- Treat the scratch file as the durable continuity packet for context pressure, resume, and successor sessions.",
+		'- If an existing todo list is present in the restored session state or scratch context, keep using that list. Do not create a meta todo such as "Refining based on scratch-handoff"; update the carried list only when the actual task state changes.',
 	];
 	if (parentScratchDisplayPath) {
 		lines.push(
@@ -184,7 +186,7 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- After orientation, write the first useful scratch delta if the file lacks current task state. Do not wait for the final response to create the first handoff.",
 		"- Before any deliberate large read/edit/proof block, before context pressure can force compaction, and before ending with unfinished work, inspect the scratch file and update only stale or missing handoff state.",
 		"- Do not rewrite or re-output the whole summary when the file is already current.",
-		"- The scratch file must be enough for a successor session: current objective, completed work, changed files, verification already run, blockers, next action, and source refs needed to continue.",
+		"- The scratch file must be enough for a successor session: current objective, active todo list, completed work, changed files, verification already run, blockers, next action, and source refs needed to continue.",
 		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta, not as the place to build the first scratch summary.",
 		"- If no update is needed, leave the file unchanged and report one sentence saying it was already current.",
 		"- In the final response, mention whether the scratch file was updated or unchanged and name the path.",
@@ -194,5 +196,5 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 
 export function renderScratchHandoffSyntheticRead(context: ScratchHandoffContext): string {
 	const parentLine = context.parentDisplayPath ? `Parent scratch: ${context.parentDisplayPath}\n` : "";
-	return `Synthetic read(path="${context.displayPath}") loaded the scratch handoff file for this session.\n${parentLine}<scratch-handoff-context>\nPath: ${context.displayPath}\n\n${context.scratchText}\n</scratch-handoff-context>`;
+	return `Current scratch continuity state for this session.\n${parentLine}<scratch-handoff-context>\nPath: ${context.displayPath}\n\n${context.scratchText}\n</scratch-handoff-context>`;
 }

@@ -69,6 +69,10 @@ import type {
 	AutoRetryStartEvent,
 	ContextEvent,
 	GoalUpdatedEvent,
+	MaintenanceTraceDeltaEvent,
+	MaintenanceTraceEndEvent,
+	MaintenanceTracePhaseEvent,
+	MaintenanceTraceStartEvent,
 	SessionBeforeBranchEvent,
 	SessionBeforeBranchResult,
 	SessionBeforeCompactEvent,
@@ -595,6 +599,10 @@ export type {
 	AutoCompactionStartEvent,
 	AutoRetryEndEvent,
 	AutoRetryStartEvent,
+	MaintenanceTraceDeltaEvent,
+	MaintenanceTraceEndEvent,
+	MaintenanceTracePhaseEvent,
+	MaintenanceTraceStartEvent,
 	TodoReminderEvent,
 	TtsrTriggeredEvent,
 } from "../shared-events";
@@ -830,6 +838,10 @@ export type ExtensionEvent =
 	| ToolExecutionEndEvent
 	| AutoCompactionStartEvent
 	| AutoCompactionEndEvent
+	| MaintenanceTraceStartEvent
+	| MaintenanceTracePhaseEvent
+	| MaintenanceTraceDeltaEvent
+	| MaintenanceTraceEndEvent
 	| AutoRetryStartEvent
 	| AutoRetryEndEvent
 	| TtsrTriggeredEvent
@@ -1009,6 +1021,10 @@ export interface ExtensionAPI {
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
 	on(event: "auto_compaction_start", handler: ExtensionHandler<AutoCompactionStartEvent>): void;
 	on(event: "auto_compaction_end", handler: ExtensionHandler<AutoCompactionEndEvent>): void;
+	on(event: "maintenance_trace_start", handler: ExtensionHandler<MaintenanceTraceStartEvent>): void;
+	on(event: "maintenance_trace_phase", handler: ExtensionHandler<MaintenanceTracePhaseEvent>): void;
+	on(event: "maintenance_trace_delta", handler: ExtensionHandler<MaintenanceTraceDeltaEvent>): void;
+	on(event: "maintenance_trace_end", handler: ExtensionHandler<MaintenanceTraceEndEvent>): void;
 	on(event: "auto_retry_start", handler: ExtensionHandler<AutoRetryStartEvent>): void;
 	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;

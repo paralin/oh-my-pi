@@ -7,7 +7,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
@@ -199,6 +199,10 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 		const notices = collectNotices();
 		const startCount = countCompactionStarts();
+		const traceEnds: Array<Extract<AgentSessionEvent, { type: "maintenance_trace_end" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "maintenance_trace_end") traceEnds.push(event);
+		});
 
 		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
 		session.subscribe(event => {
@@ -223,6 +227,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 		const noProgress = notices.filter(n => n.source === NOTICE_SOURCE && n.message.includes(NO_PROGRESS_FRAGMENT));
 		expect(noProgress.length).toBe(1);
 		expect(noProgress[0].level).toBe("warning");
+		expect(traceEnds).toContainEqual(
+			expect.objectContaining({ action: "snapcompact", terminalResult: "no-progress" }),
+		);
 	});
 
 	it("blocks todo continuations after no-headroom compaction when auto-continue is disabled", async () => {
