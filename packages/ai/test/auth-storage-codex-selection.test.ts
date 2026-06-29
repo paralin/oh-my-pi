@@ -400,6 +400,119 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(resumeInMs).toBeLessThan(16 * 60 * 1000);
 	});
 
+	test("when every account is exhausted, switches the session to the soonest-usable account and waits for it", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-near", "near@example.com") },
+			{ type: "oauth", ...createCredential("acct-whole", "whole@example.com") },
+		]);
+		// Both exhausted. acct-near's 5h window frees first (10m), so ranking sticks
+		// the session to it, but its weekly window is also spent and only frees in
+		// 50m, so it is not truly usable until then. acct-whole frees both windows
+		// at 20m, making it the soonest account to actually regain capacity.
+		usageByAccount.set(
+			"acct-near",
+			createCodexUsageReport({
+				accountId: "acct-near",
+				primary: { usedFraction: 1, resetInMs: 10 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 50 * 60 * 1000 },
+			}),
+		);
+		usageByAccount.set(
+			"acct-whole",
+			createCodexUsageReport({
+				accountId: "acct-whole",
+				primary: { usedFraction: 1, resetInMs: 20 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 20 * 60 * 1000 },
+			}),
+		);
+
+		// First selection probes/ranks both accounts (marking each blocked at its
+		// soonest reset) and sticks the session to acct-near (earliest 5h reset).
+		const sessionId = "session-all-exhausted";
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("api-acct-near");
+
+		const before = Date.now();
+		const outcome = await authStorage.markUsageLimitReached("openai-codex", sessionId, {
+			retryAfterMs: 30 * 60 * 1000,
+		});
+
+		// The current account does not fully recover until its weekly window resets
+		// (50m), but the sibling regains capacity at 20m, so the wait targets the
+		// sibling instead of the current account or the blunt 30m provider
+		// retry-after.
+		expect(outcome.switched).toBe(false);
+		const resumeInMs = (outcome.resumeAtMs ?? 0) - before;
+		expect(resumeInMs).toBeGreaterThan(19 * 60 * 1000);
+		expect(resumeInMs).toBeLessThan(21 * 60 * 1000);
+
+		// The session's sticky credential is switched to the soonest-usable account,
+		// so the post-wait re-rank resumes on it.
+		expect(authStorage.getOAuthAccountId("openai-codex", sessionId)).toBe("acct-whole");
+	});
+
+	test("rechecks a blocked runtime Codex chain sibling before waiting for all accounts", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		authStorage.setRuntimeApiKeyChain("openai-codex", [
+			{ key: "runtime-personal", accountId: "acct-personal", label: "personal", usageType: "oauth" },
+			{ key: "runtime-secondary", accountId: "acct-secondary", label: "secondary", usageType: "oauth" },
+		]);
+		usageByAccount.set(
+			"acct-personal",
+			createCodexUsageReport({
+				accountId: "acct-personal",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-secondary",
+			createCodexUsageReport({
+				accountId: "acct-secondary",
+				primary: { usedFraction: 0.2, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.2, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const sessionId = "runtime-codex-stale-block";
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("runtime-personal");
+
+		usageByAccount.set(
+			"acct-personal",
+			createCodexUsageReport({
+				accountId: "acct-personal",
+				primary: { usedFraction: 1, resetInMs: 60 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 60 * 60 * 1000 },
+			}),
+		);
+		expect((await authStorage.markUsageLimitReached("openai-codex", sessionId)).switched).toBe(true);
+
+		usageByAccount.set(
+			"acct-secondary",
+			createCodexUsageReport({
+				accountId: "acct-secondary",
+				primary: { usedFraction: 1, resetInMs: 45 * 60 * 1000 },
+				secondary: { usedFraction: 1, resetInMs: 45 * 60 * 1000 },
+			}),
+		);
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("runtime-personal");
+
+		usageByAccount.set(
+			"acct-secondary",
+			createCodexUsageReport({
+				accountId: "acct-secondary",
+				primary: { usedFraction: 0.4, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.4, resetInMs: WEEK_MS },
+			}),
+		);
+
+		const outcome = await authStorage.markUsageLimitReached("openai-codex", sessionId);
+		expect(outcome.switched).toBe(true);
+		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("runtime-secondary");
+	});
+
 	test("prefers Pro accounts for codex spark models over Plus accounts", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

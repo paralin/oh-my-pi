@@ -1395,6 +1395,20 @@ export class AuthStorage {
 		this.#credentialBackoff.set(backoffKey, backoffMap);
 	}
 
+	#clearCredentialBlocked(
+		providerKey: string,
+		credentialIndex: number,
+		blockScope: string | undefined = undefined,
+	): void {
+		const backoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
+		const backoffMap = this.#credentialBackoff.get(backoffKey);
+		if (!backoffMap) return;
+		backoffMap.delete(credentialIndex);
+		if (backoffMap.size === 0) {
+			this.#credentialBackoff.delete(backoffKey);
+		}
+	}
+
 	/** Records which credential was used for a session (for rate-limit switching). */
 	#recordSessionCredential(
 		provider: string,
@@ -2814,6 +2828,27 @@ export class AuthStorage {
 		);
 	}
 
+	async #getUsageReportFreshForOauth(
+		provider: Provider,
+		credential: OAuthCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null> {
+		const storeHook = this.#store.getUsageReport?.bind(this.#store);
+		if (storeHook) {
+			return storeHook(provider, credential, options?.signal);
+		}
+		const request = this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl);
+		const report = await this.#fetchUsageUncached(request, options?.timeoutMs ?? this.#usageRequestTimeoutMs);
+		if (report !== null) {
+			this.#usageCache.set(this.#buildUsageReportCacheKey(request), {
+				value: report,
+				expiresAt: Date.now() + USAGE_REPORT_TTL_MS,
+			});
+			this.#recordUsageHistory(request, report);
+		}
+		return report;
+	}
+
 	async #getUsageReportForRuntimeApiKey(
 		provider: Provider,
 		credential: RuntimeApiKeyChainCredential,
@@ -2823,6 +2858,23 @@ export class AuthStorage {
 			this.#buildUsageRequestForRuntimeApiKey(provider, credential, options?.baseUrl),
 			options?.timeoutMs ?? this.#usageRequestTimeoutMs,
 		);
+	}
+
+	async #getUsageReportFreshForRuntimeApiKey(
+		provider: Provider,
+		credential: RuntimeApiKeyChainCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null> {
+		const request = this.#buildUsageRequestForRuntimeApiKey(provider, credential, options?.baseUrl);
+		const report = await this.#fetchUsageUncached(request, options?.timeoutMs ?? this.#usageRequestTimeoutMs);
+		if (report !== null) {
+			this.#usageCache.set(this.#buildUsageReportCacheKey(request), {
+				value: report,
+				expiresAt: Date.now() + USAGE_REPORT_TTL_MS,
+			});
+			this.#recordUsageHistory(request, report);
+		}
+		return report;
 	}
 
 	/**
@@ -3156,12 +3208,60 @@ export class AuthStorage {
 			);
 
 		let retryAtMs: number | undefined;
+		let soonestSiblingIndex: number | undefined;
 		for (const candidate of remainingCredentials) {
-			const candidateBlockedUntil = this.#getCredentialBlockedUntil(providerKey, candidate.index, blockScope);
+			let candidateBlockedUntil = this.#getCredentialBlockedUntil(providerKey, candidate.index, blockScope);
 			if (candidateBlockedUntil === undefined) return { switched: true };
-			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+			if (candidate.credential.type === "oauth" && strategy) {
+				const report = await this.#getUsageReportFreshForOauth(provider as Provider, candidate.credential, {
+					...options,
+					timeoutMs: this.#usageRequestTimeoutMs,
+				});
+				if (report) {
+					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+					if (!this.#isUsageLimitReached(scopedLimits)) {
+						this.#clearCredentialBlocked(providerKey, candidate.index, blockScope);
+						return { switched: true };
+					}
+					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
+					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
+						this.#markCredentialBlocked(providerKey, candidate.index, resetAtMs, blockScope);
+						candidateBlockedUntil = resetAtMs;
+					}
+				}
+			}
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) {
+				retryAtMs = candidateBlockedUntil;
+				soonestSiblingIndex = candidate.index;
+			}
 		}
-		return { switched: false, retryAtMs, resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs) };
+
+		// Every account of this type/scope is usage-limited (no sibling returned
+		// `switched: true` above). Compute the soonest moment any account regains
+		// capacity, switch the session's sticky credential to that account so the
+		// post-wait re-rank resumes on it, and log the concrete reset time so the
+		// wait is auditable. The current account's usable-at uses the later of its
+		// exhausted windows (`currentResumeAtMs`); a sibling's is the soonest reset
+		// it was blocked until (`retryAtMs`). Whichever is earlier owns both the
+		// wait target the caller sleeps on and the account it resumes on.
+		const resumeAtMs = this.#soonestDefined(currentResumeAtMs, retryAtMs);
+		if (resumeAtMs !== undefined) {
+			const switchToSibling =
+				retryAtMs !== undefined && (currentResumeAtMs === undefined || retryAtMs < currentResumeAtMs);
+			const switchIndex = switchToSibling ? soonestSiblingIndex : sessionCredential.index;
+			if (switchIndex !== undefined && switchIndex !== sessionCredential.index) {
+				this.#recordSessionCredential(provider, sessionId, sessionCredential.type, switchIndex);
+			}
+			logger.info("All OAuth accounts usage-limited; waiting for the soonest reset", {
+				provider,
+				accountCount: remainingCredentials.length + 1,
+				switchToIndex: switchIndex,
+				resumeAtMs,
+				resumeAt: new Date(resumeAtMs).toISOString(),
+				waitMs: Math.max(0, resumeAtMs - now),
+			});
+		}
+		return { switched: false, retryAtMs, resumeAtMs };
 	}
 
 	/** Returns the smaller of two optional epoch-ms values, or whichever is defined. */
@@ -3514,8 +3614,26 @@ export class AuthStorage {
 		let retryAtMs: number | undefined;
 		for (let candidateIndex = 0; candidateIndex < credentials.length; candidateIndex += 1) {
 			if (candidateIndex === index) continue;
-			const candidateBlockedUntil = this.#getCredentialBlockedUntil(providerKey, candidateIndex, blockScope);
+			let candidateBlockedUntil = this.#getCredentialBlockedUntil(providerKey, candidateIndex, blockScope);
 			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (strategy) {
+				const report = await this.#getUsageReportFreshForRuntimeApiKey(provider, credentials[candidateIndex]!, {
+					...options,
+					timeoutMs: this.#usageRequestTimeoutMs,
+				});
+				if (report) {
+					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+					if (!this.#isUsageLimitReached(scopedLimits)) {
+						this.#clearCredentialBlocked(providerKey, candidateIndex, blockScope);
+						return { switched: true };
+					}
+					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
+					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
+						this.#markCredentialBlocked(providerKey, candidateIndex, resetAtMs, blockScope);
+						candidateBlockedUntil = resetAtMs;
+					}
+				}
+			}
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
 		}
 		return { switched: false, retryAtMs, resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs) };
