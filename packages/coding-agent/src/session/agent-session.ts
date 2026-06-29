@@ -347,7 +347,7 @@ import {
 	stripImagesFromMessage,
 	USER_INTERRUPT_LABEL,
 } from "./messages";
-import { SCRATCH_HANDOFF_READ_CUSTOM_TYPE } from "./scratch-handoff";
+import { renderScratchHandoffResumeMessage, SCRATCH_HANDOFF_READ_CUSTOM_TYPE } from "./scratch-handoff";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -9230,6 +9230,18 @@ export class AgentSession {
 		if (compactMode?.rejectsFocus && customInstructions) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
 		}
+		// Bare `/compact` (no explicit native mode) on a session with scratch handoff
+		// active is the clean-break path: the agent keeps a durable scratch file
+		// current, so reset into the scratch successor session instead of running an
+		// LLM summary. Explicit modes (soft/remote/snapcompact) still drive the native
+		// engine, and `strategy: off` disables auto-maintenance so manual stays native.
+		if (
+			!compactMode &&
+			this.#scratchHandoffDisplayPath !== undefined &&
+			this.settings.getGroup("compaction").strategy !== "off"
+		) {
+			return this.#runManualScratchHandoffCompaction();
+		}
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
 
@@ -9649,7 +9661,10 @@ export class AgentSession {
 				return [
 					{
 						type: "text",
-						text: `Current scratch continuity state for this session.\n<scratch-handoff-context>\nPath: ${this.#scratchHandoffDisplayPath}\n\n${scratchText}\n</scratch-handoff-context>`,
+						text: renderScratchHandoffResumeMessage({
+							displayPath: this.#scratchHandoffDisplayPath,
+							scratchText,
+						}),
 					},
 				];
 			} catch {
@@ -10772,25 +10787,27 @@ export class AgentSession {
 	/**
 	 * Own the terminal transition for a goal that crossed its token budget.
 	 *
-	 * A budget-limited goal previously left closeout to the model: the budget
-	 * steer asked it to wrap up, the todo reminder then pressured it, and the
-	 * model could satisfy the reminder by dropping unfinished todos and stopping
-	 * with prose. When scratch handoff is enabled the runtime owns the terminal
-	 * instead. Under the handoff compaction strategy it resets into a scratch
-	 * successor session with todos preserved; otherwise it parks in the typed
-	 * budget-limited state, keeping todos and pointing at the scratch file.
+	 * When the active provider's usage report proves the selected account is
+	 * exhausted, budget-limited closeout follows the same credential/reset wait
+	 * path as a live `usage_limit_reached` provider error: mark the exhausted
+	 * account, switch to a usable sibling immediately when one exists, or wait
+	 * until the first account becomes usable again before resuming the goal.
+	 *
+	 * Without usage evidence this stays a typed budget terminal. Under the
+	 * handoff compaction strategy it resets into a scratch successor session with
+	 * todos preserved; otherwise it parks in place, keeping todos and pointing at
+	 * the scratch file.
 	 *
 	 * Fires once per budget-limited episode and only after the model has had its
 	 * wrap-up turn (the steer is "delivered", set at the turn_start that injected
-	 * it), never on the flip turn that queued the steer. Budget is spent, so
-	 * neither path auto-continues into an immediately re-limited turn.
+	 * it), never on the flip turn that queued the steer.
 	 *
-	 * Returns "reset" when it reset into a successor session (the caller
-	 * short-circuits the closeout tail), "parked" when it parked in place (the
-	 * caller skips the todo reminder but still runs session-stop hooks), or
-	 * "none" when not engaged.
+	 * Returns "retry" when a usage-reset continuation was scheduled, "reset" when
+	 * it reset into a successor session (the caller short-circuits the closeout
+	 * tail), "parked" when it parked in place (the caller skips the todo reminder
+	 * but still runs session-stop hooks), or "none" when not engaged.
 	 */
-	async #runBudgetLimitedScratchCloseout(): Promise<"reset" | "parked" | "none"> {
+	async #runBudgetLimitedScratchCloseout(): Promise<"retry" | "reset" | "parked" | "none"> {
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (scratchPath === undefined) return "none";
 		const goalState = this.#goalModeState;
@@ -10802,6 +10819,10 @@ export class AgentSession {
 		if (this.#budgetCloseoutHandledForGoalId === goalState.goal.id) return "none";
 		this.#budgetCloseoutHandledForGoalId = goalState.goal.id;
 		this.#budgetLimitSteer = "idle";
+
+		if (await this.#scheduleBudgetLimitedUsageContinuation()) {
+			return "retry";
+		}
 
 		const compaction = this.settings.getGroup("compaction");
 		if (compaction.strategy === "handoff" && compaction.enabled) {
@@ -10826,6 +10847,118 @@ export class AgentSession {
 			"goal",
 		);
 		return "parked";
+	}
+
+	async #scheduleBudgetLimitedUsageContinuation(): Promise<boolean> {
+		const model = this.model;
+		if (!model) return false;
+		const retrySettings = this.settings.getGroup("retry");
+		if (!retrySettings.enabled) return false;
+
+		const retryAfterMs = calculateRateLimitBackoffMs("QUOTA_EXHAUSTED");
+		const outcome = await this.#modelRegistry.authStorage.markUsageLimitReached(model.provider, this.sessionId, {
+			retryAfterMs,
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+			requireUsageEvidence: true,
+		});
+		if (outcome.usageLimited !== true) return false;
+
+		this.#retryAttempt++;
+		if (!this.#retryPromise) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#retryPromise = promise;
+			this.#retryResolve = resolve;
+		}
+		if (this.#retryAttempt > retrySettings.maxRetries) {
+			const attempt = this.#retryAttempt - 1;
+			this.#retryAttempt = 0;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Goal budget-limited usage wait exceeded retry.maxRetries.",
+			});
+			this.#resolveRetry();
+			return false;
+		}
+
+		let delayMs = retryAfterMs;
+		let usageResetAtMs: number | undefined;
+		if (outcome.switched) {
+			delayMs = 0;
+		} else {
+			if (outcome.retryAtMs !== undefined) {
+				const siblingWaitMs = Math.max(0, outcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+				if (siblingWaitMs < delayMs) {
+					delayMs = siblingWaitMs;
+				}
+			}
+			if (retrySettings.waitForUsageReset && outcome.resumeAtMs !== undefined) {
+				const resumeWaitMs = Math.max(0, outcome.resumeAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+				if (resumeWaitMs <= retrySettings.maxUsageResetWaitMs) {
+					delayMs = resumeWaitMs;
+					usageResetAtMs = Date.now() + resumeWaitMs;
+				}
+			}
+		}
+
+		const maxDelayMs = retrySettings.maxDelayMs;
+		if (maxDelayMs > 0 && delayMs > maxDelayMs && !outcome.switched && usageResetAtMs === undefined) {
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: `Provider usage remains blocked for ${delayMs}ms, exceeding retry.maxDelayMs (${maxDelayMs}ms).`,
+			});
+			this.#resolveRetry();
+			return false;
+		}
+
+		await this.#emitSessionEvent({
+			type: "auto_retry_start",
+			attempt: this.#retryAttempt,
+			maxAttempts: retrySettings.maxRetries,
+			delayMs,
+			errorMessage: "Goal token budget reached while provider usage is exhausted; waiting for account capacity.",
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+			usageResetAtMs,
+		});
+
+		const generation = this.#promptGeneration;
+		this.#schedulePostPromptTask(
+			async signal => {
+				if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+					return;
+				}
+				this.#beginInFlight();
+				try {
+					await this.#goalRuntime.resumeGoal();
+					await this.#maybeRestoreRetryFallbackPrimary();
+					if (signal.aborted || this.#isDisposed) return;
+					await this.agent.continue();
+				} catch (error) {
+					const attempt = this.#retryAttempt;
+					this.#retryAttempt = 0;
+					await this.#emitSessionEvent({
+						type: "auto_retry_end",
+						success: false,
+						attempt,
+						finalError: error instanceof Error ? error.message : String(error),
+					});
+					this.#resolveRetry();
+					logger.warn("agent.continue failed after budget-limited usage wait", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				} finally {
+					this.#endInFlight();
+				}
+			},
+			{ delayMs: delayMs > 0 ? delayMs : 1, generation },
+		);
+		return true;
 	}
 
 	/**

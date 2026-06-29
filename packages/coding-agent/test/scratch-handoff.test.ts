@@ -99,7 +99,14 @@ describe("scratch handoff", () => {
 			if (scratchContext?.role !== "custom") throw new Error("missing scratch handoff context");
 			expect(scratchContext.content).toEqual([
 				expect.objectContaining({
-					text: expect.stringContaining("Current scratch continuity state for this session."),
+					text: expect.stringContaining("Resume this session from the scratch handoff below."),
+				}),
+			]);
+			expect(scratchContext.content).toEqual([
+				expect.objectContaining({
+					text: expect.stringContaining(
+						"Reload and continue the skill/command stack recorded in the scratch file",
+					),
 				}),
 			]);
 			const scratchText = Array.isArray(scratchContext.content)

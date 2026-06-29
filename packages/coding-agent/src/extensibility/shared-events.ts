@@ -212,7 +212,7 @@ export interface TurnEndEvent {
 // Auto-compaction / Auto-retry Events
 // ============================================================================
 
-export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete" | "manual" | "budget";
+export type AutoCompactionReason = "threshold" | "overflow" | "idle" | "incomplete" | "budget" | "manual";
 
 export type AutoCompactionAction = "context-full" | "handoff" | "shake" | "snapcompact" | "scratch-handoff";
 
