@@ -592,11 +592,17 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
  * sleep until the account itself resets and auto-resume instead of failing on
  * the provider's blunt retry-after. `undefined` when no usage report makes a
  * concrete reset time known.
+ *
+ * `usageLimited` is `false` only when a caller asked for usage-report evidence
+ * before mutating credential state and the scoped report did not prove the
+ * current credential is exhausted. Ordinary `usage_limit_reached` callers omit
+ * that guard because the provider error is already the evidence.
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
 	retryAtMs?: number;
 	resumeAtMs?: number;
+	usageLimited?: boolean;
 }
 
 type UsageCacheEntry<T> = {
@@ -3165,7 +3171,13 @@ export class AuthStorage {
 	async markUsageLimitReached(
 		provider: string,
 		sessionId: string | undefined,
-		options?: { retryAfterMs?: number; baseUrl?: string; modelId?: string; signal?: AbortSignal },
+		options?: {
+			retryAfterMs?: number;
+			baseUrl?: string;
+			modelId?: string;
+			signal?: AbortSignal;
+			requireUsageEvidence?: boolean;
+		},
 	): Promise<UsageLimitMarkResult> {
 		const runtimeMark = await this.#markRuntimeApiKeyChainUsageLimitReached(provider as Provider, sessionId, options);
 		if (runtimeMark) return runtimeMark;
@@ -3180,6 +3192,7 @@ export class AuthStorage {
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 		let currentResumeAtMs: number | undefined;
+		let currentUsageLimited = false;
 
 		if (sessionCredential.type === "oauth" && strategy) {
 			const credential = this.#getCredentialsForProvider(provider)[sessionCredential.index];
@@ -3188,6 +3201,7 @@ export class AuthStorage {
 				if (report) {
 					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
 					if (this.#isUsageLimitReached(scopedLimits)) {
+						currentUsageLimited = true;
 						const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
 						if (resetAtMs && resetAtMs > blockedUntil) {
 							blockedUntil = resetAtMs;
@@ -3196,6 +3210,10 @@ export class AuthStorage {
 					}
 				}
 			}
+		}
+
+		if (options?.requireUsageEvidence && !currentUsageLimited) {
+			return { switched: false, usageLimited: false };
 		}
 
 		this.#markCredentialBlocked(providerKey, sessionCredential.index, blockedUntil, blockScope);
@@ -3211,7 +3229,7 @@ export class AuthStorage {
 		let soonestSiblingIndex: number | undefined;
 		for (const candidate of remainingCredentials) {
 			let candidateBlockedUntil = this.#getCredentialBlockedUntil(providerKey, candidate.index, blockScope);
-			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (candidateBlockedUntil === undefined) return { switched: true, usageLimited: true };
 			if (candidate.credential.type === "oauth" && strategy) {
 				const report = await this.#getUsageReportFreshForOauth(provider as Provider, candidate.credential, {
 					...options,
@@ -3221,7 +3239,7 @@ export class AuthStorage {
 					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
 					if (!this.#isUsageLimitReached(scopedLimits)) {
 						this.#clearCredentialBlocked(providerKey, candidate.index, blockScope);
-						return { switched: true };
+						return { switched: true, usageLimited: true };
 					}
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
 					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
@@ -3261,7 +3279,7 @@ export class AuthStorage {
 				waitMs: Math.max(0, resumeAtMs - now),
 			});
 		}
-		return { switched: false, retryAtMs, resumeAtMs };
+		return { switched: false, retryAtMs, resumeAtMs, usageLimited: true };
 	}
 
 	/** Returns the smaller of two optional epoch-ms values, or whichever is defined. */
@@ -3582,7 +3600,13 @@ export class AuthStorage {
 	async #markRuntimeApiKeyChainUsageLimitReached(
 		provider: Provider,
 		sessionId: string | undefined,
-		options?: { retryAfterMs?: number; baseUrl?: string; modelId?: string; signal?: AbortSignal },
+		options?: {
+			retryAfterMs?: number;
+			baseUrl?: string;
+			modelId?: string;
+			signal?: AbortSignal;
+			requireUsageEvidence?: boolean;
+		},
 	): Promise<UsageLimitMarkResult | undefined> {
 		const credentials = this.#runtimeApiKeyChains.get(provider);
 		const index = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId);
@@ -3595,11 +3619,13 @@ export class AuthStorage {
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 		let currentResumeAtMs: number | undefined;
+		let currentUsageLimited = false;
 		if (strategy) {
 			const report = await this.#getUsageReportForRuntimeApiKey(provider, credentials[index], options);
 			if (report) {
 				const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
 				if (this.#isUsageLimitReached(scopedLimits)) {
+					currentUsageLimited = true;
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
 					if (resetAtMs && resetAtMs > blockedUntil) {
 						blockedUntil = resetAtMs;
@@ -3608,6 +3634,9 @@ export class AuthStorage {
 				}
 			}
 		}
+		if (options?.requireUsageEvidence && !currentUsageLimited) {
+			return { switched: false, usageLimited: false };
+		}
 		this.#markCredentialBlocked(providerKey, index, blockedUntil, blockScope);
 		this.#clearRuntimeApiKeyChainSessionCredential(provider, sessionId);
 
@@ -3615,7 +3644,7 @@ export class AuthStorage {
 		for (let candidateIndex = 0; candidateIndex < credentials.length; candidateIndex += 1) {
 			if (candidateIndex === index) continue;
 			let candidateBlockedUntil = this.#getCredentialBlockedUntil(providerKey, candidateIndex, blockScope);
-			if (candidateBlockedUntil === undefined) return { switched: true };
+			if (candidateBlockedUntil === undefined) return { switched: true, usageLimited: true };
 			if (strategy) {
 				const report = await this.#getUsageReportFreshForRuntimeApiKey(provider, credentials[candidateIndex]!, {
 					...options,
@@ -3625,7 +3654,7 @@ export class AuthStorage {
 					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
 					if (!this.#isUsageLimitReached(scopedLimits)) {
 						this.#clearCredentialBlocked(providerKey, candidateIndex, blockScope);
-						return { switched: true };
+						return { switched: true, usageLimited: true };
 					}
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
 					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
@@ -3636,7 +3665,12 @@ export class AuthStorage {
 			}
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
 		}
-		return { switched: false, retryAtMs, resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs) };
+		return {
+			switched: false,
+			retryAtMs,
+			resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs),
+			usageLimited: true,
+		};
 	}
 
 	/**

@@ -285,6 +285,10 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 		await authStorage.getApiKey(PROVIDER, "sess");
 		const outcome = await authStorage.markUsageLimitReached(PROVIDER, "sess", { retryAfterMs: 3_600_000 });
-		expect(outcome).toEqual({ switched: false, retryAtMs: undefined });
+		// No sibling and no usage-report reset time, so there is no retry/resume
+		// target — but the account is genuinely usage-limited, so `usageLimited` is
+		// true. That flag is what lets the goal-budget continuation wait for capacity
+		// rather than treating the stop as a pure token-budget park.
+		expect(outcome).toEqual({ switched: false, retryAtMs: undefined, usageLimited: true });
 	});
 });
