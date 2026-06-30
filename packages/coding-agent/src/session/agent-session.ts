@@ -306,12 +306,7 @@ import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { buildResolveReminderMessage } from "../tools/resolve";
-import {
-	getLatestTodoPhasesFromEntries,
-	type TodoItem,
-	type TodoPhase,
-	USER_TODO_EDIT_CUSTOM_TYPE,
-} from "../tools/todo";
+import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
@@ -2127,7 +2122,11 @@ export class AgentSession {
 		this.agent.afterToolCall = ctx => this.#ttsrAfterToolCall(ctx);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
-		this.#syncTodoPhasesFromBranch();
+		// Scratch org TODO headings are the durable work tracker; carrying tool
+		// todos into a scratch successor resurrects stale parallel state.
+		if (!this.#scratchHandoffDisplayPath) {
+			this.#syncTodoPhasesFromBranch();
+		}
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
@@ -9769,8 +9768,6 @@ export class AgentSession {
 		trace: MaintenanceTraceState,
 		pendingMessages: readonly AgentMessage[] = [],
 	): Promise<void> {
-		this.#syncTodoPhasesFromBranch();
-		const preservedTodoPhases = this.getTodoPhases();
 		const scratchContent = this.#scratchHandoffMessageContent(pendingMessages);
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
 		const previousSessionFile = this.sessionFile;
@@ -9790,6 +9787,7 @@ export class AgentSession {
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#todoReminderCount = 0;
 		this.#todoReminderAwaitingProgress = false;
+		this.setTodoPhases([]);
 		await this.#emitMaintenanceTracePhase(trace, "scratch-successor-session-reset");
 		this.sessionManager.appendCustomMessageEntry(
 			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
@@ -9798,17 +9796,12 @@ export class AgentSession {
 			{ path: this.#scratchHandoffDisplayPath },
 			"agent",
 		);
-		if (preservedTodoPhases.length > 0) {
-			this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: preservedTodoPhases });
-		}
 		await this.sessionManager.ensureOnDisk();
 		await this.#emitMaintenanceTracePhase(trace, "scratch-read-injected");
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#resetAllAdvisorRuntimes();
 		await this.#emitMaintenanceTracePhase(trace, "scratch-session-rebuilt");
-		this.#syncTodoPhasesFromBranch();
-		await this.#emitMaintenanceTracePhase(trace, "scratch-todo-synced");
 	}
 
 	/**

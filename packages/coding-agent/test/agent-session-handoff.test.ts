@@ -1033,7 +1033,7 @@ describe("AgentSession handoff", () => {
 		).toBe("context-full");
 	});
 
-	it("refreshes scratch handoff content from disk before resetting", async () => {
+	it("refreshes scratch handoff content from disk before resetting without carrying todos", async () => {
 		await session.dispose();
 		const scratchPath = "agent/current.org";
 		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
@@ -1135,12 +1135,7 @@ describe("AgentSession handoff", () => {
 		expect(scratchEntry.content).not.toEqual([
 			expect.objectContaining({ text: expect.stringContaining("stale launch snapshot") }),
 		]);
-		expect(session.getTodoPhases()).toEqual([
-			{
-				name: "Carryover",
-				tasks: [{ content: "Reuse existing todo list", status: "in_progress" }],
-			},
-		]);
+		expect(session.getTodoPhases()).toEqual([]);
 		type MaintenanceEvent = Extract<
 			AgentSessionEvent,
 			| { type: "maintenance_trace_start" }
@@ -1178,7 +1173,6 @@ describe("AgentSession handoff", () => {
 			"maintenance_trace_phase",
 			"maintenance_trace_phase",
 			"maintenance_trace_phase",
-			"maintenance_trace_phase",
 			"maintenance_trace_end",
 		]);
 		expect(tracePhases.map(event => event.phase)).toEqual([
@@ -1186,7 +1180,6 @@ describe("AgentSession handoff", () => {
 			"scratch-successor-session-reset",
 			"scratch-read-injected",
 			"scratch-session-rebuilt",
-			"scratch-todo-synced",
 		]);
 		expect(traceDeltas.map(event => event.content)).toEqual(["activity"]);
 		expect(maintenanceEvents.every(event => event.traceId === traceStart.traceId)).toBe(true);
