@@ -250,10 +250,28 @@ function initialScratchHandoffDocument(input: {
 	date?: Date;
 }): string {
 	const isoDate = (input.date ?? new Date()).toISOString();
-	const parentLine = input.parentScratchDisplayPath
-		? `- Parent scratch: [[file:${input.parentScratchDisplayPath}][Parent scratch handoff]]\n`
-		: "";
-	return `#+TITLE: OMP Scratch Handoff ${input.sessionId}\n#+DATE: ${isoDate}\n\n* Scratch Handoff\n:PROPERTIES:\n:session: ${input.sessionId}\n:path: ${input.displayPath}\n:END:\n\n${parentLine}** TODO Current work\n- Objective: \n- Skill stack: \n- Work completed: \n- Files changed: \n- Verification: \n- Blockers or risks: \n- Next action: \n- Source refs: \n`;
+	const lines = [
+		"#+TITLE: Current agent work",
+		`#+DATE: ${isoDate}`,
+		`#+SESSION: ${input.sessionId}`,
+		`#+PATH: ${input.displayPath}`,
+	];
+	if (input.parentScratchDisplayPath) {
+		lines.push(`#+PARENT_SCRATCH: [[file:${input.parentScratchDisplayPath}][Parent scratch handoff]]`);
+	}
+	lines.push(
+		"",
+		"* TODO Current work",
+		"- Objective: ",
+		"- Skill stack: ",
+		"- Work completed: ",
+		"- Files changed: ",
+		"- Verification: ",
+		"- Blockers or risks: ",
+		"- Next action: ",
+		"- Source refs: ",
+	);
+	return `${lines.join("\n")}\n`;
 }
 
 function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPath: string | undefined): string {
@@ -262,10 +280,13 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		`- Existing scratch org file: ${displayPath}. Its current contents are already in context as continuation state; inspect or update the file only when live state diverges.`,
 		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
 		"- Record the loaded skill/command stack in the `Skill stack:` field, in the order it was loaded (e.g. orient -> investigate-issue -> ...), so a successor session reloads and resumes the same stack.",
+		"- Keep `#+TITLE` as a one-line summary of the agent's current purpose; update it with the first useful scratch delta once the objective is known.",
+		"- Keep scratch metadata in root org keywords such as `#+SESSION`, `#+PATH`, and optional `#+PARENT_SCRATCH`; do not add a wrapper heading above the work tree.",
 		"- Resume the active skill/workflow stack recorded in the scratch file or restored session context; do not restart the workflow from its initial capture/orientation step.",
 		"- Treat the scratch file as the durable continuity packet for context pressure, resume, and successor sessions.",
-		"- Track work inside the scratch file with org GTD TODO/DONE subheadings. Keep the current work under an active `** TODO ...` heading, record state as bullets under that heading, and add future work as child `*** TODO ...` subheadings.",
+		"- Track work inside the scratch file with org GTD TODO/DONE subheadings. Keep the current work under an active `* TODO ...` heading, record state as bullets under that heading, and add future work as child `** TODO ...` subheadings.",
 		"- A child TODO blocks closing its parent heading. Before marking the parent DONE, complete each child TODO or defer it explicitly with owner, blocker, next action, return condition, and source refs.",
+		"- Keep verification as current proof and residual risk, not a transcript of intermediate skill steps. Record commands only when a successor needs the exact invocation, output, blocker, or falsifier.",
 		"- Do not use the separate todo tool/list for scratch-owned work; scratch org TODO headings are the task tracker in this setup.",
 	];
 	if (parentScratchDisplayPath) {
@@ -278,7 +299,7 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- After the first scratch delta, keep iteratively refining the same org heading instead of appending duplicate status blocks; add a new TODO subheading only for real child work.",
 		"- Before any deliberate large read/edit/proof block, before context pressure can force compaction, and before ending with unfinished work, inspect the scratch file and update only stale or missing handoff state.",
 		"- Do not rewrite or re-output the whole summary when the file is already current.",
-		"- The scratch file must be enough for a successor session: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, changed files, verification already run, blockers, next action, and source refs needed to continue.",
+		"- The scratch file must be enough for a successor session: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
 		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta, not as the place to build the first scratch summary.",
 		"- If no update is needed, leave the file unchanged and report one sentence saying it was already current.",
 		"- In the final response, mention whether the scratch file was updated or unchanged and name the path.",

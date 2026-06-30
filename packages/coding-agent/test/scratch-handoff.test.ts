@@ -82,16 +82,21 @@ describe("scratch handoff", () => {
 				agentId: "Main",
 			});
 			const document = fs.readFileSync(scratch.absolutePath, "utf8");
-			expect(document).toContain("* Scratch Handoff");
-			expect(document).toContain(`:session: ${sessionManager.getSessionId()}`);
-			expect(document).toContain("** TODO Current work");
+			expect(document).toContain("#+TITLE: Current agent work");
+			expect(document).toContain(`#+SESSION: ${sessionManager.getSessionId()}`);
+			expect(document).toContain(`#+PATH: ${scratch.displayPath}`);
+			expect(document).toContain("* TODO Current work");
+			expect(document).not.toContain("* Scratch Handoff");
 			const promptText = session.systemPrompt.join("\n\n");
 			expect(promptText).toContain("Scratch continuity protocol:");
 			expect(promptText).toContain(`Existing scratch org file: ${scratch.displayPath}.`);
 			expect(promptText).toContain("Continue exactly as if no context reset, compaction, or handoff occurred.");
 			expect(promptText).toContain("Do not mention, log, summarize, or count scratch loading");
-			expect(promptText).toContain("Track work inside the scratch file with org GTD TODO/DONE subheadings");
+			expect(promptText).toContain("Keep `#+TITLE` as a one-line summary");
+			expect(promptText).toContain("Keep scratch metadata in root org keywords");
+			expect(promptText).toContain("Keep the current work under an active `* TODO ...` heading");
 			expect(promptText).toContain("A child TODO blocks closing its parent heading");
+			expect(promptText).toContain("Keep verification as current proof and residual risk");
 			expect(promptText).toContain("Do not use the separate todo tool/list for scratch-owned work");
 			const scratchContext = session.agent.state.messages.find(message => {
 				return message.role === "custom" && message.customType === "scratch-handoff-read";
