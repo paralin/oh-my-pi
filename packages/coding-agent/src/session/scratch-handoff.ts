@@ -1,10 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Message } from "@oh-my-pi/pi-ai";
+import * as snapcompact from "@oh-my-pi/snapcompact";
+
 import { resolveToCwd } from "../tools/path-utils";
+
+import { createCustomMessage } from "./messages";
 import type { SessionEntry } from "./session-entries";
 
 export const SCRATCH_HANDOFF_READ_CUSTOM_TYPE = "scratch-handoff-read";
+export const SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE = "scratch-handoff-write";
 
 export interface ScratchHandoffSettings {
 	enabled: boolean;
@@ -68,9 +75,13 @@ function nonEmptyString(value: unknown): string | undefined {
 	return trimmed ? value : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 function scratchHandoffDetails(details: unknown): ScratchHandoffPathSelection | undefined {
-	if (!details || typeof details !== "object") return undefined;
-	const record = details as Record<string, unknown>;
+	if (!isRecord(details)) return undefined;
+	const record = details;
 	const scratchFile = nonEmptyString(record.path);
 	const parentScratchDisplayPath = nonEmptyString(record.parentPath);
 	if (!scratchFile && !parentScratchDisplayPath) return undefined;
@@ -99,6 +110,82 @@ export function resolveScratchHandoffPathSelection(input: {
 		scratchFile: nonEmptyString(input.scratchFile) ?? persisted?.scratchFile,
 		parentScratchDisplayPath: nonEmptyString(input.parentScratchDisplayPath) ?? persisted?.parentScratchDisplayPath,
 	};
+}
+
+export type ScratchHandoffMessageConverter = (messages: AgentMessage[]) => Message[];
+
+function sessionEntryMessage(entry: SessionEntry): AgentMessage | undefined {
+	if (entry.type === "message") return entry.message;
+	if (entry.type !== "custom_message") return undefined;
+	if (entry.customType === SCRATCH_HANDOFF_READ_CUSTOM_TYPE) return undefined;
+	return createCustomMessage(
+		entry.customType,
+		entry.content,
+		entry.display,
+		entry.details,
+		entry.timestamp,
+		entry.attribution,
+	);
+}
+
+function modelVisibleUserMessageIndex(
+	messages: readonly AgentMessage[],
+	convertToLlm: ScratchHandoffMessageConverter,
+): number {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message && convertToLlm([message]).some(converted => converted.role === "user")) return index;
+	}
+	return -1;
+}
+
+function latestModelVisibleUserEntryIndex(
+	entries: readonly SessionEntry[],
+	convertToLlm: ScratchHandoffMessageConverter,
+): number {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const message = sessionEntryMessage(entries[index]);
+		if (message && convertToLlm([message]).some(converted => converted.role === "user")) return index;
+	}
+	return -1;
+}
+
+function latestScratchHandoffWriteEntryIndex(entries: readonly SessionEntry[]): number {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type === "custom" && entry.customType === SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE) return index;
+	}
+	return -1;
+}
+
+export function buildScratchHandoffRecentContext(input: {
+	entries: readonly SessionEntry[];
+	pendingMessages?: readonly AgentMessage[];
+	convertToLlm: ScratchHandoffMessageConverter;
+}): string | undefined {
+	const pendingMessages = input.pendingMessages ?? [];
+	const pendingUserIndex = modelVisibleUserMessageIndex(pendingMessages, input.convertToLlm);
+	const messages =
+		pendingUserIndex >= 0
+			? pendingMessages.slice(pendingUserIndex)
+			: [
+					...input.entries
+						.slice(
+							Math.max(
+								latestModelVisibleUserEntryIndex(input.entries, input.convertToLlm),
+								latestScratchHandoffWriteEntryIndex(input.entries) + 1,
+								0,
+							),
+						)
+						.map(sessionEntryMessage)
+						.filter((message): message is AgentMessage => message !== undefined),
+					...pendingMessages,
+				];
+	const llmMessages = input
+		.convertToLlm(messages.filter(message => message.role !== "toolResult"))
+		.filter(message => message.role !== "toolResult");
+	const text = snapcompact.serializeConversation(llmMessages).trim();
+	return text.length > 0 ? text : undefined;
 }
 
 export async function buildScratchHandoffContext(input: {
@@ -208,19 +295,29 @@ export function renderScratchHandoffResumeMessage(input: {
 	displayPath: string;
 	scratchText: string;
 	parentDisplayPath?: string;
+	recentContextText?: string;
 }): string {
 	const parentLine = input.parentDisplayPath ? `Parent scratch: ${input.parentDisplayPath}\n` : "";
-	return [
-		"Resume this session from the scratch handoff below.",
-		"Reload and continue the skill/command stack recorded in the scratch file, in its original load order, and keep using the existing todo list. Continue the work already in progress.",
-		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
-		"",
+	const scratchContext = [
 		`${parentLine}<scratch-handoff-context>`,
 		`Path: ${input.displayPath}`,
 		"",
 		input.scratchText,
 		"</scratch-handoff-context>",
 	].join("\n");
+	const recentContext = input.recentContextText?.trim();
+	return [
+		"Resume this session from the scratch handoff below.",
+		"Reload and continue the skill/command stack recorded in the scratch file, in its original load order, and keep using the existing todo list. Continue the work already in progress.",
+		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
+		"",
+		scratchContext,
+		recentContext
+			? `\n<recent-session-context>\nRecent user, assistant, and tool-call turns that may not be reflected in the scratch file. Tool result bodies are intentionally omitted.\n\n${recentContext}\n</recent-session-context>`
+			: "",
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 export function renderScratchHandoffSyntheticRead(context: ScratchHandoffContext): string {

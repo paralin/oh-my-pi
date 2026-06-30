@@ -347,7 +347,12 @@ import {
 	stripImagesFromMessage,
 	USER_INTERRUPT_LABEL,
 } from "./messages";
-import { renderScratchHandoffResumeMessage, SCRATCH_HANDOFF_READ_CUSTOM_TYPE } from "./scratch-handoff";
+import {
+	buildScratchHandoffRecentContext,
+	renderScratchHandoffResumeMessage,
+	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
+} from "./scratch-handoff";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -481,6 +486,41 @@ export function assistantToolUseCanScratchHandoff(
 		if (message?.role === "toolResult" && !isScratchSafeReadTool(message.toolName, undefined)) return false;
 	}
 	return true;
+}
+
+function toolWriteTargetPaths(toolName: string, args: unknown): string[] {
+	if (!isRecord(args)) return [];
+	const record = args;
+	if (toolName === "write") {
+		const pathArg = getStringProperty(record, "path");
+		return pathArg ? [pathArg] : [];
+	}
+	if (toolName !== "edit") return [];
+
+	const paths: string[] = [];
+	const directPath = getStringProperty(record, "path");
+	if (directPath) paths.push(directPath);
+	const input = getStringProperty(record, "input");
+	if (!input) return paths;
+	try {
+		const patch = Patch.parse(input);
+		for (const section of patch.sections) {
+			paths.push(section.path);
+			if (section.fileOp?.kind === "move") paths.push(section.fileOp.dest);
+		}
+		return paths;
+	} catch {
+		// Not a hashline patch — fall through to apply_patch parsing.
+	}
+	try {
+		for (const entry of expandApplyPatchToEntries({ input })) {
+			paths.push(entry.path);
+			if (entry.rename) paths.push(entry.rename);
+		}
+	} catch {
+		// If the edit input is not an apply_patch envelope, there are no parseable target paths.
+	}
+	return paths;
 }
 
 /** Session-specific events that extend the core AgentEvent */
@@ -1589,6 +1629,7 @@ export class AgentSession {
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scratchHandoffDisplayPath: string | undefined;
+	#scratchHandoffToolArgsById = new Map<string, unknown>();
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#isDisposed = false;
@@ -2702,6 +2743,37 @@ export class AgentSession {
 		return this.#scratchHandoffDisplayPath;
 	}
 
+	#recordScratchHandoffWrite(toolName: string, args: unknown, isError: boolean): void {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (isError || scratchPath === undefined) return;
+		const cwd = this.sessionManager.getCwd();
+		let scratchAbsolutePath: string;
+		try {
+			scratchAbsolutePath = path.resolve(resolveToCwd(scratchPath, cwd));
+		} catch {
+			return;
+		}
+		for (const targetPath of toolWriteTargetPaths(toolName, args)) {
+			let targetAbsolutePath: string;
+			try {
+				targetAbsolutePath = path.resolve(resolveToCwd(targetPath, cwd));
+			} catch {
+				continue;
+			}
+			if (targetAbsolutePath !== scratchAbsolutePath) continue;
+			this.sessionManager.appendCustomEntry(SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE, { path: scratchPath });
+			return;
+		}
+	}
+
+	#scratchHandoffRecentContextText(pendingMessages: readonly AgentMessage[] = []): string | undefined {
+		return buildScratchHandoffRecentContext({
+			entries: this.sessionManager.getBranch(),
+			pendingMessages,
+			convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+		});
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -3405,6 +3477,9 @@ export class AgentSession {
 				cacheWrite: usage.cacheWrite,
 			});
 		}
+		if (event.type === "tool_execution_start" && this.#scratchHandoffDisplayPath !== undefined) {
+			this.#scratchHandoffToolArgsById.set(event.toolCallId, event.args);
+		}
 
 		try {
 			await this.#emitSessionEvent(displayEvent);
@@ -3435,6 +3510,9 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "tool_execution_end") {
+			const args = this.#scratchHandoffToolArgsById.get(event.toolCallId);
+			this.#scratchHandoffToolArgsById.delete(event.toolCallId);
+			this.#recordScratchHandoffWrite(event.toolName, args, event.isError === true);
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
@@ -9653,17 +9731,19 @@ export class AgentSession {
 		return this.#handoffAbortController !== undefined;
 	}
 
-	#scratchHandoffMessageContent(): CustomMessage["content"] {
+	#scratchHandoffMessageContent(pendingMessages: readonly AgentMessage[] = []): CustomMessage["content"] {
 		if (this.#scratchHandoffDisplayPath) {
 			try {
 				const scratchPath = resolveToCwd(this.#scratchHandoffDisplayPath, this.sessionManager.getCwd());
 				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
+				const recentContextText = this.#scratchHandoffRecentContextText(pendingMessages);
 				return [
 					{
 						type: "text",
 						text: renderScratchHandoffResumeMessage({
 							displayPath: this.#scratchHandoffDisplayPath,
 							scratchText,
+							recentContextText,
 						}),
 					},
 				];
@@ -9685,10 +9765,13 @@ export class AgentSession {
 		];
 	}
 
-	async #startScratchHandoffSession(trace: MaintenanceTraceState): Promise<void> {
+	async #startScratchHandoffSession(
+		trace: MaintenanceTraceState,
+		pendingMessages: readonly AgentMessage[] = [],
+	): Promise<void> {
 		this.#syncTodoPhasesFromBranch();
 		const preservedTodoPhases = this.getTodoPhases();
-		const scratchContent = this.#scratchHandoffMessageContent();
+		const scratchContent = this.#scratchHandoffMessageContent(pendingMessages);
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
 		const previousSessionFile = this.sessionFile;
 		await this.sessionManager.flush();
@@ -9987,6 +10070,7 @@ export class AgentSession {
 		await this.#runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
+			scratchRecentMessages: messages,
 		});
 	}
 
@@ -11910,6 +11994,7 @@ export class AgentSession {
 			triggerContextTokens?: number;
 			suppressContinuation?: boolean;
 			suppressHandoff?: boolean;
+			scratchRecentMessages?: readonly AgentMessage[];
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.settings.getGroup("compaction");
@@ -12006,7 +12091,7 @@ export class AgentSession {
 			await this.#emitMaintenanceTraceDelta(trace, "activity", `Started ${action} maintenance for ${reason}.`);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (action === "scratch-handoff") {
-				await this.#startScratchHandoffSession(trace);
+				await this.#startScratchHandoffSession(trace, options.scratchRecentMessages);
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,

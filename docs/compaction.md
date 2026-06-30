@@ -448,7 +448,7 @@ From `settings-schema.ts`:
 - `compaction.remoteEnabled` = `true`
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.maintenanceTrace` = `"assistant"` (`"loader"` hides trace cards/events; `"debug"` adds raw-SSE artifact refs)
-- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`
+- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`. A positive `thresholdTokens` override is capped at `contextWindow - 50000` on context windows above 50k tokens, with a runtime warning when the configured value is clamped.
 - `compaction.idleEnabled` = `false`
 - `scratchHandoff.enabled` = `false`
 - `scratchHandoff.rootDir` = `"agent"`; relative paths resolve from the session cwd and create `agent/YYYYMMDD/<session-id>.org`

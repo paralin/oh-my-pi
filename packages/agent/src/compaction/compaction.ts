@@ -170,6 +170,10 @@ export interface CompactionSettings {
 	v2RetainedMessageBudget?: number;
 }
 
+export interface ThresholdResolutionOptions {
+	warnOnClamp?: boolean;
+}
+
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
 	strategy: "context-full",
@@ -183,6 +187,8 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	remoteStreamingV2Enabled: true,
 	v2RetainedMessageBudget: V2_RETAINED_MESSAGE_TOKEN_BUDGET,
 };
+
+const FIXED_THRESHOLD_HEADROOM_TOKENS = 50_000;
 
 // ============================================================================
 // Token calculation
@@ -244,7 +250,7 @@ export function effectiveReserveTokens(contextWindow: number, settings: Compacti
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
 	if (!settings.enabled || settings.strategy === "off" || contextWindow <= 0) return false;
-	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+	const thresholdTokens = resolveThresholdTokens(contextWindow, settings, { warnOnClamp: true });
 	return contextTokens > thresholdTokens;
 }
 
@@ -267,12 +273,28 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
-export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
-	// Fixed token limit takes priority over percentage
+export function resolveThresholdTokens(
+	contextWindow: number,
+	settings: CompactionSettings,
+	options: ThresholdResolutionOptions = {},
+): number {
+	// Fixed token limit takes priority over percentage.
 	const thresholdTokens = settings.thresholdTokens;
 	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
-		// Clamp to [1, contextWindow - 1] so there's always room
-		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+		const maxThresholdTokens =
+			contextWindow > FIXED_THRESHOLD_HEADROOM_TOKENS
+				? contextWindow - FIXED_THRESHOLD_HEADROOM_TOKENS
+				: contextWindow - 1;
+		const clampedThresholdTokens = Math.min(maxThresholdTokens, Math.max(1, thresholdTokens));
+		if (thresholdTokens > maxThresholdTokens && options.warnOnClamp) {
+			logger.warn("compaction.thresholdTokens exceeds model context headroom; clamping", {
+				thresholdTokens,
+				contextWindow,
+				maxThresholdTokens: clampedThresholdTokens,
+				reserveTokens: FIXED_THRESHOLD_HEADROOM_TOKENS,
+			});
+		}
+		return clampedThresholdTokens;
 	}
 
 	// Percentage-based threshold

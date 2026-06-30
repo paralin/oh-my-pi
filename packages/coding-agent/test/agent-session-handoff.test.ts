@@ -1357,6 +1357,58 @@ describe("AgentSession handoff", () => {
 		expect(assistantToolUseCanScratchHandoff(readAssistant, [readAssistant], true)).toBe(false);
 	});
 
+	it("records successful scratch file writes as recent-context boundaries", async () => {
+		await session.dispose();
+		const scratchPath = "agent/current.org";
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			scratchHandoffDisplayPath: scratchPath,
+		});
+		session.subscribe(event => events.push(event));
+
+		session.agent.emitExternalEvent({
+			type: "tool_execution_start",
+			toolCallId: "write-scratch",
+			toolName: "write",
+			args: { path: scratchPath },
+		});
+		session.agent.emitExternalEvent({
+			type: "tool_execution_end",
+			toolCallId: "write-scratch",
+			toolName: "write",
+			isError: false,
+			result: null,
+		});
+		await waitFor(() =>
+			sessionManager
+				.getEntries()
+				.some(entry => entry.type === "custom" && entry.customType === "scratch-handoff-write"),
+		);
+
+		const marker = sessionManager
+			.getEntries()
+			.find(entry => entry.type === "custom" && entry.customType === "scratch-handoff-write");
+		expect(marker).toMatchObject({
+			type: "custom",
+			customType: "scratch-handoff-write",
+			data: { path: scratchPath },
+		});
+	});
+
 	it("runs context maintenance before sending an oversized pending prompt", async () => {
 		session.settings.set("compaction.strategy", "context-full");
 		session.settings.set("compaction.thresholdTokens", 50);
