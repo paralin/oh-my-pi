@@ -253,7 +253,7 @@ function initialScratchHandoffDocument(input: {
 	const parentLine = input.parentScratchDisplayPath
 		? `- Parent scratch: [[file:${input.parentScratchDisplayPath}][Parent scratch handoff]]\n`
 		: "";
-	return `#+TITLE: OMP Scratch Handoff ${input.sessionId}\n#+DATE: ${isoDate}\n\n* Scratch Handoff\n:PROPERTIES:\n:session: ${input.sessionId}\n:path: ${input.displayPath}\n:END:\n\n${parentLine}- Current objective: \n- Skill stack: \n- Active todo list: \n- Work completed: \n- Files changed: \n- Verification: \n- Blockers or risks: \n- Next action: \n- Source refs: \n`;
+	return `#+TITLE: OMP Scratch Handoff ${input.sessionId}\n#+DATE: ${isoDate}\n\n* Scratch Handoff\n:PROPERTIES:\n:session: ${input.sessionId}\n:path: ${input.displayPath}\n:END:\n\n${parentLine}** TODO Current work\n- Objective: \n- Skill stack: \n- Work completed: \n- Files changed: \n- Verification: \n- Blockers or risks: \n- Next action: \n- Source refs: \n`;
 }
 
 function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPath: string | undefined): string {
@@ -264,7 +264,9 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- Record the loaded skill/command stack in the `Skill stack:` field, in the order it was loaded (e.g. orient -> investigate-issue -> ...), so a successor session reloads and resumes the same stack.",
 		"- Resume the active skill/workflow stack recorded in the scratch file or restored session context; do not restart the workflow from its initial capture/orientation step.",
 		"- Treat the scratch file as the durable continuity packet for context pressure, resume, and successor sessions.",
-		'- If an existing todo list is present in the restored session state or scratch context, keep using that list. Do not create a meta todo such as "Refining based on scratch-handoff"; update the carried list only when the actual task state changes.',
+		"- Track work inside the scratch file with org GTD TODO/DONE subheadings. Keep the current work under an active `** TODO ...` heading, record state as bullets under that heading, and add future work as child `*** TODO ...` subheadings.",
+		"- A child TODO blocks closing its parent heading. Before marking the parent DONE, complete each child TODO or defer it explicitly with owner, blocker, next action, return condition, and source refs.",
+		"- Do not use the separate todo tool/list for scratch-owned work; scratch org TODO headings are the task tracker in this setup.",
 	];
 	if (parentScratchDisplayPath) {
 		lines.push(
@@ -273,9 +275,10 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 	}
 	lines.push(
 		"- After orientation, write the first useful scratch delta if the file lacks current task state. Do not wait for the final response to create the first handoff.",
+		"- After the first scratch delta, keep iteratively refining the same org heading instead of appending duplicate status blocks; add a new TODO subheading only for real child work.",
 		"- Before any deliberate large read/edit/proof block, before context pressure can force compaction, and before ending with unfinished work, inspect the scratch file and update only stale or missing handoff state.",
 		"- Do not rewrite or re-output the whole summary when the file is already current.",
-		"- The scratch file must be enough for a successor session: current objective, loaded skill/command stack in load order, active todo list, completed work, changed files, verification already run, blockers, next action, and source refs needed to continue.",
+		"- The scratch file must be enough for a successor session: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, changed files, verification already run, blockers, next action, and source refs needed to continue.",
 		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta, not as the place to build the first scratch summary.",
 		"- If no update is needed, leave the file unchanged and report one sentence saying it was already current.",
 		"- In the final response, mention whether the scratch file was updated or unchanged and name the path.",
@@ -285,11 +288,11 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 
 /**
  * Build the successor session's first model-visible handoff message. It leads
- * with the resume directive (reload the recorded skill stack in load order, keep
- * the existing todo list, continue in place, do not restart), then the scratch
- * file path and its current contents. The recorded skill stack and todo list
- * live inside the scratch body, so the directive surfaces them as the first
- * thing the successor must act on.
+ * with the resume directive (reload the recorded skill stack in load order,
+ * continue from the scratch org TODO subheading state, and do not restart),
+ * then the scratch file path and its current contents. The recorded skill stack
+ * and open TODO headings live inside the scratch body, so the directive surfaces
+ * them as the first thing the successor must act on.
  */
 export function renderScratchHandoffResumeMessage(input: {
 	displayPath: string;
@@ -308,7 +311,7 @@ export function renderScratchHandoffResumeMessage(input: {
 	const recentContext = input.recentContextText?.trim();
 	return [
 		"Resume this session from the scratch handoff below.",
-		"Reload and continue the skill/command stack recorded in the scratch file, in its original load order, and keep using the existing todo list. Continue the work already in progress.",
+		"Reload and continue the skill/command stack recorded in the scratch file, in its original load order, and continue from the scratch file's org TODO subheading state. Continue the work already in progress.",
 		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
 		"",
 		scratchContext,

@@ -1116,8 +1116,8 @@ describe("AgentSession handoff", () => {
 			expect.objectContaining({ text: expect.stringContaining("Fresh scratch objective") }),
 		]);
 		// The successor's first message leads with the resume directive (reload the
-		// recorded skill stack in load order, keep the existing todo list, continue in
-		// place) before the scratch-context block.
+		// recorded skill stack in load order, continue from scratch org TODO state,
+		// and keep going) before the scratch-context block.
 		expect(scratchEntry.content).toEqual([
 			expect.objectContaining({
 				text: expect.stringContaining("Resume this session from the scratch handoff below."),
