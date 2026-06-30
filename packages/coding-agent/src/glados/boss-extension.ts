@@ -2,6 +2,7 @@ import { ThinkingLevel, type ThinkingLevel as ThinkingLevelValue } from "@oh-my-
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ExtensionFactory } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, getActiveSkills } from "../extensibility/skills";
+import { scratchHandoffDate } from "../session/scratch-handoff";
 
 export const GLADOS_BOSS_EXTENSION_ID = "<builtin:glados-boss>";
 export const GLADOS_BOSS_EXTENSION_VERSION = 1;
@@ -13,6 +14,34 @@ export const GLADOS_BOSS_MARKER_TYPE = "glados:boss-mode";
 export const GLADOS_BOSS_PROVIDER_DECISION_TYPE = "glados:boss-provider-decision";
 export const GLADOS_BOSS_STATUS_TOOL = "glados_boss_status";
 export const GLADOS_BOSS_AUTOLOAD_SKILLS = ["orient", "quorra", "quorra-auto", "boss"] as const;
+
+/**
+ * bossScratchHandoffFile returns the persistent same-day Boss/Quorra notes
+ * sidecar used as the scratch-handoff file for GLaDOS Boss root runs. The path
+ * carries no sessionId, so same-day resumes reuse the one file and peer Bosses
+ * discover it by globbing the day's sidecars.
+ */
+export function bossScratchHandoffFile(date = new Date()): string {
+	const stamp = scratchHandoffDate(date);
+	return `notes/${date.getFullYear()}/${stamp}.d/${stamp}-quorra-scratch-boss.org`;
+}
+
+/**
+ * resolveBossScratchHandoffFile picks a session's scratch-handoff file: an
+ * explicit --scratch-handoff-file always wins, a Boss run with no explicit file
+ * defaults to the persistent Boss/Quorra sidecar, and an ordinary session keeps
+ * the runtime's per-session default (undefined here).
+ */
+export function resolveBossScratchHandoffFile(input: {
+	bossEnabled: boolean;
+	explicitScratchFile?: string;
+	date?: Date;
+}): string | undefined {
+	if (input.explicitScratchFile?.trim()) {
+		return input.explicitScratchFile;
+	}
+	return input.bossEnabled ? bossScratchHandoffFile(input.date) : undefined;
+}
 
 const GLADOS_BOSS_THINKING_LEVEL: ThinkingLevelValue = ThinkingLevel.XHigh;
 let gladosBossSkillContextCache: { key: string; value: string | undefined } | undefined;

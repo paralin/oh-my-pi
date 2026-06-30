@@ -51,6 +51,7 @@ import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { GLADOS_BOSS_FLAG, resolveBossScratchHandoffFile } from "./glados/boss-extension";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -1310,6 +1311,17 @@ export async function runRootCommand(
 			},
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+		// GLaDOS Boss root runs default their scratch-handoff file to the persistent
+		// same-day Boss/Quorra notes sidecar, so live continuity and the peer claim
+		// record are one file instead of a per-session agent/ scratch. The boss flag
+		// is extension-registered, so it resolves only here (after applyExtensionFlags),
+		// not at the earlier sessionOptions.scratchHandoffFile assignment. An explicit
+		// --scratch-handoff-file still wins and ordinary sessions keep the agent/
+		// default; the path is sessionId-free so same-day resumes reuse it.
+		sessionOptions.scratchHandoffFile = resolveBossScratchHandoffFile({
+			bossEnabled: initialArgs.unknownFlags.get(GLADOS_BOSS_FLAG) === true,
+			explicitScratchFile: sessionOptions.scratchHandoffFile,
+		});
 		// Fail fast on stale/typo flags (e.g. `omp --list-models`) now that we
 		// know the real extension flag set. Without this check the unrecognized
 		// token gets silently consumed and any following positional leaks as the
@@ -1460,7 +1472,7 @@ export async function runRootCommand(
 				contextBudgetStop: {
 					stopAtPercent: parsedArgs.contextStopPercent,
 					stopAtTokens: parsedArgs.contextStopTokens,
-					scratchHandoffFile: parsedArgs.scratchHandoffFile,
+					scratchHandoffFile: sessionOptions.scratchHandoffFile,
 				},
 			});
 			if ($env.PI_TIMING) {

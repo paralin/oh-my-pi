@@ -11,6 +11,7 @@ import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { resetActiveSkillsForTests, type Skill, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import {
+	bossScratchHandoffFile,
 	createGladosBossExtension,
 	GLADOS_BOSS_AUTOLOAD_SKILLS,
 	GLADOS_BOSS_EXTENSION_ID,
@@ -20,6 +21,7 @@ import {
 	GLADOS_BOSS_PROVIDER,
 	GLADOS_BOSS_PROVIDER_DECISION_TYPE,
 	GLADOS_BOSS_STATUS_TOOL,
+	resolveBossScratchHandoffFile,
 } from "@oh-my-pi/pi-coding-agent/glados/boss-extension";
 import { loadSessionExtensions } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -157,6 +159,58 @@ describe("GLaDOS Boss extension", () => {
 		} finally {
 			await harness.close();
 		}
+	});
+});
+
+describe("Boss scratch-handoff file selection", () => {
+	const day = new Date(2026, 5, 30);
+
+	it("derives the constant same-day Boss sidecar with no sessionId", () => {
+		expect(bossScratchHandoffFile(day)).toBe("notes/2026/20260630.d/20260630-quorra-scratch-boss.org");
+	});
+
+	it("is date-stable, so same-day resumes reuse the one file", () => {
+		const morning = new Date(2026, 5, 30, 1, 2, 3);
+		const evening = new Date(2026, 5, 30, 23, 59, 59);
+		expect(bossScratchHandoffFile(morning)).toBe(bossScratchHandoffFile(evening));
+	});
+
+	it("never points at the per-session agent/ scratch tree", () => {
+		const file = bossScratchHandoffFile(day);
+		expect(file.startsWith("notes/")).toBe(true);
+		expect(file).not.toContain("agent/");
+	});
+
+	it("defaults a Boss run with no explicit file to the persistent sidecar", () => {
+		expect(resolveBossScratchHandoffFile({ bossEnabled: true, date: day })).toBe(
+			"notes/2026/20260630.d/20260630-quorra-scratch-boss.org",
+		);
+	});
+
+	it("lets an explicit --scratch-handoff-file win even under --boss", () => {
+		expect(
+			resolveBossScratchHandoffFile({
+				bossEnabled: true,
+				explicitScratchFile: "agent/20260630/Main-abc.org",
+				date: day,
+			}),
+		).toBe("agent/20260630/Main-abc.org");
+	});
+
+	it("leaves ordinary sessions on the runtime per-session default", () => {
+		expect(resolveBossScratchHandoffFile({ bossEnabled: false, date: day })).toBeUndefined();
+	});
+
+	it("keeps an ordinary session's explicit override untouched", () => {
+		expect(
+			resolveBossScratchHandoffFile({ bossEnabled: false, explicitScratchFile: "agent/20260630/Main-xyz.org" }),
+		).toBe("agent/20260630/Main-xyz.org");
+	});
+
+	it("treats a blank explicit file as no override", () => {
+		expect(resolveBossScratchHandoffFile({ bossEnabled: true, explicitScratchFile: "   ", date: day })).toBe(
+			"notes/2026/20260630.d/20260630-quorra-scratch-boss.org",
+		);
 	});
 });
 
