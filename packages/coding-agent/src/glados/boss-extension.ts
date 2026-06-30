@@ -43,7 +43,7 @@ export function resolveBossScratchHandoffFile(input: {
 	return input.bossEnabled ? bossScratchHandoffFile(input.date) : undefined;
 }
 
-const GLADOS_BOSS_THINKING_LEVEL: ThinkingLevelValue = ThinkingLevel.XHigh;
+const GLADOS_BOSS_THINKING_LEVEL: ThinkingLevelValue = ThinkingLevel.High;
 let gladosBossSkillContextCache: { key: string; value: string | undefined } | undefined;
 
 const GLADOS_BOSS_SYSTEM_PROMPT = `# GLaDOS Boss mode
