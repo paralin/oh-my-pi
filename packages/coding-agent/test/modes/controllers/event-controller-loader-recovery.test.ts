@@ -160,7 +160,6 @@ const TASK_TOOL_EXECUTION_END: Extract<AgentSessionEvent, { type: "tool_executio
 	type: "tool_execution_end",
 	toolCallId: "call-task-1",
 	toolName: "task",
-	args: {},
 	result: { content: [], details: {} },
 	isError: false,
 };
