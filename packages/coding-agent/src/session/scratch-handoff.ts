@@ -302,6 +302,7 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- The scratch file must be enough for a successor session: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
 		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta, not as the place to build the first scratch summary.",
 		"- If no update is needed, leave the file unchanged and report one sentence saying it was already current.",
+		"- Org wrapping the scratch document is unnecessary; keep the org structure valid and readable, but do not run a formatter solely for scratch-handoff text.",
 		"- In the final response, mention whether the scratch file was updated or unchanged and name the path.",
 	);
 	return lines.join("\n");

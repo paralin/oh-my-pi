@@ -1,8 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { convertToLlm, SKILL_PROMPT_MESSAGE_TYPE } from "./messages";
 import {
+	buildScratchHandoffContext,
 	buildScratchHandoffRecentContext,
 	latestPersistedScratchHandoffPathSelection,
 	renderScratchHandoffResumeMessage,
@@ -174,6 +178,25 @@ describe("scratch handoff path selection", () => {
 			scratchFile: "agent/20260629/Sub-original-session.org",
 			parentScratchDisplayPath: "agent/20260629/Main-current-session.org",
 		});
+	});
+});
+
+describe("scratch handoff prompt", () => {
+	it("tells agents that org wrapping the scratch document is unnecessary", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
+		try {
+			const context = await buildScratchHandoffContext({
+				cwd,
+				sessionId: "Main-session",
+				settings: { enabled: true, rootDir: "agent" },
+				date: new Date("2026-06-30T00:00:00.000Z"),
+			});
+
+			expect(context?.prompt).toContain("Org wrapping the scratch document is unnecessary");
+			expect(context?.prompt).toContain("do not run a formatter solely for scratch-handoff text");
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
 	});
 });
 
