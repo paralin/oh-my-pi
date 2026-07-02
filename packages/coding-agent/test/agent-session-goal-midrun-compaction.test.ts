@@ -9,7 +9,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
-import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -63,15 +63,23 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 	async function createHarness(
 		settingsOverride: Record<string, unknown> = {},
-		options: { extensionRunner?: ExtensionRunner } = {},
+		options: {
+			extensionRunner?: ExtensionRunner;
+			modelContextWindow?: number;
+			scratchHandoffDisplayPath?: string;
+		} = {},
 	): Promise<{
 		session: AgentSession;
 		observedContexts: string[][];
 		sessionManager: SessionManager;
 	}> {
 		const observedContexts: string[][] = [];
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!baseModel) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const model =
+			options.modelContextWindow === undefined
+				? baseModel
+				: { ...baseModel, contextWindow: options.modelContextWindow };
 
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${cleanups.length}.db`));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -146,6 +154,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			modelRegistry,
 			toolRegistry: new Map([[mockBashTool.name, mockBashTool]]),
 			extensionRunner: options.extensionRunner,
+			scratchHandoffDisplayPath: options.scratchHandoffDisplayPath,
 		});
 
 		cleanups.push(async () => {
@@ -200,6 +209,63 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(handoffSpy).not.toHaveBeenCalled();
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(observedContexts[1].join("\n")).toContain("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
+	});
+
+	it("stops before an oversized scratch-handoff continuation request", async () => {
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.midTurnEnabled": false,
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{ modelContextWindow: 55_000, scratchHandoffDisplayPath: "agent/current.org" },
+		);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(1);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				source: "compaction",
+				message: expect.stringContaining("stopping to use scratch handoff"),
+			}),
+		);
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
+	});
+
+	it("queues a scratch closeout steer before mid-run scratch-handoff reset when it fits", async () => {
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 40_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{ modelContextWindow: 372_000, scratchHandoffDisplayPath: "agent/current.org" },
+		);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(2);
+		expect(observedContexts[1].join("\n")).toContain("Context maintenance threshold reached");
+		expect(observedContexts[1].join("\n")).toContain("full, comprehensive snapshot");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				source: "compaction",
+				message: expect.stringContaining("handing off anyway with recent session context"),
+			}),
+		);
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
 	});
 
 	it("preserves the just-finished tool turn when message_end hooks are still pending", async () => {

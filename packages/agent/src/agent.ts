@@ -42,6 +42,7 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentPreModelCallResult,
 	AgentState,
 	AgentTool,
 	AgentToolContext,
@@ -390,6 +391,7 @@ export class Agent {
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	#beforeModelCall?: (context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>;
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
@@ -753,6 +755,12 @@ export class Agent {
 			| undefined,
 	): void {
 		this.#onTurnEnd = fn;
+	}
+
+	setBeforeModelCall(
+		fn: ((context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>) | undefined,
+	): void {
+		this.#beforeModelCall = fn;
 	}
 
 	/**
@@ -1151,6 +1159,7 @@ export class Agent {
 				}
 				context.systemPrompt = this.#state.systemPrompt;
 				context.tools = this.#state.tools;
+				return await this.#beforeModelCall?.(context);
 			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,

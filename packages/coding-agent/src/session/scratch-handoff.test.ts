@@ -9,6 +9,7 @@ import {
 	buildScratchHandoffContext,
 	buildScratchHandoffRecentContext,
 	latestPersistedScratchHandoffPathSelection,
+	renderScratchHandoffCloseoutMessage,
 	renderScratchHandoffResumeMessage,
 	resolveScratchHandoffPathSelection,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
@@ -197,6 +198,36 @@ describe("scratch handoff prompt", () => {
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
+	});
+
+	it("preserves an existing scratch document instead of resetting it", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
+		try {
+			const scratchFile = path.join(cwd, "agent/current.org");
+			await fs.mkdir(path.dirname(scratchFile), { recursive: true });
+			await fs.writeFile(scratchFile, "* TODO Existing work\n- Objective: keep me\n", "utf8");
+
+			const context = await buildScratchHandoffContext({
+				cwd,
+				sessionId: "Main-session",
+				scratchFile: "agent/current.org",
+				settings: { enabled: true, rootDir: "agent" },
+			});
+
+			expect(context?.scratchText).toContain("Objective: keep me");
+			expect(await fs.readFile(scratchFile, "utf8")).toBe("* TODO Existing work\n- Objective: keep me\n");
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("asks threshold closeout to write a comprehensive snapshot and link artifacts", () => {
+		const prompt = renderScratchHandoffCloseoutMessage("agent/current.org");
+
+		expect(prompt).toContain("full, comprehensive snapshot");
+		expect(prompt).toContain("little to no warm-up");
+		expect(prompt).toContain("Org-link artifacts");
+		expect(prompt).toContain("Do not clear, recreate, truncate, rename, or replace");
 	});
 });
 

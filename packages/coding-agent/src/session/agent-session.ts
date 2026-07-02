@@ -26,8 +26,10 @@ import {
 	type AfterToolCallResult,
 	Agent,
 	AgentBusyError,
+	type AgentContext,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentPreModelCallResult,
 	type AgentState,
 	type AgentTool,
 	type AgentTurnEndContext,
@@ -345,7 +347,9 @@ import {
 } from "./messages";
 import {
 	buildScratchHandoffRecentContext,
+	renderScratchHandoffCloseoutMessage,
 	renderScratchHandoffResumeMessage,
+	SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
 } from "./scratch-handoff";
@@ -1573,6 +1577,22 @@ export class AgentSession {
 	// Handoff state
 	#handoffAbortController: AbortController | undefined = undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined = undefined;
+	#preProviderScratchHandoffStop:
+		| {
+				contextTokens: number;
+				contextWindow: number;
+				promptBudget: number;
+				scratchPath: string;
+				thresholdTokens: number;
+		  }
+		| undefined;
+	#scratchHandoffCloseout:
+		| {
+				scratchPath: string;
+				baselineWriteCount: number;
+				triggerContextTokens?: number;
+		  }
+		| undefined;
 
 	// Retry state
 	#retryAbortController: AbortController | undefined = undefined;
@@ -2021,6 +2041,7 @@ export class AgentSession {
 				};
 		this.agent.setProviderResponseInterceptor(this.#onResponse);
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
+		this.agent.setBeforeModelCall(context => this.#stopBeforeOversizedScratchHandoffRequest(context));
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
 			const rewindReport = this.#extractRewindReport(messages);
@@ -2743,6 +2764,16 @@ export class AgentSession {
 		return this.#scratchHandoffDisplayPath;
 	}
 
+	#scratchHandoffWriteCount(scratchPath: string): number {
+		let count = 0;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE) continue;
+			if (!isRecord(entry.data) || entry.data.path !== scratchPath) continue;
+			count++;
+		}
+		return count;
+	}
+
 	#recordScratchHandoffWrite(toolName: string, args: unknown, isError: boolean): void {
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (isError || scratchPath === undefined) return;
@@ -2771,6 +2802,51 @@ export class AgentSession {
 			entries: this.sessionManager.getBranch(),
 			pendingMessages,
 			convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+		});
+	}
+
+	async #requestScratchHandoffCloseout(triggerContextTokens?: number): Promise<void> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return;
+		if (!this.#scratchHandoffCloseout) {
+			this.#scratchHandoffCloseout = {
+				scratchPath,
+				baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
+				triggerContextTokens,
+			};
+		}
+		await this.#queueCustomMessage(
+			{
+				customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
+				content: renderScratchHandoffCloseoutMessage(scratchPath),
+				display: true,
+				attribution: "agent",
+				details: { path: scratchPath, triggerContextTokens },
+			},
+			"steer",
+			`scratch handoff: update ${scratchPath}`,
+		);
+	}
+
+	async #finishScratchHandoffCloseoutIfReady(
+		assistantMessage: AssistantMessage,
+		allowDefer: boolean,
+		autoContinue: boolean,
+	): Promise<CompactionCheckResult | undefined> {
+		const closeout = this.#scratchHandoffCloseout;
+		if (!closeout) return undefined;
+		if (assistantMessage.stopReason === "toolUse") return COMPACTION_CHECK_NONE;
+		if (this.#scratchHandoffWriteCount(closeout.scratchPath) <= closeout.baselineWriteCount) {
+			this.emitNotice(
+				"warning",
+				`scratch handoff closeout did not update ${closeout.scratchPath}; handing off anyway with recent session context after the last scratch write.`,
+				"compaction",
+			);
+		}
+		this.#scratchHandoffCloseout = undefined;
+		return await this.#runAutoCompaction("threshold", false, false, allowDefer, {
+			autoContinue,
+			triggerContextTokens: closeout.triggerContextTokens,
 		});
 	}
 
@@ -3748,6 +3824,7 @@ export class AgentSession {
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
+				this.#preProviderScratchHandoffStop = undefined;
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				logger.debug("agent_end maintenance routing", {
 					reason: "no-assistant-message",
@@ -3802,6 +3879,30 @@ export class AgentSession {
 				? assistantToolUseCanScratchHandoff(msg, settledMessages, this.#mutatingToolUseNeedsContinuation)
 				: true;
 			const toolUseIsScratchSafeReadOnly = hasToolCalls ? assistantMessageToolCallsAreScratchSafeReads(msg) : false;
+			const preProviderScratchStop = this.#preProviderScratchHandoffStop;
+			this.#preProviderScratchHandoffStop = undefined;
+			if (preProviderScratchStop) {
+				maintenanceRoute("pre-provider-scratch-handoff-stop", {
+					contextTokens: preProviderScratchStop.contextTokens,
+					contextWindow: preProviderScratchStop.contextWindow,
+					promptBudget: preProviderScratchStop.promptBudget,
+					thresholdTokens: preProviderScratchStop.thresholdTokens,
+					scratchPath: preProviderScratchStop.scratchPath,
+					toolUseCanScratchHandoff,
+				});
+				const compactionTask = this.#runAutoCompaction("threshold", false, false, true, {
+					suppressHandoff: !toolUseCanScratchHandoff,
+					triggerContextTokens: preProviderScratchStop.contextTokens,
+				});
+				this.#trackPostPromptTask(compactionTask);
+				await compactionTask;
+				this.#resolveRetry();
+				await emitAgentEndNotification();
+				if (toolUseIsScratchSafeReadOnly) {
+					this.#mutatingToolUseNeedsContinuation = false;
+				}
+				return;
+			}
 			// A successful `yield` in this run is terminal for execution purposes.
 			// Suppress empty-stop retry, unexpected-stop retry, queued-message drain,
 			// and compaction-driven continuations for the rest of this prompt cycle:
@@ -10034,6 +10135,64 @@ export class AgentSession {
 		return compactionContextTokens(breakdown?.usedTokens ?? 0, localEstimate);
 	}
 
+	#estimateLiveRequestContextTokens(context: AgentContext, contextWindow: number): number {
+		const opts = { excludeEncryptedReasoning: true } as const;
+		const liveEstimate =
+			computeNonMessageTokens(this) + context.messages.reduce((sum, msg) => sum + estimateTokens(msg, opts), 0);
+		return compactionContextTokens(this.getContextUsage({ contextWindow })?.tokens ?? 0, liveEstimate);
+	}
+
+	#stopBeforeOversizedScratchHandoffRequest(context: AgentContext): AgentPreModelCallResult {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (!scratchPath) return;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return;
+
+		const compactionSettings = this.settings.getGroup("compaction");
+		if (!compactionSettings.enabled || compactionSettings.strategy !== "handoff") return;
+		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
+		const promptBudget = Math.max(0, contextWindow - reserveTokens);
+		if (promptBudget <= 0) return;
+
+		const contextTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
+		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
+		if (!shouldCompact(contextTokens, contextWindow, compactionSettings) && contextTokens <= promptBudget) return;
+		if (this.#scratchHandoffCloseout && contextTokens <= promptBudget) {
+			logger.debug("Allowing scratch-handoff closeout request before reset", {
+				contextTokens,
+				contextWindow,
+				promptBudget,
+				scratchPath,
+			});
+			return;
+		}
+
+		this.#preProviderScratchHandoffStop = {
+			contextTokens,
+			contextWindow,
+			promptBudget,
+			scratchPath,
+			thresholdTokens,
+		};
+		logger.warn("Stopping before oversized scratch-handoff provider request", {
+			contextTokens,
+			contextWindow,
+			promptBudget,
+			reserveTokens,
+			thresholdTokens,
+			scratchPath,
+		});
+		this.emitNotice(
+			"warning",
+			`Context reached ${contextTokens.toLocaleString()} tokens before the next provider request; stopping to use scratch handoff at ${scratchPath}.`,
+			"compaction",
+		);
+		return {
+			stop: true,
+			reason: "scratch-handoff-context-threshold",
+		};
+	}
+
 	async #runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.model;
 		if (!model) return;
@@ -10130,6 +10289,15 @@ export class AgentSession {
 				contextWindow,
 				from: `${model?.provider}/${model?.id}`,
 			});
+			return;
+		}
+		if (compactionSettings.strategy === "handoff" && this.#scratchHandoffDisplayPath) {
+			logger.debug("Mid-run scratch-handoff threshold queued closeout steer", {
+				contextTokens,
+				contextWindow,
+				scratchPath: this.#scratchHandoffDisplayPath,
+			});
+			await this.#requestScratchHandoffCloseout(contextTokens);
 			return;
 		}
 
@@ -10281,6 +10449,12 @@ export class AgentSession {
 
 		const compactionSettings = this.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		const scratchCloseoutResult = await this.#finishScratchHandoffCloseoutIfReady(
+			assistantMessage,
+			allowDefer,
+			autoContinue,
+		);
+		if (scratchCloseoutResult !== undefined) return scratchCloseoutResult;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
@@ -10341,6 +10515,14 @@ export class AgentSession {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
+				if (
+					compactionSettings.strategy === "handoff" &&
+					this.#scratchHandoffDisplayPath !== undefined &&
+					!options.suppressHandoff
+				) {
+					await this.#requestScratchHandoffCloseout(postMaintenanceContextTokens);
+					return COMPACTION_CHECK_CONTINUATION;
+				}
 				return await this.#runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
 					suppressHandoff: options.suppressHandoff,

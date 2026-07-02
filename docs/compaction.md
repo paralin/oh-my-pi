@@ -129,8 +129,21 @@ The automatic paths are intentionally different:
   - Tool-output pruning can reduce the measured token count before threshold comparison.
   - Context promotion is tried before post-turn compaction.
   - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
-  - With `compaction.strategy: "handoff"`, post-turn threshold maintenance normally schedules a post-prompt auto-handoff task instead of writing a compaction entry; pre-prompt and mid-turn checks run inline to avoid racing the next turn. Mid-turn checks suppress handoff session resets and fall back to context-full compaction.
-  - On success, if `compaction.autoContinue !== false`, post-turn maintenance schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`; mid-turn maintenance never schedules a separate continuation because the core loop already owns the next provider request.
+  - With `compaction.strategy: "handoff"` and scratch handoff active, post-turn
+    threshold maintenance first queues a steer asking the agent to update the
+    existing scratch org file as a comprehensive current-work snapshot. After
+    that closeout turn, or when the next request is already too large to send,
+    maintenance resets into a successor session from the same scratch file.
+    Mid-turn checks queue the same closeout steer when it still fits; if the
+    provider request would exceed the prompt budget, the runtime hands off
+    immediately.
+  - If the closeout turn did not write the scratch file, the runtime warns but
+    still hands off; the successor resume message includes snapcompact-rendered
+    recent context from after the most recent scratch write as the fallback.
+  - On success, if `compaction.autoContinue !== false`, post-turn maintenance
+    schedules an agent-authored developer auto-continue prompt from
+    `prompts/system/auto-continue.md`; mid-turn maintenance normally resumes
+    through the core loop that owns the next provider request.
 
 - **Idle maintenance**
   - Trigger: `runIdleCompaction()` when not streaming or already compacting.
@@ -379,6 +392,12 @@ does not compact the transcript by itself. On startup, a main session with
 2. Creates `agent/YYYYMMDD/<session-id>.org` by default.
 3. Appends the scratch compaction protocol to the system prompt, including the
    current scratch file content.
+
+The scratch file is never reset during handoff. Existing files are preserved;
+startup only creates the initial template when the selected path does not
+exist. Threshold closeout prompts ask the agent to maintain scratch as a full
+org-mode snapshot of current work and to org-link large artifacts, traces, logs,
+issues, or plans instead of copying their bodies into the scratch document.
 
 In-process task subagents do not get their own scratch file. A headless worker
 launched as a top-level OMP process does, so Boss/worker runs can keep the same

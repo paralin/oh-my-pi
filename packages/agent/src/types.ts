@@ -46,6 +46,15 @@ export interface AgentTurnEndContext {
 	willContinue: boolean;
 }
 
+export interface AgentPreModelCallStop {
+	/** Stop the agent loop before sending the next provider request. */
+	stop: true;
+	/** Optional owner-facing reason for logs and telemetry. */
+	reason?: string;
+}
+
+export type AgentPreModelCallResult = AgentPreModelCallStop | undefined;
+
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
@@ -236,7 +245,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Refreshes prompt/tool context from live session state before each model call.
 	 * Use this when tool availability or the system prompt can change mid-turn.
 	 */
-	syncContextBeforeModelCall?: (context: AgentContext) => void | Promise<void>;
+	syncContextBeforeModelCall?: (context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

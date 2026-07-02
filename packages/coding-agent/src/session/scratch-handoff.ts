@@ -12,6 +12,7 @@ import type { SessionEntry } from "./session-entries";
 
 export const SCRATCH_HANDOFF_READ_CUSTOM_TYPE = "scratch-handoff-read";
 export const SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE = "scratch-handoff-write";
+export const SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE = "scratch-handoff-closeout";
 
 export interface ScratchHandoffSettings {
 	enabled: boolean;
@@ -299,13 +300,24 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- After the first scratch delta, keep iteratively refining the same org heading instead of appending duplicate status blocks; add a new TODO subheading only for real child work.",
 		"- Before any deliberate large read/edit/proof block, before context pressure can force compaction, and before ending with unfinished work, inspect the scratch file and update only stale or missing handoff state.",
 		"- Do not rewrite or re-output the whole summary when the file is already current.",
-		"- The scratch file must be enough for a successor session: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
-		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta, not as the place to build the first scratch summary.",
+		"- The scratch file must be a full, comprehensive snapshot of current work so another agent can resume with little to no warm-up: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
+		"- Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch; the scratch document is the resumption index and current-state snapshot, not an artifact dump.",
+		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta; if scratch is stale, update it into the comprehensive snapshot before handoff.",
 		"- If no update is needed, leave the file unchanged and report one sentence saying it was already current.",
 		"- Org wrapping the scratch document is unnecessary; keep the org structure valid and readable, but do not run a formatter solely for scratch-handoff text.",
 		"- In the final response, mention whether the scratch file was updated or unchanged and name the path.",
 	);
 	return lines.join("\n");
+}
+
+export function renderScratchHandoffCloseoutMessage(displayPath: string): string {
+	return [
+		"Context maintenance threshold reached.",
+		`Before doing any more task work, update the existing scratch org file at ${displayPath}.`,
+		"Do not clear, recreate, truncate, rename, or replace the scratch file with a fresh template.",
+		"Render the current TODO heading as a full, comprehensive snapshot of the current work so another agent can resume with little to no warm-up: objective, loaded skill/command stack, completed work, touched files, current proof, blockers or risks, next action, and source refs.",
+		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path. After the scratch write succeeds, stop with a brief note that the scratch file is current.",
+	].join("\n");
 }
 
 /**
