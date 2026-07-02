@@ -54,7 +54,7 @@ export const BARE_BODY_AUTO_PIPED_WARNING =
 
 /** Unified-diff-style `-` row in a hunk body. */
 export const MINUS_ROW_REJECTED =
-	"`-` rows are not valid; the range already names the lines being changed. For a literal `-` line, write `+-…`.";
+	"`-` rows are not valid; the range already names the lines being changed. For Markdown bullets or other literal `-` lines, prefix the literal row with `+`: `+- item`.";
 
 /** Replace hunk with no body. */
 export const EMPTY_REPLACE = `\`SWAP N${HL_RANGE_SEP}M:\` needs at least one \`+TEXT\` body row. To delete lines, use \`DEL N${HL_RANGE_SEP}M\`.`;
@@ -167,6 +167,10 @@ export const RECOVERY_SESSION_CHAIN_WARNING =
  */
 export const RECOVERY_SESSION_REPLAY_WARNING =
 	"Recovered by replaying your edits onto the current file content (a prior in-session edit changed the lines you re-targeted with a stale hash). Verify the diff matches your intent.";
+
+/** `Recovery`: stale anchors were relocated to unchanged live lines after drift. */
+export const RECOVERY_LINE_REMAP_WARNING =
+	"Recovered by remapping stale line anchors to unchanged current lines (file changed since the tagged read). Verify the diff matches your intent.";
 
 /**
  * `insert head:`/`insert tail:` applied despite a stale snapshot tag.

@@ -13,7 +13,14 @@ import { timingSafeEqual } from "node:crypto";
 import * as fs from "node:fs/promises";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { BusChannel, AgentEvent as WireAgentEvent, SessionEntry as WireSessionEntry } from "@oh-my-pi/pi-wire";
+import type {
+	BusChannel,
+	CollabUiRequest,
+	CollabUiRequestDraft,
+	CollabUiResponseValue,
+	AgentEvent as WireAgentEvent,
+	SessionEntry as WireSessionEntry,
+} from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
@@ -94,7 +101,8 @@ function isWireSessionEntry(entry: StoredSessionEntry): entry is StoredSessionEn
 }
 const CONNECT_TIMEOUT_MS = 15_000;
 /** Max bytes served per fetch-transcript reply (guest re-requests from `newSize`). */
-const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
+export const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
+const TRANSCRIPT_ENTRY_TOO_LARGE_ERROR = `transcript entry exceeds transcript fetch cap (${TRANSCRIPT_READ_CAP} bytes)`;
 /**
  * Soft byte cap per `snapshot-chunk` frame. The first MB of a snapshot takes
  * ~3s through the default relay, so a 512 KB chunk lands well under the
@@ -102,6 +110,13 @@ const TRANSCRIPT_READ_CAP = 4 * 1024 * 1024;
  * ship in a chunk of their own.
  */
 const SNAPSHOT_CHUNK_BYTES = 512 * 1024;
+/**
+ * Outcome of {@link CollabHost.requestGuestUi}. `answered` carries the guest's
+ * response (an `undefined` value is a genuine guest cancel); `unavailable`
+ * means the collab channel went away (teardown, relay drop) or the request was
+ * aborted before any guest answered — callers MUST NOT treat it as a cancel.
+ */
+export type CollabGuestUiResult = { kind: "answered"; value: CollabUiResponseValue } | { kind: "unavailable" };
 
 export class CollabHost {
 	#ctx: InteractiveModeContext;
@@ -114,6 +129,8 @@ export class CollabHost {
 	#sessionId = "";
 	#unsubscribe?: () => void;
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	#uiReqSeq = 0;
+	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
 	#stateDebounce: Timer | null = null;
 	#streamingInterval: Timer | null = null;
@@ -151,6 +168,43 @@ export class CollabHost {
 			list.push({ name: peer.name, role: "guest", readOnly: peer.canWrite ? undefined : true });
 		}
 		return list;
+	}
+
+	requestGuestUi(request: CollabUiRequestDraft, signal?: AbortSignal): Promise<CollabGuestUiResult> | null {
+		if (!this.#socket || !this.#hasWritablePeers()) return null;
+		const reqId = ++this.#uiReqSeq;
+		const fullRequest: CollabUiRequest = { ...request, reqId };
+		const { promise, resolve } = Promise.withResolvers<CollabGuestUiResult>();
+		let settled = false;
+		const settle = (result: CollabGuestUiResult): void => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			this.#pendingUi.delete(reqId);
+			this.#sendWritablePeers({ t: "ui-request-end", reqId });
+			resolve(result);
+		};
+		const onAbort = (): void => settle({ kind: "unavailable" });
+		if (signal?.aborted) return Promise.resolve({ kind: "unavailable" });
+		signal?.addEventListener("abort", onAbort, { once: true });
+		this.#pendingUi.set(reqId, { request: fullRequest, settle });
+		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+		return promise;
+	}
+
+	#hasWritablePeers(): boolean {
+		for (const peer of this.#peers.values()) {
+			if (peer.canWrite) return true;
+		}
+		return false;
+	}
+
+	#sendWritablePeers(frame: CollabFrame): void {
+		const socket = this.#socket;
+		if (!socket) return;
+		for (const [peerId, peer] of this.#peers) {
+			if (peer.canWrite) socket.send(frame, peerId);
+		}
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
@@ -255,6 +309,8 @@ export class CollabHost {
 		this.#agentsDebounce = null;
 		clearInterval(this.#streamingInterval ?? undefined);
 		this.#streamingInterval = null;
+		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+		this.#pendingUi.clear();
 		this.#peers.clear();
 		this.#socket?.close();
 		this.#socket = null;
@@ -286,6 +342,9 @@ export class CollabHost {
 				break;
 			case "agent-cmd":
 				this.#handleAgentCmd(frame.cmd, frame.agentId, frame.text, fromPeer);
+				break;
+			case "ui-response":
+				this.#handleUiResponse(frame.reqId, frame.value, fromPeer);
 				break;
 			case "fetch-transcript":
 				void this.#handleFetchTranscript(frame.reqId, frame.agentId, frame.fromByte, fromPeer);
@@ -348,6 +407,11 @@ export class CollabHost {
 			fromPeer,
 		);
 		this.#sendSnapshotChunks(entries, fromPeer);
+		if (canWrite) {
+			for (const pending of this.#pendingUi.values()) {
+				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
+			}
+		}
 		this.#ctx.session.emitNotice(
 			"info",
 			`${cleanName} joined the collab session${canWrite ? "" : " (read-only)"}`,
@@ -390,6 +454,15 @@ export class CollabHost {
 			}
 			socket.send({ t: "snapshot-chunk", entries: batch, final: i >= entries.length }, fromPeer);
 		}
+	}
+
+	#handleUiResponse(reqId: number, value: CollabUiResponseValue, fromPeer: number): void {
+		const peer = this.#peers.get(fromPeer);
+		if (!peer?.canWrite) {
+			this.#rejectReadOnly("responding to ask", fromPeer);
+			return;
+		}
+		this.#pendingUi.get(reqId)?.settle({ kind: "answered", value });
 	}
 
 	#handlePrompt(text: string, images: ImageContent[] | undefined, fromPeer: number): void {
@@ -584,7 +657,11 @@ export class CollabHost {
 			if (!reachedEof) {
 				// Trim to the last complete JSONL line so no line or UTF-8 char is split.
 				const lastNewline = slice.lastIndexOf(0x0a);
-				slice = slice.subarray(0, lastNewline >= 0 ? lastNewline + 1 : 0);
+				if (lastNewline < 0) {
+					reply("", fromByte, TRANSCRIPT_ENTRY_TOO_LARGE_ERROR);
+					return;
+				}
+				slice = slice.subarray(0, lastNewline + 1);
 			}
 			reply(slice.toString("utf-8"), reachedEof ? stat.size : fromByte + slice.byteLength);
 		} catch (err) {

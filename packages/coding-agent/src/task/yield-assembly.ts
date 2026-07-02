@@ -8,6 +8,8 @@
  * `session-manager`, the TUI tool renderers). It has no side effects and
  * depends only on the yield type and the output-schema validator.
  */
+import { dereferenceJsonSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import type { YieldItem } from "./types";
 
@@ -105,11 +107,12 @@ export function arrayValuedLabels(outputSchema: unknown): ReadonlySet<string> {
 	// with `type: "array"`, which raw `normalizeSchema` would not expose.
 	const { jsonSchema } = buildOutputValidator(outputSchema);
 	if (jsonSchema === undefined) return labels;
-	const properties = jsonSchema.properties;
-	if (properties === null || typeof properties !== "object") return labels;
-	const propRecord = properties as Record<string, unknown>;
-	for (const key in propRecord) {
-		if (isArrayTypedSchema(propRecord[key])) labels.add(key);
+	const dereferenced = dereferenceJsonSchema(jsonSchema);
+	const labelSchema = isRecord(dereferenced) ? dereferenced : jsonSchema;
+	const properties = labelSchema.properties;
+	if (!isRecord(properties)) return labels;
+	for (const key in properties) {
+		if (isArrayTypedSchema(properties[key])) labels.add(key);
 	}
 	return labels;
 }

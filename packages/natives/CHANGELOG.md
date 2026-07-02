@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [16.3.0] - 2026-07-02
+
+### Added
+
+- Added `workingDir` to `ShellRunResult` to allow hosts to synchronize the session's current working directory without executing a hidden probe command.
+
+### Fixed
+
+- Fixed an issue where panics in native worker tasks (such as grep, AST parsing, globbing, workspace listing, HTML-to-markdown conversion, fuzzy finding, and clipboard image reading) would abort the host process instead of properly rejecting the returned JavaScript Promise.
+- Fixed a crash on Windows under low memory or commit charge conditions when spawning worker threads for token counting or sorting operations.
+
 ## [16.2.11] - 2026-07-01
 
 ### Fixed

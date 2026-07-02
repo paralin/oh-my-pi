@@ -156,6 +156,8 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 			return { ...block };
 		case "redactedThinking":
 			return { ...block };
+		case "fallback":
+			return { ...block, from: { ...block.from }, to: { ...block.to } };
 		case "toolCall":
 			return { ...block, arguments: structuredCloneJSON(block.arguments) };
 	}
@@ -535,6 +537,7 @@ export function normalizeMessagesForProvider(
 }
 
 const INTENT_FIELD_DESCRIPTION = "concise intent";
+const INTENT_SCHEMA_UNION_KEYS = ["anyOf", "oneOf"] as const;
 
 function injectIntentIntoSchema(
 	schema: unknown,
@@ -544,10 +547,30 @@ function injectIntentIntoSchema(
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
 	const schemaRecord = schema as Record<string, unknown>;
 	const propertiesValue = schemaRecord.properties;
-	const properties =
-		propertiesValue && typeof propertiesValue === "object" && !Array.isArray(propertiesValue)
-			? (propertiesValue as Record<string, unknown>)
-			: {};
+	const hasOwnProperties =
+		propertiesValue !== null && typeof propertiesValue === "object" && !Array.isArray(propertiesValue);
+
+	// Pure union root (anyOf/oneOf with no own properties): push `i` into each
+	// alternative branch so each closed shape keeps `additionalProperties: false`
+	// honest with intent tracing. Adding a sibling root `properties: { i }` /
+	// `required: [i]` would force every input to satisfy both root *and* a
+	// branch, leaving no satisfiable shape because each branch's
+	// `additionalProperties: false` rejects every other field — and OpenAI
+	// strict sanitization later promotes that sibling to a closed root
+	// `type: "object"` that rejects every non-`i` key outright. allOf is not
+	// alternation (its members are sub-constraints), so we don't recurse into it.
+	if (!hasOwnProperties) {
+		for (const key of INTENT_SCHEMA_UNION_KEYS) {
+			const variants = schemaRecord[key];
+			if (!Array.isArray(variants)) continue;
+			return {
+				...schemaRecord,
+				[key]: variants.map(variant => injectIntentIntoSchema(variant, mode, describeIntent)),
+			};
+		}
+	}
+
+	const properties = hasOwnProperties ? (propertiesValue as Record<string, unknown>) : {};
 	const requiredValue = schemaRecord.required;
 	const required = Array.isArray(requiredValue)
 		? requiredValue.filter((item): item is string => typeof item === "string")
@@ -1651,7 +1674,7 @@ async function executeToolCalls(
 	const tools = currentContext.tools;
 	const {
 		hasSteeringMessages,
-		getSteeringMessages,
+		hasIrcInterrupts,
 		interruptMode = "immediate",
 		getToolContext,
 		transformToolCallArguments,
@@ -1666,54 +1689,73 @@ async function executeToolCalls(
 	const batchId = `${assistantMessage.timestamp ?? Date.now()}_${toolCalls[0]?.id ?? "batch"}`;
 	const shouldInterruptImmediately = interruptMode !== "wait";
 	const steeringAbortController = new AbortController();
-	const toolSignal = signal
+	const ircAbortController = new AbortController();
+	// Interruptible tools observe steering + external + IRC aborts; every other
+	// tool only sees steering + external, so an IRC-only interrupt never kills a
+	// partially side-effecting foreground tool (e.g. `bash`) running alongside a
+	// pure wait (e.g. `job` poll).
+	const nonInterruptibleSignal: AbortSignal = signal
 		? AbortSignal.any([signal, steeringAbortController.signal])
 		: steeringAbortController.signal;
+	const interruptibleSignal: AbortSignal = signal
+		? AbortSignal.any([signal, steeringAbortController.signal, ircAbortController.signal])
+		: AbortSignal.any([steeringAbortController.signal, ircAbortController.signal]);
 	const interruptState = { triggered: false };
 
-	const records = toolCalls.map(toolCall => ({
-		toolCall,
+	const records = toolCalls.map(toolCall => {
 		// Tools emitted via OpenAI's custom-tool path (e.g. `apply_patch` on GPT-5)
 		// come back under their wire-level name, which may differ from the
 		// harness-internal `name`. Match on either, preferring `name` for
 		// determinism if both somehow collide.
-		tool:
+		const tool =
 			tools?.find(t => t.name === toolCall.name) ??
-			tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name),
-		args: toolCall.arguments as Record<string, unknown>,
-		started: false,
-		result: undefined as AgentToolResult<any> | undefined,
-		isError: false,
-		skipped: false,
-		toolResultMessage: undefined as ToolResultMessage | undefined,
-		resultEmitted: false,
-	}));
+			tools?.find(t => t.customWireName !== undefined && t.customWireName === toolCall.name);
+		return {
+			toolCall,
+			tool,
+			args: toolCall.arguments as Record<string, unknown>,
+			signal: tool?.interruptible ? interruptibleSignal : nonInterruptibleSignal,
+			started: false,
+			result: undefined as AgentToolResult<any> | undefined,
+			isError: false,
+			skipped: false,
+			toolResultMessage: undefined as ToolResultMessage | undefined,
+			resultEmitted: false,
+		};
+	});
 
 	const checkSteering = async (): Promise<void> => {
 		// `signal` (external/user abort) is checked separately from the internal
-		// steeringAbortController: once the run is externally aborted it is
-		// unwinding and the interrupt would be redundant.
-		if (!shouldInterruptImmediately || interruptState.triggered || signal?.aborted) {
+		// abort controllers: once the run is externally aborted it is unwinding
+		// and the interrupt would be redundant.
+		if (!shouldInterruptImmediately || signal?.aborted) {
 			return;
 		}
-		// Prefer the non-consuming peek (`hasSteeringMessages`) when available.
-		// Fall back to calling `getSteeringMessages` directly when only it is
-		// provided (e.g. in tests or minimal integrations without a separate
-		// peek function). In that case the message is consumed here rather than
-		// at the outer injection boundary, but the interrupt still fires.
-		let hasMessages: boolean;
+		// Mid-batch steering detection must be non-consuming. If a direct
+		// integration only provides getSteeringMessages(), the queue drains at the
+		// injection boundary below; polling it here would strand or drop messages.
+		let steeringQueued = false;
 		if (hasSteeringMessages) {
-			hasMessages = await hasSteeringMessages();
-		} else if (getSteeringMessages) {
-			const msgs = await getSteeringMessages();
-			hasMessages = (msgs?.length ?? 0) > 0;
-		} else {
+			steeringQueued = await hasSteeringMessages();
+		}
+		if (steeringQueued) {
+			// User steering upgrades an in-flight IRC interrupt: it aborts the
+			// shared signal so foreground tools stop as they do for a user Esc.
+			// Idempotent — a second steer poll after the abort is a no-op.
+			if (!steeringAbortController.signal.aborted) {
+				interruptState.triggered = true;
+				steeringAbortController.abort();
+			}
 			return;
 		}
-		if (hasMessages) {
-			if (interruptState.triggered || signal?.aborted) return;
+		// IRC only fires once: a peer interrupt already recorded on interruptState
+		// must not re-abort, and (unlike steering above) never re-consume a queue.
+		if (interruptState.triggered) return;
+		if (hasIrcInterrupts && (await hasIrcInterrupts())) {
+			// Peer IRC only aborts interruptible waits: a foreground bash / write
+			// mid-execution keeps running so we never leave partial side effects.
 			interruptState.triggered = true;
-			steeringAbortController.abort();
+			ircAbortController.abort();
 		}
 	};
 
@@ -1824,14 +1866,14 @@ async function executeToolCalls(
 		}
 
 		record.args = effectiveArgs;
-		if (toolSignal.aborted) {
+		if (record.signal.aborted) {
 			record.skipped = true;
 			recordSkippedTool(telemetry, {
 				toolCallId: toolCall.id,
 				toolName: toolCall.name,
 				status: "aborted",
 			});
-			emitToolResult(record, createToolSignalAbortedResult(toolSignal), true);
+			emitToolResult(record, createToolSignalAbortedResult(record.signal), true);
 			return;
 		}
 		record.started = true;
@@ -1862,8 +1904,8 @@ async function executeToolCalls(
 		await runInActiveSpan(toolSpan, async () => {
 			try {
 				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
-				if (toolSignal.aborted) {
-					result = createToolSignalAbortedResult(toolSignal);
+				if (record.signal.aborted) {
+					result = createToolSignalAbortedResult(record.signal);
 					isError = true;
 					return;
 				}
@@ -1876,14 +1918,14 @@ async function executeToolCalls(
 							args: effectiveArgs,
 							context: currentContext,
 						},
-						toolSignal,
+						record.signal,
 					);
 					if (beforeResult?.block) {
 						throw new ToolCallBlockedError(beforeResult.reason);
 					}
 				}
-				if (toolSignal.aborted) {
-					result = createToolSignalAbortedResult(toolSignal);
+				if (record.signal.aborted) {
+					result = createToolSignalAbortedResult(record.signal);
 					isError = true;
 					return;
 				}
@@ -1903,7 +1945,7 @@ async function executeToolCalls(
 				const rawResult = await tool.execute(
 					toolCall.id,
 					executionArgs,
-					toolSignal,
+					record.signal,
 					partialResult => {
 						stream.push({
 							type: "tool_execution_update",
@@ -1928,7 +1970,7 @@ async function executeToolCalls(
 				isError = true;
 			}
 
-			if (afterToolCall && (!toolSignal.aborted || completedToolExecution)) {
+			if (afterToolCall && (!record.signal.aborted || completedToolExecution)) {
 				try {
 					const after = await afterToolCall(
 						{
@@ -1939,7 +1981,7 @@ async function executeToolCalls(
 							isError,
 							context: currentContext,
 						},
-						toolSignal,
+						record.signal,
 					);
 					if (after) {
 						// Re-normalize the post-hook result: `afterToolCall` is untyped user/extension
@@ -1967,30 +2009,33 @@ async function executeToolCalls(
 		});
 
 		const interrupted = interruptState.triggered;
-		const abortedDuringExecution = toolSignal.aborted && isError;
-		if (interrupted && isError) {
-			// Steering/abort fired AND this tool failed — it was cut off before producing a
-			// usable result, so report it as skipped.
+		const perToolAborted = record.signal.aborted;
+		const abortedDuringExecution = perToolAborted && isError;
+		if (interrupted && perToolAborted && isError) {
+			// This tool's own signal fired AND it failed — it was cut off before producing
+			// a usable result, so report it as skipped.
 			record.skipped = true;
 			emitToolResult(record, createSkippedToolResult(), true);
 		} else {
-			// No interrupt, or the tool finished (successfully or with a genuine error) before
-			// the interrupt landed. Keep its real result: a completed tool already ran its side
-			// effects, so the model must see what actually happened rather than a false "skipped".
+			// No interrupt on this signal, or the tool finished (successfully or with a
+			// genuine error) before the interrupt landed. Keep its real result: a completed
+			// tool already ran its side effects, so the model must see what actually
+			// happened rather than a false "skipped". A peer-IRC interrupt on the batch
+			// leaves non-interruptible tools' signals untouched — their genuine errors
+			// survive here instead of being clobbered into "skipped".
 			emitToolResult(record, result, isError);
 		}
 
 		const firstTextBlock = result.content?.[0];
 		const errorMessageForSpan =
 			caughtError === undefined && isError && firstTextBlock?.type === "text" ? firstTextBlock.text : undefined;
-		const status =
-			(interrupted && isError) || abortedDuringExecution
-				? "aborted"
-				: caughtError instanceof ToolCallBlockedError
-					? "blocked"
-					: isError
-						? "error"
-						: "ok";
+		const status = abortedDuringExecution
+			? "aborted"
+			: caughtError instanceof ToolCallBlockedError
+				? "blocked"
+				: isError
+					? "error"
+					: "ok";
 		finishExecuteToolSpan(telemetry, toolSpan, {
 			result,
 			isError,
@@ -2034,15 +2079,15 @@ async function executeToolCalls(
 		}
 	}
 
-	// While an interruptible tool is in flight (e.g. a `job` poll blocking on
-	// background work), a queued steer would otherwise wait out the tool's own
-	// window. Poll the steering queue and let checkSteering() abort the shared
-	// tool signal so the wait returns early; the boundary dequeue below then
-	// injects it. Gated on immediate-interrupt mode + an interruptible tool;
-	// checkSteering is idempotent (no-op once triggered).
+	// While an interruptible tool is in flight (e.g. a `job`/`irc` wait
+	// blocking on external work), queued steering or interrupting IRC would
+	// otherwise wait out the tool's own window. Poll only non-consuming queues
+	// and abort the shared tool signal so the boundary dequeue below injects
+	// the message promptly. Gated on immediate-interrupt mode + an
+	// interruptible tool; checkSteering is idempotent (no-op once triggered).
 	const watchSteeringWhileRunning =
 		shouldInterruptImmediately &&
-		(hasSteeringMessages !== undefined || getSteeringMessages !== undefined) &&
+		(hasSteeringMessages !== undefined || hasIrcInterrupts !== undefined) &&
 		records.some(r => r.tool?.interruptible === true);
 	const steeringWatchTimer = watchSteeringWhileRunning
 		? setInterval(() => void checkSteering(), STEERING_INTERRUPT_POLL_MS)
@@ -2135,7 +2180,12 @@ function createToolSignalAbortedResult(signal: AbortSignal): AgentToolResult<unk
 
 function createSkippedToolResult(): AgentToolResult<any> {
 	return {
-		content: [{ type: "text", text: "Skipped due to queued user message." }],
+		content: [
+			{
+				type: "text",
+				text: "Skipped due to queued user message. Do not count this skipped result as completed work or verification. After the queued message is handled on the next step, retry the skipped tool if it is still needed.",
+			},
+		],
 		details: {},
 	};
 }

@@ -30,7 +30,12 @@ import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSetting
 import { Settings } from "../config/settings";
 import benchPrompt from "../prompts/bench.md" with { type: "text" };
 import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
-import { resolveThinkingLevelForModel, shouldDisableReasoning, toReasoningEffort } from "../thinking";
+import {
+	concreteThinkingLevel,
+	resolveThinkingLevelForModel,
+	shouldDisableReasoning,
+	toReasoningEffort,
+} from "../thinking";
 
 const DEFAULT_RUNS = 10;
 const DEFAULT_PAR = 4;
@@ -477,7 +482,7 @@ function resolveBenchModels(
 		resolved.push({
 			selector,
 			model,
-			thinking: resolveThinkingLevelForModel(model, result.thinkingLevel),
+			thinking: resolveThinkingLevelForModel(model, concreteThinkingLevel(result.thinkingLevel)),
 		});
 	}
 	if (errors.length > 0) {

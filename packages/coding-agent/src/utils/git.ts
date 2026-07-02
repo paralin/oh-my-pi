@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, hasFsCode, isEisdir, isEnoent, isEnotdir, Snowflake } from "@oh-my-pi/pi-utils";
+import type { Subprocess } from "bun";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
 	parseFileDiffs,
@@ -103,6 +104,7 @@ export interface PatchOptions {
 	readonly cached?: boolean;
 	readonly check?: boolean;
 	readonly env?: Record<string, string | undefined>;
+	readonly reverse?: boolean;
 	readonly threeWay?: boolean;
 	readonly signal?: AbortSignal;
 }
@@ -115,10 +117,18 @@ export interface RestoreOptions {
 	readonly worktree?: boolean;
 }
 
+export interface FetchOptions {
+	readonly signal?: AbortSignal;
+	/** Deadline for the network transfer. Defaults to {@link GIT_NETWORK_TIMEOUT_MS}. */
+	readonly timeoutMs?: number;
+}
+
 export interface CloneOptions {
 	readonly ref?: string;
 	readonly sha?: string;
 	readonly signal?: AbortSignal;
+	/** Deadline for the network transfer. Defaults to {@link GIT_NETWORK_TIMEOUT_MS}. */
+	readonly timeoutMs?: number;
 }
 
 interface GitHeadBase extends GitRepository {
@@ -174,7 +184,6 @@ const SHORT_LIVED_GIT_CONFIG: readonly (readonly [key: string, value: string])[]
 	["core.fsmonitor", "false"],
 	["core.untrackedCache", "false"],
 ];
-const REMOTE_ALREADY_EXISTS = /remote .* already exists/i;
 const AMBIENT_GIT_ENV = {
 	GIT_DIR: undefined,
 	GIT_COMMON_DIR: undefined,
@@ -184,11 +193,177 @@ const AMBIENT_GIT_ENV = {
 	GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined,
 } satisfies Record<string, undefined>;
 
+const GIT_NON_INTERACTIVE_ENV = {
+	GIT_ASKPASS: "true",
+	GIT_EDITOR: "true",
+	GIT_TERMINAL_PROMPT: "0",
+	GPG_TTY: "not a tty",
+	SSH_ASKPASS: "/usr/bin/false",
+} satisfies Record<string, string>;
+const GH_NON_INTERACTIVE_ENV = {
+	...GIT_NON_INTERACTIVE_ENV,
+	GH_PROMPT_DISABLED: "1",
+} satisfies Record<string, string>;
+
+/** Default deadline for git and gh subprocesses spawned by the coding agent. */
+export const GIT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
+/**
+ * Default deadline for git subprocesses that perform network transfers
+ * (`clone`/`fetch`). Large-repo transfers legitimately outlive
+ * {@link GIT_COMMAND_TIMEOUT_MS}, so they get a wider deadline; local plumbing
+ * commands keep the short one.
+ */
+export const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
+/** Maximum captured stdout or stderr bytes retained from git and gh subprocesses. */
+export const GIT_COMMAND_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
+
+const GIT_COMMAND_TIMEOUT_EXIT_CODE = 124;
+const GIT_OUTPUT_TRUNCATED_MARKER = "\n[git subprocess output truncated after 8 MiB]\n";
+const GIT_COMMAND_TERMINATE_GRACE_MS = 5_000;
+
+type CommandName = "git" | "gh";
+
+function resolveTimeoutMs(timeoutMs: number | undefined, fallback: number = GIT_COMMAND_TIMEOUT_MS): number {
+	if (timeoutMs === undefined) return fallback;
+	if (!Number.isFinite(timeoutMs) || timeoutMs < 0) return fallback;
+	return Math.trunc(timeoutMs);
+}
+
+function resolveOutputLimit(maxOutputBytes: number | undefined): number {
+	if (maxOutputBytes === undefined) return GIT_COMMAND_OUTPUT_LIMIT_BYTES;
+	if (!Number.isFinite(maxOutputBytes) || maxOutputBytes < 0) return GIT_COMMAND_OUTPUT_LIMIT_BYTES;
+	return Math.trunc(maxOutputBytes);
+}
+
+function formatCommandLabel(command: CommandName, args: readonly string[]): string {
+	return `${command} ${args.join(" ")}`.trim();
+}
+
+async function waitForChildExit(child: Subprocess, timeoutMs: number): Promise<boolean> {
+	if (timeoutMs <= 0) return false;
+	const timeout = Promise.withResolvers<false>();
+	const timer = setTimeout(() => timeout.resolve(false), timeoutMs);
+	timer.unref?.();
+	try {
+		return await Promise.race([
+			child.exited.then(
+				() => true,
+				() => true,
+			),
+			timeout.promise,
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function terminateTimedOutChild(child: Subprocess): Promise<void> {
+	child.kill("SIGTERM");
+	if (await waitForChildExit(child, GIT_COMMAND_TERMINATE_GRACE_MS)) return;
+	child.kill("SIGKILL");
+	await waitForChildExit(child, GIT_COMMAND_TERMINATE_GRACE_MS);
+}
+
+async function waitForExitWithTimeout(
+	child: Subprocess,
+	commandLabel: string,
+	timeoutMs: number,
+): Promise<{ exitCode: number | null; timedOut: false } | { timedOut: true; stderr: string }> {
+	if (timeoutMs === 0) {
+		await terminateTimedOutChild(child);
+		return { timedOut: true, stderr: `${commandLabel} timed out after 0ms` };
+	}
+	const timeout = Promise.withResolvers<"timeout">();
+	const timer = setTimeout(() => timeout.resolve("timeout"), timeoutMs);
+	timer.unref?.();
+	try {
+		const result = await Promise.race([
+			child.exited.then(exitCode => ({ kind: "exit" as const, exitCode })),
+			timeout.promise.then(() => ({ kind: "timeout" as const })),
+		]);
+		if (result.kind === "exit") {
+			return { timedOut: false, exitCode: result.exitCode };
+		}
+		await terminateTimedOutChild(child);
+		return { timedOut: true, stderr: `${commandLabel} timed out after ${timeoutMs}ms` };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+async function readCappedText(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	const chunks: string[] = [];
+	let remaining = maxBytes;
+	let truncated = false;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!truncated && value.length <= remaining) {
+				chunks.push(decoder.decode(value, { stream: true }));
+				remaining -= value.length;
+				continue;
+			}
+			if (!truncated && remaining > 0) {
+				chunks.push(decoder.decode(value.subarray(0, remaining), { stream: true }));
+				remaining = 0;
+			}
+			truncated = true;
+		}
+		chunks.push(decoder.decode());
+		if (truncated) chunks.push(GIT_OUTPUT_TRUNCATED_MARKER);
+		return chunks.join("");
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function cancelOutput(stream: ReadableStream<Uint8Array>): Promise<void> {
+	try {
+		await stream.cancel();
+	} catch {
+		// Best-effort cleanup after a timeout; the subprocess has already been signaled.
+	}
+}
+
+async function collectSubprocessResult(
+	command: CommandName,
+	args: readonly string[],
+	child: Subprocess,
+	options: Pick<CommandOptions, "maxOutputBytes" | "timeoutMs"> = {},
+): Promise<GitCommandResult> {
+	const stdoutStream = child.stdout;
+	const stderrStream = child.stderr;
+	if (!(stdoutStream instanceof ReadableStream) || !(stderrStream instanceof ReadableStream)) {
+		throw new Error(`Failed to capture ${command} command output.`);
+	}
+	const maxOutputBytes = resolveOutputLimit(options.maxOutputBytes);
+	const stdoutPromise = readCappedText(stdoutStream, maxOutputBytes);
+	const stderrPromise = readCappedText(stderrStream, maxOutputBytes);
+	const exit = await waitForExitWithTimeout(
+		child,
+		formatCommandLabel(command, args),
+		resolveTimeoutMs(options.timeoutMs),
+	);
+	if (exit.timedOut) {
+		void stdoutPromise.catch(() => undefined);
+		void stderrPromise.catch(() => undefined);
+		await Promise.all([cancelOutput(stdoutStream), cancelOutput(stderrStream)]);
+		return { exitCode: GIT_COMMAND_TIMEOUT_EXIT_CODE, stdout: "", stderr: exit.stderr };
+	}
+	const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+	return { exitCode: exit.exitCode ?? 0, stdout, stderr };
+}
+
 interface CommandOptions {
 	readonly env?: Record<string, string | undefined>;
+	readonly maxOutputBytes?: number;
 	readonly readOnly?: boolean;
 	readonly signal?: AbortSignal;
 	readonly stdin?: string | Uint8Array | ArrayBuffer | SharedArrayBuffer;
+	readonly timeoutMs?: number;
 }
 
 function normalizeStdin(input: CommandOptions["stdin"]): "ignore" | Uint8Array {
@@ -204,6 +379,7 @@ function buildGitEnv(overrides?: Record<string, string | undefined>): Record<str
 		GIT_OPTIONAL_LOCKS: "0",
 		...AMBIENT_GIT_ENV,
 		...overrides,
+		...GIT_NON_INTERACTIVE_ENV,
 	};
 }
 
@@ -236,17 +412,7 @@ async function git(cwd: string, args: readonly string[], options: CommandOptions
 		windowsHide: true,
 	});
 
-	if (!child.stdout || !child.stderr) {
-		throw new Error("Failed to capture git command output.");
-	}
-
-	const [stdout, stderr, exitCode] = await Promise.all([
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-		child.exited,
-	]);
-
-	return { exitCode: exitCode ?? 0, stdout, stderr };
+	return await collectSubprocessResult("git", commandArgs, child, options);
 }
 
 function withNoOptionalLocks(args: readonly string[]): string[] {
@@ -389,6 +555,7 @@ function buildApplyArgs(patchPath: string, options: PatchOptions): string[] {
 	const args = ["apply"];
 	if (options.check) args.push("--check");
 	if (options.cached) args.push("--cached");
+	if (options.reverse) args.push("--reverse");
 	if (options.threeWay) args.push("--3way");
 	args.push("--binary", patchPath);
 	return args;
@@ -1185,15 +1352,18 @@ export async function checkout(cwd: string, ref: string, signal?: AbortSignal): 
 	await runEffect(cwd, ["checkout", ref], { signal });
 }
 
-/** Fetch a specific refspec from a remote. */
+/** Fetch a specific refspec from a remote. Network transfer: defaults to the {@link GIT_NETWORK_TIMEOUT_MS} deadline. */
 export async function fetch(
 	cwd: string,
 	remote: string,
 	source: string,
 	target: string,
-	signal?: AbortSignal,
+	options: FetchOptions = {},
 ): Promise<void> {
-	await runEffect(cwd, ["fetch", remote, `+${source}:${target}`], { signal });
+	await runEffect(cwd, ["fetch", remote, `+${source}:${target}`], {
+		signal: options.signal,
+		timeoutMs: resolveTimeoutMs(options.timeoutMs, GIT_NETWORK_TIMEOUT_MS),
+	});
 }
 
 /** Read a tree-ish into the index. */
@@ -1370,10 +1540,10 @@ export const remote = {
 	async add(cwd: string, name: string, url: string, signal?: AbortSignal): Promise<void> {
 		const result = await git(cwd, ["remote", "add", name, url], { signal });
 		if (result.exitCode === 0) return;
-		if (REMOTE_ALREADY_EXISTS.test(result.stderr)) {
-			const existing = await remote.url(cwd, name, signal);
+		const existing = await remote.url(cwd, name, signal);
+		if (existing !== undefined) {
 			if (existing === url) return;
-			throw new ToolError(`remote ${name} already exists with URL ${existing ?? "(unset)"}, expected ${url}`);
+			throw new ToolError(`remote ${name} already exists with URL ${existing}, expected ${url}`);
 		}
 		throw new GitCommandError(["remote", "add", name, url], result);
 	},
@@ -1580,6 +1750,69 @@ export const stash = {
 		if (options?.index) args.push("--index");
 		await runEffect(cwd, args);
 	},
+	/**
+	 * Return the working-tree patch that `stash@{0}` would apply, in a form
+	 * that `git apply --check` can consume. Empty string when no stash entry
+	 * exists or the stash contains no diffable working-tree changes.
+	 */
+	async showPatch(cwd: string): Promise<string> {
+		return (await tryText(cwd, ["stash", "show", "-p", "--binary", "stash@{0}"], { readOnly: true })) ?? "";
+	},
+	/** Return untracked paths stored in the top stash entry. */
+	async untrackedFiles(cwd: string): Promise<string[]> {
+		const output = await tryText(cwd, ["ls-tree", "-r", "-z", "--name-only", "stash@{0}^3"], { readOnly: true });
+		return output?.split("\0").filter(Boolean) ?? [];
+	},
+	/**
+	 * Attempt to restore the top stash entry. On success returns `true` and
+	 * git drops the stash entry. On conflict returns `false`, leaves the stash
+	 * entry preserved for manual resolution, and guarantees the failed restore
+	 * leaves no unmerged index entries or partially-restored untracked files.
+	 *
+	 * The historical raw `pop` catches the failure in a `finally` block and
+	 * only logs — it leaves `.git/index` with stage 1/2/3 unmerged entries
+	 * that survive indefinitely, corrupting every subsequent overlay-isolated
+	 * task that reads through this repo's `.git/`. See issue #4175.
+	 */
+	async tryPop(cwd: string, options?: { index?: boolean }): Promise<boolean> {
+		// Preflight: `git stash pop` internally does a 3-way merge, so a plain
+		// `git apply --check` is too strict — it rejects hunks whose context
+		// drifted from HEAD even when 3-way merge would resolve them cleanly.
+		// Match pop's semantics with `--3way --check`, which succeeds iff the
+		// patch either applies directly or merges without conflict against
+		// the patch's `index abc..def` base blobs.
+		const workingPatch = await stash.showPatch(cwd);
+		if (workingPatch.trim() && !(await patch.canApplyText(cwd, workingPatch, { threeWay: true }))) {
+			return false;
+		}
+		const restoredUntracked = await stash.untrackedFiles(cwd);
+		try {
+			await stash.pop(cwd, options);
+			return true;
+		} catch {
+			// Preflight can still miss mode-only or delete/modify conflicts. If
+			// the pop left unmerged entries, wipe them: HEAD holds the merged
+			// state so `reset --hard HEAD` restores a clean index and working
+			// tree without losing the cherry-picked commits. A failed pop can
+			// still restore unrelated untracked files before exiting while
+			// preserving the stash entry, so clean only the untracked paths
+			// recorded in that stash. The user's WIP remains recoverable via
+			// `git stash pop`.
+			try {
+				await reset(cwd, { hard: true });
+			} catch {
+				/* best-effort cleanup — do not mask the primary conflict */
+			}
+			if (restoredUntracked.length > 0) {
+				try {
+					await clean(cwd, { includeIgnored: true, literalPathspecs: true, paths: restoredUntracked });
+				} catch {
+					/* best-effort cleanup — do not mask the primary conflict */
+				}
+			}
+			return false;
+		}
+	},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1603,7 +1836,10 @@ export async function clone(url: string, targetDir: string, options: CloneOption
 	args.push(url, absoluteTarget);
 
 	try {
-		await runEffect(path.dirname(absoluteTarget), args, { signal: options.signal });
+		await runEffect(path.dirname(absoluteTarget), args, {
+			signal: options.signal,
+			timeoutMs: resolveTimeoutMs(options.timeoutMs, GIT_NETWORK_TIMEOUT_MS),
+		});
 		if (options.sha) {
 			try {
 				await checkout(absoluteTarget, options.sha, options.signal);
@@ -1646,9 +1882,18 @@ export async function reset(
 
 export async function clean(
 	cwd: string,
-	options: { ignoredOnly?: boolean; paths?: readonly string[]; signal?: AbortSignal } = {},
+	options: {
+		ignoredOnly?: boolean;
+		includeIgnored?: boolean;
+		literalPathspecs?: boolean;
+		paths?: readonly string[];
+		signal?: AbortSignal;
+	} = {},
 ): Promise<void> {
-	const args = ["clean", options.ignoredOnly ? "-fdX" : "-fd"];
+	const args = [options.literalPathspecs ? "--literal-pathspecs" : undefined, "clean"].filter(
+		(arg): arg is string => arg !== undefined,
+	);
+	args.push(options.ignoredOnly ? "-fdX" : options.includeIgnored ? "-fdx" : "-fd");
 	if (options.paths?.length) args.push("--", ...options.paths);
 	await runEffect(cwd, args, { signal: options.signal });
 }
@@ -1857,20 +2102,17 @@ export const github = {
 		try {
 			const child = Bun.spawn(["gh", ...args], {
 				cwd,
+				env: {
+					...process.env,
+					...GH_NON_INTERACTIVE_ENV,
+				},
 				stdin: "ignore",
 				stdout: "pipe",
 				stderr: "pipe",
 				windowsHide: true,
 				signal,
 			});
-			if (!child.stdout || !child.stderr) {
-				throw new ToolError("Failed to capture GitHub CLI output.");
-			}
-			const [stdout, stderr, exitCode] = await Promise.all([
-				new Response(child.stdout).text(),
-				new Response(child.stderr).text(),
-				child.exited,
-			]);
+			const { stdout, stderr, exitCode } = await collectSubprocessResult("gh", args, child, {});
 			throwIfAborted(signal);
 			const trim = options?.trimOutput !== false;
 			return {

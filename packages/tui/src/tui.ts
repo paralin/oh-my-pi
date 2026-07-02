@@ -21,6 +21,7 @@ import { isConPTYHosted, setAltScreenActive, type Terminal } from "./terminal";
 import {
 	encodeKittyDeleteImage,
 	ImageProtocol,
+	isInsideTerminalMultiplexer,
 	setCellDimensions,
 	setTerminalImageProtocol,
 	shouldEnableSynchronizedOutputByDefault,
@@ -387,17 +388,7 @@ function parseSizeValue(value: SizeValue | undefined, referenceSize: number): nu
 
 /** Detect terminal multiplexers where scrollback clearing and height-change redraws are hostile. */
 function isMultiplexerSession(): boolean {
-	// TMUX/STY/ZELLIJ/CMUX workspace+surface ids are authoritative session
-	// signals. TERM can also survive when those are stripped (`sudo` without -E,
-	// `su`, env-sanitizing launchers/ssh), so keep the TERM prefix fallback aligned
-	// with sibling multiplexer checks (terminal-capabilities.ts). Misclassifying a
-	// multiplexer as a direct terminal lets resize/reset paths emit ED3 (`CSI 3 J`)
-	// and wipe pane scrollback. Do not use CMUX_SOCKET_PATH here: it is a CLI socket
-	// override and can be set outside a CMUX terminal.
-	if (Bun.env.TMUX || Bun.env.STY || Bun.env.ZELLIJ) return true;
-	if (Bun.env.CMUX_WORKSPACE_ID || Bun.env.CMUX_SURFACE_ID) return true;
-	const term = Bun.env.TERM?.toLowerCase() ?? "";
-	return term.startsWith("tmux") || term.startsWith("screen");
+	return isInsideTerminalMultiplexer();
 }
 
 /**
@@ -923,8 +914,23 @@ export class TUI extends Container {
 	#renderTimer: RenderTimer | undefined;
 	#renderScheduler: RenderScheduler;
 	#lastRenderAt = 0;
+	/**
+	 * Wall-clock cost of the most recent `#doRender()` call. Used by
+	 * `#scheduleRender` to inflate the next render delay proportionally so a
+	 * spike of slow frames (large transcript diffs, huge assistant text wrap,
+	 * component-tree walks) does not busy-loop the CPU: the throttle would
+	 * otherwise collapse to zero once `elapsed >= MIN_RENDER_INTERVAL_MS` and
+	 * fire the next frame immediately (see #4145).
+	 */
+	#lastFrameCostMs = 0;
 	static readonly #MIN_RENDER_INTERVAL_MS = 1000 / 30;
 	static readonly #INPUT_RENDER_GRACE_MS = TUI.#MIN_RENDER_INTERVAL_MS;
+	/**
+	 * Cap on the adaptive floor derived from `#lastFrameCostMs`. Bounds the UI
+	 * responsiveness at ~5 fps under sustained heavy renders — anything slower
+	 * feels dead to the user and no longer justifies further CPU savings.
+	 */
+	static readonly #MAX_ADAPTIVE_RENDER_MS = 200;
 	#inputRenderGraceUntilMs = 0;
 	// Pane-reflow settle window for tmux/screen/zellij. The host process gets
 	// SIGWINCH (and `process.stdout` already reports the new geometry) before
@@ -972,6 +978,8 @@ export class TUI extends Container {
 	// ConPTY hosts (`isConPTYHosted()`); other terminals do not exhibit the
 	// drift and would just see an unnecessary post-paint latency. See #2095.
 	static readonly #CONPTY_POST_FULL_PAINT_SETTLE_MS = 150;
+	static readonly #CONPTY_FRAME_TRUNCATE_THRESHOLD_BYTES = 512 * 1024;
+	static readonly #CONPTY_FRAME_RETAIN_BYTES = 64 * 1024;
 	#postFullPaintSettleUntilMs = 0;
 	#postFullPaintSettleTimer: RenderTimer | undefined;
 	#hardwareCursorRow = 0; // Actual terminal cursor row (may differ due to IME positioning)
@@ -1831,8 +1839,7 @@ export class TUI extends Container {
 		this.#prepareForcedRender(!isMultiplexerSession());
 		this.#resizeEventPending = true;
 		this.#renderRequested = false;
-		this.#lastRenderAt = this.#renderScheduler.now();
-		this.#doRender();
+		this.#executeRender();
 	}
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
@@ -1863,8 +1870,7 @@ export class TUI extends Container {
 					return;
 				}
 				this.#renderRequested = false;
-				this.#lastRenderAt = this.#renderScheduler.now();
-				this.#doRender();
+				this.#executeRender();
 			});
 			return;
 		}
@@ -2085,8 +2091,7 @@ export class TUI extends Container {
 			this.#ghosttyInitialImageDelayTimer = undefined;
 			this.#ghosttyInitialImageDelayDone = true;
 			if (this.#stopped) return;
-			this.#lastRenderAt = this.#renderScheduler.now();
-			this.#doRender();
+			this.#executeRender();
 			if (this.#renderRequested) this.#scheduleRender();
 		}, delayMs);
 		return true;
@@ -2114,20 +2119,39 @@ export class TUI extends Container {
 		const now = this.#renderScheduler.now();
 		const elapsed = now - this.#lastRenderAt;
 		const cadenceDelay = Math.max(0, TUI.#MIN_RENDER_INTERVAL_MS - elapsed);
+		// Adaptive backpressure — target ~50% render duty cycle: the next frame
+		// starts no sooner than `last_frame_end + last_frame_cost`, i.e.
+		// `last_frame_start + 2 × last_frame_cost`. So `elapsed` (which counts
+		// from the last frame's start) must already exceed twice the cost
+		// before we allow the follow-up render to fire. Capped so a
+		// pathological one-off spike doesn't lock the UI (#4145).
+		const adaptiveFloor = Math.min(TUI.#MAX_ADAPTIVE_RENDER_MS, this.#lastFrameCostMs * 2);
+		const adaptiveDelay = Math.max(0, adaptiveFloor - elapsed);
 		const inputGraceDelay = Math.max(0, this.#inputRenderGraceUntilMs - now);
-		const delay = Math.max(cadenceDelay, inputGraceDelay);
+		const delay = Math.max(cadenceDelay, adaptiveDelay, inputGraceDelay);
 		this.#renderTimer = this.#renderScheduler.scheduleRender(() => {
 			this.#renderTimer = undefined;
 			if (this.#stopped || !this.#renderRequested) {
 				return;
 			}
 			this.#renderRequested = false;
-			this.#lastRenderAt = this.#renderScheduler.now();
-			this.#doRender();
+			this.#executeRender();
 			if (this.#renderRequested) {
 				this.#scheduleRender();
 			}
 		}, delay);
+	}
+
+	/**
+	 * Wrap `#doRender()` so every path records the wall-clock frame cost that
+	 * feeds adaptive backpressure. Set `#lastRenderAt` first (some render code
+	 * reads it re-entrantly) and compute the cost once the paint returns.
+	 */
+	#executeRender(): void {
+		const start = this.#renderScheduler.now();
+		this.#lastRenderAt = start;
+		this.#doRender();
+		this.#lastFrameCostMs = this.#renderScheduler.now() - start;
 	}
 
 	#handleInput(data: string): void {
@@ -2458,6 +2482,56 @@ export class TUI extends Container {
 		return markers;
 	}
 
+	#truncateLargeConptyFrame(
+		lines: string[],
+		width: number,
+		height: number,
+		cursorPos: { row: number; col: number } | null,
+	): { lines: string[]; cursorPos: { row: number; col: number } | null } {
+		if (!isConPTYHosted()) return { lines, cursorPos };
+
+		let totalBytes = 0;
+		let exceedsThreshold = false;
+		for (const line of lines) {
+			totalBytes += Buffer.byteLength(line, "utf8") + 8;
+			if (totalBytes > TUI.#CONPTY_FRAME_TRUNCATE_THRESHOLD_BYTES) {
+				exceedsThreshold = true;
+				break;
+			}
+		}
+		if (!exceedsThreshold) return { lines, cursorPos };
+
+		let retainedBytes = 0;
+		let retainedStart = lines.length;
+		while (
+			retainedStart > 0 &&
+			(retainedBytes < TUI.#CONPTY_FRAME_RETAIN_BYTES || lines.length - retainedStart < height)
+		) {
+			retainedStart -= 1;
+			retainedBytes += Buffer.byteLength(lines[retainedStart] ?? "", "utf8") + 8;
+		}
+		if (retainedStart <= 0) return { lines, cursorPos };
+
+		const marker = truncateToWidth(
+			`[${retainedStart} older lines hidden to keep Windows console resume responsive]`,
+			width,
+			Ellipsis.Omit,
+		);
+		const truncated = new Array<string>(lines.length - retainedStart + 1);
+		truncated[0] = marker;
+		for (let i = retainedStart; i < lines.length; i++) {
+			truncated[i - retainedStart + 1] = lines[i] ?? "";
+		}
+
+		if (cursorPos === null || cursorPos.row < retainedStart) {
+			return { lines: truncated, cursorPos: null };
+		}
+		return {
+			lines: truncated,
+			cursorPos: { row: cursorPos.row - retainedStart + 1, col: cursorPos.col },
+		};
+	}
+
 	#terminalLine(line: string): string {
 		if (TERMINAL.isImageLine(line)) return line;
 		const coalesced = coalesceAdjacentSgr(line);
@@ -2762,6 +2836,7 @@ export class TUI extends Container {
 			}
 			window = this.#prepareLinesArray(window, width);
 		}
+		const cursorTrackingLineCount = hasVisibleOverlay ? Math.max(frame.length, windowTop + height) : frame.length;
 
 		const intent: RenderIntent = fullPaint
 			? { kind: "fullPaint", clearScrollback: replaceRequested || geometryRebuild ? !isMultiplexerSession() : false }
@@ -2792,6 +2867,7 @@ export class TUI extends Container {
 				clearScrollback: intent.clearScrollback,
 				chunkTo,
 				windowTop,
+				cursorTrackingLineCount,
 			});
 			this.#committedPrefix = rawFrame.slice(0, chunkTo);
 			this.#updateCommittedAuditRows(
@@ -2817,6 +2893,8 @@ export class TUI extends Container {
 			prevWindowTop,
 			prevHardwareCursorRow,
 			forceWindowRewrite: this.#forceViewportRepaintOnNextRender || (geometryChanged && resizeRepaintsInPlace()),
+			repaintVirtualScrollInPlace: hasVisibleOverlay,
+			cursorTrackingLineCount,
 		});
 		for (let i = this.#committedPrefix.length; i < chunkTo; i++) {
 			this.#committedPrefix.push(rawFrame[i] ?? "");
@@ -3198,10 +3276,48 @@ export class TUI extends Container {
 		cursorPos: { row: number; col: number } | null,
 		purgeSequence: string,
 		imageTransmitBuffer: string,
-		options: { clearScrollback: boolean; chunkTo: number; windowTop: number },
+		options: {
+			clearScrollback: boolean;
+			chunkTo: number;
+			windowTop: number;
+			cursorTrackingLineCount: number;
+		},
 	): void {
 		this.#fullRedrawCount += 1;
-		const { chunkTo, windowTop } = options;
+		const { chunkTo, windowTop, cursorTrackingLineCount } = options;
+		// Map the frame-space cursor into paint space: committed-prefix rows
+		// keep their index, visible-window rows land after the prefix, and a
+		// cursor in neither region (hidden behind the overlay gap) hides.
+		let paintCursorPos: { row: number; col: number } | null = null;
+		if (cursorPos !== null) {
+			if (cursorPos.row < chunkTo) {
+				paintCursorPos = cursorPos;
+			} else if (cursorPos.row >= windowTop && cursorPos.row < windowTop + height) {
+				paintCursorPos = { row: chunkTo + cursorPos.row - windowTop, col: cursorPos.col };
+			}
+		}
+		// ConPTY hosts bound the replay: merge prefix + window into one array
+		// so #truncateLargeConptyFrame can measure the payload and retain only
+		// the tail. Gated on the host check — everywhere else the merge would
+		// copy a pointer per committed row (a 50k-row session = 50k-entry
+		// array per resize step / theme change / session replace) just to be
+		// returned unchanged. `paintLines` stays null unless truncation
+		// actually rewrote the replay.
+		let paintLines: string[] | null = null;
+		let paintLineCount = chunkTo + height;
+		if (isConPTYHosted()) {
+			const merged = new Array<string>(chunkTo + height);
+			for (let i = 0; i < chunkTo; i++) merged[i] = frame[i] ?? "";
+			for (let screenRow = 0; screenRow < height; screenRow++) {
+				merged[chunkTo + screenRow] = window[screenRow] ?? "";
+			}
+			const paint = this.#truncateLargeConptyFrame(merged, width, height, paintCursorPos);
+			if (paint.lines !== merged) {
+				paintLines = paint.lines;
+				paintLineCount = paint.lines.length;
+				paintCursorPos = paint.cursorPos;
+			}
+		}
 		let buffer = this.#paintBeginSequence + this.#leaveResizeAltSequence() + purgeSequence;
 		if (options.clearScrollback) {
 			buffer += "\x1b[2J\x1b[H\x1b[3J";
@@ -3218,21 +3334,43 @@ export class TUI extends Container {
 		// DECCARA fills optimize only the rows that stay visible; history-bound
 		// rows are written as full styled strings (their background must
 		// survive in scrollback, which DECCARA cannot reach).
-		const { texts, sequence } = this.#deccaraFillsEnabled()
-			? planDeccaraFills(window, width)
-			: { texts: window, sequence: "" };
-		let wroteLine = false;
-		for (let i = 0; i < chunkTo; i++) {
-			if (wroteLine) buffer += "\r\n";
-			buffer += this.#terminalLine(frame[i] ?? "");
-			wroteLine = true;
+		const visibleStart = Math.max(0, paintLineCount - height);
+		let fillSequence = "";
+		let visibleTexts: string[] | null = null;
+		if (this.#deccaraFillsEnabled() && visibleStart < paintLineCount) {
+			// Untruncated, the visible slice is exactly the caller's window
+			// (visibleStart === chunkTo) — reuse it rather than copying;
+			// planDeccaraFills fills its own `texts` and never mutates input.
+			let visible = window;
+			if (paintLines !== null) {
+				visible = new Array<string>(paintLineCount - visibleStart);
+				for (let k = 0; k < visible.length; k++) visible[k] = paintLines[visibleStart + k] ?? "";
+			}
+			const plan = planDeccaraFills(visible, width);
+			visibleTexts = plan.texts;
+			fillSequence = plan.sequence;
 		}
-		for (let screenRow = 0; screenRow < height; screenRow++) {
-			if (wroteLine) buffer += "\r\n";
-			buffer += this.#terminalLine(texts[screenRow] ?? "");
-			wroteLine = true;
+		if (paintLines === null) {
+			// Common path: emit straight from the source arrays (the
+			// pre-merge two-loop form); byte-identical to replaying the
+			// merged array.
+			for (let i = 0; i < chunkTo; i++) {
+				if (i > 0) buffer += "\r\n";
+				buffer += this.#terminalLine(frame[i] ?? "");
+			}
+			for (let screenRow = 0; screenRow < height; screenRow++) {
+				if (chunkTo + screenRow > 0) buffer += "\r\n";
+				buffer += this.#terminalLine(visibleTexts ? (visibleTexts[screenRow] ?? "") : (window[screenRow] ?? ""));
+			}
+		} else {
+			for (let i = 0; i < paintLines.length; i++) {
+				if (i > 0) buffer += "\r\n";
+				buffer += this.#terminalLine(
+					visibleTexts && i >= visibleStart ? visibleTexts[i - visibleStart] : (paintLines[i] ?? ""),
+				);
+			}
 		}
-		buffer += sequence;
+		buffer += fillSequence;
 		// Park the hardware cursor at real content bottom, not the padded
 		// window bottom — a later height shrink would otherwise scroll live
 		// rows into scrollback and duplicate them per resize step.
@@ -3240,14 +3378,30 @@ export class TUI extends Container {
 		const parkUp = height - contentRows;
 		if (parkUp > 0) buffer += `\x1b[${parkUp}A`;
 		const contentBottomRow = windowTop + contentRows - 1;
-		const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, contentBottomRow);
+		const paintContentBottomRow = Math.max(0, paintLineCount - 1 - parkUp);
+		const cursorControl = this.#cursorControlSequence(paintCursorPos, paintLineCount, paintContentBottomRow);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 
+		const committedCursorState = paintCursorPos
+			? this.#targetHardwareCursorState(cursorPos, cursorTrackingLineCount)
+			: null;
+		const committedCursor = committedCursorState
+			? {
+					toRow: committedCursorState.row,
+					state: committedCursorState,
+					visible: committedCursorState.visible,
+				}
+			: {
+					toRow: contentBottomRow,
+					state: null,
+					visible: cursorControl.visible,
+				};
+
 		this.#committedRows = chunkTo;
 		this.#windowTopRow = windowTop;
-		this.#commit(frame, window, width, height, cursorControl);
+		this.#commit(frame, window, width, height, committedCursor);
 	}
 
 	/**
@@ -3277,8 +3431,7 @@ export class TUI extends Container {
 	#requestResizeViewportPaint(): void {
 		if (this.#stopped) return;
 		this.#renderRequested = false;
-		this.#lastRenderAt = this.#renderScheduler.now();
-		this.#doRender();
+		this.#executeRender();
 		if (this.#renderRequested) this.#scheduleRender();
 	}
 
@@ -3502,9 +3655,19 @@ export class TUI extends Container {
 			prevWindowTop: number;
 			prevHardwareCursorRow: number;
 			forceWindowRewrite: boolean;
+			repaintVirtualScrollInPlace: boolean;
+			cursorTrackingLineCount: number;
 		},
 	): void {
-		const { chunkTo, windowTop, prevWindowTop, prevHardwareCursorRow, forceWindowRewrite } = options;
+		const {
+			chunkTo,
+			windowTop,
+			prevWindowTop,
+			prevHardwareCursorRow,
+			forceWindowRewrite,
+			repaintVirtualScrollInPlace,
+			cursorTrackingLineCount,
+		} = options;
 		const chunkFrom = this.#committedRows;
 		const chunkLength = chunkTo - chunkFrom;
 		const scroll = windowTop - prevWindowTop;
@@ -3555,7 +3718,7 @@ export class TUI extends Container {
 					}
 					cursorFromRow = windowTop + lastChanged;
 				}
-				const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, cursorFromRow);
+				const cursorControl = this.#cursorControlSequence(cursorPos, cursorTrackingLineCount, cursorFromRow);
 				buffer += cursorControl.seq;
 				buffer += this.#paintEndSequence;
 				this.terminal.write(buffer);
@@ -3566,12 +3729,17 @@ export class TUI extends Container {
 			}
 		}
 
-		// In-window diff: nothing scrolls, nothing commits.
-		if (chunkLength === 0 && scroll === 0) {
-			if (forceWindowRewrite) this.#fullRedrawCount += 1;
-			let firstChanged = forceWindowRewrite ? 0 : -1;
-			let lastChanged = forceWindowRewrite ? height - 1 : -1;
-			if (!forceWindowRewrite) {
+		// In-window diff: nothing commits. While an overlay is visible, repaint
+		// the full viewport in place from a top-clamped cursor origin. Overlay
+		// cursor-only frames can leave the tracked row behind the physical cursor;
+		// a relative partial rewrite from that stale origin can CRLF on the bottom
+		// row and scroll native history without appending to the commit tape.
+		const overlayInPlaceRewrite = repaintVirtualScrollInPlace;
+		if (chunkLength === 0 && (scroll === 0 || overlayInPlaceRewrite)) {
+			if (forceWindowRewrite || overlayInPlaceRewrite) this.#fullRedrawCount += 1;
+			let firstChanged = forceWindowRewrite || overlayInPlaceRewrite ? 0 : -1;
+			let lastChanged = forceWindowRewrite || overlayInPlaceRewrite ? height - 1 : -1;
+			if (!forceWindowRewrite && !overlayInPlaceRewrite) {
 				const comparable = previousWindow.length === height;
 				for (let r = 0; r < height; r++) {
 					if (comparable && (window[r] ?? "") === (previousWindow[r] ?? "")) continue;
@@ -3581,15 +3749,22 @@ export class TUI extends Container {
 			}
 			if (firstChanged === -1) {
 				if (purgeSequence.length > 0) this.terminal.write(purgeSequence);
-				this.#writeCursorPosition(cursorPos, frame.length);
+				this.#writeCursorPosition(cursorPos, cursorTrackingLineCount);
 				this.#previousWidth = width;
 				this.#previousHeight = height;
 				return;
 			}
 			let buffer = this.#paintBeginSequence + purgeSequence;
-			const rowDelta = firstChanged - currentScreenRow;
-			if (rowDelta > 0) buffer += `\x1b[${rowDelta}B`;
-			else if (rowDelta < 0) buffer += `\x1b[${-rowDelta}A`;
+			if (overlayInPlaceRewrite) {
+				// The cursor tracker can be stale after overlay-only frames. A large
+				// CUU clamps at the viewport top without using absolute cursor home,
+				// so the following full-window rewrite cannot overflow the bottom.
+				if (height > 1) buffer += `\x1b[${height - 1}A`;
+			} else {
+				const rowDelta = firstChanged - currentScreenRow;
+				if (rowDelta > 0) buffer += `\x1b[${rowDelta}B`;
+				else if (rowDelta < 0) buffer += `\x1b[${-rowDelta}A`;
+			}
 			buffer += "\r";
 			// DECCARA-optimize the contiguous rewritten range (visible rows
 			// only; rectangles are absolute screen rows).
@@ -3615,10 +3790,11 @@ export class TUI extends Container {
 				buffer += `\x1b[${lastChanged - contentBottomScreenRow}A`;
 				cursorFromRow = contentBottomRow;
 			}
-			const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, cursorFromRow);
+			const cursorControl = this.#cursorControlSequence(cursorPos, cursorTrackingLineCount, cursorFromRow);
 			buffer += cursorControl.seq;
 			buffer += this.#paintEndSequence;
 			this.terminal.write(buffer);
+			this.#windowTopRow = windowTop;
 			this.#commit(frame, window, width, height, cursorControl);
 			return;
 		}
@@ -3644,7 +3820,7 @@ export class TUI extends Container {
 		}
 		const parkUp = height - 1 - (contentBottomRow - windowTop);
 		if (parkUp > 0) buffer += `\x1b[${parkUp}A`;
-		const cursorControl = this.#cursorControlSequence(cursorPos, frame.length, contentBottomRow);
+		const cursorControl = this.#cursorControlSequence(cursorPos, cursorTrackingLineCount, contentBottomRow);
 		buffer += cursorControl.seq;
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);

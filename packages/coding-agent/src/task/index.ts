@@ -60,7 +60,7 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
+import { mapWithConcurrencyLimit, normalizeConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { parseIsolationMode } from "./worktree";
@@ -208,7 +208,7 @@ function renderDescription(
 		defaultAgent: spawnPolicy.defaultAgent,
 		defaultAgentIsGeneric: spawnPolicy.defaultAgent === DEFAULT_SPAWN_AGENT,
 		allowedAgentsText: spawnPolicy.allowedPromptText,
-		MAX_CONCURRENCY: maxConcurrency,
+		MAX_CONCURRENCY: normalizeConcurrencyLimit(maxConcurrency),
 		isolationEnabled,
 		batchEnabled,
 		asyncEnabled,
@@ -501,8 +501,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly #blockedAgent: string | undefined;
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
-	 * subagents across parallel `task` calls within the session. Sized from
-	 * `task.maxConcurrency` at first use; later setting changes do not resize it.
+	 * subagents across parallel `task` calls within the session. Resized in
+	 * place from `task.maxConcurrency` before every acquire/release so a
+	 * mid-session settings change (UI toggle, `/settings`) applies to both new
+	 * spawns and work already parked in the semaphore queue.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
 
@@ -545,8 +547,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	#getSpawnSemaphore(): Semaphore {
-		this.#spawnSemaphore ??= new Semaphore(this.session.settings.get("task.maxConcurrency"));
+		const max = this.session.settings.get("task.maxConcurrency");
+		if (this.#spawnSemaphore) {
+			this.#spawnSemaphore.resize(max);
+		} else {
+			this.#spawnSemaphore = new Semaphore(max);
+		}
 		return this.#spawnSemaphore;
+	}
+
+	#releaseSpawnSemaphore(): void {
+		this.#getSpawnSemaphore().release();
 	}
 
 	/**
@@ -803,6 +814,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const startedAt = Date.now();
 				const semaphore = this.#getSpawnSemaphore();
 				let semaphoreHeld = false;
+				// Every release funnels through here: the flag flips before the
+				// release so no path — acquire-time abort, executor failure, or a
+				// future refactor that reorders the branches — can return a permit
+				// twice. Releasing a permit this job never acquired would steal one
+				// from a running job and let a later spawn start past
+				// task.maxConcurrency.
+				const releasePermit = () => {
+					if (!semaphoreHeld) return;
+					semaphoreHeld = false;
+					this.#releaseSpawnSemaphore();
+				};
 				try {
 					await semaphore.acquire(runSignal);
 					semaphoreHeld = true;
@@ -814,7 +836,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 				const acquiredAt = Date.now();
 				if (!semaphoreHeld || runSignal.aborted) {
-					if (semaphoreHeld) semaphore.release();
+					releasePermit();
 					progress.status = "aborted";
 					onSettled?.(true);
 					throw new Error("Aborted before execution");
@@ -886,7 +908,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const hint = AgentRegistry.global().get(agentId) ? buildFollowUpHint(false) : "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
-					semaphore.release();
+					releasePermit();
 				}
 			},
 			{
@@ -931,7 +953,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					{ invokedAt, acquiredAt },
 				);
 			} finally {
-				semaphore.release();
+				this.#releaseSpawnSemaphore();
 			}
 		}
 
@@ -979,7 +1001,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						{ invokedAt, acquiredAt },
 					);
 				} finally {
-					semaphore.release();
+					this.#releaseSpawnSemaphore();
 				}
 			},
 			signal,

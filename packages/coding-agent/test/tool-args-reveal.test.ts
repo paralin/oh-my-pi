@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { STREAMING_REVEAL_FRAME_MS } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
-import { ToolArgsRevealController } from "@oh-my-pi/pi-coding-agent/modes/controllers/tool-args-reveal";
+import {
+	decodeStreamedToolArgs,
+	streamingStringKeysForTool,
+	ToolArgsRevealController,
+} from "@oh-my-pi/pi-coding-agent/modes/controllers/tool-args-reveal";
 import { STREAMING_JSON_PARSE_MIN_GROWTH } from "@oh-my-pi/pi-utils";
 
 class RecordingArgsComponent {
@@ -34,16 +38,16 @@ function drain(frames: number): void {
 	}
 }
 
-function jsonTarget(options: { fullArgs?: Record<string, unknown>; exposeRawPartialJson?: boolean } = {}) {
+function jsonTarget(options: { exposeRawPartialJson?: boolean; streamingStringKeys?: readonly string[] } = {}) {
 	return {
 		rawInput: false,
 		exposeRawPartialJson: options.exposeRawPartialJson ?? false,
-		fullArgs: options.fullArgs ?? {},
+		streamingStringKeys: options.streamingStringKeys,
 	};
 }
 
-function rawTarget(fullArgs: Record<string, unknown>) {
-	return { rawInput: true, exposeRawPartialJson: true, fullArgs };
+function rawTarget() {
+	return { rawInput: true, exposeRawPartialJson: true };
 }
 
 describe("tool args reveal", () => {
@@ -55,11 +59,7 @@ describe("tool args reveal", () => {
 		const { controller } = makeController();
 		const target = `{"path":"a.ts","content":"abc"}`;
 
-		const initial = controller.setTarget(
-			"call-1",
-			target,
-			jsonTarget({ fullArgs: { path: "a.ts" }, exposeRawPartialJson: true }),
-		);
+		const initial = controller.setTarget("call-1", target, jsonTarget({ exposeRawPartialJson: true }));
 
 		// The provider already delivered a complete partialJson chunk; the
 		// controller MUST surface its parsed fields and raw prefix immediately —
@@ -76,17 +76,13 @@ describe("tool args reveal", () => {
 		const target = `{"path":"a.ts","content":"${content}"}`;
 		const seed = target.slice(0, 12);
 
-		const initial = controller.setTarget(
-			"call-1",
-			seed,
-			jsonTarget({ fullArgs: { path: "a.ts" }, exposeRawPartialJson: true }),
-		);
+		const initial = controller.setTarget("call-1", seed, jsonTarget({ exposeRawPartialJson: true }));
 		// What arrived is exposed immediately, no empty initial frame.
 		expect(partialOf(initial)).toBe(seed);
 		controller.bind("call-1", component);
 
 		// More bytes arrive later — the controller now paces the new backlog.
-		controller.setTarget("call-1", target, jsonTarget({ fullArgs: { path: "a.ts" }, exposeRawPartialJson: true }));
+		controller.setTarget("call-1", target, jsonTarget({ exposeRawPartialJson: true }));
 		drain(100);
 
 		const partials = component.frames.map(partialOf);
@@ -136,20 +132,125 @@ describe("tool args reveal", () => {
 		expect(secondPartial.length - firstPartial.length).toBeGreaterThanOrEqual(STREAMING_JSON_PARSE_MIN_GROWTH);
 	});
 
-	it("passes the full target through untouched when smoothing is disabled", () => {
+	it("refreshes parsed write content on raw-prefix frames below the JSON parse throttle", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+		const initialContent = "x".repeat(STREAMING_JSON_PARSE_MIN_GROWTH + 24);
+		const appendedJsonContent = "line 1\\nline 2\\n";
+		const appendedContent = "line 1\nline 2\n";
+		const initial = `{"path":"a.ts","content":"${initialContent}`;
+		const next = `${initial}${appendedJsonContent}`;
+
+		const renderArgs = controller.setTarget(
+			"call-1",
+			initial,
+			jsonTarget({ exposeRawPartialJson: true, streamingStringKeys: ["content"] }),
+		);
+		expect(renderArgs.content).toBe(initialContent);
+		controller.bind("call-1", component);
+
+		controller.setTarget(
+			"call-1",
+			next,
+			jsonTarget({ exposeRawPartialJson: true, streamingStringKeys: ["content"] }),
+		);
+		drain(20);
+
+		const latest = component.frames.at(-1);
+		expect(latest).toBeDefined();
+		expect(partialOf(latest!)).toBe(next);
+		expect(latest!.content).toBe(`${initialContent}${appendedContent}`);
+	});
+
+	it("extracts multiple string keys concurrently across throttled JSON parses", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+		// Two long fields (edit-style `input`, write-style `content`) inside the
+		// same JSON. A sub-throttle append must refresh BOTH decoded values on the
+		// next reveal frame — proving the extractor generalizes past `content`.
+		const initialInput = "y".repeat(STREAMING_JSON_PARSE_MIN_GROWTH + 8);
+		const initialContent = "x".repeat(STREAMING_JSON_PARSE_MIN_GROWTH + 16);
+		const initial = `{"input":"${initialInput}","content":"${initialContent}`;
+		const appendedContent = "tail";
+		const next = `${initial}${appendedContent}`;
+
+		const streamingStringKeys = ["input", "content"];
+		const renderArgs = controller.setTarget(
+			"call-1",
+			initial,
+			jsonTarget({ exposeRawPartialJson: true, streamingStringKeys }),
+		);
+		expect(renderArgs.input).toBe(initialInput);
+		expect(renderArgs.content).toBe(initialContent);
+		controller.bind("call-1", component);
+
+		controller.setTarget("call-1", next, jsonTarget({ exposeRawPartialJson: true, streamingStringKeys }));
+		drain(20);
+
+		const latest = component.frames.at(-1);
+		expect(latest).toBeDefined();
+		expect(latest!.input).toBe(initialInput);
+		expect(latest!.content).toBe(`${initialContent}${appendedContent}`);
+	});
+
+	it("ignores streaming string keys nested below the top level", () => {
+		vi.useFakeTimers();
+		const { controller } = makeController({ smooth: false });
+		const streamingStringKeys = ["content"];
+
+		// Prefix ends inside the nested object: the nested "content" key must
+		// NOT be captured and injected as a top-level preview arg.
+		const nestedOnly = `{"meta":{"content":"NESTED"`;
+		const first = controller.setTarget("call-1", nestedOnly, jsonTarget({ streamingStringKeys }));
+		expect(first.content).toBeUndefined();
+
+		// Growth past the nested object: the real top-level key must be captured.
+		const full = `${nestedOnly}"},"content":"real"}`;
+		const second = controller.setTarget("call-1", full, jsonTarget({ streamingStringKeys }));
+		expect(second.content).toBe("real");
+
+		// Reverse order: a nested duplicate arriving AFTER the top-level key must
+		// not reset/overwrite the captured top-level value. Extractor values are
+		// merged over the parsed args, so a depth-blind capture would win here.
+		const reversed = `{"content":"real","meta":{"content":"NESTED"}}`;
+		const decoded = decodeStreamedToolArgs(reversed, { rawInput: false, streamingStringKeys });
+		expect(decoded.content).toBe("real");
+		expect(decoded.meta).toEqual({ content: "NESTED" });
+	});
+
+	it("decodes the full received buffer, unpaced, when smoothing is disabled", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
 		const { component, controller } = makeController({ smooth: false, requestRender });
 		const target = `{"path":"a.ts","content":"abc"}`;
-		const fullArgs = { path: "a.ts", content: "abc" };
 
-		const renderArgs = controller.setTarget("call-1", target, jsonTarget({ fullArgs }));
+		const renderArgs = controller.setTarget("call-1", target, jsonTarget());
 		controller.bind("call-1", component);
 		drain(10);
 
-		expect(renderArgs).toEqual({ ...fullArgs, __partialJson: target });
+		// Display args come from a fresh decode of the buffer in hand — never a
+		// provider-parsed snapshot that may lag the stream — and nothing paces.
+		expect(renderArgs).toEqual({ path: "a.ts", content: "abc", __partialJson: target });
 		expect(component.frames).toHaveLength(0);
 		expect(requestRender).not.toHaveBeenCalled();
+	});
+
+	it("keeps streamed string fields fresh across sub-throttle growth when smoothing is disabled", () => {
+		vi.useFakeTimers();
+		const { controller } = makeController({ smooth: false });
+		const initialContent = "x".repeat(STREAMING_JSON_PARSE_MIN_GROWTH + 24);
+		const seed = `{"path":"a.ts","content":"${initialContent}`;
+		// Growth below STREAMING_JSON_PARSE_MIN_GROWTH: a throttled re-parse
+		// will not fire, so freshness must come from the string extractor.
+		const grown = `${seed}tail`;
+		const keys = streamingStringKeysForTool("write", false);
+
+		const first = controller.setTarget("call-1", seed, jsonTarget({ streamingStringKeys: keys }));
+		expect(first.content).toBe(initialContent);
+
+		const second = controller.setTarget("call-1", grown, jsonTarget({ streamingStringKeys: keys }));
+		expect(second.content).toBe(`${initialContent}tail`);
+		expect(partialOf(second)).toBe(grown);
 	});
 
 	it("finish drops the reveal so no further frames are pushed", () => {
@@ -213,11 +314,11 @@ describe("tool args reveal", () => {
 		const target = "*** Begin Patch\n*** Update File: a.ts\n-old\n+new\n*** End Patch";
 		const seed = target.slice(0, 5);
 
-		const initial = controller.setTarget("call-1", seed, rawTarget({ input: seed }));
+		const initial = controller.setTarget("call-1", seed, rawTarget());
 		expect(initial.input).toBe(seed);
 		expect(partialOf(initial)).toBe(seed);
 		controller.bind("call-1", component);
-		controller.setTarget("call-1", target, rawTarget({ input: target }));
+		controller.setTarget("call-1", target, rawTarget());
 		drain(100);
 
 		expect(component.frames.length).toBeGreaterThan(0);
@@ -225,5 +326,74 @@ describe("tool args reveal", () => {
 			expect(frame.input).toBe(partialOf(frame));
 		}
 		expect(component.frames.at(-1)!.input).toBe(target);
+	});
+
+	describe("live/rebuild display-args identity", () => {
+		// Contract: a transcript rebuild mid-stream (theme change, settings edit,
+		// focus replay) MUST show exactly what the live preview shows. Both paths
+		// decode the same raw buffer; the rebuild one-shot (decodeStreamedToolArgs)
+		// and the live reveal (setTarget caught up to the buffer) must agree even
+		// when the buffer grew past the last throttled full-JSON parse.
+		it("matches for a mid-stream write whose content grew past the last throttled parse", () => {
+			vi.useFakeTimers();
+			const { component, controller } = makeController();
+			const keys = streamingStringKeysForTool("write", false);
+			const initialContent = `line 1\\nline 2\\n${"x".repeat(STREAMING_JSON_PARSE_MIN_GROWTH)}`;
+			const seed = `{"path":"src/a.ts","content":"${initialContent}`;
+			// Sub-throttle growth: the provider's own arguments parse has NOT rerun,
+			// so a rebuild spreading provider args would still show only
+			// initialContent. Includes an escape split across the growth boundary.
+			const grown = `${seed}appended\\ntail`;
+
+			// Live path: seed arrives, then grows; drain until the reveal catches up.
+			const target = jsonTarget({ exposeRawPartialJson: true, streamingStringKeys: keys });
+			controller.setTarget("call-1", seed, target);
+			controller.bind("call-1", component);
+			controller.setTarget("call-1", grown, target);
+			drain(50);
+			const live = component.frames.at(-1);
+			expect(live).toBeDefined();
+			expect(partialOf(live!)).toBe(grown);
+
+			// Rebuild path: one-shot decode of the same buffer, seeded with the
+			// provider's stale parsed arguments (as ui-helpers does).
+			const staleProviderArgs = { path: "src/a.ts", content: initialContent };
+			const rebuilt = decodeStreamedToolArgs(grown, {
+				rawInput: false,
+				fullArgs: staleProviderArgs,
+				streamingStringKeys: keys,
+			});
+
+			expect(rebuilt).toEqual(live!);
+			// Both must carry the grown content — decoded escapes included — not
+			// the stale pre-throttle value.
+			expect(rebuilt.content).toBe(`line 1\nline 2\n${"x".repeat(STREAMING_JSON_PARSE_MIN_GROWTH)}appended\ntail`);
+		});
+
+		it("matches for a custom raw-input stream", () => {
+			const { controller } = makeController();
+			const buffer = "*** Begin Patch\n*** Update File: a.ts\n-old\n+new";
+
+			const live = controller.setTarget("call-1", buffer, rawTarget());
+			const rebuilt = decodeStreamedToolArgs(buffer, { rawInput: true });
+
+			expect(rebuilt).toEqual(live);
+			expect(rebuilt.input).toBe(buffer);
+		});
+
+		it("stale provider args never override freshly decoded fields", () => {
+			// fullArgs is an under-spread for dialect-projected keys a raw re-parse
+			// cannot recover; any key the fresh decode recovers must win.
+			const buffer = `{"path":"b.ts","content":"fresh body`;
+			const rebuilt = decodeStreamedToolArgs(buffer, {
+				rawInput: false,
+				fullArgs: { path: "b.ts", content: "stale body", projected: true },
+				streamingStringKeys: ["content"],
+			});
+
+			expect(rebuilt.content).toBe("fresh body");
+			expect(rebuilt.projected).toBe(true);
+			expect(rebuilt.path).toBe("b.ts");
+		});
 	});
 });

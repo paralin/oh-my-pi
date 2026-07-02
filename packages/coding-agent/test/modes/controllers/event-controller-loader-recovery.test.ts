@@ -71,7 +71,7 @@ function createContext(
 			},
 		},
 		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
+		updateEditorBorderColor: vi.fn(),
 		pendingTools: new Map<string, unknown>(),
 		hideThinkingBlock: false,
 		setWorkingMessage: vi.fn(),
@@ -365,7 +365,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		expect(ctx.showStatus).not.toHaveBeenCalled();
 		expect(ctx.showWarning).not.toHaveBeenCalled();
 		expect(ctx.statusLine.invalidate).toHaveBeenCalled();
-		expect(ctx.updateEditorTopBorder).toHaveBeenCalled();
+		expect(ctx.updateEditorBorderColor).toHaveBeenCalled();
 	});
 
 	it("mounts a UI-only maintenance card for handoff trace deltas", async () => {

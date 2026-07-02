@@ -80,10 +80,12 @@ const MCP_CALL_TIMEOUT_MS = 60_000;
 
 /**
  * Soft per-agent request budgets (assistant requests per run). When a subagent
- * crosses its budget it receives ONE steering notice asking it to wrap up; at
- * 1.5x the budget the run is aborted gracefully so partial output is salvaged.
- * The `default` key applies to agents without an explicit entry and can be
- * overridden via the `task.softRequestBudget` setting (0 disables the guard).
+ * crosses its budget it can receive an optional steering notice asking it to
+ * wrap up; at 1.5x the budget the run is aborted gracefully so partial output is
+ * salvaged. The `default` key applies to agents without an explicit entry and
+ * can be overridden via the `task.softRequestBudget` setting (0 disables the
+ * guard). The notice is off by default and controlled separately by
+ * `task.softRequestBudgetNotice`.
  */
 export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	explore: 40,
@@ -91,7 +93,7 @@ export const SOFT_REQUEST_BUDGET: Record<string, number> = {
 	default: 90,
 };
 
-/** Steering notice injected once when a subagent crosses its soft request budget. */
+/** Optional steering notice injected when a subagent crosses its soft request budget. */
 export function buildBudgetNotice(requests: number): string {
 	return `[budget notice] You have used ${requests} requests in this run. Wrap up now: finish the current step and yield your final report.`;
 }
@@ -297,6 +299,11 @@ export interface ExecutorOptions {
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ThinkingLevel;
 	outputSchema?: unknown;
+	/**
+	 * Caller supplied a schema that supersedes the agent's native output prompt.
+	 * Eval `agent(..., schema=...)` sets this so built-in agents ignore stale yield labels.
+	 */
+	outputSchemaOverridesAgent?: boolean;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/**
@@ -795,6 +802,8 @@ interface RunMonitorArgs {
 	sessionFile?: string;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
+	/** Whether crossing the soft budget injects a wrap-up steering notice. */
+	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
 }
@@ -837,7 +846,18 @@ interface SubagentRunMonitor {
 }
 
 function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
-	const { index, id, agent, task, assignment, signal, onProgress, softRequestBudget, maxRuntimeMs } = args;
+	const {
+		index,
+		id,
+		agent,
+		task,
+		assignment,
+		signal,
+		onProgress,
+		softRequestBudget,
+		softRequestBudgetNotice,
+		maxRuntimeMs,
+	} = args;
 	const startTime = Date.now();
 
 	const progress: AgentProgress = {
@@ -1234,7 +1254,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 					if (softRequestBudget > 0 && !abortSent) {
 						if (progress.requests >= softRequestBudget * 1.5) {
 							requestAbort("budget");
-						} else if (!budgetSteerSent && progress.requests >= softRequestBudget) {
+						} else if (softRequestBudgetNotice && !budgetSteerSent && progress.requests >= softRequestBudget) {
 							budgetSteerSent = true;
 							const steerSession = activeSession;
 							if (steerSession) {
@@ -1870,6 +1890,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	);
 	const softRequestBudget =
 		configuredDefaultBudget === 0 ? 0 : (SOFT_REQUEST_BUDGET[agent.name] ?? configuredDefaultBudget);
+	const softRequestBudgetNotice = settings.get("task.softRequestBudgetNotice") ?? false;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -1929,6 +1950,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		detached: options.detached,
 		sessionFile: subtaskSessionFile,
 		softRequestBudget,
+		softRequestBudgetNotice,
 		maxRuntimeMs,
 	});
 	const progress = monitor.progress;
@@ -2141,6 +2163,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						planReferencePath: options.planReference?.path ?? "",
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
+						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
 						ircSelfId: ircEnabled ? id : "",
 					});
@@ -2316,7 +2339,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
 			if (options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {
-					const { message } = await buildSkillPromptMessage(skill, "");
+					const { message } = await buildSkillPromptMessage(skill, "", "autoload");
 					await session.sendCustomMessage(
 						{
 							customType: SKILL_PROMPT_MESSAGE_TYPE,
