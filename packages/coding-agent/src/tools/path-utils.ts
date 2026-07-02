@@ -510,6 +510,39 @@ export function normalizePathLikeInput(input: string): string {
 	return stripOuterDoubleQuotes(input.trim());
 }
 
+/**
+ * Parse a JSON-encoded array of path strings (e.g. `'["a.ts","b.ts"]'`).
+ * Returns `null` when the input is not a bracketed JSON string array, so the
+ * caller can fall back to treating the input as a single literal path.
+ */
+function parseStringEncodedPathArray(input: string): string[] | null {
+	const trimmed = input.trim();
+	if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) return null;
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(trimmed);
+	} catch {
+		return null;
+	}
+
+	if (!Array.isArray(parsed) || parsed.some(entry => typeof entry !== "string")) {
+		return null;
+	}
+	return parsed;
+}
+
+/**
+ * Normalize a path argument that may arrive as a single string, a JSON-encoded
+ * string array (`'["a.ts"]'`), or an actual array into a flat `string[]`.
+ * Delimited single strings (`"a.ts b.ts"`) are left for
+ * {@link expandDelimitedPathEntries} to split.
+ */
+export function toPathList(input: string | string[] | undefined): string[] {
+	if (typeof input === "string") return parseStringEncodedPathArray(input) ?? [input];
+	return input ?? [];
+}
+
 const GLOB_PATH_CHARS = ["*", "?", "[", "{"] as const;
 
 export function hasGlobPathChars(filePath: string): boolean {
@@ -592,12 +625,21 @@ async function delimitedPathPartResolves(entry: string, cwd: string, splitter: P
 	}
 }
 
+/**
+ * How many split parts must resolve to an existing path for the split to win.
+ * Semicolon is the documented list delimiter, so it splits unconditionally
+ * (`"none"`) — an all-missing list must still fan out so multi-path missing
+ * semantics can name every entry. Comma is legacy recovery (`"some"`), and
+ * whitespace/mixed are aggressive heuristics gated on every part existing.
+ */
+type DelimitedResolveRequirement = "all" | "some" | "none";
+
 async function tryDelimitedPathSplit(
 	entry: string,
 	cwd: string,
 	splitter: PathEntrySplitter,
 	mode: DelimitedPathSplitMode,
-	requireAllParts: boolean,
+	requirement: DelimitedResolveRequirement,
 ): Promise<string[] | null> {
 	const rawParts = splitTopLevelDelimitedPath(entry, mode);
 	if (rawParts.length < 2) return null;
@@ -606,9 +648,12 @@ async function tryDelimitedPathSplit(
 	if (parts.length === 0) return null;
 	if (parts.length < 2 && rawParts.length === parts.length) return null;
 
-	const resolved = await Promise.all(parts.map(part => delimitedPathPartResolves(part, cwd, splitter)));
-	const valid = requireAllParts ? resolved.every(Boolean) : resolved.some(Boolean);
-	return valid ? parts : null;
+	if (requirement !== "none") {
+		const resolved = await Promise.all(parts.map(part => delimitedPathPartResolves(part, cwd, splitter)));
+		const valid = requirement === "all" ? resolved.every(Boolean) : resolved.some(Boolean);
+		if (!valid) return null;
+	}
+	return parts;
 }
 
 /**
@@ -632,10 +677,10 @@ export async function splitDelimitedPathEntry(
 	}
 
 	return (
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", false)) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", false)) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", true)) ??
-		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", true))
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "semicolon", "none")) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "comma", "some")) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "whitespace", "all")) ??
+		(await tryDelimitedPathSplit(normalizedEntry, cwd, splitter, "mixed", "all"))
 	);
 }
 
@@ -1094,11 +1139,11 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	const { rawPaths: inputs, cwd, internalUrlAction } = opts;
 	const normalizedRawPaths = inputs.map(normalizePathLikeInput);
 	if (normalizedRawPaths.some(rawPath => rawPath.length === 0)) {
-		throw new ToolError("`paths` must contain non-empty paths or globs");
+		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
 	const rawPaths = await expandDelimitedPathEntries(normalizedRawPaths, cwd);
 	if (rawPaths.some(rawPath => rawPath.length === 0)) {
-		throw new ToolError("`paths` must contain non-empty paths or globs");
+		throw new ToolError("Search scope entries must be non-empty paths or globs");
 	}
 	// Strict external-URL schemes. `file://` is intentionally absent: it has
 	// local-path semantics (expandPath strips it downstream), so it flows through
