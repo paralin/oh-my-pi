@@ -445,6 +445,72 @@ describe("task spawn routing", () => {
 		await Promise.all(jobs.map(job => job.promise));
 	});
 
+	it("omits history URI when an aborted background task has no retained transcript", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("UnavailableAbort", {
+				exitCode: 1,
+				output: "aborted before session persistence",
+				aborted: true,
+			}),
+		);
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+
+		const result = await tool.execute("tc-abort", {
+			agent: "task",
+			id: "UnavailableAbort",
+			description: "aborted before persistence",
+			assignment: "Start and then abort before a transcript exists.",
+		} as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		await job.promise;
+
+		expect(job.status).toBe("failed");
+		expect(job.errorText?.toLowerCase()).toContain("transcript unavailable");
+		expect(job.errorText).not.toContain("history://UnavailableAbort");
+	});
+
+	it("keeps history URI when an aborted background task retains a transcript ref", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(
+			makeResult("RetainedAbort", {
+				exitCode: 1,
+				output: "aborted after session persistence",
+				aborted: true,
+			}),
+		);
+		AgentRegistry.global().register({
+			id: "RetainedAbort",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "RetainedAbort.jsonl",
+			status: "aborted",
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+
+		const result = await tool.execute("tc-retained-abort", {
+			agent: "task",
+			id: "RetainedAbort",
+			description: "aborted after persistence",
+			assignment: "Start, persist a transcript, then abort.",
+		} as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		await job.promise;
+
+		expect(job.status).toBe("failed");
+		expect(job.errorText).toContain("RetainedAbort was aborted — transcript at history://RetainedAbort");
+	});
 	it("surfaces task.maxConcurrency in the tool description so the model can self-throttle", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [taskAgent],

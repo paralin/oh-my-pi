@@ -454,6 +454,40 @@ describe("IRC", () => {
 			expect(peerIds).not.toContain("0-Main/advisor");
 		});
 
+		it("op=list and op=send keep terminal transcript-only refs out of peer messaging", async () => {
+			const live = makeFakeSession();
+			registry.register({ id: "0-Live", displayName: "task", kind: "sub", session: live.session });
+			registry.register({
+				id: "0-AbortedTranscript",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile: "/tmp/0-AbortedTranscript.jsonl",
+				status: "aborted",
+			});
+
+			const tool = new IrcTool(makeToolSession(registry, "0-Main"));
+			const listed = await tool.execute("call-1", { op: "list" });
+			const peerIds = listed.details?.peers?.map(peer => peer.id) ?? [];
+			expect(peerIds).toEqual(["0-Live"]);
+			const listText = listed.content[0]?.type === "text" ? listed.content[0].text : "";
+			expect(listText).not.toContain("0-AbortedTranscript");
+
+			const sent = await tool.execute("call-2", {
+				op: "send",
+				to: "0-AbortedTranscript",
+				message: "wake up",
+			});
+			expect(sent.isError).toBe(true);
+			expect(sent.details?.receipts).toEqual([
+				{
+					to: "0-AbortedTranscript",
+					outcome: "failed",
+					error: 'Unknown or terminated agent "0-AbortedTranscript".',
+				},
+			]);
+		});
+
 		it("op=send returns receipts immediately without waiting for a reply", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });

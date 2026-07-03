@@ -11,6 +11,7 @@
  */
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
+import { registerPersistedSubagentsForKnownSessions } from "../registry/persisted-subagents";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
@@ -42,7 +43,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		const registry = AgentRegistry.global();
 		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
 		// in the agent-facing roster. Hide them from the index, lookup, and completions.
-		const visible = registry.list().filter(ref => ref.kind !== "advisor");
+		let visible = registry.list().filter(ref => ref.kind !== "advisor");
 
 		if (!agentId) {
 			const content = this.#renderIndex(visible);
@@ -60,6 +61,16 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			// Case-insensitive fallback: agent ids are human-typed (e.g. AuthLoader).
 			const lower = agentId.toLowerCase();
 			ref = visible.find(candidate => candidate.id.toLowerCase() === lower);
+		}
+		if (!ref) {
+			await registerPersistedSubagentsForKnownSessions({ registry });
+			visible = registry.list().filter(candidate => candidate.kind !== "advisor");
+			ref = registry.get(agentId);
+			if (ref?.kind === "advisor") ref = undefined;
+			if (!ref) {
+				const lower = agentId.toLowerCase();
+				ref = visible.find(candidate => candidate.id.toLowerCase() === lower);
+			}
 		}
 		if (!ref) {
 			const known = visible.map(candidate => candidate.id);

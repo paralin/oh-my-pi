@@ -3310,9 +3310,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel async jobs registered by *this* agent only. Used by lifecycle
-	 * transitions (newSession, switchSession, handoff, dispose) so a subagent
-	 * cleans up its own background work without touching its parent's jobs.
+	 * Cancel async jobs registered by *this* agent only. Used by teardown and
+	 * owner-changing transitions (newSession, switchSession, dispose) so a
+	 * subagent cleans up its own background work without touching its parent's jobs.
 	 *
 	 * Cancellation runs against this session's scoped manager. Subagents have
 	 * unique agent ids and inherit the parent's manager to clean up their own
@@ -10393,7 +10393,6 @@ export class AgentSession {
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
 		const previousSessionFile = this.sessionFile;
 		await this.sessionManager.flush();
-		this.#cancelOwnAsyncJobs();
 		await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
 		const preservedSteering = this.agent.peekSteeringQueue().slice();
 		const preservedFollowUp = this.agent.peekFollowUpQueue().slice();
@@ -10557,7 +10556,6 @@ export class AgentSession {
 			// Start a new session
 			const previousSessionFile = this.sessionFile;
 			await this.sessionManager.flush();
-			this.#cancelOwnAsyncJobs();
 			await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
 			this.#clearCheckpointRuntimeState();
 			// agent.reset() clears the core steering/follow-up queues. Preserve any queued

@@ -48,6 +48,7 @@ import type { AsyncJobManager } from "../async";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { registerPersistedSubagentsForKnownSessions } from "../registry/persisted-subagents";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import {
@@ -800,9 +801,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}): string {
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
-		const buildFollowUpHint = (aborted: boolean): string => {
+		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
-				return `\n\n${agentId} was aborted — transcript at history://${agentId}`;
+				let ref = AgentRegistry.global().get(agentId);
+				if (!ref) {
+					ref = await registerPersistedSubagentsForKnownSessions({ targetId: agentId });
+				}
+				if (ref?.session || ref?.sessionFile) {
+					return `\n\n${agentId} was aborted — transcript at history://${agentId}`;
+				}
+				return `\n\n${agentId} was aborted — transcript unavailable: the job ended before a child session was persisted.`;
 			}
 			const followUp = ircEnabled ? "message it via `irc` to follow up; " : "";
 			return `\n\n${agentId} is now idle — ${followUp}transcript at history://${agentId}`;
@@ -885,7 +893,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						content: [{ type: "text", text: statusText }],
 						details: buildDetails(resultFailed ? "failed" : "completed", ownJobId),
 					});
-					const deliveryText = `${finalText}${buildFollowUpHint(singleResult?.aborted === true)}`;
+					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
 						throw new TaskJobError(deliveryText);

@@ -202,6 +202,21 @@ describe("AgentLifecycleManager", () => {
 		await expect(lifecycle.ensureLive("7-Sub")).rejects.toThrow(/cannot be revived.*no reviver registered/);
 	});
 
+	it("ensureLive rejects a terminal transcript-only ref even when a session file exists", async () => {
+		const revive = vi.fn(async () => makeSessionStub().session);
+		registry.register({
+			id: "9-Aborted",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: "/tmp/9-Aborted.jsonl",
+			status: "aborted",
+		});
+		lifecycle.adopt("9-Aborted", { idleTtlMs: 0, revive });
+
+		await expect(lifecycle.ensureLive("9-Aborted")).rejects.toThrow(/is aborted and cannot be revived/);
+		expect(revive).not.toHaveBeenCalled();
+	});
 	it("a failed cold revive is not sticky: the next ensureLive re-runs the factory", async () => {
 		const revived = makeSessionStub();
 		registry.register({

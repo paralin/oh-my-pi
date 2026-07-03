@@ -12,9 +12,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { advisorTranscriptFilename } from "@oh-my-pi/pi-coding-agent/advisor/transcript-recorder";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { registerPersistedSubagentsForKnownSessions } from "@oh-my-pi/pi-coding-agent/registry/persisted-subagents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -33,21 +35,24 @@ function fakeLiveSession(messages: unknown[]): AgentSession {
 }
 
 /** Minimal current-version session JSONL: header + a linear user/assistant chain. */
-function sessionFixtureJsonl(): string {
+function sessionFixtureJsonl(
+	input: { id?: string; user?: string; assistant?: string; parentSession?: string } = {},
+): string {
 	const timestamp = new Date().toISOString();
 	const header = {
 		type: "session",
 		version: CURRENT_SESSION_VERSION,
-		id: "fixture-session",
+		id: input.id ?? "fixture-session",
 		timestamp,
 		cwd: "/tmp",
+		...(input.parentSession ? { parentSession: input.parentSession } : {}),
 	};
 	const userEntry = {
 		type: "message",
 		id: "m1",
 		parentId: null,
 		timestamp,
-		message: { role: "user", content: "parked hello", timestamp: 1 },
+		message: { role: "user", content: input.user ?? "parked hello", timestamp: 1 },
 	};
 	const assistantEntry = {
 		type: "message",
@@ -56,7 +61,7 @@ function sessionFixtureJsonl(): string {
 		timestamp,
 		message: {
 			role: "assistant",
-			content: [{ type: "text", text: "parked reply" }],
+			content: [{ type: "text", text: input.assistant ?? "parked reply" }],
 			api: "anthropic-messages",
 			provider: "anthropic",
 			model: "test-model",
@@ -148,6 +153,164 @@ describe("history:// protocol", () => {
 		});
 	});
 
+	it("discovers a past-session child transcript from a registered parent session file", async () => {
+		await withTempDir(async dir => {
+			const parentFile = path.join(dir, "parent.jsonl");
+			const childDir = path.join(dir, "parent");
+			const childFile = path.join(childDir, "PastChild.jsonl");
+			await fs.mkdir(childDir, { recursive: true });
+			await Bun.write(parentFile, sessionFixtureJsonl({ id: "parent-session", user: "parent hello" }));
+			await Bun.write(
+				childFile,
+				sessionFixtureJsonl({
+					id: "child-session",
+					user: "past child hello",
+					assistant: "past child reply",
+					parentSession: parentFile,
+				}),
+			);
+			AgentRegistry.global().register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: fakeLiveSession([]),
+				sessionFile: parentFile,
+				status: "idle",
+			});
+
+			const resource = await InternalUrlRouter.instance().resolve("history://PastChild");
+
+			expect(resource.content).toContain("# PastChild (parked)");
+			expect(resource.content).toContain("past child hello");
+			expect(resource.content).toContain("past child reply");
+			expect(resource.sourcePath).toBe(childFile);
+			expect(AgentRegistry.global().get("PastChild")?.sessionFile).toBe(childFile);
+		});
+	});
+
+	it("shared persisted-child discovery is idempotent, keeps live refs, and leaves advisors hidden", async () => {
+		await withTempDir(async dir => {
+			const parentFile = path.join(dir, "main.jsonl");
+			const childDir = path.join(dir, "main");
+			const pastChildFile = path.join(childDir, "PastChild.jsonl");
+			const liveChildFile = path.join(childDir, "LiveChild.jsonl");
+			const advisorFile = path.join(childDir, advisorTranscriptFilename(""));
+			const liveSessionFile = path.join(dir, "live-current.jsonl");
+			await fs.mkdir(childDir, { recursive: true });
+			await Bun.write(parentFile, sessionFixtureJsonl({ id: "main-session", user: "parent hello" }));
+			await Bun.write(
+				pastChildFile,
+				sessionFixtureJsonl({
+					id: "past-child-session",
+					user: "past child hello",
+					assistant: "past child reply",
+					parentSession: parentFile,
+				}),
+			);
+			await Bun.write(
+				liveChildFile,
+				sessionFixtureJsonl({
+					id: "live-child-session",
+					user: "stale file copy",
+					parentSession: parentFile,
+				}),
+			);
+			await Bun.write(
+				advisorFile,
+				sessionFixtureJsonl({
+					id: "advisor-session",
+					user: "advisor private note",
+					parentSession: parentFile,
+				}),
+			);
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: "Main",
+				displayName: "main",
+				kind: "main",
+				session: fakeLiveSession([]),
+				sessionFile: parentFile,
+				status: "idle",
+			});
+			const liveSession = fakeLiveSession([{ role: "user", content: "live child state", timestamp: 1 }]);
+			const liveRef = registry.register({
+				id: "LiveChild",
+				displayName: "live",
+				kind: "sub",
+				parentId: "Main",
+				session: liveSession,
+				sessionFile: liveSessionFile,
+				status: "running",
+			});
+			const events: string[] = [];
+			const unsubscribe = registry.onChange(event => events.push(`${event.type}:${event.ref.id}`));
+
+			await registerPersistedSubagentsForKnownSessions({ registry });
+			await registerPersistedSubagentsForKnownSessions({ registry });
+			unsubscribe();
+
+			const pastRefs = registry.list().filter(ref => ref.id === "PastChild");
+			const advisorRefs = registry.list().filter(ref => ref.id === "Main/advisor");
+			const liveAfterScan = registry.get("LiveChild");
+			expect(pastRefs).toHaveLength(1);
+			expect(pastRefs[0]?.sessionFile).toBe(pastChildFile);
+			expect(pastRefs[0]?.status).toBe("parked");
+			expect(advisorRefs).toHaveLength(1);
+			expect(advisorRefs[0]?.sessionFile).toBe(advisorFile);
+			expect(liveAfterScan).toBe(liveRef);
+			expect(liveAfterScan?.session).toBe(liveSession);
+			expect(liveAfterScan?.sessionFile).toBe(liveSessionFile);
+			expect(liveAfterScan?.status).toBe("running");
+			expect(events.filter(event => event === "registered:PastChild")).toHaveLength(1);
+			expect(events.filter(event => event === "registered:Main/advisor")).toHaveLength(1);
+			expect(events.some(event => event.endsWith(":LiveChild"))).toBe(false);
+
+			const index = await InternalUrlRouter.instance().resolve("history://");
+			expect(index.content).toContain("PastChild");
+			expect(index.content).toContain("LiveChild");
+			expect(index.content).not.toContain("advisor private note");
+			expect(index.content).not.toContain("Main/advisor");
+
+			const advisorLookup = await InternalUrlRouter.instance()
+				.resolve("history://Main%2Fadvisor")
+				.then(
+					() => null,
+					err => err as Error,
+				);
+			expect(advisorLookup).toBeInstanceOf(Error);
+			expect(advisorLookup?.message).toContain("Unknown agent");
+			expect(advisorLookup?.message).not.toContain("advisor private note");
+		});
+	});
+
+	it("history:// renders a terminal transcript-only ref from its session file", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "aborted.jsonl");
+			await Bun.write(
+				sessionFile,
+				sessionFixtureJsonl({
+					id: "aborted-session",
+					user: "work before abort",
+					assistant: "partial result before abort",
+				}),
+			);
+			AgentRegistry.global().register({
+				id: "AbortedChild",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile,
+				status: "aborted",
+			});
+
+			const resource = await InternalUrlRouter.instance().resolve("history://AbortedChild");
+
+			expect(resource.content).toContain("# AbortedChild (aborted)");
+			expect(resource.content).toContain("work before abort");
+			expect(resource.content).toContain("partial result before abort");
+			expect(resource.sourcePath).toBe(sessionFile);
+		});
+	});
 	it("rejects an unknown id with the list of known agents", async () => {
 		AgentRegistry.global().register({
 			id: "HubAgent",

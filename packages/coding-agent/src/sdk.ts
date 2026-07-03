@@ -1553,12 +1553,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	);
 	/**
 	 * Forget the agent ref on teardown — unless the agent is being parked (or is
-	 * already parked). Parking disposes the session but keeps the ref addressable
-	 * (history://, revive); only process teardown / explicit kill unregisters.
+	 * already parked), or a subagent abort retained a session file for read-only
+	 * transcript access. Parking keeps the ref revivable; terminal aborted refs
+	 * keep only the transcript and are never messageable.
 	 */
 	const unregisterUnlessParked = (): void => {
-		if (agentRegistry.get(resolvedAgentId)?.status === "parked") return;
+		const ref = agentRegistry.get(resolvedAgentId);
+		if (ref?.status === "parked") return;
 		if (AgentLifecycleManager.global().isParking(resolvedAgentId)) return;
+		if (agentKind === "sub" && ref?.status === "aborted" && ref.sessionFile) {
+			agentRegistry.detachSession(resolvedAgentId);
+			return;
+		}
 		agentRegistry.unregister(resolvedAgentId);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
