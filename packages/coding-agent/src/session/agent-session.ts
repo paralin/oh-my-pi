@@ -3092,13 +3092,21 @@ export class AgentSession {
 	async #requestScratchHandoffCloseout(triggerContextTokens?: number): Promise<void> {
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (scratchPath === undefined) return;
-		if (!this.#scratchHandoffCloseout) {
-			this.#scratchHandoffCloseout = {
-				scratchPath,
-				baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
-				triggerContextTokens,
-			};
+		const existing = this.#scratchHandoffCloseout;
+		if (existing?.scratchPath === scratchPath) {
+			if (
+				triggerContextTokens !== undefined &&
+				(existing.triggerContextTokens === undefined || triggerContextTokens > existing.triggerContextTokens)
+			) {
+				existing.triggerContextTokens = triggerContextTokens;
+			}
+			return;
 		}
+		this.#scratchHandoffCloseout = {
+			scratchPath,
+			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
+			triggerContextTokens,
+		};
 		await this.#queueCustomMessage(
 			{
 				customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,

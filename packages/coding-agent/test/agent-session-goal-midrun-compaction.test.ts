@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -16,6 +17,8 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+
+type StreamedAssistantMessage = AssistantMessage & { stopReason: "length" | "stop" | "toolUse" };
 
 function activeGoalState(): GoalModeState {
 	const now = Date.now();
@@ -66,7 +69,9 @@ describe("AgentSession mid-run threshold compaction", () => {
 		options: {
 			extensionRunner?: ExtensionRunner;
 			modelContextWindow?: number;
+			responseForCall?: (index: number) => StreamedAssistantMessage;
 			scratchHandoffDisplayPath?: string;
+			tools?: AgentTool[];
 		} = {},
 	): Promise<{
 		session: AgentSession;
@@ -105,40 +110,44 @@ describe("AgentSession mid-run threshold compaction", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "tool output" }] }),
 		};
+		const tools = options.tools ?? [mockBashTool];
 
 		let call = 0;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [mockBashTool], messages: [] },
+			initialState: { model, systemPrompt: ["Test"], tools, messages: [] },
 			convertToLlm,
 			streamFn: (_model, context) => {
 				const index = call++;
 				observedContexts.push(context.messages.map(message => JSON.stringify(message)));
 				const stream = new AssistantMessageEventStream();
+				const scriptedMessage = options.responseForCall?.(index);
 				const isToolTurn = index === 0;
-				const message = isToolTurn
-					? {
-							role: "assistant" as const,
-							content: [
-								{ type: "toolCall" as const, id: `tc-${index}`, name: "bash", arguments: { cmd: "pwd" } },
-							],
-							api: "anthropic-messages" as const,
-							provider: "anthropic" as const,
-							model: "claude-sonnet-4-5",
-							usage: highUsage(50_000),
-							stopReason: "toolUse" as const,
-							timestamp: Date.now(),
-						}
-					: {
-							role: "assistant" as const,
-							content: [{ type: "text" as const, text: "All done." }],
-							api: "anthropic-messages" as const,
-							provider: "anthropic" as const,
-							model: "claude-sonnet-4-5",
-							usage: highUsage(200),
-							stopReason: "stop" as const,
-							timestamp: Date.now(),
-						};
+				const message =
+					scriptedMessage ??
+					(isToolTurn
+						? {
+								role: "assistant" as const,
+								content: [
+									{ type: "toolCall" as const, id: `tc-${index}`, name: "bash", arguments: { cmd: "pwd" } },
+								],
+								api: "anthropic-messages" as const,
+								provider: "anthropic" as const,
+								model: "claude-sonnet-4-5",
+								usage: highUsage(50_000),
+								stopReason: "toolUse" as const,
+								timestamp: Date.now(),
+							}
+						: {
+								role: "assistant" as const,
+								content: [{ type: "text" as const, text: "All done." }],
+								api: "anthropic-messages" as const,
+								provider: "anthropic" as const,
+								model: "claude-sonnet-4-5",
+								usage: highUsage(200),
+								stopReason: "stop" as const,
+								timestamp: Date.now(),
+							});
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: message });
 					stream.push({ type: "done", reason: message.stopReason, message });
@@ -152,7 +161,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			toolRegistry: new Map([[mockBashTool.name, mockBashTool]]),
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			extensionRunner: options.extensionRunner,
 			scratchHandoffDisplayPath: options.scratchHandoffDisplayPath,
 		});
@@ -296,6 +305,75 @@ describe("AgentSession mid-run threshold compaction", () => {
 			}),
 		);
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
+	});
+
+	it("does not re-queue a pending scratch closeout after a scratch-safe read tool turn", async () => {
+		const scratchPath = "agent/current.org";
+		const closeoutPrompt = "Context maintenance threshold reached";
+		const readTool: AgentTool = {
+			name: "read",
+			label: "Read",
+			description: "Mock read tool",
+			parameters: type({}),
+			execute: async () => ({
+				content: [{ type: "text" as const, text: "#+TITLE: Scratch\n* TODO Continue the release" }],
+			}),
+		};
+		const makeMessage = (
+			index: number,
+			content: AssistantMessage["content"],
+			stopReason: StreamedAssistantMessage["stopReason"],
+		) => ({
+			role: "assistant" as const,
+			content,
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			usage: highUsage(index < 2 ? 50_000 : 200),
+			stopReason,
+			timestamp: Date.now() + index,
+		});
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 40_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{
+				modelContextWindow: 372_000,
+				responseForCall: index => {
+					if (index === 0) {
+						return makeMessage(index, [{ type: "text" as const, text: "Ready to close out." }], "stop");
+					}
+					if (index === 1) {
+						return makeMessage(
+							index,
+							[
+								{
+									type: "toolCall" as const,
+									id: "read-scratch",
+									name: "read",
+									arguments: { path: scratchPath },
+								},
+							],
+							"toolUse",
+						);
+					}
+					return makeMessage(index, [{ type: "text" as const, text: "Done after scratch read." }], "stop");
+				},
+				scratchHandoffDisplayPath: scratchPath,
+				tools: [readTool],
+			},
+		);
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(3);
+		expect(observedContexts[1].filter(serialized => serialized.includes(closeoutPrompt))).toHaveLength(1);
+		expect(observedContexts[2].join("\n")).toContain('"toolCallId":"read-scratch"');
+		expect(observedContexts[2].filter(serialized => serialized.includes(closeoutPrompt))).toHaveLength(1);
 	});
 
 	it("preserves the just-finished tool turn when message_end hooks are still pending", async () => {
