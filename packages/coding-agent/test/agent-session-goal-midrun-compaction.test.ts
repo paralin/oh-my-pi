@@ -232,8 +232,38 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(events).toContainEqual(
 			expect.objectContaining({
 				type: "notice",
+				level: "info",
 				source: "compaction",
-				message: expect.stringContaining("stopping to use scratch handoff"),
+				message: expect.stringContaining("starting scratch handoff directly from agent/current.org"),
+			}),
+		);
+		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
+	});
+
+	it("queues scratch closeout before threshold when only closeout headroom remains", async () => {
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 100_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{ modelContextWindow: 68_000, scratchHandoffDisplayPath: "agent/current.org" },
+		);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(2);
+		expect(observedContexts[1].join("\n")).toContain("Context maintenance threshold reached");
+		expect(observedContexts[1].join("\n")).toContain("full, comprehensive snapshot");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				source: "compaction",
+				message: expect.stringContaining("handing off anyway with recent session context"),
 			}),
 		);
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });

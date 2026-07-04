@@ -729,6 +729,8 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	automaticContinuationBlocked: true,
 };
 
+const SCRATCH_HANDOFF_CLOSEOUT_MIN_HEADROOM_TOKENS = 4_096;
+
 /**
  * User-facing notice for a compaction dead end: maintenance freed too little
  * to retry safely. `remedies` names the recovery actions available on the
@@ -10662,6 +10664,30 @@ export class AgentSession {
 		return compactionContextTokens(this.getContextUsage({ contextWindow })?.tokens ?? 0, liveEstimate);
 	}
 
+	#scratchHandoffCloseoutTriggerTokens(
+		contextWindow: number,
+		compactionSettings: CompactionSettings,
+		scratchPath: string,
+	): number {
+		const promptBudget = Math.max(0, contextWindow - effectiveReserveTokens(contextWindow, compactionSettings));
+		if (promptBudget <= 0) return 0;
+		const closeoutTokens = Math.max(
+			countTokens(renderScratchHandoffCloseoutMessage(scratchPath)),
+			SCRATCH_HANDOFF_CLOSEOUT_MIN_HEADROOM_TOKENS,
+		);
+		return Math.max(0, promptBudget - closeoutTokens);
+	}
+
+	#shouldRequestScratchHandoffCloseout(
+		contextTokens: number,
+		contextWindow: number,
+		compactionSettings: CompactionSettings,
+		scratchPath: string,
+	): boolean {
+		const triggerTokens = this.#scratchHandoffCloseoutTriggerTokens(contextWindow, compactionSettings, scratchPath);
+		return triggerTokens > 0 && contextTokens >= triggerTokens;
+	}
+
 	#stopBeforeOversizedScratchHandoffRequest(context: AgentContext): AgentPreModelCallResult {
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (!scratchPath) return;
@@ -10694,7 +10720,7 @@ export class AgentSession {
 			scratchPath,
 			thresholdTokens,
 		};
-		logger.warn("Stopping before oversized scratch-handoff provider request", {
+		logger.info("Starting direct scratch handoff before oversized closeout request", {
 			contextTokens,
 			contextWindow,
 			promptBudget,
@@ -10703,8 +10729,8 @@ export class AgentSession {
 			scratchPath,
 		});
 		this.emitNotice(
-			"warning",
-			`Context reached ${contextTokens.toLocaleString()} tokens before the next provider request; stopping to use scratch handoff at ${scratchPath}.`,
+			"info",
+			`Context reached ${contextTokens.toLocaleString()} tokens; one more scratch-closeout model turn would exceed the prompt budget, so starting scratch handoff directly from ${scratchPath}.`,
 			"compaction",
 		);
 		return {
@@ -10795,7 +10821,13 @@ export class AgentSession {
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const shouldScratchHandoffCloseout =
+			compactionSettings.strategy === "handoff" &&
+			scratchPath !== undefined &&
+			this.#shouldRequestScratchHandoffCloseout(contextTokens, contextWindow, compactionSettings, scratchPath);
+		if (!shouldThresholdCompact && !shouldScratchHandoffCloseout) return;
 
 		// Promote to a larger-context sibling before compacting, mirroring the
 		// pre-prompt (#runPrePromptCompactionIfNeeded) and post-turn threshold
@@ -10811,11 +10843,13 @@ export class AgentSession {
 			});
 			return;
 		}
-		if (compactionSettings.strategy === "handoff" && this.#scratchHandoffDisplayPath) {
-			logger.debug("Mid-run scratch-handoff threshold queued closeout steer", {
+		if (compactionSettings.strategy === "handoff" && scratchPath) {
+			logger.debug("Mid-run scratch-handoff queued closeout steer", {
 				contextTokens,
 				contextWindow,
-				scratchPath: this.#scratchHandoffDisplayPath,
+				scratchPath,
+				shouldThresholdCompact,
+				shouldScratchHandoffCloseout,
 			});
 			await this.#requestScratchHandoffCloseout(contextTokens);
 			return;
@@ -11056,6 +11090,17 @@ export class AgentSession {
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		const shouldScratchHandoffCloseout =
+			compactionSettings.strategy === "handoff" &&
+			scratchPath !== undefined &&
+			!options.suppressHandoff &&
+			this.#shouldRequestScratchHandoffCloseout(
+				postMaintenanceContextTokens,
+				contextWindow,
+				compactionSettings,
+				scratchPath,
+			);
 		logger.debug("Auto-compaction threshold decision", {
 			phase: "post-agent-end",
 			goalModeEnabled: this.#goalModeState?.enabled === true,
@@ -11071,17 +11116,14 @@ export class AgentSession {
 			postMaintenanceContextTokens,
 			maintenanceTokensFreed,
 			shouldCompact: shouldThresholdCompact,
+			shouldScratchHandoffCloseout,
 			contextPromotionEnabled: this.settings.get("contextPromotion.enabled") === true,
 		});
-		if (shouldThresholdCompact) {
+		if (shouldThresholdCompact || shouldScratchHandoffCloseout) {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
-				if (
-					compactionSettings.strategy === "handoff" &&
-					this.#scratchHandoffDisplayPath !== undefined &&
-					!options.suppressHandoff
-				) {
+				if (compactionSettings.strategy === "handoff" && scratchPath !== undefined && !options.suppressHandoff) {
 					await this.#requestScratchHandoffCloseout(postMaintenanceContextTokens);
 					return COMPACTION_CHECK_CONTINUATION;
 				}
