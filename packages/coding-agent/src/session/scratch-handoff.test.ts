@@ -197,6 +197,10 @@ describe("scratch handoff prompt", () => {
 			expect(context?.prompt).toContain("do not run a formatter solely for scratch-handoff text");
 			expect(context?.prompt).toContain("Scratch continuity is internal maintenance, not task evidence.");
 			expect(context?.prompt).toContain("do not report scratch state to the user");
+			expect(context?.prompt).toContain("Do not update the scratch document during ordinary work.");
+			expect(context?.prompt).toContain("unless the significant-work exception applies");
+			expect(context?.prompt).toContain("trivial lookups, small edits, and routine status changes do not qualify");
+			expect(context?.prompt).not.toContain("After orientation, write the first useful scratch delta");
 			expect(context?.prompt).not.toContain("report one sentence saying it was already current");
 			expect(context?.prompt).not.toContain("In the final response, mention whether the scratch file was updated");
 		} finally {
