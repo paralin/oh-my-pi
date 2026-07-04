@@ -279,7 +279,7 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 	const lines = [
 		"Scratch continuity protocol:",
 		`- Existing scratch org file: ${displayPath}. Its current contents are already in context as continuation state; inspect or update the file only when live state diverges.`,
-		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
+		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch updates, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
 		"- Record the loaded skill/command stack in the `Skill stack:` field, in the order it was loaded (e.g. orient -> investigate-issue -> ...), so a successor session reloads and resumes the same stack.",
 		"- Keep `#+TITLE` as a one-line summary of the agent's current purpose; update it with the first useful scratch delta once the objective is known.",
 		"- Keep scratch metadata in root org keywords such as `#+SESSION`, `#+PATH`, and optional `#+PARENT_SCRATCH`; do not add a wrapper heading above the work tree.",
@@ -303,9 +303,9 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- The scratch file must be a full, comprehensive snapshot of current work so another agent can resume with little to no warm-up: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
 		"- Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch; the scratch document is the resumption index and current-state snapshot, not an artifact dump.",
 		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta; if scratch is stale, update it into the comprehensive snapshot before handoff.",
-		"- If no update is needed, leave the file unchanged and report one sentence saying it was already current.",
+		"- If no update is needed, leave the file unchanged; do not report scratch state to the user.",
 		"- Org wrapping the scratch document is unnecessary; keep the org structure valid and readable, but do not run a formatter solely for scratch-handoff text.",
-		"- In the final response, mention whether the scratch file was updated or unchanged and name the path.",
+		"- In final responses, do not mention whether the scratch file was updated, unchanged, or where it lives unless the user explicitly asks about scratch mechanics. Scratch continuity is internal maintenance, not task evidence.",
 	);
 	return lines.join("\n");
 }
@@ -316,7 +316,7 @@ export function renderScratchHandoffCloseoutMessage(displayPath: string): string
 		`Before doing any more task work, update the existing scratch org file at ${displayPath}.`,
 		"Do not clear, recreate, truncate, rename, or replace the scratch file with a fresh template.",
 		"Render the current TODO heading as a full, comprehensive snapshot of the current work so another agent can resume with little to no warm-up: objective, loaded skill/command stack, completed work, touched files, current proof, blockers or risks, next action, and source refs.",
-		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path. After the scratch write succeeds, stop with a brief note that the scratch file is current.",
+		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path. After the scratch write succeeds, stop without emitting a user-facing scratch status or naming the scratch path; the runtime observes the write directly.",
 	].join("\n");
 }
 

@@ -183,7 +183,7 @@ describe("scratch handoff path selection", () => {
 });
 
 describe("scratch handoff prompt", () => {
-	it("tells agents that org wrapping the scratch document is unnecessary", async () => {
+	it("keeps scratch maintenance internal and skips org wrapping", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
 		try {
 			const context = await buildScratchHandoffContext({
@@ -195,6 +195,10 @@ describe("scratch handoff prompt", () => {
 
 			expect(context?.prompt).toContain("Org wrapping the scratch document is unnecessary");
 			expect(context?.prompt).toContain("do not run a formatter solely for scratch-handoff text");
+			expect(context?.prompt).toContain("Scratch continuity is internal maintenance, not task evidence.");
+			expect(context?.prompt).toContain("do not report scratch state to the user");
+			expect(context?.prompt).not.toContain("report one sentence saying it was already current");
+			expect(context?.prompt).not.toContain("In the final response, mention whether the scratch file was updated");
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
@@ -228,6 +232,8 @@ describe("scratch handoff prompt", () => {
 		expect(prompt).toContain("little to no warm-up");
 		expect(prompt).toContain("Org-link artifacts");
 		expect(prompt).toContain("Do not clear, recreate, truncate, rename, or replace");
+		expect(prompt).toContain("stop without emitting a user-facing scratch status");
+		expect(prompt).not.toContain("stop with a brief note");
 	});
 });
 
