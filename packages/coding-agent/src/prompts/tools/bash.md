@@ -1,10 +1,10 @@
-Runs bash in a shell session — terminal ops: git, bun, cargo, python.
+Runs commands in the embedded shell — terminal ops: git, bun, cargo, python.
 
 # When to use bash — and when not to
 
-Bash invokes **real binaries** with simple args. It is NOT a scripting surface.
+The shell invokes **real binaries** with simple args. It is NOT full GNU Bash.
 
-Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a fact (`wc -l`, `sort | uniq -c`, `comm`, `diff`, a checksum, `git status`).
+Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a fact and does not depend on shell-specific regex/quoting (`wc -l`, `sort | uniq -c`, `comm`, `diff`, a checksum, `git status`).
 
 {{#if hasEval}}Anything below → `eval` cell, not bash:
 - Inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists for that language
@@ -21,6 +21,7 @@ Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a f
 - Multiline commands, `&&`-chains mixing control flow
 - Quote/JSON escaping that fights the shell
 {{/if}}
+- GNU grep BRE extensions are not guaranteed in the embedded shell: use `grep -E 'json|tool'` for alternation instead of `grep 'json\|tool'`; use the built-in `grep` tool with `pattern: "json|tool"` (Rust regex, so `\bword\b` works there){{#if hasEval}}, or `eval` for exact text processing{{/if}}.
 
 <instruction>
 - `cwd` sets the working dir, not `cd dir && …`
@@ -30,13 +31,14 @@ Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a f
 - `;` only when later commands should run despite earlier failures
 - Multiple bash calls per message run concurrently. NEVER split order-dependent commands across parallel calls — chain with `&&` in one call.
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths
+- Need exact pipeline semantics (`cmd | head`, multi-stage filtering) or output truncation? Prefer `eval` and process the stream directly.
 {{#if asyncEnabled}}
 - `async: true` for long-running commands when you don't need immediate output: returns a background job ID; result delivered as a follow-up.
 {{/if}}
 </instruction>
 
 <critical>
-{{#if hasEval}}- Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists, several piped stages, or quote/JSON escaping mean you're writing a program → use `eval` cells: restartable, stateful, and free of shell-quoting traps.{{else}}- Bash invokes real binaries with simple args; it is NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts, several piped stages, or quote/JSON escaping mean you're writing a shell program; use a purpose-built tool or checked-in script instead.{{/if}}
+{{#if hasEval}}- The embedded shell invokes real binaries with simple args; it is NOT full GNU Bash and NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts (`-e`/`-c`/`--eval`) when an eval runtime exists, several piped stages, exact pipeline semantics, or quote/JSON escaping mean you're writing a program → use `eval` cells: restartable, stateful, and free of shell-quoting traps.{{else}}- The embedded shell invokes real binaries with simple args; it is NOT full GNU Bash and NOT a scripting surface. Loops, conditionals, heredocs, inline interpreter scripts, several piped stages, exact pipeline semantics, or quote/JSON escaping mean you're writing a shell program; use a purpose-built tool or checked-in script instead.{{/if}}
 - NEVER shell out to search content or files: `grep/rg` → `grep`.
 - NEVER use `ls` or `find` to list or locate files — `ls` → `read` (a directory path lists entries), `find` → the `glob` tool (globbing). This is non-negotiable, even for a single quick listing.
 - Avoid head/tail/redirections: stderr already merged; long output auto-truncated, FULL capture kept at `artifact://<id>`.
@@ -50,9 +52,9 @@ Use bash ONLY for: a single binary call, or one short pipeline that COMPUTES a f
 {{#if asyncEnabled}}
 # Timeout and async
 
-- `timeout` (seconds) caps wall-clock duration; the process is killed on elapse. Set `timeout: 0` only for commands that must run until completion or explicit cancellation.
+- `timeout` is seconds; nonzero values are clamped to `1..3600` and the process is killed on elapse. Set `timeout: 0` only for commands that must run until completion or explicit cancellation.
 - `async: true` defers only reporting — it does NOT extend a nonzero timeout; use `timeout: 0` when a daemon or watcher must be cancellation-owned.
-- Long-running daemons (dev servers, watchers): use `async: true` with `timeout: 0` when you need the process to stay alive until you cancel it. The shell session persists across calls, so `cmd &` keeps running between bash calls.
+- Need a daemon or >3600s run? Use `async: true` with `timeout: 0` when the harness should keep it alive until cancellation, or detach/manage lifecycle yourself (`cmd &`, supervisor, self-restarting script). The shell session persists across calls.
 {{/if}}
 {{#if autoBackgroundEnabled}}
 

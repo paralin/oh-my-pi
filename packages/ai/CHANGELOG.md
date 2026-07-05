@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [16.3.7] - 2026-07-05
+
+### Fixed
+
+- Fixed formatting of demoted reasoning blocks to prevent accidental concatenation with prose
+- Fixed terminal whitespace issues in assistant messages that caused rejections by Anthropic API
+- Fixed Cursor provider handling of empty-pattern grep arguments to return a clear, actionable error instead of a generic error and a broken TUI rendering.
+- Fixed Google Cloud Code Assist API (Antigravity) and Gemini CLI to immediately bubble up underlying API errors (such as safety or recitation blocks) instead of incorrectly retrying and hiding them behind a generic empty-response message.
+- Fixed GitHub Copilot OpenAI Responses replay to prevent empty reasoning-only assistant turns from being persisted in history and poisoning subsequent requests.
+- Fixed classification of provider gateway quota-insufficient errors so they are correctly identified as usage-limit errors rather than generic 403 failures.
+- Fixed OpenAI-compatible Responses models (such as DeepSeek endpoints) to preserve user-configured tool strictness settings unless strict mode is explicitly unsupported.
+- Fixed custom openai-codex-responses providers failing when no ChatGPT account ID claim is present by omitting the header when it cannot be derived.
+- Fixed token accounting for OpenAI Responses and Codex providers to correctly include provider-side orchestration tokens in billing totals without misclassifying them as uncached prompt input.
+- Fixed Google Gemini and Cloud Code Assist providers to preserve the requested reasoning tier when sending requests with hidden thinking summaries.
+- Fixed parallel OpenAI-compatible tool-call streaming to prevent argument data from bleeding across concurrent commands when identifiers are missing.
+- Fixed Anthropic Claude reasoning and thinking replay handling. Same-model replays now drop unsigned prior reasoning blocks to prevent reasoning-extraction refusals, while cross-model replays (including Bedrock cross-region profiles) correctly demote reasoning without emitting raw thinking tags or causing text-flattening formatting issues.
+- Fixed custom OpenAI-compatible relays serving standard OpenAI model IDs to be correctly classified as OpenAI-family targets for fast mode.
+
+## [16.3.6] - 2026-07-04
+
+### Added
+
+- Persisted credential rate-limit blocks across processes: `auth_credential_blocks` (auth schema v5) stores per-credential blocks keyed by row id + provider key + block scope with MAX-upsert semantics, `AuthStorage` merges persisted and in-memory blocks on read, and auth-broker snapshots/SSE carry per-entry blocks with `POST /v1/credential/:id/block` and `DELETE /v1/credential/:id/blocks` endpoints so gateway and sibling omp processes stop re-discovering exhausted accounts by burning a 429 each.
+
+### Fixed
+
+- Fixed Anthropic credential selection sampling Fable/Mythos-exhausted accounts on every new session: a Fable/Mythos weekly cap now proactively hard-blocks the credential when confirmed exhausted (server `exhausted` status or used fraction >= 1) with a live `resetsAt`, and a live Fable 429 extends the reactive block to the confirmed tier reset instead of the 60s default. Unconfirmed rows (missing/expired reset, below cap) remain ranking hints only, preserving the false-100% guard.
+- Fixed Ollama/Ollama Cloud tool requests failing with HTTP 400 by rewriting boolean subschemas (`true`/`false`) into a value-widening `anyOf` union of primitive types, stripping boolean `additionalProperties`/`unevaluatedProperties`, and flattening nullable `type` arrays before serializing tool parameters, so unconstrained fields still advertise "any JSON value" to grammar-constrained samplers (llama.cpp) instead of collapsing to an empty object. ([#4488](https://github.com/can1357/oh-my-pi/issues/4488))
+
 ## [16.3.5] - 2026-07-04
 
 ### Added

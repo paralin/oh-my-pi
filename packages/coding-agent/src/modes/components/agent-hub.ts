@@ -66,6 +66,7 @@ function statusBadge(status: AgentStatus): string {
 	}
 }
 
+
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {
 	text: string;
@@ -128,6 +129,8 @@ export class AgentHubOverlayComponent extends Container {
 	#unsubscribers: Array<() => void> = [];
 	#ageTimer: NodeJS.Timeout | undefined;
 	#remote: AgentHubRemote | undefined;
+	/** Resolves after persisted historical subagents have been registered and rows refreshed. */
+	readonly persistedSubagentsReady: Promise<void>;
 
 	// Table state
 	#rows: AgentRef[] = [];
@@ -183,14 +186,24 @@ export class AgentHubOverlayComponent extends Container {
 		this.#ageTimer = setInterval(() => this.#requestRender(), AGE_TICK_MS);
 		this.#ageTimer.unref?.();
 
-		if (!this.#remote) registerPersistedSubagents(deps.sessionFile, { registry: this.#registry });
+		this.persistedSubagentsReady = this.#remote
+			? Promise.resolve()
+			: Promise.resolve()
+					.then(() => {
+						registerPersistedSubagents(deps.sessionFile, { registry: this.#registry });
+						this.#refreshRows();
+					})
+					.catch((error: unknown) => {
+						logger.warn("Failed to register persisted subagents", { error });
+					})
+					.finally(() => this.#requestRender());
 		this.#refreshRows();
 	}
 
 	/**
-	 * Whether the table view has no agents to show (every registered agent except
-	 * Main, after the persisted-subagent scan in the constructor). The double-←
-	 * gesture reads this to stay inert when there is nothing to open.
+	 * Whether the current table view has no agents to show (every registered agent
+	 * except Main). Persisted historical rows may arrive later; callers that need
+	 * those included must wait for {@link persistedSubagentsReady} first.
 	 */
 	get isEmpty(): boolean {
 		return this.#rows.length === 0;

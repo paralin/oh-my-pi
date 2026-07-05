@@ -43,6 +43,8 @@ import {
 	getOpenAIResponsesHistoryItems,
 	getOpenAIResponsesHistoryPayload,
 	normalizeSystemPrompts,
+	sanitizeOpenAIResponsesAssistantFallbackItemsForReplay,
+	sanitizeOpenAIResponsesAssistantHistoryItemsForReplay,
 } from "../utils";
 import { clearStreamingPartialJson, kStreamingLastParseLen, kStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -286,7 +288,7 @@ interface CodexProviderSessionState extends ProviderSessionState {
 
 interface CodexRequestContext {
 	apiKey: string;
-	accountId: string;
+	accountId?: string;
 	baseUrl: string;
 	url: string;
 	requestHeaders: Record<string, string>;
@@ -834,7 +836,7 @@ async function buildCodexRequestContext(
 		throw new AIError.MissingApiKeyError(model.provider);
 	}
 
-	const accountId = getAccountId(apiKey);
+	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const promptCacheKey = normalizeOpenAIResponsesPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
@@ -853,7 +855,7 @@ async function buildCodexRequestContext(
 
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const responsesLite = shouldUseCodexResponsesLite(transformedBody, options?.responsesLite);
-	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, baseUrl, responsesLite);
+	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (sessionKey && publicSessionKey) {
 		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
@@ -902,7 +904,7 @@ export async function buildTransformedCodexRequestBody(
 	// `{"detail":"Unsupported parameter: temperature"}` etc., so we drop
 	// everything from `StreamOptions` rather than forwarding any of them.
 	// (#3117 — codex-rs sends none of these either.)
-	applyOpenAIServiceTier(params, options?.serviceTier, model.provider);
+	applyOpenAIServiceTier(params, options?.serviceTier, model);
 	if (context.tools && context.tools.length > 0) {
 		params.tools = convertOpenAICodexResponsesTools(context.tools, model);
 		if (options?.toolChoice) {
@@ -1531,8 +1533,15 @@ class CodexStreamProcessor {
 						input_tokens?: number;
 						output_tokens?: number;
 						total_tokens?: number;
-						input_tokens_details?: { cached_tokens?: number };
-						output_tokens_details?: { reasoning_tokens?: number };
+						input_tokens_details?: {
+							cached_tokens?: number;
+							orchestration_input_tokens?: number;
+							orchestration_input_cached_tokens?: number;
+						};
+						output_tokens_details?: {
+							reasoning_tokens?: number;
+							orchestration_output_tokens?: number;
+						};
 					};
 					status?: string;
 					service_tier?: ServiceTier | "default";
@@ -2055,14 +2064,14 @@ export async function prewarmOpenAICodexResponses(
 ): Promise<void> {
 	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 	if (!apiKey) return;
-	const accountId = getAccountId(apiKey);
+	const accountId = getCodexAccountId(apiKey);
 	const baseUrl = model.baseUrl || CODEX_BASE_URL;
 	const url = resolveCodexResponsesUrl(baseUrl);
 	const transportSessionId = normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
 	const promptCacheKey = transportSessionId;
 	const providerSessionState = getCodexProviderSessionState(options?.providerSessionState);
 	const responsesLite = options?.responsesLite === true;
-	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, baseUrl, responsesLite);
+	const sessionKey = getCodexWebSocketSessionKey(transportSessionId, model, accountId, apiKey, baseUrl, responsesLite);
 	const publicSessionKey = transportSessionId ? `${baseUrl}:${model.id}:${transportSessionId}` : undefined;
 	if (publicSessionKey && sessionKey) {
 		providerSessionState?.webSocketPublicToPrivate.set(publicSessionKey, sessionKey);
@@ -2095,15 +2104,17 @@ export async function prewarmOpenAICodexResponses(
 function getCodexWebSocketSessionKey(
 	normalizedSessionId: string | undefined,
 	model: Model<"openai-codex-responses">,
-	accountId: string,
+	accountId: string | undefined,
+	apiKey: string,
 	baseUrl: string,
 	responsesLite: boolean,
 ): string | undefined {
 	if (!normalizedSessionId) return undefined;
+	const credentialKey = accountId ? `account:${accountId}` : `token:${Bun.hash(apiKey).toString(36)}`;
 	// Responses Lite is connection-scoped on the WebSocket upgrade, so lite and
 	// non-lite turns must never share a pooled socket or append state.
 	const liteSuffix = responsesLite ? ":lite" : "";
-	return `${accountId}:${baseUrl}:${model.id}:${normalizedSessionId}${liteSuffix}`;
+	return `${credentialKey}:${baseUrl}:${model.id}:${normalizedSessionId}${liteSuffix}`;
 }
 
 function getCodexWebSocketSessionState(
@@ -2979,7 +2990,7 @@ async function getOrCreateCodexWebSocketConnection(
 async function openCodexSseEventStream(
 	url: string,
 	requestHeaders: Record<string, string> | undefined,
-	accountId: string,
+	accountId: string | undefined,
 	apiKey: string,
 	sessionId: string | undefined,
 	body: RequestBody,
@@ -3044,7 +3055,7 @@ async function openCodexSseEventStream(
 
 function createCodexHeaders(
 	initHeaders: Record<string, string> | undefined,
-	accountId: string,
+	accountId: string | undefined,
 	accessToken: string,
 	sessionId?: string,
 	transport: CodexTransport = "sse",
@@ -3054,7 +3065,7 @@ function createCodexHeaders(
 	const headers = new Headers(initHeaders ?? {});
 	headers.delete("x-api-key");
 	headers.set("Authorization", `Bearer ${accessToken}`);
-	headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
+	if (accountId) headers.set(OPENAI_HEADERS.ACCOUNT_ID, accountId);
 	const betaHeader =
 		transport === "websocket"
 			? OPENAI_HEADER_VALUES.BETA_RESPONSES_WEBSOCKETS_V2
@@ -3129,17 +3140,6 @@ function resolveCodexResponsesUrl(baseUrl: string | undefined): string {
 	return `${normalized}/codex/responses`;
 }
 
-function getAccountId(accessToken: string): string {
-	const accountId = getCodexAccountId(accessToken);
-	if (!accountId) {
-		throw new AIError.OAuthError("Failed to extract accountId from token", {
-			kind: "validation",
-			provider: "openai",
-		});
-	}
-	return accountId;
-}
-
 function convertMessages(model: Model<"openai-codex-responses">, context: Context): ResponseInput {
 	const messages: ResponseInput = [];
 
@@ -3200,32 +3200,40 @@ function convertMessages(model: Model<"openai-codex-responses">, context: Contex
 				assistantMsg.api === model.api && assistantMsg.model === model.id
 					? getOpenAIResponsesHistoryPayload(assistantMsg.providerPayload, model.provider, assistantMsg.provider)
 					: undefined;
-			const historyItems = providerPayload?.items as Array<ResponseInput[number]> | undefined;
+			const historyItems = providerPayload?.items as Array<Record<string, unknown>> | undefined;
+			let suppressHiddenEmptyFallback = false;
 			if (historyItems) {
-				for (const item of historyItems) {
-					const maybe = item as { type?: string; call_id?: string };
-					if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
-						customCallIds.add(maybe.call_id);
+				const sanitizedHistoryItems = sanitizeOpenAIResponsesAssistantHistoryItemsForReplay(historyItems);
+				if (sanitizedHistoryItems) {
+					for (const item of sanitizedHistoryItems) {
+						const maybe = item as { type?: string; call_id?: string };
+						if (maybe.type === "custom_tool_call" && typeof maybe.call_id === "string") {
+							customCallIds.add(maybe.call_id);
+						}
 					}
+					if (providerPayload?.dt) {
+						messages.push(...sanitizedHistoryItems);
+					} else {
+						messages.splice(0, messages.length, ...sanitizedHistoryItems);
+						// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
+					}
+					msgIndex += 1;
+					continue;
 				}
-				if (providerPayload?.dt) {
-					messages.push(...historyItems);
-				} else {
-					messages.splice(0, messages.length, ...historyItems);
-					// Keep customCallIds from the pre-splice state since historyItems may re-introduce them.
-				}
-				msgIndex += 1;
-				continue;
+				suppressHiddenEmptyFallback = true;
 			}
 
-			const outputItems = convertResponsesAssistantMessage(
+			const convertedOutputItems = convertResponsesAssistantMessage(
 				msg as AssistantMessage,
 				model,
 				msgIndex,
 				knownCallIds,
-				true,
+				!suppressHiddenEmptyFallback,
 				customCallIds,
 			);
+			const outputItems = suppressHiddenEmptyFallback
+				? sanitizeOpenAIResponsesAssistantFallbackItemsForReplay(convertedOutputItems)
+				: convertedOutputItems;
 			if (outputItems.length > 0) {
 				messages.push(...outputItems);
 			}

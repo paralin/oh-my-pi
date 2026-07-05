@@ -210,9 +210,17 @@ const FIXED_THRESHOLD_HEADROOM_TOKENS = 50_000;
 /**
  * Calculate total context tokens from usage.
  * Uses the native totalTokens field when available, falls back to computing from components.
+ * Provider-side orchestration tokens are billable but never replay into the
+ * conversation prefix, so they are excluded from context sizing to keep
+ * auto-compaction and context-promotion thresholds honest.
  */
 export function calculateContextTokens(usage: Usage): number {
-	return usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	const orchestration = usage.orchestration;
+	const orchestrationTotal = orchestration
+		? (orchestration.input ?? 0) + (orchestration.output ?? 0) + (orchestration.cacheRead ?? 0)
+		: 0;
+	const raw = usage.totalTokens || usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	return Math.max(0, raw - orchestrationTotal);
 }
 
 export function calculatePromptTokens(usage: Usage): number {
