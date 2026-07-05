@@ -150,7 +150,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read", "lsp", "write"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "write", "resolve"]);
+		expect(names).toEqual(["read", "write", "goal", "resolve"]);
 	});
 
 	it("excludes lsp tool when disabled", async () => {
@@ -166,7 +166,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["read", "write"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "write", "resolve"]);
+		expect(names).toEqual(["read", "write", "goal", "resolve"]);
 	});
 
 	it("lowercases requested tool subset", async () => {
@@ -174,7 +174,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["Read", "Write"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["read", "write", "resolve"]);
+		expect(names).toEqual(["read", "write", "goal", "resolve"]);
 	});
 
 	it("includes hidden tools when explicitly requested", async () => {
@@ -182,7 +182,7 @@ describe("createTools", () => {
 		const tools = await createTools(session, ["report_finding"]);
 		const names = tools.map(t => t.name);
 
-		expect(names).toEqual(["report_finding", "resolve"]);
+		expect(names).toEqual(["report_finding", "goal", "resolve"]);
 	});
 
 	it("includes yield tool when required", async () => {
@@ -235,7 +235,7 @@ describe("createTools", () => {
 		expect(names).not.toContain("inspect_image");
 
 		const requestedTools = await createTools(session, ["bash", "read"]);
-		expect(requestedTools.map(t => t.name)).toEqual(["read", "resolve"]);
+		expect(requestedTools.map(t => t.name)).toEqual(["read", "goal", "resolve"]);
 	});
 
 	it("always includes resolve regardless of plan-mode setting", async () => {
@@ -250,7 +250,7 @@ describe("createTools", () => {
 		expect(defaultTools.map(t => t.name)).not.toContain("exit_plan_mode");
 
 		const requestedTools = await createTools(session, ["read"]);
-		expect(requestedTools.map(t => t.name)).toEqual(["read", "resolve"]);
+		expect(requestedTools.map(t => t.name)).toEqual(["read", "goal", "resolve"]);
 	});
 	it("auto-includes goal when goal mode is active", async () => {
 		const session = createTestSession({
