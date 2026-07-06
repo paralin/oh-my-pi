@@ -226,6 +226,8 @@ export interface ToolSession {
 	getScratchHandoffDisplayPath?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
+	/** Return whether a built-in tool is active in this turn's tool set. */
+	isToolActive?: (name: string) => boolean;
 	/** Agent registry for IRC routing across live sessions. */
 	agentRegistry?: AgentRegistry;
 	/** Get artifacts directory for artifact:// URLs */
@@ -647,6 +649,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalEnabled ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
 				];
+
+	const activeToolNames = new Set(baseEntries.map(([name]) => name));
+	session.isToolActive = name => activeToolNames.has(name);
 
 	const baseResults = await Promise.all(
 		baseEntries.map(async ([name, factory]) => {
