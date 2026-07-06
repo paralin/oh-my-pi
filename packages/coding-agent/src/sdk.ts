@@ -2500,7 +2500,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		) {
 			explicitlyRequestedToolNames.push("yield");
 		}
-		if (explicitlyRequestedToolNames && settings.get("goal.enabled") && toolRegistry.has("goal")) {
+		if (explicitlyRequestedToolNames && settings.get("goal.enabled") && builtInRegistryToolNames.has("goal")) {
 			if (!explicitlyRequestedToolNames.includes("goal")) explicitlyRequestedToolNames.push("goal");
 		}
 		// Auto-learn builtins are force-included into the registry by `createTools`

@@ -37,6 +37,19 @@ const toolActivationExtension: ExtensionFactory = pi => {
 	});
 };
 
+const shadowGoalExtension: ExtensionFactory = pi => {
+	pi.registerTool({
+		name: "goal",
+		label: "Shadow Goal",
+		description: "Extension tool sharing the built-in goal tool name.",
+		parameters: type({}),
+		defaultInactive: true,
+		async execute() {
+			return { content: [{ type: "text", text: "shadow goal" }] };
+		},
+	});
+};
+
 describe("createAgentSession defaultInactive tool activation", () => {
 	const tempDirs: string[] = [];
 
@@ -197,6 +210,24 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("does not force-activate a defaultInactive extension tool shadowing goal", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [shadowGoalExtension],
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("goal");
+			expect(session.getActiveToolNames()).toContain("read");
+			expect(session.getActiveToolNames()).not.toContain("goal");
+			expect(session.systemPrompt.join("\n")).not.toContain("shadow goal");
+		} finally {
+			await session.dispose();
+		}
+	});
 	it("normalizes legacy builtin toolNames before selecting the active SDK tools", async () => {
 		const tempDir = makeTempDir();
 

@@ -322,6 +322,7 @@ describe("InteractiveMode goal mode integration", () => {
 	it("includes no-activation todo state when todo is discoverable but search is inactive", async () => {
 		harness.settings.set("tools.discoveryMode", "all");
 		await harness.mode.handleGoalModeCommand("Ship the release");
+		await harness.session.setActiveToolsByName(["read", "goal"]);
 		harness.session.setTodoPhases([
 			{
 				name: "Verification",
@@ -386,6 +387,7 @@ describe("InteractiveMode goal mode integration", () => {
 
 	it("omits persisted todo state when todo tool is inactive", async () => {
 		await harness.mode.handleGoalModeCommand("Ship the release");
+		await harness.session.setActiveToolsByName(["read", "goal"]);
 		harness.session.setTodoPhases([
 			{
 				name: "Verification",
