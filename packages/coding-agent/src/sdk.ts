@@ -1593,10 +1593,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// entries capture it at fetch time and are dropped at injection if a newer
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
+		const activeToolNames = new Set<string>();
+		const setActiveToolNames = (names: Iterable<string>): void => {
+			activeToolNames.clear();
+			for (const name of names) {
+				activeToolNames.add(name);
+			}
+		};
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			isToolActive: name => activeToolNames.has(name),
+			setActiveToolNames,
 			hasUI: options.hasUI ?? false,
 			enableLsp,
 			get hasEditTool() {
@@ -2619,6 +2628,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 		hasRegistered = true;
 
+		setActiveToolNames(initialToolNames);
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,
@@ -2916,6 +2926,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rebuildSystemPrompt,
 			reloadSshTool,
 			requestedToolNames: requestedToolNameSet,
+			setActiveToolNames,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();
