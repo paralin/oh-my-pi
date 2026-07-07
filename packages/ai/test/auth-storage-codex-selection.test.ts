@@ -513,6 +513,105 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("runtime-secondary");
 	});
 
+	test("runtime Codex chain prefers the first configured home when all are healthy", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		authStorage.setRuntimeApiKeyChain("openai-codex", [
+			{ key: "home-default", accountId: "acct-default", label: "default", usageType: "oauth" },
+			{ key: "home-secondary", accountId: "acct-secondary", label: "secondary", usageType: "oauth" },
+		]);
+		usageByAccount.set(
+			"acct-default",
+			createCodexUsageReport({
+				accountId: "acct-default",
+				primary: { usedFraction: 0.18, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.32, resetInMs: WEEK_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-secondary",
+			createCodexUsageReport({
+				accountId: "acct-secondary",
+				primary: { usedFraction: 0.05, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.05, resetInMs: WEEK_MS },
+			}),
+		);
+
+		expect(await authStorage.getApiKey("openai-codex", "chain-config-order")).toBe("home-default");
+	});
+
+	test("runtime Codex chain fails over to the next home when the first is exhausted", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		authStorage.setRuntimeApiKeyChain("openai-codex", [
+			{ key: "home-default", accountId: "acct-default", label: "default", usageType: "oauth" },
+			{ key: "home-secondary", accountId: "acct-secondary", label: "secondary", usageType: "oauth" },
+		]);
+		usageByAccount.set(
+			"acct-default",
+			createCodexUsageReport({
+				accountId: "acct-default",
+				primary: { usedFraction: 1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 1, resetInMs: HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-secondary",
+			createCodexUsageReport({
+				accountId: "acct-secondary",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+
+		expect(await authStorage.getApiKey("openai-codex", "chain-failover")).toBe("home-secondary");
+	});
+
+	test("runtime Codex chain block stays in-memory and never persists to the store", async () => {
+		if (!authStorage || !store) throw new Error("test setup failed");
+
+		// Stored OAuth logins give the persisted block table real credential ids at
+		// chain positions 0/1. Pre-fix a chain block wrote those ids, so a prior
+		// process's exhausted home poisoned the same-index home on the next process.
+		// The block table is keyed by stored credentialId, which the chain index
+		// does not map to, so chain blocks must never reach it.
+		await authStorage.set("openai-codex", [
+			{ type: "oauth", ...createCredential("acct-stored-a", "a@example.com") },
+			{ type: "oauth", ...createCredential("acct-stored-b", "b@example.com") },
+		]);
+
+		authStorage.setRuntimeApiKeyChain("openai-codex", [
+			{ key: "home-default", accountId: "acct-default", label: "default", usageType: "oauth" },
+			{ key: "home-secondary", accountId: "acct-secondary", label: "secondary", usageType: "oauth" },
+		]);
+		// The first home is exhausted, so resolve marks it blocked and picks the
+		// second. The mark is process-local; nothing about it may persist.
+		usageByAccount.set(
+			"acct-default",
+			createCodexUsageReport({
+				accountId: "acct-default",
+				primary: { usedFraction: 1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 1, resetInMs: HOUR_MS },
+			}),
+		);
+		usageByAccount.set(
+			"acct-secondary",
+			createCodexUsageReport({
+				accountId: "acct-secondary",
+				primary: { usedFraction: 0.1, resetInMs: HOUR_MS },
+				secondary: { usedFraction: 0.1, resetInMs: WEEK_MS },
+			}),
+		);
+		expect(await authStorage.getApiKey("openai-codex", "chain-persist")).toBe("home-secondary");
+
+		// No runtime-chain block reached the persisted per-credential block table
+		// under any stored credential id.
+		const persistedChainBlocks = (store.listCredentialBlocks?.([1, 2, 3, 4]) ?? []).filter(block =>
+			block.providerKey.endsWith(":runtime_chain"),
+		);
+		expect(persistedChainBlocks).toEqual([]);
+	});
+
 	test("prefers Pro accounts for codex spark models over Plus accounts", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

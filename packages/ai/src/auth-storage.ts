@@ -555,6 +555,10 @@ const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
 );
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
+// Provider-key suffix marking the runtime API key chain (config `codexHomes` /
+// `--codex-home-chain`). Chain block state is process-local; see
+// `#isRuntimeApiKeyChainProviderKey`.
+const RUNTIME_API_KEY_CHAIN_PROVIDER_KEY_SUFFIX = ":runtime_chain";
 // 5 min stale tolerance. Anthropic / OpenAI rate-limit /usage hard at the IP
 // level so we can't fetch all N credentials every cycle; with a long cache
 // each credential's last-known value sticks visible while peers retry. UI
@@ -1335,7 +1339,18 @@ export class AuthStorage {
 	}
 
 	#getRuntimeApiKeyChainProviderKey(provider: string): string {
-		return `${provider}:runtime_chain`;
+		return `${provider}${RUNTIME_API_KEY_CHAIN_PROVIDER_KEY_SUFFIX}`;
+	}
+
+	// Runtime API key chains (e.g. Codex `codexHomes`) are rebuilt from config
+	// every process and indexed by chain position, which has no stable mapping to
+	// a stored-credential DB id. The persisted per-credential block table is keyed
+	// by stored credentialId, so consulting it for a chain index attributes one
+	// account's block to whichever stored credential shares that numeric index —
+	// a differently-ordered set — poisoning a healthy home with an exhausted
+	// account's reset. Chain block state therefore stays in-memory only.
+	#isRuntimeApiKeyChainProviderKey(providerKey: string): boolean {
+		return providerKey.endsWith(RUNTIME_API_KEY_CHAIN_PROVIDER_KEY_SUFFIX);
 	}
 
 	#clearRuntimeApiKeyChainBackoff(provider: string): void {
@@ -1447,6 +1462,11 @@ export class AuthStorage {
 			}
 		}
 
+		// Runtime chain indices do not map to a stored credentialId; the persisted
+		// block table would attribute a stored account's block to a chain home at
+		// the same numeric position. Keep chain blocks in-memory only.
+		if (this.#isRuntimeApiKeyChainProviderKey(providerKey)) return blockedUntil;
+
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return blockedUntil;
 		const persistedGlobalBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, "");
@@ -1492,6 +1512,11 @@ export class AuthStorage {
 		const nextBlockedUntil = Math.max(existing, blockedUntilMs);
 		backoffMap.set(credentialIndex, nextBlockedUntil);
 		this.#credentialBackoff.set(backoffKey, backoffMap);
+
+		// Runtime chain blocks stay in-memory: their index has no stored
+		// credentialId, so persisting would poison an unrelated stored credential's
+		// block at the same numeric position (see #isRuntimeApiKeyChainProviderKey).
+		if (this.#isRuntimeApiKeyChainProviderKey(providerKey)) return;
 
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock) return;
