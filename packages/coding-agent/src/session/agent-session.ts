@@ -386,8 +386,12 @@ import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import {
 	type DrainedSteeringRecord,
+	drainSessionSteeringFile,
+	readSessionSteeringOffset,
 	type SessionSteeringDrainResult,
 	SessionSteeringWatcher,
+	sessionSteeringOffsetFileForSessionFile,
+	writeSessionSteeringOffset,
 } from "./session-steering";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
@@ -2304,9 +2308,11 @@ export class AgentSession {
 			: (event, model) => {
 					this.rawSseDebugBuffer.recordEvent(event, model);
 				};
+		this.agent.setOnBeforeYield(() => this.#drainSessionSteering());
 		this.agent.setProviderResponseInterceptor(this.#onResponse);
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
 		this.agent.setBeforeModelCall(context => this.#stopBeforeOversizedScratchHandoffRequest(context));
+		this.agent.setBeforeSteeringPoll(() => this.#drainSessionSteering());
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
 			const rewindReport = this.#extractRewindReport(messages);
@@ -3455,6 +3461,25 @@ export class AgentSession {
 	#stopSessionSteeringWatcher(): void {
 		this.#sessionSteeringWatcher?.dispose();
 		this.#sessionSteeringWatcher = undefined;
+	}
+
+	async #drainSessionSteering(): Promise<void> {
+		const watcher = this.#sessionSteeringWatcher;
+		if (watcher) {
+			await watcher.drain();
+			return;
+		}
+
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile || this.#isDisposed) return;
+		const result = drainSessionSteeringFile(sessionFile);
+		if (result.records.length === 0) return;
+		await this.#injectSessionSteering(result.records, result);
+		if (!this.#isDisposed) {
+			const offsetFile = sessionSteeringOffsetFileForSessionFile(sessionFile);
+			if (readSessionSteeringOffset(offsetFile) < result.offset)
+				writeSessionSteeringOffset(offsetFile, result.offset);
+		}
 	}
 
 	async #injectSessionSteering(records: DrainedSteeringRecord[], result: SessionSteeringDrainResult): Promise<void> {

@@ -162,6 +162,8 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		return true;
 	};
 
+	await session.sessionManager.ensureOnDisk();
+
 	// Emit session header for JSON mode
 	if (mode === "json") {
 		const header = session.sessionManager.getHeader();

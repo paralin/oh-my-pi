@@ -138,4 +138,30 @@ describe("SessionSteeringWatcher", () => {
 			watcher.dispose();
 		}
 	});
+
+	it("drains appended records when explicitly polled at a turn boundary", async () => {
+		const sessionPath = sessionFile("watcher-boundary");
+		const seen: string[] = [];
+		const watcher = new SessionSteeringWatcher({
+			sessionFile: sessionPath,
+			onRecords: records => {
+				seen.push(...records.map(record => record.message));
+			},
+		});
+
+		try {
+			watcher.start();
+			await watcher.flush();
+			await appendSteering(sessionPath, jsonl("between turns"));
+
+			await watcher.drain();
+
+			expect(seen).toEqual(["between turns"]);
+			expect(readSessionSteeringOffset(sessionSteeringOffsetFileForSessionFile(sessionPath))).toBe(
+				Buffer.byteLength(jsonl("between turns")),
+			);
+		} finally {
+			watcher.dispose();
+		}
+	});
 });

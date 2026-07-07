@@ -389,6 +389,7 @@ export class Agent {
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
+	#beforeSteeringPoll?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#beforeModelCall?: (context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>;
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
@@ -751,6 +752,10 @@ export class Agent {
 
 	setOnBeforeYield(fn: (() => Promise<void> | void) | undefined): void {
 		this.#onBeforeYield = fn;
+	}
+
+	setBeforeSteeringPoll(fn: (() => Promise<void> | void) | undefined): void {
+		this.#beforeSteeringPoll = fn;
 	}
 	setOnTurnEnd(
 		fn:
@@ -1191,9 +1196,13 @@ export class Agent {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
+				await this.#beforeSteeringPoll?.();
 				return this.#dequeueSteeringMessages();
 			},
-			hasSteeringMessages: () => this.#steeringQueue.length > 0,
+			hasSteeringMessages: async () => {
+				await this.#beforeSteeringPoll?.();
+				return this.#steeringQueue.length > 0;
+			},
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			getFollowUpMessages: async () => this.#dequeueFollowUpMessages(),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],

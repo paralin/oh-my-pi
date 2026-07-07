@@ -144,6 +144,10 @@ export class SessionSteeringWatcher {
 		this.#watcher = undefined;
 	}
 
+	drain(): Promise<void> {
+		this.#scheduleDrain();
+		return this.flush();
+	}
 	flush(): Promise<void> {
 		return this.#drainTail;
 	}
