@@ -179,6 +179,7 @@ export class EventController {
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
+			boss_inbox_message: async () => {},
 			notice: e => this.#handleNotice(e),
 			thinking_level_changed: async () => {
 				this.ctx.statusLine.invalidate();

@@ -22,6 +22,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
+import type { BossInboxMessageKind, BossInboxRecord } from "../session/boss-inbox";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
@@ -222,6 +223,10 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Whether this session can write worker-to-boss messages to its persisted sidecar. */
+	bossInboxEnabled?: boolean;
+	/** Persist and emit a worker-to-boss message. */
+	appendBossInboxMessage?: (message: { kind: BossInboxMessageKind; message: string }) => BossInboxRecord;
 	/** Current session scratch handoff file, if scratch handoff is enabled. */
 	getScratchHandoffDisplayPath?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
@@ -614,12 +619,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
-		if (name === "web_search") return session.settings.get("web_search.enabled");
+		if (name === "irc")
+			return isIrcEnabled(session.settings, session.taskDepth ?? 0, session.bossInboxEnabled === true);
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
-		if (name === "irc") return isIrcEnabled(session.settings, session.taskDepth ?? 0);
 		if (name === "retain" || name === "recall" || name === "reflect") {
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}

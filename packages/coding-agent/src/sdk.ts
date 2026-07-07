@@ -113,6 +113,7 @@ import {
 import { AgentSession } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { appendSessionBossInboxMessage } from "./session/boss-inbox";
 import {
 	type CustomMessage,
 	convertToLlm,
@@ -541,6 +542,8 @@ export interface CreateAgentSessionOptions {
 	parentScratchHandoffDisplayPath?: string;
 	/** Explicit scratch handoff file for this session. Overrides scratchHandoff.rootDir naming. */
 	scratchHandoffFile?: string;
+	/** Enable the file-backed worker-to-boss inbox for this session. */
+	bossInbox?: boolean;
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
 
@@ -1633,6 +1636,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
 			getScratchHandoffDisplayPath: () => session?.getScratchHandoffDisplayPath(),
+			bossInboxEnabled: options.bossInbox === true,
+			appendBossInboxMessage: ({ kind, message }) => {
+				const sessionFile = sessionManager.getSessionFile();
+				if (!sessionFile) throw new Error("boss inbox requires a persisted session");
+				const record = appendSessionBossInboxMessage(sessionFile, {
+					sessionId: sessionManager.getSessionId(),
+					from: resolvedAgentId,
+					kind,
+					message,
+				});
+				session?.emitBossInboxMessage(record);
+				return record;
+			},
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
 			getSessionSpawns: () => options.spawns ?? "*",

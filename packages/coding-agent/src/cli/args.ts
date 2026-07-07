@@ -35,6 +35,7 @@ export interface Args {
 	contextStopPercent?: number;
 	contextStopTokens?: number;
 	scratchHandoffFile?: string;
+	bossInbox?: boolean;
 	apiKey?: string;
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
@@ -241,6 +242,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.print = true;
 		} else if (arg === "--print-thoughts") {
 			result.printThoughts = true;
+		} else if (arg === "--boss-inbox") {
+			result.bossInbox = true;
 		} else if (arg === "--no-extensions") {
 			result.noExtensions = true;
 		} else if (arg === "--no-skills") {

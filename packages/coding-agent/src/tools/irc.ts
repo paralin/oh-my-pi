@@ -20,6 +20,7 @@ import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
 import type { Theme } from "../modes/theme/theme";
 import ircDescription from "../prompts/tools/irc.md" with { type: "text" };
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type BossInboxMessageKind, type BossInboxRecord, normalizeBossInboxKind } from "../session/boss-inbox";
 import { canSpawnAtDepth } from "../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
@@ -36,12 +37,13 @@ import {
 const DEFAULT_IRC_TIMEOUT_MS = 120_000;
 
 /**
- * IRC availability: there must be someone to chat with. True for every
+ * IRC availability: there must be someone to chat with, or the session must
+ * expose an out-of-process boss inbox. In-process IRC is true for every
  * subagent (it always has a parent, and possibly siblings) and for any
- * session that can still spawn subagents through the task tool. Only a
- * top-level session with task spawning unavailable has no peers — no irc.
+ * session that can still spawn subagents through the task tool.
  */
-export function isIrcEnabled(settings: Settings, taskDepth: number): boolean {
+export function isIrcEnabled(settings: Settings, taskDepth: number, bossInboxEnabled = false): boolean {
+	if (bossInboxEnabled) return true;
 	if (taskDepth > 0) return true;
 	// Top-level session: peers exist only if it can still spawn subagents — the
 	// same capacity gate the task tool uses, reused here to avoid drift.
@@ -55,6 +57,7 @@ const ircSchema = type({
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"kind?": type("'question' | 'status' | 'finding'").describe('boss inbox message kind for to:"boss"'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"timeoutMs?": type("number").describe("wait: timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
@@ -82,6 +85,7 @@ export interface IrcDetails {
 	waited?: IrcMessage | null;
 	inbox?: IrcMessage[];
 	peers?: IrcPeerInfo[];
+	bossInbox?: BossInboxRecord;
 }
 
 function formatIncoming(msg: IrcMessage): string {
@@ -144,8 +148,8 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	}
 
 	static createIf(session: ToolSession): IrcTool | null {
-		if (!isIrcEnabled(session.settings, session.taskDepth ?? 0)) return null;
-		if (!session.agentRegistry || !session.getAgentId) return null;
+		if (!session.agentRegistry && session.bossInboxEnabled !== true) return null;
+		if (!session.getAgentId) return null;
 		return new IrcTool(session);
 	}
 
@@ -158,22 +162,23 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	): Promise<AgentToolResult<IrcDetails>> {
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
-		if (!registry) {
-			return errorResult("IRC is unavailable in this session.", { op: params.op });
-		}
 		if (!senderId) {
 			return errorResult("IRC is unavailable: caller has no agent id.", { op: params.op });
 		}
 
 		switch (params.op) {
 			case "list":
-				return this.#executeList(registry, senderId);
+				return registry
+					? this.#executeList(registry, senderId)
+					: errorResult("IRC peer listing is unavailable in this session.", { op: "list", from: senderId });
 			case "send":
 				return this.#executeSend(registry, senderId, params, signal);
 			case "wait":
 				return this.#executeWait(senderId, params, signal);
 			case "inbox":
-				return this.#executeInbox(registry, senderId, params);
+				return registry
+					? this.#executeInbox(registry, senderId, params)
+					: errorResult("IRC inbox is unavailable in this session.", { op: "inbox", from: senderId });
 			default:
 				return errorResult("Unknown irc op.", { op: params.op });
 		}
@@ -220,7 +225,7 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 	}
 
 	async #executeSend(
-		registry: AgentRegistry,
+		registry: AgentRegistry | undefined,
 		senderId: string,
 		params: IrcParams,
 		signal?: AbortSignal,
@@ -235,6 +240,12 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 		}
 		if (to === senderId) {
 			return errorResult("Cannot send an IRC message to yourself.", { op: "send", from: senderId, to });
+		}
+		if (to === "boss") {
+			return this.#executeBossInboxSend(senderId, message, normalizeBossInboxKind(params.kind));
+		}
+		if (!registry) {
+			return errorResult("IRC peer delivery is unavailable in this session.", { op: "send", from: senderId, to });
 		}
 		const isBroadcast = to === "all";
 		if (isBroadcast && params.await) {
@@ -365,6 +376,35 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			awaitAbort?.abort(awaitCancelled);
 			removeAwaitAbortListener?.();
 		}
+	}
+
+	#executeBossInboxSend(senderId: string, message: string, kind: BossInboxMessageKind): AgentToolResult<IrcDetails> {
+		if (this.session.bossInboxEnabled !== true || !this.session.appendBossInboxMessage) {
+			return errorResult(
+				"Boss inbox is disabled for this session. Start the worker with --boss-inbox to enable it.",
+				{
+					op: "send",
+					from: senderId,
+					to: "boss",
+				},
+			);
+		}
+		const record = this.session.appendBossInboxMessage({ kind, message });
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Queued ${kind} for boss inbox (${record.id}). Keep working; replies arrive through normal steering.`,
+				},
+			],
+			details: {
+				op: "send",
+				from: senderId,
+				to: "boss",
+				receipts: [{ to: "boss", outcome: "injected" }],
+				bossInbox: record,
+			},
+		};
 	}
 
 	async #executeWait(senderId: string, params: IrcParams, signal?: AbortSignal): Promise<AgentToolResult<IrcDetails>> {

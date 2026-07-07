@@ -332,6 +332,7 @@ import { formatLocalCalendarDate } from "../utils/local-date";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
+import type { BossInboxRecord } from "./boss-inbox";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
 	type CodexAutoRedeemRedeemDecision,
@@ -689,6 +690,7 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
+	| { type: "boss_inbox_message"; message: BossInboxRecord }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string }
 	| {
 			type: "thinking_level_changed";
@@ -3119,6 +3121,10 @@ export class AgentSession {
 
 	getScratchHandoffDisplayPath(): string | undefined {
 		return this.#scratchHandoffDisplayPath;
+	}
+
+	emitBossInboxMessage(message: BossInboxRecord): void {
+		this.#emit({ type: "boss_inbox_message", message });
 	}
 
 	#scratchHandoffWriteCount(scratchPath: string): number {
