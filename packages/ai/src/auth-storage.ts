@@ -3375,7 +3375,12 @@ export class AuthStorage {
 		let retryAtMs: number | undefined;
 		let soonestSiblingIndex: number | undefined;
 		for (const candidate of remainingCredentials) {
-			let candidateBlockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, candidate.index, blockScope);
+			let candidateBlockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				providerKey,
+				candidate.index,
+				blockScope,
+			);
 			if (candidateBlockedUntil === undefined) return { switched: true, usageLimited: true };
 			if (candidate.credential.type === "oauth" && strategy) {
 				const report = await this.#getUsageReportFreshForOauth(provider as Provider, candidate.credential, {

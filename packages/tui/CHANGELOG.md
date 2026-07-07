@@ -5,6 +5,18 @@
 ### Fixed
 
 - Kept slash command autocomplete rows compact by truncating descriptions instead of wrapping them into multi-line blocks.
+## [16.3.10] - 2026-07-06
+
+### Fixed
+
+- Registered emergency terminal restore with the postmortem fatal path whenever a real terminal starts, so fatal exits restore raw mode/alternate screen on the normal CLI graph (previously the registration was a side effect of a barrel module the CLI never imported).
+
+## [16.3.9] - 2026-07-06
+
+### Fixed
+
+- Fixed autocompletion for absolute paths (such as `/tmp/...` or `/Users/...`) at the start of a prompt, ensuring they fall back to file-path completion instead of being incorrectly treated as slash commands.
+- Updated absolute path autocompletion behavior so that accepting a suggestion inserts the path without submitting the prompt.
 
 ## [16.3.7] - 2026-07-05
 

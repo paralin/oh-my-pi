@@ -9073,6 +9073,35 @@
 			"contextWindow": 128000,
 			"maxTokens": 4096
 		},
+		"jp.anthropic.claude-haiku-4-5-20251001-v1:0": {
+			"id": "jp.anthropic.claude-haiku-4-5-20251001-v1:0",
+			"name": "Claude Haiku 4.5 (JP)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 1,
+				"output": 5,
+				"cacheRead": 0.1,
+				"cacheWrite": 1.25
+			},
+			"contextWindow": 200000,
+			"maxTokens": 64000,
+			"thinking": {
+				"mode": "budget",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
 		"jp.anthropic.claude-opus-4-7": {
 			"id": "jp.anthropic.claude-opus-4-7",
 			"name": "Claude Opus 4.7 (JP)",
@@ -51831,6 +51860,25 @@
 			"contextWindow": null,
 			"maxTokens": null
 		},
+		"tencent/hy3": {
+			"id": "tencent/hy3",
+			"name": "tencent/hy3",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": null
+		},
 		"tencent/hy3-preview": {
 			"id": "tencent/hy3-preview",
 			"name": "Hy3 Preview",
@@ -60395,6 +60443,7 @@
 			"maxTokens": 384000,
 			"compat": {
 				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
 			},
@@ -60436,6 +60485,7 @@
 			"maxTokens": 384000,
 			"compat": {
 				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
 			},
@@ -71921,9 +71971,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.5740000000000001,
-				"output": 1.804,
-				"cacheRead": 0.1066,
+				"input": 0.9086,
+				"output": 2.8556,
+				"cacheRead": 0.16874,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -88419,6 +88469,35 @@
 					"xhigh"
 				],
 				"requiresEffort": true
+			}
+		},
+		"tencent/hy3": {
+			"id": "tencent/hy3",
+			"name": "Hy3",
+			"api": "openai-completions",
+			"provider": "zenmux",
+			"baseUrl": "https://zenmux.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.134561595,
+				"output": 0.539161765,
+				"cacheRead": 0.033869245,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
 			}
 		},
 		"tencent/hy3-preview": {

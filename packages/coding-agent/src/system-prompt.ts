@@ -250,6 +250,21 @@ async function getCachedGpu(): Promise<string | undefined> {
 	await logger.time("getCachedGpu:saveGpuCache", saveGpuCache, { gpu });
 	return gpu ?? undefined;
 }
+
+async function getCpuModel(): Promise<string | undefined> {
+	if (process.platform !== "linux") return undefined;
+	try {
+		const cpuInfo = await Bun.file("/proc/cpuinfo").text();
+		const match = /^model name\s*:\s*(.+)$/m.exec(cpuInfo);
+		return match?.[1]?.trim() || undefined;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.debug("Could not read Linux CPU model", { error: String(error) });
+		}
+		return undefined;
+	}
+}
+
 /**
  * Kernel identity for the workstation block. Prefers the uname build string
  * from `os.version()`, but Bun on macOS 15+ (Darwin 24/25) returns the literal
@@ -264,13 +279,10 @@ function getKernelIdentity(): string {
 	return `${os.type()} ${os.release()}`.trim();
 }
 
-function getEnvironmentInfo(gpu: string | undefined): Array<{ label: string; value: string }> {
-	let cpuModel: string | undefined;
-	try {
-		cpuModel = os.cpus()[0]?.model;
-	} catch {
-		cpuModel = undefined;
-	}
+function getEnvironmentInfo(
+	cpuModel: string | undefined,
+	gpu: string | undefined,
+): Array<{ label: string; value: string }> {
 	const entries: Array<{ label: string; value: string | undefined }> = [
 		{ label: "OS", value: `${os.platform()} ${os.release()}` },
 		{ label: "Distro", value: os.type() },
@@ -550,6 +562,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			agentsMdFiles: [],
 		} satisfies WorkspaceTree,
 		activeRepoContext: null as ActiveRepoContext | null,
+		cpuModel: undefined as string | undefined,
 		gpu: undefined as string | undefined,
 	};
 
@@ -620,6 +633,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		providedActiveRepoContext !== undefined
 			? Promise.resolve(providedActiveRepoContext)
 			: logger.time("resolveActiveRepoContext", () => resolveActiveRepoContext(resolvedCwd));
+	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
 	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
 
 	const [
@@ -630,6 +644,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills,
 		workspaceTree,
 		activeRepoContext,
+		cpuModel,
 		gpu,
 	] = await Promise.all([
 		withDeadline(
@@ -653,6 +668,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
+		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
 		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
 	]);
 	clearTimeout(deadlineTimer);
@@ -733,7 +749,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(gpu);
+	const environment = getEnvironmentInfo(cpuModel, gpu);
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
