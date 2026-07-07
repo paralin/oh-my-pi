@@ -407,6 +407,16 @@ The same prompt cards surface over ACP, so editors get the picker without writin
 
 ![omp TUI: the ask tool renders an option picker with three choices, a (Recommended) badge on the first, and 'up/down navigate · enter select · esc cancel' footer.](https://omp.sh/captures/ask.webp)
 
+### Session steering — append into a live run
+
+Persistent sessions watch a per-session steering file at `<session-file-without-.jsonl>/steer.jsonl`. Append one JSON object per line:
+
+```json
+{"message":"New instruction for the running agent"}
+```
+
+The running process drains from `steer.offset` and injects each entry as a normal user steering message at the next safe boundary. In-flight tool calls and provider requests finish first; the session is not interrupted, restarted, or resumed from disk.
+
 ### SDK — embed in Node
 
 `@oh-my-pi/pi-coding-agent`

@@ -206,6 +206,7 @@ export class EventController {
 				this.ctx.ui.resetDisplay();
 			},
 			goal_updated: async () => {},
+			steering_received: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 

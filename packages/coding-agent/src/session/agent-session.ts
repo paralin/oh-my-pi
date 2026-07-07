@@ -384,6 +384,11 @@ import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionEnt
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
+import {
+	type DrainedSteeringRecord,
+	type SessionSteeringDrainResult,
+	SessionSteeringWatcher,
+} from "./session-steering";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
@@ -689,7 +694,14 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| {
+			type: "steering_received";
+			sessionId: string;
+			steeringFile: string;
+			count: number;
+			entries: Array<{ offset: number; bytes: number }>;
+	  };
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
@@ -1887,6 +1899,7 @@ export class AgentSession {
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
+	#sessionSteeringWatcher: SessionSteeringWatcher | undefined;
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 
@@ -2466,6 +2479,7 @@ export class AgentSession {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		this.#startSessionSteeringWatcher();
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
 	}
@@ -3410,6 +3424,51 @@ export class AgentSession {
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter)
 		);
+	}
+
+	#startSessionSteeringWatcher(): void {
+		this.#stopSessionSteeringWatcher();
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile || this.#isDisposed) return;
+		const watcher = new SessionSteeringWatcher({
+			sessionFile,
+			onRecords: (records, result) => this.#injectSessionSteering(records, result),
+			onError: error => {
+				logger.warn("Session steering drain failed", {
+					sessionFile,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			},
+		});
+		this.#sessionSteeringWatcher = watcher;
+		try {
+			watcher.start();
+		} catch (error) {
+			this.#sessionSteeringWatcher = undefined;
+			logger.warn("Session steering watcher failed to start", {
+				sessionFile,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	#stopSessionSteeringWatcher(): void {
+		this.#sessionSteeringWatcher?.dispose();
+		this.#sessionSteeringWatcher = undefined;
+	}
+
+	async #injectSessionSteering(records: DrainedSteeringRecord[], result: SessionSteeringDrainResult): Promise<void> {
+		if (this.#isDisposed || records.length === 0) return;
+		for (const record of records) {
+			await this.sendUserMessage(record.message, { deliverAs: "steer" });
+		}
+		this.#emit({
+			type: "steering_received",
+			sessionId: this.sessionManager.getSessionId(),
+			steeringFile: result.file,
+			count: records.length,
+			entries: records.map(record => ({ offset: record.offset, bytes: record.bytes })),
+		});
 	}
 
 	// =========================================================================
@@ -5980,7 +6039,6 @@ export class AgentSession {
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this.#eventListeners.push(listener);
-
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this.#eventListeners.indexOf(listener);
@@ -6126,6 +6184,7 @@ export class AgentSession {
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.#stopAdvisorRuntime();
+		this.#stopSessionSteeringWatcher();
 		this.#evalExecutionDisposing = true;
 	}
 
@@ -15806,6 +15865,7 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				await this.#resetMemoryContextForNewTranscript();
 			}
+			this.#startSessionSteeringWatcher();
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
