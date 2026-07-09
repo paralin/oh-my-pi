@@ -16,6 +16,7 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import type {
+	AutocompleteProvider,
 	Component,
 	EditorTheme,
 	LoaderMessageColorFn,
@@ -59,6 +60,7 @@ import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { isSettingsInitialized, onStatusLineSessionAccentChanged, Settings, settings } from "../config/settings";
 import { clearClaudePluginRootsCache } from "../discovery/helpers";
 import type {
+	AutocompleteProviderFactory,
 	ContextUsage,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -516,6 +518,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	collabGuest?: CollabGuestLink;
 
 	#pendingSlashCommands: SlashCommand[] = [];
+	/** Built-in editor autocomplete provider, before extension wrapping. */
+	#baseAutocompleteProvider: AutocompleteProvider | undefined;
+	/** Extension-registered provider factories, applied in registration order (#4919). */
+	#autocompleteProviderFactories: AutocompleteProviderFactory[] = [];
 	#cleanupUnsubscribe?: () => void;
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
@@ -579,10 +585,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.retryLoader.stop();
 			this.retryLoader = undefined;
 		}
-		this.statusContainer.clear();
-		this.pendingMessagesContainer.clear();
+		this.statusContainer.disposeChildren();
+		this.pendingMessagesContainer.disposeChildren();
 		this.#cancelModelCycleClearTimer();
-		this.modelCycleContainer.clear();
+		this.modelCycleContainer.disposeChildren();
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -1094,12 +1100,47 @@ export class InteractiveMode implements InteractiveModeContext {
 				// source suffix (e.g. "Review code (project)"), so pass it through verbatim.
 				description: template.description,
 			}));
-		const autocompleteProvider = this.#inputController.createAutocompleteProvider(
+		this.#baseAutocompleteProvider = this.#inputController.createAutocompleteProvider(
 			[...this.#pendingSlashCommands, ...fileSlashCommands, ...promptTemplateCommands],
 			basePath,
 		);
-		this.editor.setAutocompleteProvider(autocompleteProvider);
+		this.#applyAutocompleteProvider();
 		this.session.setSlashCommands(fileCommands);
+	}
+
+	/**
+	 * Rebuild the editor's autocomplete provider: the built-in provider wrapped
+	 * by every extension-registered factory, in registration order. A factory
+	 * that throws or returns a malformed provider is skipped so one broken
+	 * extension cannot take down core autocomplete.
+	 */
+	#applyAutocompleteProvider(): void {
+		const base = this.#baseAutocompleteProvider;
+		if (!base) return;
+		let provider = base;
+		for (const factory of this.#autocompleteProviderFactories) {
+			try {
+				const wrapped = factory(provider);
+				if (
+					wrapped &&
+					typeof wrapped.getSuggestions === "function" &&
+					typeof wrapped.applyCompletion === "function"
+				) {
+					provider = wrapped;
+				} else {
+					logger.warn("Extension autocomplete provider factory returned an invalid provider; skipping it");
+				}
+			} catch (error) {
+				logger.warn("Extension autocomplete provider factory threw; skipping it", { error: String(error) });
+			}
+		}
+		this.editor.setAutocompleteProvider(provider);
+	}
+
+	/** Stack extension autocomplete behavior on top of the built-in editor provider (#4919). */
+	addAutocompleteProvider(factory: AutocompleteProviderFactory): void {
+		this.#autocompleteProviderFactories.push(factory);
+		this.#applyAutocompleteProvider();
 	}
 
 	/**
@@ -2603,6 +2644,49 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	#resolveLocalRoot(): string {
+		return resolveLocalUrlToPath("local://", {
+			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
+			getSessionId: () => this.sessionManager.getSessionId(),
+		});
+	}
+
+	async #copyLocalArtifactsForFreshSession(sourceRoot: string, destinationRoot: string): Promise<void> {
+		if (sourceRoot === destinationRoot) return;
+
+		let sourceRootStat: { isDirectory(): boolean };
+		try {
+			sourceRootStat = await fs.lstat(sourceRoot);
+		} catch (error) {
+			if (isEnoent(error)) return;
+			throw error;
+		}
+
+		if (!sourceRootStat.isDirectory()) return;
+
+		await fs.mkdir(destinationRoot, { recursive: true });
+		await this.#copyLocalArtifactEntries(sourceRoot, destinationRoot);
+	}
+
+	async #copyLocalArtifactEntries(sourceDir: string, destinationDir: string): Promise<void> {
+		const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+		for (const entry of entries) {
+			const sourcePath = path.join(sourceDir, entry.name);
+			const destinationPath = path.join(destinationDir, entry.name);
+
+			if (entry.isDirectory()) {
+				await fs.mkdir(destinationPath, { recursive: true });
+				await this.#copyLocalArtifactEntries(sourcePath, destinationPath);
+				continue;
+			}
+
+			if (entry.isFile()) {
+				await fs.mkdir(path.dirname(destinationPath), { recursive: true });
+				await fs.copyFile(sourcePath, destinationPath);
+			}
+		}
+	}
+
 	async #approvePlan(
 		planContent: string,
 		options: {
@@ -2633,14 +2717,16 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 
 			if (!options.preserveContext) {
+				const oldLocalRoot = this.#resolveLocalRoot();
 				await this.handleClearCommand();
-				// The new session has a fresh local:// root — persist the approved plan there
-				// so `local://<slug>-plan.md` resolves correctly in the execution session.
+				const newLocalRoot = this.#resolveLocalRoot();
+				await this.#copyLocalArtifactsForFreshSession(oldLocalRoot, newLocalRoot);
 				const newLocalPath = resolveLocalUrlToPath(options.planFilePath, {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
 				});
-				await Bun.write(newLocalPath, planContent);
+				await fs.mkdir(path.dirname(newLocalPath), { recursive: true });
+				await fs.writeFile(newLocalPath, planContent);
 			} else if (options.compactBeforeExecute) {
 				// Distill the plan-mode transcript before the execution turn is queued so
 				// the plan-approved synthetic prompt lands as a fresh cache anchor.
@@ -3627,7 +3713,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	ensureLoadingAnimation(): void {
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 			const messageColorFn = ((message: string) =>
 				renderWorkingMessage(message, this.#getWorkingMessageAccent())) as LoaderMessageColorFn & {
 				animated?: true;
@@ -3648,7 +3734,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			);
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 			this.statusContainer.addChild(this.loadingAnimation);
 			this.ui.requestRender();
 		}
@@ -3661,7 +3747,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loadingAnimation = undefined;
 		this.#clearWorkingMessageAccentCache();
 		if (clearStatusContainer) {
-			this.statusContainer.clear();
+			this.statusContainer.disposeChildren();
 		}
 	}
 
@@ -4124,7 +4210,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.#btwController.dispose();
 			this.#omfgController.dispose();
-			this.chatContainer.clear();
 			this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
 			this.showStatus(

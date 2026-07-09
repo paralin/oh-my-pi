@@ -285,8 +285,6 @@ function buildUsageLimit(args: {
 		label: usageWindow.label,
 		scope: {
 			provider: "openai-codex",
-			accountId: args.accountId,
-			tier: args.planType,
 			windowId: usageWindow.id,
 			shared: true,
 		},
@@ -532,6 +530,9 @@ function scopeCodexLimitsForRequest(report: UsageReport, context?: CredentialRan
 
 export const codexRankingStrategy: CredentialRankingStrategy = {
 	scopeLimits: scopeCodexLimitsForRequest,
+	blockScope() {
+		return "shared";
+	},
 	findWindowLimits(report) {
 		const findLimit = (key: "primary" | "secondary"): UsageLimit | undefined => {
 			const direct = report.limits.find(l => l.id === `openai-codex:${key}`);

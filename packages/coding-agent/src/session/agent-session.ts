@@ -37,6 +37,7 @@ import {
 	type AsideMessage,
 	type CompactionSummaryMessage,
 	countTokens,
+	createToolScopedAbortReason,
 	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
@@ -110,6 +111,7 @@ import {
 	clearAnthropicFastModeFallback,
 	deriveClaudeDeviceId,
 	Effort,
+	isUsageLimitOutcome,
 	parseRateLimitReason,
 	realizesPriorityServiceTier,
 	resolveModelServiceTier,
@@ -126,6 +128,7 @@ import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	escapeXmlText,
+	extractHttpStatusFromError,
 	extractRetryHint,
 	formatDuration,
 	getAgentDbPath,
@@ -181,7 +184,12 @@ import { MODEL_ROLE_IDS, MODEL_ROLES } from "../config/model-roles";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
-import { getDefault, onAppendOnlyModeChanged, validateProviderMaxInFlightRequests } from "../config/settings";
+import {
+	getDefault,
+	onAppendOnlyModeChanged,
+	onModelRolesChanged,
+	validateProviderMaxInFlightRequests,
+} from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
@@ -1058,6 +1066,7 @@ export interface HandoffResult {
 export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
+	onSwitchCancelled?: () => void;
 }
 
 /** Result from cycleModel() */
@@ -1354,6 +1363,7 @@ const noOpUIContext: ExtensionUIContext = {
 	pasteToEditor: () => {},
 	getEditorText: () => "",
 	editor: async () => undefined,
+	addAutocompleteProvider: () => {},
 	get theme() {
 		return theme;
 	},
@@ -1743,6 +1753,7 @@ export class AgentSession {
 	#cancelExitRecorder?: () => void;
 	#exitRecorded = false;
 	#unsubscribeAppendOnly?: () => void;
+	#unsubscribeModelRoles?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -2498,6 +2509,11 @@ export class AgentSession {
 		this.#startSessionSteeringWatcher();
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
+		this.#unsubscribeModelRoles = onModelRolesChanged(() => {
+			if (!this.#advisorEnabled || this.#isDisposed) return;
+			if (this.#advisors.length > 0 && !this.#advisorRuntimeMatchesCurrentConfig()) this.#stopAdvisorRuntime();
+			this.#buildAdvisorRuntime(true);
+		});
 	}
 	// -------------------------------------------------------------------------
 	// Advisor runtime lifecycle
@@ -2630,7 +2646,9 @@ export class AgentSession {
 	#advisorRuntimeSignature(config: AdvisorConfig, slug: string, model: Model, thinkingLevel: ThinkingLevel): string {
 		const tools = config.tools?.length ? config.tools.join("\u001e") : "";
 		const instructions = config.instructions?.trim() ?? "";
-		return [config.name, slug, model.provider, model.id, thinkingLevel, tools, instructions].join("\u001f");
+		return [config.name, slug, formatModelStringWithRouting(model), thinkingLevel, tools, instructions].join(
+			"\u001f",
+		);
 	}
 
 	#advisorRuntimeMatchesCurrentConfig(): boolean {
@@ -2778,6 +2796,21 @@ export class AgentSession {
 				maintainContext: incomingTokens => this.#maintainAdvisorContext(advisorRef, incomingTokens),
 				obfuscator: this.#obfuscator,
 				beginAdvisorUpdate: () => advisorRef.emissionGuard.beginUpdate(),
+				onTurnError: async error => {
+					// Mirror the auth-gateway's usage-limit remedy: the in-stream a/b/c
+					// auth retry rotates through siblings within one request but never
+					// blocks the LAST failing credential, so without this the advisor
+					// re-picks the same exhausted account every retry. Usage limits
+					// only — other failures keep the plain retry/notify path (never
+					// suspect-mark a credential on a transient advisor error).
+					const message = error instanceof Error ? error.message : String(error);
+					if (!isUsageLimitOutcome(extractHttpStatusFromError(error), message)) return;
+					await this.#modelRegistry.authStorage.markUsageLimitReached(advisorModel.provider, advisorSessionId, {
+						retryAfterMs: extractRetryHint(undefined, message),
+						baseUrl: advisorModel.baseUrl,
+						modelId: advisorModel.id,
+					});
+				},
 				notifyFailure: error => {
 					const message = error instanceof Error ? error.message : String(error);
 					this.emitNotice(
@@ -5274,7 +5307,8 @@ export class AgentSession {
 		// Decide first: a non-interrupting tool-source match attaches to the
 		// specific tool call's result instead of driving a loop-wide follow-up.
 		const shouldInterrupt = this.#shouldInterruptForTtsrMatch(matches, matchContext);
-		const perToolId = shouldInterrupt ? undefined : this.#extractTtsrToolCallId(matchContext);
+		const matchedToolId = this.#extractTtsrToolCallId(matchContext);
+		const perToolId = shouldInterrupt ? undefined : matchedToolId;
 		if (perToolId) {
 			this.#addPerToolTtsrInjections(perToolId, matches);
 			this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
@@ -5290,7 +5324,16 @@ export class AgentSession {
 		// Abort the stream immediately — do not gate on extension callbacks
 		this.#ttsrAbortPending = true;
 		this.#ensureTtsrResumePromise();
-		this.agent.abort(this.#formatTtsrAbortReason(matches));
+		const abortReason = this.#formatTtsrAbortReason(matches);
+		this.agent.abort(
+			matchedToolId
+				? createToolScopedAbortReason(
+						abortReason,
+						{ [matchedToolId]: abortReason },
+						"TTSR interrupt on another tool call",
+					)
+				: abortReason,
+		);
 		// Notify extensions (fire-and-forget, does not block abort)
 		this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
 		// Schedule retry after a short delay
@@ -6370,6 +6413,10 @@ export class AgentSession {
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
 			this.#unsubscribeAppendOnly = undefined;
+		}
+		if (this.#unsubscribeModelRoles) {
+			this.#unsubscribeModelRoles();
+			this.#unsubscribeModelRoles = undefined;
 		}
 		this.#eventListeners = [];
 	}
@@ -7960,7 +8007,11 @@ export class AgentSession {
 				timestamp,
 			});
 		}
-		if (this.#magicKeywordEnabled("workflow") && containsWorkflow(text)) {
+		if (
+			this.#magicKeywordEnabled("workflow") &&
+			containsWorkflow(text) &&
+			this.getActiveToolNames().includes("task")
+		) {
 			keywordNotices.push({
 				role: "custom",
 				customType: "workflow-notice",
@@ -8866,11 +8917,10 @@ export class AgentSession {
 	}
 
 	/**
-	 * Send a user message to the agent.
-	 * When deliverAs is set, queue the message instead of starting a new turn.
+	 * Send a user message through the prompt flow.
 	 *
-	 * @param content User message content (string or content array)
-	 * @param options.deliverAs Delivery mode: "steer" or "followUp"
+	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
+	 * Explicit `deliverAs` queues without starting a turn in either state.
 	 */
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
@@ -8905,10 +8955,13 @@ export class AgentSession {
 			return;
 		}
 
-		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
+		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion.
+		// `streamingBehavior: "steer"` preserves prompt-flow side effects during streaming while
+		// covering the narrow race where a stream starts before prompt() acquires the turn.
 		await this.prompt(text, {
 			expandPromptTemplates: false,
 			images,
+			streamingBehavior: "steer",
 		});
 	}
 
@@ -9405,6 +9458,7 @@ export class AgentSession {
 
 		const targetModel = await this.#modelRegistry.refreshSelectedModelMetadata(model);
 
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(targetModel);
 		this.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
@@ -9442,6 +9496,7 @@ export class AgentSession {
 
 		const targetModel = await this.#modelRegistry.refreshSelectedModelMetadata(model);
 
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(targetModel);
 		this.sessionManager.appendModelChange(
@@ -9601,6 +9656,7 @@ export class AgentSession {
 		const next = scopedModels[nextIndex];
 
 		// Apply model
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(next.model);
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
@@ -9631,6 +9687,7 @@ export class AgentSession {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
 
+		this.#modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(nextModel);
 		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
@@ -10805,6 +10862,17 @@ export class AgentSession {
 
 			// Start a new session
 			const previousSessionFile = this.sessionFile;
+			if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+				const result = (await this.#extensionRunner.emit({
+					type: "session_before_switch",
+					reason: "handoff",
+				})) as SessionBeforeSwitchResult | undefined;
+
+				if (result?.cancel) {
+					options?.onSwitchCancelled?.();
+					return undefined;
+				}
+			}
 			await this.sessionManager.flush();
 			await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
 
@@ -10860,6 +10928,13 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#resetAllAdvisorRuntimes();
 			this.#syncTodoPhasesFromBranch();
+			if (this.#extensionRunner) {
+				await this.#extensionRunner.emit({
+					type: "session_switch",
+					reason: "handoff",
+					previousSessionFile,
+				});
+			}
 
 			return { document: handoffText, savedPath };
 		} catch (error) {
@@ -13413,6 +13488,7 @@ export class AgentSession {
 			}
 
 			if (action === "handoff") {
+				let handoffSwitchCancelled = false;
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
 				const previousHandoffTrace = this.#handoffMaintenanceTrace;
 				let handoffResult: HandoffResult | undefined;
@@ -13421,12 +13497,15 @@ export class AgentSession {
 					handoffResult = await this.handoff(handoffFocus, {
 						autoTriggered: true,
 						signal: autoCompactionSignal,
+						onSwitchCancelled: () => {
+							handoffSwitchCancelled = true;
+						},
 					});
 				} finally {
 					this.#handoffMaintenanceTrace = previousHandoffTrace;
 				}
 				if (!handoffResult) {
-					const aborted = autoCompactionSignal.aborted;
+					const aborted = autoCompactionSignal.aborted || handoffSwitchCancelled;
 					if (aborted) {
 						await this.#emitSessionEvent({
 							type: "auto_compaction_end",
@@ -14410,6 +14489,7 @@ export class AgentSession {
 	#resolveRetryFallbackRole(currentSelector: string): string | undefined {
 		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
 		if (!parsedCurrent) return undefined;
+		const chains = this.#getRetryFallbackChains();
 		const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
 		const currentPlainSelector = this.model
 			? formatModelSelectorValue(formatModelString(this.model), parsedCurrent.thinkingLevel)
@@ -14419,17 +14499,25 @@ export class AgentSession {
 				? formatRetryFallbackBaseSelector(parseRetryFallbackSelector(currentPlainSelector) ?? parsedCurrent)
 				: undefined;
 
-		for (const role of Object.keys(this.#getRetryFallbackChains())) {
+		for (const role of Object.keys(chains)) {
 			const primarySelector = this.#getRetryFallbackPrimarySelector(role);
 			if (primarySelector?.raw === currentSelector) return role;
 		}
-		for (const role of Object.keys(this.#getRetryFallbackChains())) {
+		for (const role of Object.keys(chains)) {
 			const primarySelector = this.#getRetryFallbackPrimarySelector(role);
 			if (!primarySelector) continue;
 			if (currentPlainSelector && primarySelector.raw === currentPlainSelector) return role;
 			const primaryBaseSelector = formatRetryFallbackBaseSelector(primarySelector);
 			if (primaryBaseSelector === currentBaseSelector) return role;
 			if (currentPlainBaseSelector && primaryBaseSelector === currentPlainBaseSelector) return role;
+		}
+		const defaultChain = chains.default;
+		if (
+			Array.isArray(defaultChain) &&
+			defaultChain.length > 0 &&
+			this.#getRetryFallbackPrimarySelector("default") === undefined
+		) {
+			return "default";
 		}
 		return undefined;
 	}
@@ -14449,9 +14537,27 @@ export class AgentSession {
 	}
 
 	#findRetryFallbackCandidates(role: string, currentSelector: string): RetryFallbackSelector[] {
-		const chain = this.#getRetryFallbackEffectiveChain(role);
-		if (chain.length <= 1) return [];
+		let chain = this.#getRetryFallbackEffectiveChain(role);
 		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
+		if (chain.length === 0 && role === "default" && parsedCurrent) {
+			const chains = this.#getRetryFallbackChains();
+			const defaultChain = chains.default;
+			if (
+				Array.isArray(defaultChain) &&
+				defaultChain.length > 0 &&
+				this.#getRetryFallbackPrimarySelector("default") === undefined
+			) {
+				const seen = new Set<string>([parsedCurrent.raw]);
+				chain = [parsedCurrent];
+				for (const selector of defaultChain) {
+					const parsed = parseRetryFallbackSelector(selector, this.#modelRegistry);
+					if (!parsed || seen.has(parsed.raw)) continue;
+					seen.add(parsed.raw);
+					chain.push(parsed);
+				}
+			}
+		}
+		if (chain.length <= 1) return [];
 		const currentBaseSelector = parsedCurrent ? formatRetryFallbackBaseSelector(parsedCurrent) : undefined;
 		const currentPlainSelector =
 			this.model && parsedCurrent
@@ -16752,7 +16858,7 @@ export class AgentSession {
 				lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
 			});
 			if (!decision.redeem) {
-				logger.debug("codex-auto-reset: skipped", { reason: decision.reason });
+				logger.debug("codex-auto-reset: skipped", { reason: decision.reason, account: accountKey });
 				return false;
 			}
 			if (shouldPromptCodexAutoRedeem(cfg.autoRedeem) && !(await this.#confirmCodexAutoRedeem(decision))) {
