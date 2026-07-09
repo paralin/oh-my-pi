@@ -276,7 +276,7 @@ function commandMatchesNameOrAlias(cmd: CommandEntry, commandName: string): bool
 	return getCommandAliases(cmd).includes(commandName);
 }
 
-function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
+export function scoreCommandTextMatch(lowerPrefix: string, lowerTarget: string): number {
 	if (lowerPrefix.length === 0) return 1;
 	if (lowerPrefix === lowerTarget) return 1000;
 	// Flat score for every prefix match so same-prefix commands keep registry
@@ -437,6 +437,9 @@ export class CombinedAutocompleteProvider implements AutocompleteProvider {
 				const argumentText = commandText.slice(spaceIndex + 1); // Text after space
 
 				const command = this.#commands.find(cmd => commandMatchesNameOrAlias(cmd, commandName));
+				if (command && "allowArgs" in command && command.allowArgs === false && !/\S/.test(argumentText)) {
+					return null;
+				}
 				if (command && (!("allowArgs" in command) || command.allowArgs !== false)) {
 					if (!("getArgumentCompletions" in command) || !command.getArgumentCompletions) {
 						return null; // No argument completion for this command

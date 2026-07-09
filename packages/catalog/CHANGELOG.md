@@ -2,6 +2,30 @@
 
 ## [Unreleased]
 
+## [16.3.13] - 2026-07-09
+
+### Added
+
+- Added support for Grok 4.5 across multiple providers
+- Added support for GPT-5.6 series models (Luna, Sol, Terra)
+- Added Aion 3.0 and 3.0 Mini models
+- Added Kuaishou KAT-Coder v2.5 models
+- Added Nex-N2-Mini and SWE-1.7 series models
+- Added Hy3 models and free variants
+
+### Changed
+
+- Updated cost and token configurations for various models across providers
+- Renamed several models for consistency (e.g., MiniMax M3, Gemma 4 31B, Qwen variants)
+
+## [16.3.12] - 2026-07-08
+
+### Fixed
+
+- Fixed LiteLLM discovery stopping at `/model_group/info` when that endpoint omitted `supports_vision`; it now continues to `/model/info` and preserves `model_info.supports_vision=true` for vision-capable proxy models. ([#4747](https://github.com/can1357/oh-my-pi/issues/4747))
+- Fixed LiteLLM discovery to fall back to bundled catalog metadata when `models.dev` lacks a model reference, preserving reasoning and thinking support for models such as `glm-5.2`. ([#4695](https://github.com/can1357/oh-my-pi/issues/4695))
+- Detected Azure AI Inference / Foundry Anthropic routes as strict-tool-incompatible so resolved Anthropic compat disables strict tools before request construction ([#4679](https://github.com/can1357/oh-my-pi/issues/4679)).
+
 ## [16.3.11] - 2026-07-06
 
 ### Added

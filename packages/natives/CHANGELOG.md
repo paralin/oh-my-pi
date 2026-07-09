@@ -2,9 +2,20 @@
 
 ## [Unreleased]
 
+## [16.3.13] - 2026-07-09
+
+### Fixed
+
+- Fixed unbounded memory growth in the native bash output bridge when a command produces output faster than the JS event loop consumes it: the shell streaming path now uses a bounded chunk queue with real backpressure (pipe readers park until the JS callback catches up, parking the child on its pipe) instead of buffering the entire surplus in memory. No output is dropped — the rolling tail view, `[raw output: artifact://…]` lossless capture, and byte accounting are unaffected ([#4078](https://github.com/can1357/oh-my-pi/issues/4078)).
+- Fixed `readImageFromClipboard` on Windows failing with "could not be converted to the appropriate format" for screenshots taken by Qt-based tools such as PixPin and Snipaste. arboard hands their `CF_DIBV5` payload (`BI_RGB` plus an alpha mask, rewritten to `BI_BITFIELDS`) to a header-less BMP decode that mis-places the pixel offset for V4/V5 bitfield headers; the native reader now falls back to decoding the raw `CF_DIB` clipboard bytes directly, so image paste no longer depends on the PowerShell bridge. ([#3426](https://github.com/can1357/oh-my-pi/issues/3426))
+- Fixed OMP being killed outright (OOM on memory-capped hosts such as WSL) when an output-heavy bash command hit its timeout: the unbounded output-bridge backlog could grow by gigabytes before cancellation and starve the JS event loop far past the deadline; with the bounded backpressured bridge the run resolves at its deadline with flat memory ([#4866](https://github.com/can1357/oh-my-pi/issues/4866)).
+
+## [16.3.12] - 2026-07-08
+
 ### Fixed
 
 - Fixed the native build script failing to locate the `@napi-rs/cli` `napi` binary on Windows because the `PATH` lookup joined entries with a Unix `:` separator instead of the platform delimiter (`path.delimiter`).
+- Fixed a Windows regression where an abnormal `omp` exit or bash cancellation could `TerminateProcess` unrelated `pwsh.exe` / `powershell.exe` sessions (including other Cursor terminal tabs). `SpawnRegistry` stored only the raw pid of each brush-spawned child and re-opened it via `Process::from_pid` at cancellation time; between those two moments Windows could recycle a freed pid onto an unrelated PowerShell, and `signal_tree` then walked the wrong subtree via Toolhelp. The observer now pins a stable `Process` handle at spawn time — on Windows the open handle keeps the pid slot reserved, on Linux the pidfd carries identity, on macOS the `(pid, start_time)` triple detects impersonation — so cancellation can only reach children this run actually launched. The registry sweeps exited entries once the recorded set crosses a small threshold so a long bash loop of short external commands cannot pin one owned OS handle per historical spawn. ([#4605](https://github.com/can1357/oh-my-pi/issues/4605))
 
 ## [16.3.6] - 2026-07-04
 
