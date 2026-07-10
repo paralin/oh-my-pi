@@ -102,6 +102,7 @@ describe("AgentSession retry delay cap", () => {
 			"compaction.enabled": false,
 			"retry.baseDelayMs": 5,
 			"retry.maxDelayMs": 100,
+			"retry.waitForUsageReset": false,
 		});
 		settings.setModelRole("default", `${model.provider}/${model.id}`);
 
@@ -1019,6 +1020,297 @@ describe("AgentSession retry delay cap", () => {
 		expect(mock.calls).toHaveLength(1);
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("aborted");
+	});
+
+	it("waits for usage reset instead of failing fast when waitForUsageReset is enabled", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// Codex-style usage-limit error with a 30-minute provider-requested wait.
+		const usageLimitError =
+			"Codex error event: The usage limit has been reached (code=usage_limit_reached) retry-after-ms=1800000";
+
+		const mock = createMockModel({
+			responses: [
+				{ throw: usageLimitError },
+				{ content: ["recovered after usage reset wait"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.waitForUsageReset": true,
+			"retry.maxUsageResetWaitMs": 2 * 60 * 60 * 1000,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger usage limit with long retry-after");
+		await session.waitForIdle();
+
+		// The retry MUST proceed (not fail fast) because waitForUsageReset is on
+		// and the 30-min wait is under maxUsageResetWaitMs (2h).
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0].delayMs).toBe(1800000);
+		expect(retryStartEvents[0].usageResetAtMs).toBeGreaterThan(Date.now() - 5000);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		// scheduler.wait was called with the full 30-min delay.
+		const longWaits = waitSpy.mock.calls.filter(call => (call[0] as number) >= 1800000);
+		expect(longWaits.length).toBeGreaterThanOrEqual(1);
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after usage reset wait" });
+	});
+
+	it("caps usage reset wait at maxUsageResetWaitMs", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// Provider requests a 30-minute wait, but maxUsageResetWaitMs is only 10 minutes.
+		const usageLimitError =
+			"Codex error event: The usage limit has been reached (code=usage_limit_reached) retry-after-ms=1800000";
+
+		const mock = createMockModel({ handler: () => ({ throw: usageLimitError }) });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.waitForUsageReset": true,
+			"retry.maxUsageResetWaitMs": 10 * 60 * 1000,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger usage limit exceeding maxUsageResetWaitMs");
+		await session.waitForIdle();
+
+		// 30-min wait > 10-min cap: the request must fail fast.
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false });
+		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
+	});
+
+	it("fails fast when waitForUsageReset is disabled", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		const usageLimitError =
+			"Codex error event: The usage limit has been reached (code=usage_limit_reached) retry-after-ms=1800000";
+
+		const mock = createMockModel({ handler: () => ({ throw: usageLimitError }) });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.waitForUsageReset": false,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger usage limit with wait disabled");
+		await session.waitForIdle();
+
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false });
+		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
+	});
+
+	it("usage-reset wait plus transient retry both succeed within attempt budget", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// Usage limit first, then a transient error on the continuation.
+		// With maxRetries=2, the usage-limit wait consumes attempt 1 and
+		// the transient retry consumes attempt 2; both must succeed.
+		const mock = createMockModel();
+		let attempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				attempts++;
+				if (attempts === 1) {
+					mock.push({ throw: "usage_limit_reached retry-after-ms=600000" });
+				} else if (attempts === 2) {
+					mock.push({ throw: "503 service unavailable: overloaded_error" });
+				} else {
+					mock.push({ content: ["recovered after usage wait and transient retry"] });
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 5_000,
+			"retry.maxRetries": 2,
+			"retry.waitForUsageReset": true,
+			"retry.maxUsageResetWaitMs": 2 * 60 * 60 * 1000,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger usage limit then transient error");
+		await session.waitForIdle();
+
+		expect(attempts).toBe(3);
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		const last = lastAssistant(session);
+		expect(last.stopReason).toBe("stop");
+		expect(last.content).toContainEqual({ type: "text", text: "recovered after usage wait and transient retry" });
+	});
+
+	it("transient errors still respect maxDelayMs cap", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// A transient 503 with a very long retry-after must still hit the
+		// maxDelayMs cap (not the usage-reset path).
+		const transientError = "503 service unavailable: overloaded_error retry-after-ms=1800000";
+
+		const mock = createMockModel({ handler: () => ({ throw: transientError }) });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 100,
+			"retry.waitForUsageReset": true,
+			"retry.maxUsageResetWaitMs": 2 * 60 * 60 * 1000,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Trigger transient with long retry-after");
+		await session.waitForIdle();
+
+		// Transient errors are NOT usage limits: the maxDelayMs cap fires.
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: false });
+		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
 	});
 
 	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {
