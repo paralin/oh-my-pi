@@ -4,7 +4,7 @@ description: Generate AGENTS.md for current codebase
 thinking-level: medium
 ---
 
-Generate AGENTS.md by launching multiple `explore` agents in parallel (via `task` tool) scanning different areas (core src, tests, configs/build, scripts/docs), then synthesize findings into a single file.
+Generate AGENTS.md by launching ONE `scout` agent (via `task`) with the complete repository-mapping assignment, then synthesize its findings into a single file. Use multiple scouts only when the repository has truly independent, substantial roots; NEVER split by directory or checklist item.
 
 <structure>
 - **Project Overview**: Brief description of project purpose

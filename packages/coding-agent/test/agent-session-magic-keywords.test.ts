@@ -126,9 +126,9 @@ describe("AgentSession magic keyword settings", () => {
 
 		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ content?: string; customType?: string }>;
 		const notice = promptMessages.find(message => message.customType === "workflow-notice")?.content ?? "";
-		expect(notice).toContain("once per independent subagent");
+		expect(notice).toContain("once per substantial workstream");
 		expect(notice).toContain("Do not pass `context` or `tasks[]`");
-		expect(notice).not.toContain("Call `task` once per independent fan-out batch");
+		expect(notice).not.toContain("smallest sufficient batch");
 	});
 
 	it("skips workflowz notice when the task tool is inactive", async () => {

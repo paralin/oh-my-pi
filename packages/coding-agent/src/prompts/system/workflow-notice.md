@@ -1,18 +1,18 @@
 <system-notice>
-The user's message above contains the **workflowz** keyword: drive this task as a deterministic multi-subagent workflow. Use the `task` tool {{#if taskBatch}}for batched fan-out{{else}}once per independent subagent{{/if}} — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before you commit), or to take on scale one context can't hold (audits, migrations, broad sweeps). This overrides any default tendency to do the whole task inline when fanning out would be more thorough.
+The user's message above contains the **workflowz** keyword: drive this task as a deterministic delegated workflow. Prefer ONE capable `task` subagent carrying a large, complete assignment. Use parallel subagents only when workstreams are truly independent AND each is substantial. Every spawn pays fixed cache/context cost, so the smallest sufficient fan-out is usually cheaper and better.
 
 <when>
-Worth it when the task benefits from decomposition + parallel coverage, or from independent/adversarial cross-checking before you commit. For a quick lookup or single edit, just do it directly — don't spin up agents. Scout inline first (list the files, scope the diff, find the call sites) to discover the work list, then fan out over it. Common shapes:
-- **Understand** — parallel readers over subsystems → structured map.
-- **Design** — independent approaches → scored synthesis.
-- **Review** — split dimensions → find per dimension → adversarially verify each finding.
-- **Research** — multi-modal sweep → deep-read the hits → synthesize.
-- **Migrate** — discover sites → transform each → verify.
+Worth it when one substantial subagent benefits from isolated context/tool work, or when several independent substantial workstreams need parallel coverage. Related files, functions, dimensions, and migration sites belong together. Common shapes:
+- **Understand** — one reader maps related subsystems; split only independent roots.
+- **Design** — one primary design; add an independent critique only for substantial stakes.
+- **Review** — one reviewer covers related dimensions; split only independent domains.
+- **Research** — one broad sweep → deep-read hits → synthesize.
+- **Migrate** — one owner per independent subsystem, NEVER per site.
 </when>
 
 <task-contract>
 {{#if taskBatch}}
-Call `task` once per independent fan-out batch. Put shared background in `context`, and put each independent work item in `tasks[]`. Do not emulate batching with shell loops or eval helper APIs.
+Call `task` once for the smallest sufficient batch of substantial workstreams. Put shared background in `context`, and put each independent workstream in `tasks[]`. Do not emulate batching with shell loops or eval helper APIs.
 
 `context` must carry the shared contract:
 
@@ -23,7 +23,7 @@ Call `task` once per independent fan-out batch. Put shared background in `contex
     # Contract
     Shared interfaces, output shape, branch/base assumptions, and coordination rules.
 
-Each task assignment must be self-contained:
+Each task assignment must be complete and substantial:
 
     # Target
     Exact files, symbols, subsystem, or evidence surface; explicit non-goals.
@@ -33,9 +33,9 @@ Each task assignment must be self-contained:
     Observable result, return packet, and local verification. Subagents skip formatters,
     linters, and project-wide tests; the parent runs shared proof once.
 {{else}}
-Call `task` once per independent subagent. Put the full shared background and the leaf work in that call's `assignment`. Do not pass `context` or `tasks[]`: the flat task schema rejects them when batch calls are disabled.
+Call `task` once per substantial workstream only when batch calls are disabled. Put the full shared background and the complete workstream in that call's `assignment`. Do not pass `context` or `tasks[]`: the flat task schema rejects them when batch calls are disabled.
 
-Each assignment must be self-contained:
+Each assignment must be complete and substantial:
 
     # Target
     Exact files, symbols, subsystem, or evidence surface; explicit non-goals.
@@ -47,7 +47,7 @@ Each assignment must be self-contained:
 {{/if}}
 
 <structure>
-Decompose first, then {{#if taskBatch}}batch the independent leaves{{else}}issue one independent task call per leaf in the same turn{{/if}}:
+Decompose into the smallest number of large, complete workstreams, then {{#if taskBatch}}batch the independent workstreams{{else}}issue one task call per independent workstream in the same turn{{/if}}:
 
 {{#if taskBatch}}
     task(
@@ -68,21 +68,21 @@ Decompose first, then {{#if taskBatch}}batch the independent leaves{{else}}issue
     )
 {{/if}}
 
-{{#if taskBatch}}Prefer one wide batch over serial subagent calls when work items do not share files. If tasks overlap, name the overlap and have agents coordinate through IRC before editing.{{else}}Prefer issuing all independent task calls in one assistant turn over serial dispatch when work items do not share files. If tasks overlap, name the overlap and have agents coordinate through IRC before editing.{{/if}}
+{{#if taskBatch}}Prefer one task. Multiple truly independent, substantial workstreams SHOULD use the smallest sufficient batch. If assignments overlap, merge them or name the overlap and coordinate through IRC.{{else}}Prefer one task. Dispatch multiple calls in the same turn only for truly independent, substantial workstreams. If assignments overlap, merge them or name the overlap and coordinate through IRC.{{/if}}
 </structure>
 
 <patterns>
-- **Adversarial verify** — dispatch skeptical reviewers with distinct targets, then keep only findings the parent can verify against source.
-- **Perspective-diverse review** — use separate correctness, security, performance, and maintainability roles instead of identical reviewers.
-- **Completeness critic** — after the first batch, dispatch one read-only critic that asks what modality, file, claim, or proof was missed.
+- **Adversarial verify** — add a separate skeptical reviewer only when stakes justify a full second context.
+- **Perspective-diverse review** — one reviewer covers related dimensions unless independent domains each warrant deep review.
+- **Completeness critic** — for broad high-risk work, one critic checks missed modality, file, claim, or proof.
 - **No silent caps** — if you bound coverage (top-N, no retry, sampling), state what was dropped and why before acting.
 - **Parent owns closure** — subagents return evidence; the parent reads it, resolves contradictions, runs proof, and makes the final decision.
 </patterns>
 <execution>
 - Capture multi-phase workflow state in the visible todo system when available.
-{{#if taskBatch}}- Batch independent subagents in one `task` call.{{else}}- Dispatch independent subagents as separate `task` calls in the same turn.{{/if}}
-- Give every subagent a narrow target, explicit non-goals, and a concrete return packet.
-- After fan-out returns, read the artifacts, patch or decide, and run the shared gate.
-- Keep going until the task is closed — returned fan-out is a step, not a stopping point.
+{{#if taskBatch}}- Dispatch the smallest sufficient batch of substantial subagents.{{else}}- Dispatch the smallest sufficient set of substantial subagents.{{/if}}
+- Give every subagent a large, complete target, explicit non-goals, and a concrete return packet.
+- After delegated work returns, read the artifacts, patch or decide, and run the shared gate.
+- Keep going until the task is closed — delegation is a step, not a stopping point.
 </execution>
 </system-notice>

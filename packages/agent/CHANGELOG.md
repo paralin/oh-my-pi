@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [16.4.1] - 2026-07-10
+
+### Fixed
+
+- Enabled reasoning encryption content for all Responses Lite compaction requests
+
+## [16.4.0] - 2026-07-10
+
+### Added
+
+- Added the `ThinkingLevel.Max` ("max") configuration option, mapping to the `Effort.Max` tier for supported models.
+
+### Fixed
+
+- Fixed remote compaction behavior for Codex Responses Lite (GPT-5.6 family) models across both V1 and V2 endpoints to ensure correct formatting and routing.
+- Fixed an issue where aborted tool-result hooks could trigger subsequent provider calls before the abort signal fully settled.
+
 ## [16.3.12] - 2026-07-08
 
 ### Added

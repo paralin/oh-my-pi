@@ -60,4 +60,19 @@ describe("task spawn policy surfaces", () => {
 		expect(description).toContain("Current spawn policy allows: `fact-finder`, `oracle`.");
 		expect(description).not.toContain("Defaults to `task`");
 	});
+
+	it("renders one-large-task economics in the task description", async () => {
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [factFinderAgent, oracleAgent],
+			projectAgentsDir: null,
+		});
+
+		const tool = await TaskTool.create(makeSession("*"));
+		const description = tool.description;
+
+		expect(description).toContain("Give one capable subagent a large, complete assignment");
+		expect(description).toContain("NEVER spawn per-file, per-function, or per-item agents");
+		expect(description).toContain("N small agents cost roughly N times one large agent");
+		expect(description).toContain("truly independent AND each is substantial");
+	});
 });

@@ -95,7 +95,7 @@ import {
 
 // OpenAI Responses-specific options
 export interface OpenAIResponsesOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ServiceTier;
 	textVerbosity?: "low" | "medium" | "high";
@@ -897,8 +897,14 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
+	const reasoningSummary =
+		model.provider === "xai-oauth"
+			? options?.reasoning === undefined
+				? undefined
+				: null
+			: options?.reasoningSummary;
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
-		reasoningSummary: options?.reasoningSummary,
+		reasoningSummary,
 		mapEffort: effort =>
 			model.compat.reasoningEffortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??
 			model.thinking?.effortMap?.[effort as NonNullable<OpenAIResponsesOptions["reasoning"]>] ??

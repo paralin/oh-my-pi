@@ -53,18 +53,19 @@ describe("workflow keyword highlighting", () => {
 });
 
 describe("workflow notice", () => {
-	it("is a non-empty system notice carrying the task fan-out contract", () => {
+	it("is a non-empty system notice carrying the economical delegation contract", () => {
 		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
 		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
-		expect(WORKFLOW_NOTICE).toContain("Use the `task` tool for batched fan-out");
+		expect(WORKFLOW_NOTICE).toContain("Prefer ONE capable `task` subagent");
+		expect(WORKFLOW_NOTICE).toContain("fixed cache/context cost");
 		expect(WORKFLOW_NOTICE).toContain("tasks[]");
 	});
 
 	it("renders flat task-call guidance when task.batch is disabled", () => {
 		const notice = renderWorkflowNotice({ taskBatch: false });
-		expect(notice).toContain("once per independent subagent");
+		expect(notice).toContain("once per substantial workstream");
 		expect(notice).toContain("Do not pass `context` or `tasks[]`");
-		expect(notice).toContain("one independent task call per leaf");
-		expect(notice).not.toContain("Call `task` once per independent fan-out batch");
+		expect(notice).toContain("one task call per independent workstream");
+		expect(notice).not.toContain("smallest sufficient batch");
 	});
 });
