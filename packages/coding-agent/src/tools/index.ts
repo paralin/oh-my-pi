@@ -619,6 +619,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
+		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "irc")
 			return isIrcEnabled(session.settings, session.taskDepth ?? 0, session.bossInboxEnabled === true);
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
