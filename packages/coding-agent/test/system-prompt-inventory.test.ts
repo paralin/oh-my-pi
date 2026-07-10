@@ -302,4 +302,33 @@ describe("system prompt tool inventory", () => {
 		expect(text).toContain("<skills>");
 		expect(text).toContain("- frontend-design: Frontend UI workflow");
 	});
+
+	it("renders economical delegation and the cheap completion carve-out", async () => {
+		const tools = new Map(TOOLS);
+		tools.set("task", {
+			label: "Task",
+			description: "Delegates work.",
+			parameters: { type: "object", properties: {} },
+		});
+		tools.set("eval", {
+			label: "Eval",
+			description: "Runs code.",
+			parameters: { type: "object", properties: {} },
+		});
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: ["task", "eval"],
+			tools,
+			eagerTasks: true,
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("ONE capable `task` subagent a large, complete assignment");
+		expect(text).toContain("files/functions/items alone are not workstreams");
+		expect(text).toContain('`completion()` with the `"smol"` model');
+	});
 });

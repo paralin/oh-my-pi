@@ -19,7 +19,7 @@ Analyze the codebase and the user's request. Produce a detailed implementation p
 4. Identify types, interfaces, contracts
 5. Note dependencies between components
 
-You MUST spawn `scout` agents for independent areas and synthesize findings.
+You SHOULD spawn ONE `scout` agent with the complete exploration surface and synthesize its findings. Use multiple scouts only for independent, substantial subsystems; NEVER split by file or question type.
 
 ## Phase 3: Design
 1. List concrete changes (files, functions, types)

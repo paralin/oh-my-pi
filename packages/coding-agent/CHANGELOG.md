@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Tuned default delegation prompts to prefer one substantial subagent, reserve parallel fan-out for independent substantial workstreams, and route cheap per-item classification through smol completions.
+
 ## [16.4.1] - 2026-07-10
 
 ### Changed

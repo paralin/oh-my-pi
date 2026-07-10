@@ -75,7 +75,7 @@ Cite the exact instruction or risk.
 - Use when:
   - Exploring wrong code path.
   - Picking fragile approach when better exists.
-  - Not parallelizing when user request is obviously parallelizable.
+  - Wasteful granular task-agent fan-out, or missed substantial independent workstreams.
   - Missing constraint.
   - Edge case about to be baked in.
   - Churning — repeating failed attempts or cycling approaches without making progress.

@@ -38,14 +38,14 @@ output(*ids, format?="raw", query?=None, offset?=None, limit?=None) → str | di
 tool.<name>(args) → unknown
     Invoke any session tool; `args` = its parameter object.
 completion(prompt, model?="default", system?=None, schema?=None) → str | dict
-    Oneshot, stateless (no history/tools). `model`: "smol" fast | "default" session | "slow" most capable. `schema` (JSON-Schema) → structured output, parsed object.
+    Oneshot, stateless (no history/tools). `model`: "smol" fast | "default" session | "slow" most capable. Use `completion()` with the `"smol"` model for cheap per-item lookup/classification. `schema` (JSON-Schema) → structured output, parsed object.
 {{#if spawns}}agent(prompt, agent?="{{spawnDefaultAgent}}", model?=None, label?=None, schema?=None, handle?=False) → str | dict
-    Run a subagent → final output. `agent` picks another discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} `schema` as in completion(). Background via `local://` files named in the prompt. `handle` → DAG node dict { text, output, handle: "agent://<id>", id, agent } (parsed under `data` when `schema` set).
+    Run one substantial subagent → final output. Prefer one prompt covering all related work; multiple agents only for independent, substantial workstreams. `agent` picks another discovered agent; omit it to use `{{spawnDefaultAgent}}`.{{#if spawnAllowedAgentsText}} Allowed agents: {{spawnAllowedAgentsText}}.{{/if}} `schema` as in completion(). Background via `local://` files named in the prompt. `handle` → DAG node dict { text, output, handle: "agent://<id>", id, agent } (parsed under `data` when `schema` set).
 {{#if js}}    JS: options are ONE trailing object — agent(prompt, { agent, schema, handle }).
 {{/if}}
 {{/if}}
 parallel(thunks) → list
-    Thunks through a bounded pool (wide as a `task` batch — don't pre-shrink), input order kept; returns when all finish, a throwing thunk propagates.
+    Run independent thunks through a bounded pool; use `completion()` with the `"smol"` model for cheap per-item maps instead of task-agent fan-out. Input order kept; a throwing thunk propagates.
 pipeline(items, ...stages) → list
     Map items through one-arg stages left-to-right, barrier between stages; stage 1 gets the item, later stages the previous result.
 log(message) → None
@@ -59,6 +59,7 @@ budget → per-turn token budget
 {{#if spawns}}
 <dag>
 Pipe handles through stage helpers to build a dependency graph — acyclic waves:
+- **Right-size nodes.** Each `agent()` pays full cache/context startup. One large node beats per-file, per-function, or per-item nodes; parallel agents require independent, substantial workstreams.
 - **Name nodes.** Capture each `agent(…, {{#if py}}handle=True{{/if}}{{#if js}}{ handle: true }{{/if}}{{#if jl}}handle=true{{/if}})` result; carries `handle` (`agent://<id>`) + `output`.
 - **Wire edges by reference.** Put an upstream node's `handle`/`output` in the dependent stage's prompt — large transcript never re-inlined. Bulk: `write("local://<name>.md", …)`, pass the URI.
 - **`pipeline(items, *stages)` = staged waves**, barrier between stages (every item clears stage N before any enters N+1). **`parallel(thunks)` = one wave** of independent nodes.

@@ -45,6 +45,13 @@ describe("eval tool description", () => {
 		expect(text).toContain("agent(prompt");
 	});
 
+	it("reserves subagents for substantial work and smol completions for cheap maps", () => {
+		const text = getEvalToolDescription({ py: true, js: true, spawns: true });
+		expect(text).toContain("Run one substantial subagent");
+		expect(text).toContain('`completion()` with the `"smol"` model for cheap per-item');
+		expect(text).toContain("Each `agent()` pays full cache/context startup");
+	});
+
 	it("omits agent() when the session forbids spawning", () => {
 		// Subagents with spawns: undefined (resolved to "") cannot launch tasks.
 		// The prelude doc must not promise a helper that always throws.
