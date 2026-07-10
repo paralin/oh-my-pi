@@ -13979,6 +13979,12 @@ export class AgentSession {
 				details,
 				preserveData,
 			};
+			// The compaction rewrite is complete. Clear the active marker before
+			// publishing completion so queued-message continuations scheduled by the
+			// completion path cannot discard themselves as a compaction race.
+			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
+				this.#autoCompactionAbortController = undefined;
+			}
 			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
 			// Post-maintenance progress guard. Snapcompact can project over budget and

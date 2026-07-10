@@ -103,7 +103,7 @@ describe("GLaDOS Boss extension", () => {
 			const before = await harness.runner.emitBeforeAgentStart("hello", undefined, ["base prompt"]);
 
 			expect(`${harness.selectedModel?.provider}/${harness.selectedModel?.id}`).toBe(GLADOS_BOSS_MODEL_SELECTOR);
-			expect(harness.thinkingLevel).toBe(ThinkingLevel.XHigh);
+			expect(harness.thinkingLevel).toBe(ThinkingLevel.High);
 			expect(harness.activeTools).toContain("read");
 			expect(harness.activeTools).toContain(GLADOS_BOSS_STATUS_TOOL);
 			expect(harness.sessionName).toBe(`Boss: ${harness.cwd}`);
