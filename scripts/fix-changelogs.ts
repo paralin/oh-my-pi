@@ -705,9 +705,10 @@ export function collectPromotableAddedItemLines(diffText: string): Map<string, S
 }
 
 async function git(args: readonly string[], cwd: string): Promise<string> {
-	const result = await $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`
-		.cwd(cwd)
-		.quiet();
+	const result =
+		await $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false -c diff.mnemonicPrefix=false ${args}`
+			.cwd(cwd)
+			.quiet();
 	return result.text();
 }
 
@@ -770,10 +771,11 @@ async function pinChangelogBaseline(repoRoot: string): Promise<string> {
 }
 
 async function gitMaybe(args: readonly string[], cwd: string): Promise<string | undefined> {
-	const result = await $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false ${args}`
-		.cwd(cwd)
-		.quiet()
-		.nothrow();
+	const result =
+		await $`git -c core.fsmonitor=false -c core.untrackedCache=false -c fetch.pruneTags=false -c diff.mnemonicPrefix=false ${args}`
+			.cwd(cwd)
+			.quiet()
+			.nothrow();
 	if (result.exitCode !== 0) return undefined;
 	return result.text();
 }
