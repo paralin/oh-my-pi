@@ -56,6 +56,12 @@ export interface AsyncJob {
 	 */
 	ownerId?: string;
 	/**
+	 * Registry id of the subagent this job runs (task/tan/vibe jobs). Lets
+	 * job-view code link a job row to its AgentRegistry ref even when the job
+	 * id differs from the agent id (vibe turn jobs, tan clones).
+	 */
+	agentId?: string;
+	/**
 	 * Job is registered but parked behind a caller-managed gate (e.g. a task
 	 * batch semaphore). Queued jobs do not count toward the running-job limit
 	 * until the caller invokes `markRunning()` from the run context.
@@ -96,6 +102,8 @@ export interface AsyncJobRegisterOptions {
 	persistent?: boolean;
 	/** Reload current progress and terminal state from the durable owner. */
 	refresh?: () => Promise<string | AsyncJobRefresh>;
+	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
+	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
 	/** Register the job in queued state; see {@link AsyncJob.queued}. */
 	queued?: boolean;
@@ -213,6 +221,7 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			lifecycleAbortController,
 			ownerId: options?.ownerId,
+			agentId: options?.agentId,
 			queued: options?.queued === true,
 			persistent: options?.persistent === true,
 			refresh: options?.refresh,

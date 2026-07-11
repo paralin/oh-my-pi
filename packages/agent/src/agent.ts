@@ -1201,7 +1201,17 @@ export class Agent {
 			},
 			hasSteeringMessages: async () => {
 				await this.#beforeSteeringPoll?.();
-				return this.#steeringQueue.length > 0;
+				if (this.#steeringQueue.length === 0) {
+					return { queued: false };
+				}
+				for (const message of this.#steeringQueue) {
+					const role = "role" in message ? message.role : undefined;
+					const attribution = "attribution" in message ? message.attribution : undefined;
+					if (role === "user" && attribution !== "agent") {
+						return { queued: true, source: "user" };
+					}
+				}
+				return { queued: true, source: "system" };
 			},
 			hasIrcInterrupts: this.hasIrcInterrupts,
 			getFollowUpMessages: async () => this.#dequeueFollowUpMessages(),

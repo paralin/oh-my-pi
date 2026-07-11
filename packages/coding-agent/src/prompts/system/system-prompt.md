@@ -162,6 +162,7 @@ Everything else—multi-file changes, refactors, new features, tests, investigat
 {{/if}}
 {{/if}}
 - Use `{{toolRefs.task}}` to map unknown code instead of reading file after file yourself.
+- NEVER abandon phases under scope pressure—delegate, don't shrink.
 {{#has tools "eval"}}
 {{#has tools "task"}}- Cheap per-item lookup or classification → `{{toolRefs.eval}}` `completion()` with the `"smol"` model, NEVER task-agent fan-out.{{/has}}
 {{/has}}
