@@ -5,6 +5,7 @@
 ### Added
 
 - Added `/effort` (`/thinking`) for session-scoped thinking changes with optional default persistence, and a session-only action to the model picker.
+- Added an in-process `cron` tool that schedules one-shot follow-up user messages for the active model session.
 
 ### Changed
 
