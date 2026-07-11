@@ -242,7 +242,7 @@ describe("scratch handoff prompt", () => {
 });
 
 describe("scratch handoff recent context", () => {
-	it("starts after a newer scratch write marker", () => {
+	it("starts after the most recent scratch write marker", () => {
 		const context = buildScratchHandoffRecentContext({
 			entries: [
 				userEntry("user-old", "old user request"),
@@ -256,7 +256,7 @@ describe("scratch handoff recent context", () => {
 		expect(context).toContain("after scratch write");
 	});
 
-	it("starts at a newer user turn even when a scratch write exists", () => {
+	it("keeps the complete delta after the most recent scratch write", () => {
 		const context = buildScratchHandoffRecentContext({
 			entries: [
 				scratchWriteEntry("write"),
@@ -267,23 +267,24 @@ describe("scratch handoff recent context", () => {
 			convertToLlm,
 		});
 
-		expect(context).not.toContain("old assistant context");
+		expect(context).toContain("old assistant context");
 		expect(context).toContain("latest user request");
 		expect(context).toContain("new assistant context");
 	});
 
-	it("lets pending skill prompts supersede persisted branch context", () => {
+	it("appends pending messages to the complete persisted delta", () => {
 		const context = buildScratchHandoffRecentContext({
 			entries: [userEntry("user-old", "old persisted request"), assistantEntry("old-after", "old answer")],
 			pendingMessages: [skillPromptMessage("fresh skill-read request")],
 			convertToLlm,
 		});
 
-		expect(context).not.toContain("old persisted request");
+		expect(context).toContain("old persisted request");
+		expect(context).toContain("old answer");
 		expect(context).toContain("fresh skill-read request");
 	});
 
-	it("serializes context newer than a stale scratch write with snapcompact", () => {
+	it("serializes the post-write delta for SnapCompact", () => {
 		const serializeSpy = vi.spyOn(snapcompact, "serializeConversation");
 
 		const context = buildScratchHandoffRecentContext({
@@ -291,6 +292,7 @@ describe("scratch handoff recent context", () => {
 				scratchWriteEntry("write"),
 				userEntry("user-new", "latest user request"),
 				assistantToolEntry("assistant"),
+				toolResultEntry("tool", "decisive tool result"),
 			],
 			convertToLlm,
 		});
@@ -300,35 +302,24 @@ describe("scratch handoff recent context", () => {
 			expect.arrayContaining([
 				expect.objectContaining({ role: "user" }),
 				expect.objectContaining({ role: "assistant" }),
+				expect.objectContaining({ role: "toolResult" }),
 			]),
 		);
 		expect(context).toContain("latest user request");
 		expect(context).toContain("read(");
+		expect(context).toContain("decisive tool result");
 	});
 
-	it("keeps tool calls while omitting tool result bodies", () => {
-		const context = buildScratchHandoffRecentContext({
-			entries: [
-				userEntry("user", "inspect file"),
-				assistantToolEntry("assistant"),
-				toolResultEntry("tool", "tool result body"),
-			],
-			convertToLlm,
-		});
-
-		expect(context).toContain("read(");
-		expect(context).not.toContain("tool result body");
-	});
-
-	it("renders recent context after the scratch body", () => {
+	it("renders the SnapCompact delta after the scratch body", () => {
 		const message = renderScratchHandoffResumeMessage({
 			displayPath: "agent/current.org",
 			scratchText: "- Current objective: patch",
-			recentContextText: "# User ¶\nlatest request",
+			recentContextSnapcompactFrames: 2,
 		});
 
 		expect(message).toContain("<scratch-handoff-context>");
 		expect(message).toContain("<recent-session-context>");
-		expect(message).toContain("latest request");
+		expect(message).toContain("2 attached SnapCompact frames");
+		expect(message).not.toContain("Tool result bodies are intentionally omitted");
 	});
 });

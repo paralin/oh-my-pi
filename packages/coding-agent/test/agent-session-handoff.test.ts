@@ -1188,6 +1188,28 @@ describe("AgentSession handoff", () => {
 		});
 		session.subscribe(event => events.push(event));
 
+		const scratchCompactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => ({
+			summary: "Read the attached ScratchCompact archive before continuing.",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: {
+					frames: [
+						{
+							data: "c25hcGNvbXBhY3Q=",
+							mimeType: "image/png",
+							cols: 10,
+							rows: 10,
+							chars: 100,
+						},
+					],
+					totalChars: 125,
+					truncatedChars: 0,
+					textHead: "oldest edge",
+					textTail: "newest edge",
+				},
+			},
+		}));
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [readAssistant] });
 		await waitFor(() => events.some(event => event.type === "maintenance_trace_end"));
 
@@ -1196,25 +1218,34 @@ describe("AgentSession handoff", () => {
 		});
 		expect(scratchEntry?.type).toBe("custom_message");
 		if (scratchEntry?.type !== "custom_message") throw new Error("missing scratch handoff entry");
-		expect(scratchEntry.content).toEqual([
-			expect.objectContaining({ text: expect.stringContaining("Fresh scratch objective") }),
-		]);
+		expect(scratchEntry.content).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ text: expect.stringContaining("Fresh scratch objective") }),
+				expect.objectContaining({ type: "image", mimeType: "image/png" }),
+			]),
+		);
 		// The successor's first message leads with the resume directive (reload the
 		// recorded skill stack in load order, continue from scratch org TODO state,
 		// and keep going) before the scratch-context block.
-		expect(scratchEntry.content).toEqual([
-			expect.objectContaining({
-				text: expect.stringContaining("Resume this session from the scratch handoff below."),
-			}),
-		]);
-		expect(scratchEntry.content).toEqual([
-			expect.objectContaining({
-				text: expect.stringContaining("Reload and continue the skill/command stack recorded in the scratch file"),
-			}),
-		]);
+		expect(scratchEntry.content).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					text: expect.stringContaining("Resume this session from the scratch handoff below."),
+				}),
+				expect.objectContaining({
+					text: expect.stringContaining(
+						"Reload and continue the skill/command stack recorded in the scratch file",
+					),
+				}),
+			]),
+		);
 		const scratchText = Array.isArray(scratchEntry.content)
 			? scratchEntry.content.map(block => (block.type === "text" ? block.text : "")).join("\n")
 			: scratchEntry.content;
+		expect(scratchText).toContain("attached SnapCompact frames");
+		expect(scratchCompactSpy).toHaveBeenCalledTimes(1);
+		const compactedMessage = scratchCompactSpy.mock.calls[0]?.[0]?.messagesToSummarize[0];
+		expect(JSON.stringify(compactedMessage)).toContain("todo initialized");
 		expect(scratchText).not.toContain("Synthetic read");
 		expect(scratchEntry.content).not.toEqual([
 			expect.objectContaining({ text: expect.stringContaining("stale launch snapshot") }),

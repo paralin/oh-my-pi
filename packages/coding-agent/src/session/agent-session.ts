@@ -10763,12 +10763,61 @@ export class AgentSession {
 		return this.#handoffAbortController !== undefined;
 	}
 
-	#scratchHandoffMessageContent(pendingMessages: readonly AgentMessage[] = []): CustomMessage["content"] {
+	async #scratchHandoffMessageContent(
+		pendingMessages: readonly AgentMessage[] = [],
+	): Promise<CustomMessage["content"]> {
 		if (this.#scratchHandoffDisplayPath) {
 			try {
 				const scratchPath = resolveToCwd(this.#scratchHandoffDisplayPath, this.sessionManager.getCwd());
 				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
 				const recentContextText = this.#scratchHandoffRecentContextText(pendingMessages);
+				if (recentContextText && this.model?.input.includes("image")) {
+					try {
+						const shape = snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape"));
+						const maxFrames = Math.min(
+							snapcompact.providerImageBudget(this.model.provider),
+							snapcompact.maxFramesForDataBudget(),
+						);
+						const result = await snapcompact.compact<Message>(
+							{
+								firstKeptEntryId: "scratch-handoff-successor",
+								messagesToSummarize: [
+									{
+										role: "user",
+										content: [{ type: "text", text: recentContextText }],
+										timestamp: Date.now(),
+									},
+								],
+								turnPrefixMessages: [],
+								tokensBefore: countTokens(recentContextText),
+								fileOps: snapcompact.createFileOps(),
+							},
+							{ model: this.model, shape, maxFrames, dimToolResults: false },
+						);
+						const archive = snapcompact.getPreservedArchive(result.preserveData);
+						if (archive) {
+							return [
+								{
+									type: "text",
+									text: renderScratchHandoffResumeMessage({
+										displayPath: this.#scratchHandoffDisplayPath,
+										scratchText,
+										recentContextSnapcompactFrames: archive.frames.length,
+									}),
+								},
+								{ type: "text", text: result.summary },
+								...snapcompact.historyBlocks(archive, {
+									maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+								}),
+							];
+						}
+					} catch (error) {
+						logger.warn("Failed to compact scratch handoff delta with SnapCompact; preserving text", {
+							error: String(error),
+							scratchPath: this.#scratchHandoffDisplayPath,
+						});
+					}
+				}
 				return [
 					{
 						type: "text",
@@ -10779,8 +10828,11 @@ export class AgentSession {
 						}),
 					},
 				];
-			} catch {
-				// Fall back to the launch snapshot if the scratch file was moved or deleted.
+			} catch (error) {
+				logger.warn("Failed to build current scratch handoff payload; using launch snapshot", {
+					error: String(error),
+					scratchPath: this.#scratchHandoffDisplayPath,
+				});
 			}
 		}
 		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
@@ -10801,7 +10853,7 @@ export class AgentSession {
 		trace: MaintenanceTraceState,
 		pendingMessages: readonly AgentMessage[] = [],
 	): Promise<void> {
-		const scratchContent = this.#scratchHandoffMessageContent(pendingMessages);
+		const scratchContent = await this.#scratchHandoffMessageContent(pendingMessages);
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
 		const previousSessionFile = this.sessionFile;
 		await this.sessionManager.flush();

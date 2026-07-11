@@ -134,12 +134,13 @@ The automatic paths are intentionally different:
     existing scratch org file as a comprehensive current-work snapshot. After
     that closeout turn, or when the next request is already too large to send,
     maintenance resets into a successor session from the same scratch file.
-    Mid-turn checks queue the same closeout steer when it still fits; if the
-    provider request would exceed the prompt budget, the runtime hands off
-    immediately.
-  - If the closeout turn did not write the scratch file, the runtime warns but
-    still hands off; the successor resume message includes snapcompact-rendered
-    recent context from after the most recent scratch write as the fallback.
+    Mid-turn checks compact in place because resetting while the active tool
+    loop owns its message array would race the next request.
+  - Every successor receives the current scratch file plus the complete session
+    delta after the most recent successful scratch write. Vision-capable models
+    receive that delta as local SnapCompact frames, including tool results;
+    text-only models and render failures receive the serialized text delta.
+    This fallback also covers an untouched initial scratch template.
   - On success, if `compaction.autoContinue !== false`, post-turn maintenance
     schedules an agent-authored developer auto-continue prompt from
     `prompts/system/auto-continue.md`; mid-turn maintenance normally resumes
@@ -398,6 +399,13 @@ startup only creates the initial template when the selected path does not
 exist. Threshold closeout prompts ask the agent to maintain scratch as a full
 org-mode snapshot of current work and to org-link large artifacts, traces, logs,
 issues, or plans instead of copying their bodies into the scratch document.
+
+At handoff, the runtime locates the newest successful scratch-write marker and
+serializes every subsequent user, assistant, custom, tool-call, and tool-result
+message together with pending in-flight messages. It renders that delta locally
+into provider-shaped SnapCompact frames when the successor model supports
+images. The scratch document remains the durable state owner; the attached
+delta preserves work too recent to have reached it.
 
 In-process task subagents do not get their own scratch file. A headless worker
 launched as a top-level OMP process does, so Boss/worker runs can keep the same

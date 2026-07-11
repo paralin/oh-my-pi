@@ -129,28 +129,6 @@ function sessionEntryMessage(entry: SessionEntry): AgentMessage | undefined {
 	);
 }
 
-function modelVisibleUserMessageIndex(
-	messages: readonly AgentMessage[],
-	convertToLlm: ScratchHandoffMessageConverter,
-): number {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message && convertToLlm([message]).some(converted => converted.role === "user")) return index;
-	}
-	return -1;
-}
-
-function latestModelVisibleUserEntryIndex(
-	entries: readonly SessionEntry[],
-	convertToLlm: ScratchHandoffMessageConverter,
-): number {
-	for (let index = entries.length - 1; index >= 0; index--) {
-		const message = sessionEntryMessage(entries[index]);
-		if (message && convertToLlm([message]).some(converted => converted.role === "user")) return index;
-	}
-	return -1;
-}
-
 function latestScratchHandoffWriteEntryIndex(entries: readonly SessionEntry[]): number {
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
@@ -165,26 +143,15 @@ export function buildScratchHandoffRecentContext(input: {
 	convertToLlm: ScratchHandoffMessageConverter;
 }): string | undefined {
 	const pendingMessages = input.pendingMessages ?? [];
-	const pendingUserIndex = modelVisibleUserMessageIndex(pendingMessages, input.convertToLlm);
-	const messages =
-		pendingUserIndex >= 0
-			? pendingMessages.slice(pendingUserIndex)
-			: [
-					...input.entries
-						.slice(
-							Math.max(
-								latestModelVisibleUserEntryIndex(input.entries, input.convertToLlm),
-								latestScratchHandoffWriteEntryIndex(input.entries) + 1,
-								0,
-							),
-						)
-						.map(sessionEntryMessage)
-						.filter((message): message is AgentMessage => message !== undefined),
-					...pendingMessages,
-				];
-	const llmMessages = input
-		.convertToLlm(messages.filter(message => message.role !== "toolResult"))
-		.filter(message => message.role !== "toolResult");
+	const latestWriteIndex = latestScratchHandoffWriteEntryIndex(input.entries);
+	const messages = [
+		...input.entries
+			.slice(Math.max(latestWriteIndex + 1, 0))
+			.map(sessionEntryMessage)
+			.filter((message): message is AgentMessage => message !== undefined),
+		...pendingMessages,
+	];
+	const llmMessages = input.convertToLlm(messages);
 	const text = snapcompact.serializeConversation(llmMessages).trim();
 	return text.length > 0 ? text : undefined;
 }
@@ -333,6 +300,7 @@ export function renderScratchHandoffResumeMessage(input: {
 	scratchText: string;
 	parentDisplayPath?: string;
 	recentContextText?: string;
+	recentContextSnapcompactFrames?: number;
 }): string {
 	const parentLine = input.parentDisplayPath ? `Parent scratch: ${input.parentDisplayPath}\n` : "";
 	const scratchContext = [
@@ -343,15 +311,20 @@ export function renderScratchHandoffResumeMessage(input: {
 		"</scratch-handoff-context>",
 	].join("\n");
 	const recentContext = input.recentContextText?.trim();
+	const snapcompactFrames = input.recentContextSnapcompactFrames ?? 0;
+	const recentContextBlock =
+		snapcompactFrames > 0
+			? `<recent-session-context>\nThe complete session delta after the most recent successful scratch write is preserved in ${snapcompactFrames} attached SnapCompact frames. Read those frames before continuing so tool results, decisions, and verification newer than the scratch file remain authoritative.\n</recent-session-context>`
+			: recentContext
+				? `<recent-session-context>\nSession context newer than the scratch file follows.\n\n${recentContext}\n</recent-session-context>`
+				: "";
 	return [
 		"Resume this session from the scratch handoff below.",
 		"Reload and continue the skill/command stack recorded in the scratch file, in its original load order, and continue from the scratch file's org TODO subheading state. Continue the work already in progress.",
 		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
 		"",
 		scratchContext,
-		recentContext
-			? `\n<recent-session-context>\nRecent user, assistant, and tool-call turns that may not be reflected in the scratch file. Tool result bodies are intentionally omitted.\n\n${recentContext}\n</recent-session-context>`
-			: "",
+		recentContextBlock ? `\n${recentContextBlock}` : "",
 	]
 		.filter(Boolean)
 		.join("\n");

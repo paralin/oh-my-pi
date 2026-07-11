@@ -10,6 +10,11 @@
 ### Changed
 
 - Tuned default delegation prompts to prefer one substantial subagent, reserve parallel fan-out for independent substantial workstreams, and route cheap per-item classification through smol completions.
+
+### Fixed
+
+- Fixed scratch handoff losing tool results and other work newer than the latest scratch write when a tool-loop request crossed the prompt budget. Successor sessions now receive the current scratch document plus a bounded SnapCompact archive of the complete post-write session delta, with serialized text fallback for text-only models or local rendering failures.
+
 ## [16.4.2] - 2026-07-10
 
 ### Fixed
