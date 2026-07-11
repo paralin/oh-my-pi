@@ -457,10 +457,18 @@ export interface ModelMatchPreferences {
 	providerOrder?: readonly string[];
 	/** Providers to deprioritize when no recent usage or provider priority is available. */
 	deprioritizeProviders?: string[];
+	/**
+	 * Side-effect-free probe for whether a model's provider has configured
+	 * auth ({@link ModelRegistry.hasConfiguredAuth}). When set, ambiguous
+	 * unqualified patterns prefer callable providers: a catalog mirror of the
+	 * same id on a provider with no credentials must not shadow the provider
+	 * the user can actually call.
+	 */
+	configuredAuth?: (model: Model<Api>) => boolean;
 }
 
 export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll">;
+type CliModelRegistry = Pick<ModelRegistry, "getAll"> & Partial<Pick<ModelRegistry, "hasConfiguredAuth">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey">;
 
@@ -470,6 +478,7 @@ interface ModelPreferenceContext {
 	providerPriorityRank: Map<string, number>;
 	deprioritizedProviders: Set<string>;
 	modelOrder: Map<string, number>;
+	configuredAuth?: (model: Model<Api>) => boolean;
 }
 
 function buildPreferenceContext(
@@ -496,7 +505,14 @@ function buildPreferenceContext(
 		modelOrder.set(formatModelString(availableModels[i]), i);
 	}
 
-	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
+	return {
+		modelUsageRank,
+		providerUsageRank,
+		providerPriorityRank,
+		deprioritizedProviders,
+		modelOrder,
+		configuredAuth: preferences?.configuredAuth,
+	};
 }
 
 export function getModelMatchPreferences(
@@ -517,12 +533,23 @@ function mergeModelMatchPreferences(
 		usageOrder: preferences?.usageOrder ?? settingsPreferences.usageOrder,
 		providerOrder: preferences?.providerOrder ?? settingsPreferences.providerOrder,
 		deprioritizeProviders: preferences?.deprioritizeProviders,
+		configuredAuth: preferences?.configuredAuth,
 	};
 }
 
 function pickPreferredModel(candidates: Model<Api>[], context: ModelPreferenceContext): Model<Api> {
 	if (candidates.length <= 1) return candidates[0];
 	return [...candidates].sort((a, b) => {
+		// A provider with no configured auth cannot be called at all, so a
+		// credentialed provider always beats an uncredentialed catalog mirror
+		// of the same id, regardless of usage history or catalog priority.
+		const auth = context.configuredAuth;
+		if (auth) {
+			const aConfigured = auth(a);
+			const bConfigured = auth(b);
+			if (aConfigured !== bConfigured) return aConfigured ? -1 : 1;
+		}
+
 		const aKey = formatModelString(a);
 		const bKey = formatModelString(b);
 		const aUsage = context.modelUsageRank.get(aKey);
@@ -1500,9 +1527,14 @@ export function resolveCliModel(options: {
 		if (!exact) {
 			// Flat exact id (or full selector) by catalog order: CLI resolution
 			// stays deterministic across runs regardless of usage-based ranking.
-			exact = availableModels.find(
+			// Among the exact-id ties, a provider with configured auth beats an
+			// uncredentialed catalog mirror of the same id (catalog order breaks
+			// ties within each group): a newly cataloged mirror must not shadow
+			// the provider the user can actually call.
+			const flatMatches = availableModels.filter(
 				model => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
 			);
+			exact = flatMatches.find(model => modelRegistry.hasConfiguredAuth?.(model)) ?? flatMatches[0];
 		}
 		if (exact) {
 			return {
@@ -1548,7 +1580,12 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
-	const { model, thinkingLevel, warning, upstream } = parseModelPattern(pattern, candidates, preferences, {
+	const hasConfiguredAuth = modelRegistry.hasConfiguredAuth?.bind(modelRegistry);
+	const authAwarePreferences: ModelMatchPreferences = {
+		...preferences,
+		configuredAuth: preferences?.configuredAuth ?? hasConfiguredAuth,
+	};
+	const { model, thinkingLevel, warning, upstream } = parseModelPattern(pattern, candidates, authAwarePreferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 

@@ -1039,6 +1039,59 @@ describe("resolveCliModel", () => {
 		expect(result.error).toContain("No models available");
 	});
 
+	test("prefers a configured-auth provider over an uncredentialed catalog mirror of the same id", () => {
+		// Regression: the catalog gained github-copilot/gpt-5.6-sol, which
+		// preceded openai-codex/gpt-5.6-sol in catalog order. Unprefixed
+		// `--model gpt-5.6-sol` then resolved to the copilot mirror, and every
+		// dispatch died with "No API key found for github-copilot" even though
+		// the codex provider had working credentials.
+		const mirrorFirst = buildModel({
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol (mirror)",
+			api: "anthropic-messages",
+			provider: "github-copilot",
+			baseUrl: "https://mirror.example",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text"],
+			cost: { input: 1, output: 4, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 200000,
+			maxTokens: 8192,
+		});
+		const credentialedSecond = buildModel({
+			...mirrorFirst,
+			name: "GPT-5.6 Sol",
+			provider: "openai-codex",
+			baseUrl: "https://codex.example",
+		});
+		const registry = {
+			getAll: () => [mirrorFirst, credentialedSecond],
+			hasConfiguredAuth: (model: Model<Api>) => model.provider === "openai-codex",
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+
+		const flat = resolveCliModel({ cliModel: "gpt-5.6-sol", modelRegistry: registry });
+		expect(flat.error).toBeUndefined();
+		expect(flat.model?.provider).toBe("openai-codex");
+
+		// The thinking-suffix grammar path resolves through matchModel and
+		// pickPreferredModel instead of the flat exact-id path; the auth
+		// preference must hold there too.
+		const suffixed = resolveCliModel({ cliModel: "gpt-5.6-sol:high", modelRegistry: registry });
+		expect(suffixed.error).toBeUndefined();
+		expect(suffixed.model?.provider).toBe("openai-codex");
+		expect(suffixed.thinkingLevel).toBe("high");
+
+		// Without an auth probe (mock registries), catalog order still wins so
+		// resolution stays deterministic.
+		const probeless = resolveCliModel({
+			cliModel: "gpt-5.6-sol",
+			modelRegistry: {
+				getAll: () => [mirrorFirst, credentialedSecond],
+			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"],
+		});
+		expect(probeless.model?.provider).toBe("github-copilot");
+	});
+
 	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
 		const registry = {
 			getAll: () => allModels,
