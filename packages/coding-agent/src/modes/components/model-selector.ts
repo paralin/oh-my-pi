@@ -90,7 +90,7 @@ interface RoleAssignment {
 	autoSelected: boolean;
 }
 
-type ModelSelectorAction = "modelRole" | "retryFallback";
+type ModelSelectorAction = "modelRole" | "retryFallback" | "temporary";
 
 type RoleSelectCallback = (
 	model: Model,
@@ -102,7 +102,7 @@ type RoleSelectCallback = (
 type CancelCallback = () => void;
 interface MenuRoleAction {
 	label: string;
-	role: string;
+	role: string | null;
 	action: ModelSelectorAction;
 }
 
@@ -298,6 +298,7 @@ export class ModelSelectorComponent extends Container {
 			};
 		});
 		this.#menuRoleActions = [
+			{ label: "Use for this session", role: null, action: "temporary" },
 			...roleActions,
 			{ label: "Set as DEFAULT retry fallback", role: "default", action: "retryFallback" },
 		];
@@ -1199,16 +1200,21 @@ export class ModelSelectorComponent extends Container {
 			this.#moveMenuSelection(1, selectedItem, optionCount);
 			return;
 		}
-
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			if (this.#menuStep === "role") {
 				const action = this.#menuRoleActions[this.#menuSelectedIndex];
 				if (!action) return;
+				if (action.action === "temporary") {
+					this.#handleSelect(selectedItem, null, undefined, action.action);
+					this.#closeMenu();
+					return;
+				}
 				if (action.action === "retryFallback") {
 					this.#handleSelect(selectedItem, action.role, undefined, action.action);
 					this.#closeMenu();
 					return;
 				}
+				if (action.role === null) return;
 				this.#menuSelectedRole = action.role;
 				this.#menuStep = "thinking";
 				this.#menuSelectedIndex = this.#getThinkingPreselectIndex(action.role, selectedItem.model);

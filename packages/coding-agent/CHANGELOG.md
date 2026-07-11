@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/effort` (`/thinking`) for session-scoped thinking changes with optional default persistence, and a session-only action to the model picker.
+
 ### Changed
 
 - Tuned default delegation prompts to prefer one substantial subagent, reserve parallel fan-out for independent substantial workstreams, and route cheap per-item classification through smol completions.

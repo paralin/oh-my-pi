@@ -16,8 +16,9 @@ function normalizeRenderedText(text: string): string {
 
 const DEFAULT_RETRY_FALLBACK_ACTION_LABEL = "Set as DEFAULT retry fallback";
 const DEFAULT_RETRY_FALLBACK_ACTION = "retryFallback";
+const TEMPORARY_ACTION = "temporary";
 
-type ModelSelectorAction = "modelRole" | typeof DEFAULT_RETRY_FALLBACK_ACTION;
+type ModelSelectorAction = "modelRole" | typeof DEFAULT_RETRY_FALLBACK_ACTION | typeof TEMPORARY_ACTION;
 type TestRoleSelectArgs = [
 	model: Model,
 	role: string | null,
@@ -181,6 +182,7 @@ describe("ModelSelector role badge thinking display", () => {
 		installTestTheme();
 
 		selector.handleInput("\n");
+		selectMenuAction(selector, "Set as DEFAULT (Default)");
 		selector.handleInput("\n");
 
 		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
@@ -200,6 +202,7 @@ describe("ModelSelector role badge thinking display", () => {
 		installTestTheme();
 
 		selector.handleInput("\n");
+		selectMenuAction(selector, "Set as DEFAULT (Default)");
 		selector.handleInput("\n");
 
 		const rendered = normalizeRenderedText(selector.render(220).join("\n"));
@@ -341,6 +344,7 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(afterOpen).toContain("Set as DEFAULT (Default)");
 		expect(afterOpen).not.toContain("context>4.1k");
 
+		selectMenuAction(selector, "Set as DEFAULT (Default)");
 		selector.handleInput("\n");
 		const afterRoleEnter = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(afterRoleEnter).toContain("Thinking for: Default (only-small)");
@@ -376,6 +380,30 @@ describe("ModelSelector role badge thinking display", () => {
 		expect(call?.[1]).toBe("default");
 		expect(call?.[3]).toBe("test/retry-fallback-model");
 		expect(call?.[4]).toBe(DEFAULT_RETRY_FALLBACK_ACTION);
+	});
+
+	test("offers a session-only action that skips thinking selection", () => {
+		installTestTheme();
+		const settings = Settings.isolated({});
+		const model = createContextTestModel("session-menu-model", 128_000);
+		const onSelect = vi.fn();
+		const selector = createScopedSelector([model], settings, onSelect);
+
+		selector.handleInput("\n");
+		const menuRendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(menuRendered).toContain("Use for this session");
+
+		selectMenuAction(selector, "Use for this session");
+		selector.handleInput("\n");
+
+		expect(onSelect).toHaveBeenCalledTimes(1);
+		const call = onSelect.mock.calls[0];
+		expect(call?.[0]).toBe(model);
+		expect(call?.[1]).toBeNull();
+		expect(call?.[2]).toBeUndefined();
+		expect(call?.[3]).toBe("test/session-menu-model");
+		expect(call?.[4]).toBe(TEMPORARY_ACTION);
+		expect(normalizeRenderedText(selector.render(220).join("\n"))).not.toContain("Thinking for:");
 	});
 
 	test("uses cached models for Enter while offline refresh is still pending", () => {

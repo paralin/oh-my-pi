@@ -9845,13 +9845,13 @@ export class AgentSession {
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
+		if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
+			this.settings.set("defaultThinkingLevel", effectiveLevel);
+		}
 
 		if (isChanging) {
 			this.#clearInheritedProviderPromptCacheKey();
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
-			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				this.settings.set("defaultThinkingLevel", effectiveLevel);
-			}
 			this.#emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
 	}

@@ -32,6 +32,7 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../thinking";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import { getChangelogPath, parseChangelog } from "../utils/changelog";
@@ -195,6 +196,12 @@ function parseShakeMode(args: string): ShakeMode | { error: string } {
 	return { error: `Unknown /shake mode "${verb}". Use elide or images.` };
 }
 
+function formatEffortChoices(session: AgentSession): string {
+	const choices = new Set<string>(["off", AUTO_THINKING, ...session.getAvailableThinkingLevels()]);
+	return [...choices].join(", ");
+}
+
+const EFFORT_COMMAND_USAGE = "Usage: /effort <level> [--default]";
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "settings",
@@ -346,6 +353,62 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "effort",
+		aliases: ["thinking"],
+		description: "Set thinking effort for this session",
+		acpDescription: "Set thinking effort for this session",
+		inlineHint: "[off|auto|<level>] [--default]",
+		acpInputHint: "[off|auto|<level>] [--default]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const args = command.args.trim();
+			if (!args) {
+				const current = runtime.session.configuredThinkingLevel() ?? "unset";
+				await runtime.output(
+					`Current configured thinking level: ${current}.\nValid levels: ${formatEffortChoices(runtime.session)}.`,
+				);
+				return commandConsumed();
+			}
+
+			const tokens = args.split(/\s+/);
+			const levelText = tokens[0] ?? "";
+			if (levelText.startsWith("--")) {
+				return usage(`Unknown option "${levelText}". ${EFFORT_COMMAND_USAGE}`, runtime);
+			}
+			if (tokens.length > 2) {
+				return usage(`Expected one level and an optional --default. ${EFFORT_COMMAND_USAGE}`, runtime);
+			}
+			const persist = tokens[1] !== undefined;
+			if (persist && tokens[1] !== "--default") {
+				return usage(`Unknown option "${tokens[1]}". ${EFFORT_COMMAND_USAGE}`, runtime);
+			}
+
+			const level = parseConfiguredThinkingLevel(levelText);
+			const validLevels = new Set<string>(["off", AUTO_THINKING, ...runtime.session.getAvailableThinkingLevels()]);
+			if (level === undefined || !validLevels.has(level)) {
+				return usage(
+					`Unknown or unsupported thinking level "${levelText}". Valid levels: ${formatEffortChoices(runtime.session)}.`,
+					runtime,
+				);
+			}
+			if (persist && level === "off") {
+				return usage(
+					"Cannot save off as the default because settings do not support it. Use /effort off for this session, or choose another level with --default.",
+					runtime,
+				);
+			}
+
+			runtime.session.setThinkingLevel(level, persist);
+			if (persist) await runtime.notifyConfigChanged?.();
+			await runtime.output(
+				persist
+					? `Thinking level set to ${level} and saved as the default.`
+					: `Thinking level set to ${level} for this session.`,
+			);
+			return commandConsumed();
 		},
 	},
 	{

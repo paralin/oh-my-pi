@@ -487,6 +487,9 @@ describe("AgentSession role model thinking behavior", () => {
 		session.setThinkingLevel(Effort.Medium, true);
 		expect(session.isAutoThinking).toBe(false);
 		expect(sessionSettings.get("defaultThinkingLevel")).toBe(Effort.Medium);
+		sessionSettings.set("defaultThinkingLevel", Effort.High);
+		session.setThinkingLevel(Effort.Medium, true);
+		expect(sessionSettings.get("defaultThinkingLevel")).toBe(Effort.Medium);
 		session.sessionManager.appendMessage(createAssistantMessage("done"));
 
 		const sessionFile = session.sessionFile;
