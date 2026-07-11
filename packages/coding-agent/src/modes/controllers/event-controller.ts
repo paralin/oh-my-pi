@@ -1238,8 +1238,8 @@ export class EventController {
 		switch (eventPhase) {
 			case "scratch-target-resolved":
 				return "Context pressure: scratch target resolved";
-			case "scratch-successor-session-reset":
-				return "Context pressure: scratch session reset";
+			case "scratch-session-compacted":
+				return "Context pressure: scratch session compacted";
 			case "scratch-read-injected":
 				return "Context pressure: scratch state loaded";
 			case "scratch-session-rebuilt":

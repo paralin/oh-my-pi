@@ -10326,10 +10326,10 @@ export class AgentSession {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
 		}
 		// Bare `/compact` (no explicit native mode) on a session with scratch handoff
-		// active is the clean-break path: the agent keeps a durable scratch file
-		// current, so reset into the scratch successor session instead of running an
-		// LLM summary. Explicit modes (soft/remote/snapcompact) still drive the native
-		// engine, and `strategy: off` disables auto-maintenance so manual stays native.
+		// active is the clean-break path: compact the current session around its
+		// durable scratch state instead of running an LLM summary. Explicit modes
+		// (soft/remote/snapcompact) still drive the native engine, and `strategy:
+		// off` disables auto-maintenance so manual stays native.
 		if (
 			!compactMode &&
 			this.#scratchHandoffDisplayPath !== undefined &&
@@ -10655,11 +10655,12 @@ export class AgentSession {
 	}
 
 	/**
-	 * Manual `/compact` clean-break path: reset into the scratch successor session
-	 * instead of summarizing. Mirrors `compact()`'s disconnect/abort/reconnect
-	 * setup, then drives the same `#startScratchHandoffSession` reset the auto
-	 * maintenance path uses under a `manual` maintenance reason. No auto-continue:
-	 * the operator issued `/compact` and drives the next turn.
+	 * Manual `/compact` clean-break path: compact the current session around its
+	 * scratch handoff instead of summarizing. Mirrors `compact()`'s
+	 * disconnect/abort/reconnect setup, then drives the same
+	 * `#compactScratchHandoffSession` path used by automatic maintenance under a
+	 * `manual` reason. No auto-continue: the operator issued `/compact` and drives
+	 * the next turn.
 	 */
 	async #runManualScratchHandoffCompaction(): Promise<CompactionResult> {
 		if (this.#compactionAbortController) {
@@ -10679,7 +10680,7 @@ export class AgentSession {
 			await this.#emitMaintenanceTraceStart(trace);
 			await this.#emitMaintenanceTraceDelta(trace, "activity", "Started scratch handoff from the current session.");
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason: "manual", action: "scratch-handoff" });
-			await this.#startScratchHandoffSession(trace);
+			await this.#compactScratchHandoffSession(trace);
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
 				action: "scratch-handoff",
@@ -10689,8 +10690,8 @@ export class AgentSession {
 			});
 			await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
 			return {
-				summary: `Scratch handoff: reset into a successor session carrying ${scratchPath}.`,
-				firstKeptEntryId: this.sessionManager.getEntries()[0]?.id ?? "",
+				summary: `Scratch handoff: compacted the current session around ${scratchPath}.`,
+				firstKeptEntryId: getLatestCompactionEntry(this.sessionManager.getBranch())?.firstKeptEntryId ?? "",
 				tokensBefore,
 			};
 		} finally {
@@ -10780,7 +10781,7 @@ export class AgentSession {
 						);
 						const result = await snapcompact.compact<Message>(
 							{
-								firstKeptEntryId: "scratch-handoff-successor",
+								firstKeptEntryId: "scratch-handoff-context",
 								messagesToSummarize: [
 									{
 										role: "user",
@@ -10849,42 +10850,40 @@ export class AgentSession {
 		];
 	}
 
-	async #startScratchHandoffSession(
+	async #compactScratchHandoffSession(
 		trace: MaintenanceTraceState,
 		pendingMessages: readonly AgentMessage[] = [],
 	): Promise<void> {
 		const scratchContent = await this.#scratchHandoffMessageContent(pendingMessages);
+		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
-		const previousSessionFile = this.sessionFile;
 		await this.sessionManager.flush();
-		await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
-		const preservedSteering = this.agent.peekSteeringQueue().slice();
-		const preservedFollowUp = this.agent.peekFollowUpQueue().slice();
-		this.agent.reset();
-		this.agent.replaceQueues(preservedSteering, preservedFollowUp);
-		this.#freshProviderSessionId = undefined;
-		this.#syncAgentSessionId();
-		this.#rekeyHindsightMemoryForCurrentSessionId();
-		this.#rekeyMnemopiMemoryForCurrentSessionId();
-		await this.#resetMemoryContextForNewTranscript();
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.#todoReminderCount = 0;
-		this.#todoReminderAwaitingProgress = false;
-		this.setTodoPhases([]);
-		await this.#emitMaintenanceTracePhase(trace, "scratch-successor-session-reset");
-		this.sessionManager.appendCustomMessageEntry(
+		const scratchEntryId = this.sessionManager.appendCustomMessageEntry(
 			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 			scratchContent,
 			false,
 			{ path: this.#scratchHandoffDisplayPath },
 			"agent",
 		);
+		this.sessionManager.appendCompaction(
+			"Continue from the scratch handoff state preserved after this compaction.",
+			"Scratch handoff",
+			scratchEntryId,
+			tokensBefore,
+		);
 		await this.sessionManager.ensureOnDisk();
+		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#todoReminderCount = 0;
+		this.#todoReminderAwaitingProgress = false;
+		this.setTodoPhases([]);
+		await this.#emitMaintenanceTracePhase(trace, "scratch-session-compacted");
 		await this.#emitMaintenanceTracePhase(trace, "scratch-read-injected");
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
+		this.#planReferenceSent = false;
 		this.#resetAllAdvisorRuntimes();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
 		await this.#emitMaintenanceTracePhase(trace, "scratch-session-rebuilt");
 	}
 
@@ -12354,8 +12353,8 @@ export class AgentSession {
 	 * until the first account becomes usable again before resuming the goal.
 	 *
 	 * Without usage evidence this stays a typed budget terminal. Under the
-	 * handoff compaction strategy it resets into a scratch successor session with
-	 * todos preserved; otherwise it parks in place, keeping todos and pointing at
+	 * handoff compaction strategy it compacts the current session around the
+	 * scratch state; otherwise it parks in place, keeping todos and pointing at
 	 * the scratch file.
 	 *
 	 * Fires once per budget-limited episode and only after the model has had its
@@ -12363,7 +12362,7 @@ export class AgentSession {
 	 * it), never on the flip turn that queued the steer.
 	 *
 	 * Returns "retry" when a usage-reset continuation was scheduled, "reset" when
-	 * it reset into a successor session (the caller short-circuits the closeout
+	 * it compacted the active context (the caller short-circuits the closeout
 	 * tail), "parked" when it parked in place (the caller skips the todo reminder
 	 * but still runs session-stop hooks), or "none" when not engaged.
 	 */
@@ -12387,8 +12386,8 @@ export class AgentSession {
 		const compaction = this.settings.getGroup("compaction");
 		if (compaction.strategy === "handoff" && compaction.enabled) {
 			// Reuse the scratch-handoff maintenance path with no auto-continue: it
-			// preserves todos, resets into the successor session, and emits the
-			// maintenance trace under the budget reason.
+			// compacts the current session and emits the maintenance trace under the
+			// budget reason.
 			await this.#runAutoCompaction("budget", false, true, false, { autoContinue: false });
 			return "reset";
 		}
@@ -13646,15 +13645,15 @@ export class AgentSession {
 		);
 
 		try {
-			// Emit start AFTER the controller is installed so isCompacting is already true
-			// for any listener — and for input routed during this emit's event-loop yield:
-			// a message typed as the compaction loader appears must land in the compaction
-			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
+			// Emit start after installing the controller so listeners already see
+			// isCompacting. Input arriving during this emit's event-loop yield must
+			// enter the compaction queue, not the core steering queue that the LLM
+			// handoff path resets.
 			await this.#emitMaintenanceTraceStart(trace);
 			await this.#emitMaintenanceTraceDelta(trace, "activity", `Started ${action} maintenance for ${reason}.`);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (action === "scratch-handoff") {
-				await this.#startScratchHandoffSession(trace, options.scratchRecentMessages);
+				await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages);
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,

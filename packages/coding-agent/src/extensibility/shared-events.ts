@@ -223,7 +223,7 @@ export type MaintenanceTracePhase =
 	| "stream"
 	| "action-fallback"
 	| "scratch-target-resolved"
-	| "scratch-successor-session-reset"
+	| "scratch-session-compacted"
 	| "scratch-read-injected"
 	| "scratch-session-rebuilt"
 	| "scratch-todo-synced"

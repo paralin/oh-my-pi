@@ -29,7 +29,7 @@ type ScratchPhase = Exclude<MaintenanceTracePhase, "start" | "stream" | "termina
 
 const SCRATCH_PHASES = new Set<MaintenanceTracePhase>([
 	"scratch-target-resolved",
-	"scratch-successor-session-reset",
+	"scratch-session-compacted",
 	"scratch-read-injected",
 	"scratch-session-rebuilt",
 	"scratch-todo-synced",
@@ -226,14 +226,14 @@ export class MaintenanceTraceCard extends ChatBlock {
 				const suffix = target ? `: ${previewLine(shortenPath(target), TRUNCATE_LENGTHS.SHORT)}` : "";
 				return `Resolved scratch target${suffix}.`;
 			}
-			case "scratch-successor-session-reset":
-				return "Created successor session for scratch handoff.";
+			case "scratch-session-compacted":
+				return "Compacted the current session around the scratch handoff.";
 			case "scratch-read-injected":
-				return "Injected scratch file as the successor session context.";
+				return "Loaded the scratch handoff into the current session context.";
 			case "scratch-session-rebuilt":
-				return "Rebuilt model context from the successor session.";
+				return "Rebuilt model context in the current session.";
 			case "scratch-todo-synced":
-				return "Synced todo state into the successor session.";
+				return "Synced todo state into the compacted session.";
 		}
 	}
 
@@ -256,8 +256,8 @@ export class MaintenanceTraceCard extends ChatBlock {
 		switch (phase) {
 			case "scratch-target-resolved":
 				return "target resolved";
-			case "scratch-successor-session-reset":
-				return "successor session reset";
+			case "scratch-session-compacted":
+				return "session compacted";
 			case "scratch-read-injected":
 				return "scratch read injected";
 			case "scratch-session-rebuilt":

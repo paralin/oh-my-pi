@@ -247,14 +247,14 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"Scratch continuity protocol:",
 		`- Existing scratch org file: ${displayPath}. Its current contents are already in context as continuation state; inspect or update the file only when live state diverges.`,
 		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch updates, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
-		"- Record the loaded skill/command stack in the `Skill stack:` field, in the order it was loaded (e.g. orient -> investigate-issue -> ...), so a successor session reloads and resumes the same stack.",
+		"- Record the loaded skill/command stack in the `Skill stack:` field, in the order it was loaded (e.g. orient -> investigate-issue -> ...), so continuation context reloads and resumes the same stack.",
 		"- Keep `#+TITLE` as a one-line summary of the agent's current purpose when a scratch update is warranted.",
 		"- Keep scratch metadata in root org keywords such as `#+SESSION`, `#+PATH`, and optional `#+PARENT_SCRATCH`; do not add a wrapper heading above the work tree.",
 		"- Resume the active skill/workflow stack recorded in the scratch file or restored session context; do not restart the workflow from its initial capture/orientation step.",
-		"- Treat the scratch file as the durable continuity packet for context pressure, resume, and successor sessions, not a progress log for trivial turns.",
+		"- Treat the scratch file as the durable continuity packet for context pressure, compaction, and process resume, not a progress log for trivial turns.",
 		"- When updating scratch, track work inside the file with org GTD TODO/DONE subheadings. Keep the current work under an active `* TODO ...` heading, record state as bullets under that heading, and add future work as child `** TODO ...` subheadings.",
 		"- A child TODO blocks closing its parent heading. Before marking the parent DONE, complete each child TODO or defer it explicitly with owner, blocker, next action, return condition, and source refs.",
-		"- Keep verification as current proof and residual risk, not a transcript of intermediate skill steps. Record commands only when a successor needs the exact invocation, output, blocker, or falsifier.",
+		"- Keep verification as current proof and residual risk, not a transcript of intermediate skill steps. Record commands only when continuation needs the exact invocation, output, blocker, or falsifier.",
 		"- Do not use the separate todo tool/list for scratch-owned work; scratch org TODO headings are the task tracker in this setup.",
 	];
 	if (parentScratchDisplayPath) {
@@ -288,12 +288,11 @@ export function renderScratchHandoffCloseoutMessage(displayPath: string): string
 }
 
 /**
- * Build the successor session's first model-visible handoff message. It leads
- * with the resume directive (reload the recorded skill stack in load order,
- * continue from the scratch org TODO subheading state, and do not restart),
- * then the scratch file path and its current contents. The recorded skill stack
- * and open TODO headings live inside the scratch body, so the directive surfaces
- * them as the first thing the successor must act on.
+ * Build the first model-visible message after scratch compaction or process
+ * resume. It leads with the directive to reload the recorded skill stack in
+ * load order, continue from the scratch org TODO state, and avoid restarting.
+ * The recorded stack and open TODO headings live inside the scratch body, so
+ * the directive surfaces them before work resumes.
  */
 export function renderScratchHandoffResumeMessage(input: {
 	displayPath: string;

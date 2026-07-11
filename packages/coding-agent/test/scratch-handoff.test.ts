@@ -175,7 +175,7 @@ describe("scratch handoff", () => {
 		}
 	});
 
-	it("preserves pre-handoff background task completion for the scratch successor", async () => {
+	it("preserves pre-compaction background task completion in the same session", async () => {
 		const { session, authStorage } = await createTestSession();
 		const manager = session.asyncJobManager;
 		if (!manager) throw new Error("expected top-level session to own an async job manager");
@@ -212,13 +212,13 @@ describe("scratch handoff", () => {
 			const statusAfterHandoff = manager.getJob(jobId)?.status;
 			const afterSessionId = session.sessionId;
 
-			gate.resolve("child completed after scratch successor");
+			gate.resolve("child completed after scratch compaction");
 			await manager.getJob(jobId)?.promise;
 			await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
 			await session.waitForIdle();
 
 			expect(compactResult.summary).toContain("Scratch handoff");
-			expect(afterSessionId).not.toBe(beforeSessionId);
+			expect(afterSessionId).toBe(beforeSessionId);
 			expect(statusAfterHandoff).toBe("running");
 			expect(abortedByHandoff).toBe(false);
 			expect(manager.getJob(jobId)?.status).toBe("completed");
@@ -237,7 +237,7 @@ describe("scratch handoff", () => {
 				)
 				.join("\n");
 			expect(asyncResults).toHaveLength(1);
-			expect(deliveredText).toContain("child completed after scratch successor");
+			expect(deliveredText).toContain("child completed after scratch compaction");
 			expect(deliveredText.match(/continuity-child-job/g) ?? []).toHaveLength(1);
 		} finally {
 			gate.resolve("cleanup");

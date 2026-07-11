@@ -1117,7 +1117,7 @@ describe("AgentSession handoff", () => {
 		).toBe("context-full");
 	});
 
-	it("refreshes scratch handoff content from disk before resetting without carrying todos", async () => {
+	it("refreshes scratch handoff content from disk before compacting without carrying todos", async () => {
 		await session.dispose();
 		const scratchPath = "agent/current.org";
 		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
@@ -1187,6 +1187,8 @@ describe("AgentSession handoff", () => {
 			scratchHandoffDisplayPath: scratchPath,
 		});
 		session.subscribe(event => events.push(event));
+		const sessionId = sessionManager.getSessionId();
+		const sessionFile = sessionManager.getSessionFile();
 
 		const scratchCompactSpy = vi.spyOn(snapcompact, "compact").mockImplementation(async preparation => ({
 			summary: "Read the attached ScratchCompact archive before continuing.",
@@ -1224,9 +1226,9 @@ describe("AgentSession handoff", () => {
 				expect.objectContaining({ type: "image", mimeType: "image/png" }),
 			]),
 		);
-		// The successor's first message leads with the resume directive (reload the
-		// recorded skill stack in load order, continue from scratch org TODO state,
-		// and keep going) before the scratch-context block.
+		// The compacted context leads with the resume directive: reload the recorded
+		// skill stack in load order, continue from scratch org TODO state, and keep
+		// going.
 		expect(scratchEntry.content).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({
@@ -1251,6 +1253,11 @@ describe("AgentSession handoff", () => {
 			expect.objectContaining({ text: expect.stringContaining("stale launch snapshot") }),
 		]);
 		expect(session.getTodoPhases()).toEqual([]);
+		expect(sessionManager.getSessionId()).toBe(sessionId);
+		expect(sessionManager.getSessionFile()).toBe(sessionFile);
+		const rebuiltContext = JSON.stringify(sessionManager.buildSessionContext().messages);
+		expect(rebuiltContext).toContain("Fresh scratch objective");
+		expect(rebuiltContext).not.toContain("Reuse existing todo list");
 		type MaintenanceEvent = Extract<
 			AgentSessionEvent,
 			| { type: "maintenance_trace_start" }
@@ -1292,7 +1299,7 @@ describe("AgentSession handoff", () => {
 		]);
 		expect(tracePhases.map(event => event.phase)).toEqual([
 			"scratch-target-resolved",
-			"scratch-successor-session-reset",
+			"scratch-session-compacted",
 			"scratch-read-injected",
 			"scratch-session-rebuilt",
 		]);
@@ -1357,7 +1364,7 @@ describe("AgentSession handoff", () => {
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
 	});
 
-	it("routes bare /compact through scratch handoff and reuses the same scratch file across resets", async () => {
+	it("preserves session and scratch identity across repeated bare /compact calls", async () => {
 		await session.dispose();
 		const scratchPath = "agent/current.org";
 		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
@@ -1385,11 +1392,12 @@ describe("AgentSession handoff", () => {
 			scratchHandoffDisplayPath: scratchPath,
 		});
 		session.subscribe(event => events.push(event));
-		// A bare manual /compact must reset into the scratch successor session, never
-		// run an LLM summary.
+		// A bare manual /compact must compact around scratch state without an LLM
+		// summary or a new session identity.
 		const compactSpy = vi.spyOn(compactionModule, "compact");
 		const previousSessionId = session.sessionId;
 		const previousScratchPath = session.getScratchHandoffDisplayPath();
+		const previousSessionFile = sessionManager.getSessionFile();
 
 		const firstResult = await session.compact();
 
@@ -1399,20 +1407,19 @@ describe("AgentSession handoff", () => {
 			expect.objectContaining({ type: "auto_compaction_end", action: "scratch-handoff", aborted: false }),
 		);
 		expect(firstResult.summary).toContain(scratchPath);
-		expect(session.sessionId).not.toBe(previousSessionId);
-		// Requirement (e): the scratch display path is the durable continuity file —
-		// a reset must keep using it, not mint a per-handoff filename.
+		expect(session.sessionId).toBe(previousSessionId);
+		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 		expect(session.getScratchHandoffDisplayPath()).toBe(previousScratchPath);
 		const scratchEntry = sessionManager.getEntries().find(entry => {
 			return entry.type === "custom_message" && entry.customType === "scratch-handoff-read";
 		});
 		expect(scratchEntry?.type).toBe("custom_message");
 
-		// A second bare /compact keeps the same scratch file across the next reset.
-		const sessionIdAfterFirst = session.sessionId;
+		// A second bare /compact preserves the same logical and durable identities.
 		await session.compact();
 		expect(session.getScratchHandoffDisplayPath()).toBe(previousScratchPath);
-		expect(session.sessionId).not.toBe(sessionIdAfterFirst);
+		expect(session.sessionId).toBe(previousSessionId);
+		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);
 	});
 
 	it("keeps scratch handoff out of verification reads after a write", () => {

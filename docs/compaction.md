@@ -133,14 +133,14 @@ The automatic paths are intentionally different:
     threshold maintenance first queues a steer asking the agent to update the
     existing scratch org file as a comprehensive current-work snapshot. After
     that closeout turn, or when the next request is already too large to send,
-    maintenance resets into a successor session from the same scratch file.
-    Mid-turn checks compact in place because resetting while the active tool
-    loop owns its message array would race the next request.
-  - Every successor receives the current scratch file plus the complete session
-    delta after the most recent successful scratch write. Vision-capable models
-    receive that delta as local SnapCompact frames, including tool results;
-    text-only models and render failures receive the serialized text delta.
-    This fallback also covers an untouched initial scratch template.
+    maintenance appends a compaction boundary in the current session and keeps
+    both the session ID and session file unchanged. Mid-turn checks use the same
+    in-place compaction so the active tool loop retains one logical identity.
+  - The compacted context receives the current scratch file plus the complete
+    session delta after the most recent successful scratch write. Vision-capable
+    models receive that delta as local SnapCompact frames, including tool
+    results; text-only models and render failures receive the serialized text
+    delta. This fallback also covers an untouched initial scratch template.
   - On success, if `compaction.autoContinue !== false`, post-turn maintenance
     schedules an agent-authored developer auto-continue prompt from
     `prompts/system/auto-continue.md`; mid-turn maintenance normally resumes
@@ -394,16 +394,17 @@ does not compact the transcript by itself. On startup, a main session with
 3. Appends the scratch compaction protocol to the system prompt, including the
    current scratch file content.
 
-The scratch file is never reset during handoff. Existing files are preserved;
-startup only creates the initial template when the selected path does not
-exist. Threshold closeout prompts ask the agent to maintain scratch as a full
-org-mode snapshot of current work and to org-link large artifacts, traces, logs,
-issues, or plans instead of copying their bodies into the scratch document.
+The scratch file, session ID, and session file are never reset during scratch
+handoff compaction. Existing scratch files are preserved; startup only creates
+the initial template when the selected path does not exist. Threshold closeout
+prompts ask the agent to maintain scratch as a full org-mode snapshot of current
+work and to org-link large artifacts, traces, logs, issues, or plans instead of
+copying their bodies into the scratch document.
 
-At handoff, the runtime locates the newest successful scratch-write marker and
-serializes every subsequent user, assistant, custom, tool-call, and tool-result
-message together with pending in-flight messages. It renders that delta locally
-into provider-shaped SnapCompact frames when the successor model supports
+At compaction, the runtime locates the newest successful scratch-write marker
+and serializes every subsequent user, assistant, custom, tool-call, and
+tool-result message together with pending in-flight messages. It renders that
+delta locally into provider-shaped SnapCompact frames when the model supports
 images. The scratch document remains the durable state owner; the attached
 delta preserves work too recent to have reached it.
 
