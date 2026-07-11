@@ -25,6 +25,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
 import { declareWorkerHostEntry, installWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
+import { runDurableBashWorker } from "./async/durable-bash-worker";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 
@@ -99,8 +100,10 @@ const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
+const DURABLE_BASH_WORKER_ARG = "__omp_worker_durable_bash";
 
-async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
+async function runWorkerEntrypoint(args: readonly string[]): Promise<boolean> {
+	const arg = args[0];
 	if (arg === TINY_WORKER_ARG) {
 		await runTinyWorker();
 		return true;
@@ -157,6 +160,10 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
 		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
+		return true;
+	}
+	if (arg === DURABLE_BASH_WORKER_ARG) {
+		await runDurableBashWorker(args.slice(1));
 		return true;
 	}
 	return false;
@@ -298,7 +305,7 @@ export async function runCli(argv: string[]): Promise<void> {
 	// worker's parked initial messages as soon as the entry module's
 	// top-level evaluation finishes.
 	if (resolvedArgv[0]?.startsWith("__omp_worker_")) {
-		await runWorkerEntrypoint(resolvedArgv[0]);
+		await runWorkerEntrypoint(resolvedArgv);
 		return;
 	}
 

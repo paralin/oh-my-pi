@@ -14,6 +14,7 @@
 ### Fixed
 
 - Fixed scratch handoff losing tool results and minting a new session identity when a tool-loop request crossed the prompt budget. Scratch compaction now preserves the session ID, session file, and scratch file while attaching a bounded SnapCompact archive of the complete post-write delta, with serialized text fallback for text-only models or local rendering failures.
+- Fixed headless background bash jobs terminating with the OMP process. Detached jobs now persist per-session identity, output, and terminal status; resumed sessions can inspect or cancel them without risking PID-reuse kills.
 
 ## [16.4.2] - 2026-07-10
 

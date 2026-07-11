@@ -112,6 +112,8 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 		// consumers without an agent id see everything (legacy behavior).
 		const ownerId = this.session.getAgentId?.() ?? undefined;
 		const ownerFilter = ownerId ? { ownerId } : undefined;
+		const refresh = manager.refreshJobs(ownerFilter);
+		if (refresh) await refresh;
 
 		// `list` is a read-only snapshot mode. Replaces the legacy `jobs://` URL.
 		if (params.list) {
@@ -347,6 +349,9 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			lines.push(`## Still Running (${running.length})\n`);
 			for (const j of running) {
 				lines.push(`- \`${j.id}\` [${j.type}] — ${j.label}`);
+				if (j.resultText) {
+					lines.push("```", j.resultText, "```");
+				}
 			}
 		}
 

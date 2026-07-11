@@ -3485,9 +3485,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel async jobs registered by *this* agent only. Used by teardown and
-	 * owner-changing transitions (newSession, switchSession, dispose) so a
-	 * subagent cleans up its own background work without touching its parent's jobs.
+	 * Cancel async jobs registered by *this* agent only. Owner-changing
+	 * transitions cancel every job; process disposal preserves detached jobs so
+	 * the same persisted session can recover them.
 	 *
 	 * Cancellation runs against this session's scoped manager. Subagents have
 	 * unique agent ids and inherit the parent's manager to clean up their own
@@ -3498,10 +3498,10 @@ export class AgentSession {
 	 *
 	 * No-op when no manager is reachable or this session has no agent id.
 	 */
-	#cancelOwnAsyncJobs(): void {
+	#cancelOwnAsyncJobs(includePersistent = true): void {
 		if (!this.#agentId) return;
 		const manager = this.#asyncJobManager;
-		manager?.cancelAll({ ownerId: this.#agentId });
+		manager?.cancelAll({ ownerId: this.#agentId }, { includePersistent });
 	}
 
 	/**
@@ -6395,11 +6395,9 @@ export class AgentSession {
 		const postPromptDrain = this.#cancelPostPromptTasks();
 		this.agent.abort();
 		await postPromptDrain;
-		// Cancel jobs this agent registered so a subagent's teardown doesn't
-		// leak its background bash/task work into the parent's manager. Only
-		// the session that owns the manager goes on to dispose it (which itself
-		// nukes any leftover jobs and pending deliveries).
-		this.#cancelOwnAsyncJobs();
+		// Cancel in-process work this agent registered. Detached bash jobs are
+		// session-owned durable state and intentionally survive host disposal.
+		this.#cancelOwnAsyncJobs(false);
 		const ownedAsyncManager = this.#ownedAsyncJobManager;
 		if (ownedAsyncManager) {
 			const drained = await ownedAsyncManager.dispose({ timeoutMs: 3_000 });
