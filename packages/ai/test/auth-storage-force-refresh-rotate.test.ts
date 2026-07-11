@@ -302,7 +302,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		expect(second.retryAtMs!).toBeLessThanOrEqual(blockedAfter + 30_000);
 	});
 
-	test("markUsageLimitReached reports no retry time for a single-credential setup", async () => {
+	test("markUsageLimitReached resumes on the block window for a single-credential setup", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 		registerProvider();
 		await authStorage.set(PROVIDER, [
@@ -310,11 +310,19 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		await authStorage.getApiKey(PROVIDER, "sess");
+		const before = Date.now();
 		const outcome = await authStorage.markUsageLimitReached(PROVIDER, "sess", { retryAfterMs: 3_600_000 });
-		// No sibling and no usage-report reset time, so there is no retry/resume
-		// target — but the account is genuinely usage-limited, so `usageLimited` is
-		// true. That flag is what lets the goal-budget continuation wait for capacity
-		// rather than treating the stop as a pure token-budget park.
-		expect(outcome).toEqual({ switched: false, retryAtMs: undefined, usageLimited: true });
+		const after = Date.now();
+		// No sibling, so there is no retry target. With no usage-report reset
+		// time either, the live usage-limit error is itself the evidence: the
+		// credential's block window (now + retryAfterMs) is the soonest known
+		// reset, so `resumeAtMs` reports it — this is what lets a
+		// single-account session sleep out the provider's wait and auto-resume
+		// instead of bailing at the fail-fast cap.
+		expect(outcome.switched).toBe(false);
+		expect(outcome.retryAtMs).toBeUndefined();
+		expect(outcome.usageLimited).toBe(true);
+		expect(outcome.resumeAtMs).toBeGreaterThanOrEqual(before + 3_600_000);
+		expect(outcome.resumeAtMs).toBeLessThanOrEqual(after + 3_600_000);
 	});
 });

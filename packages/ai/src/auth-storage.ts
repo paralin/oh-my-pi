@@ -658,8 +658,12 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
  * window reset (uncapped by the default backoff) combined with `retryAtMs`. It
  * is set even for a single-account pool, so a caller with nowhere to switch can
  * sleep until the account itself resets and auto-resume instead of failing on
- * the provider's blunt retry-after. `undefined` when no usage report makes a
- * concrete reset time known.
+ * the provider's blunt retry-after. When no usage report makes a concrete
+ * reset time known (API-key credential, a failed or lagging usage endpoint),
+ * the live usage-limit error the caller classified is itself the evidence, so
+ * `resumeAtMs` falls back to the current credential's block window (`now` +
+ * the caller's `retryAfterMs`, or the default backoff). It is `undefined` only
+ * on the `usageLimited: false` early return.
  *
  * `usageLimited` is `false` only when a caller asked for usage-report evidence
  * before mutating credential state and the scoped report did not prove the
@@ -3778,6 +3782,16 @@ export class AuthStorage {
 		// exhausted windows (`currentResumeAtMs`); a sibling's is the soonest reset
 		// it was blocked until (`retryAtMs`). Whichever is earlier owns both the
 		// wait target the caller sleeps on and the account it resumes on.
+		// When the usage report supplied no usable-at time (API-key credential,
+		// a failed or lagging usage endpoint), the live usage-limit error that
+		// brought the caller here is itself the evidence: the current
+		// credential's block window (`now` + the caller's retry-after) is the
+		// soonest known reset. Without this fallback a single-account pool has
+		// resumeAtMs undefined and the session bails at the fail-fast cap
+		// instead of sleeping out the provider's own wait and auto-resuming.
+		if (currentResumeAtMs === undefined) {
+			currentResumeAtMs = blockedUntil;
+		}
 		const resumeAtMs = this.#soonestDefined(currentResumeAtMs, retryAtMs);
 		if (resumeAtMs !== undefined) {
 			const switchToSibling =
@@ -4209,6 +4223,12 @@ export class AuthStorage {
 				}
 			}
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+		}
+		// Same fallback as the OAuth path: with no usage-report usable-at time,
+		// the current credential's block window is the soonest known reset, so
+		// single-key pools sleep and auto-resume instead of failing at the cap.
+		if (currentResumeAtMs === undefined) {
+			currentResumeAtMs = blockedUntil;
 		}
 		return {
 			switched: false,
