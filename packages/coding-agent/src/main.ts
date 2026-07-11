@@ -686,12 +686,7 @@ export async function createSessionManager(
 	if (parsed.noSession) {
 		return SessionManager.inMemory();
 	}
-	const continueSessionArg = positionalContinueSessionId(parsed);
-	if (continueSessionArg) {
-		parsed.resume = continueSessionArg;
-		parsed.continue = false;
-		parsed.messages = [];
-	}
+	normalizeContinueSessionArgs(parsed);
 
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
