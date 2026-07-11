@@ -1079,7 +1079,7 @@ describe("resolveCliModel", () => {
 		const suffixed = resolveCliModel({ cliModel: "gpt-5.6-sol:high", modelRegistry: registry });
 		expect(suffixed.error).toBeUndefined();
 		expect(suffixed.model?.provider).toBe("openai-codex");
-		expect(suffixed.thinkingLevel).toBe("high");
+		expect(suffixed.thinkingLevel).toBe(Effort.High);
 
 		// Without an auth probe (mock registries), catalog order still wins so
 		// resolution stays deterministic.
