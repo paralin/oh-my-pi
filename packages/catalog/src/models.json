@@ -17387,6 +17387,26 @@
 			"contextWindow": 200000,
 			"maxTokens": 64000
 		},
+		"nemotron-3-ultra-nvfp4": {
+			"id": "nemotron-3-ultra-nvfp4",
+			"name": "Nemotron 3 Ultra",
+			"api": "devin-agent",
+			"provider": "devin",
+			"baseUrl": "https://server.codeium.com",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"supportsTools": true,
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 64000
+		},
 		"swe-1-6": {
 			"id": "swe-1-6",
 			"name": "SWE-1.6",
@@ -31094,7 +31114,7 @@
 		},
 		"openai/gpt-5.6-terra": {
 			"id": "openai/gpt-5.6-terra",
-			"name": "GPT-5.6 Terra",
+			"name": "GPT-5.6 Terra (new)",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -62693,6 +62713,36 @@
 				]
 			}
 		},
+		"gpt-realtime-2.1": {
+			"id": "gpt-realtime-2.1",
+			"name": "GPT-Realtime-2.1",
+			"api": "openai-responses",
+			"provider": "openai",
+			"baseUrl": "https://api.openai.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 4,
+				"output": 24,
+				"cacheRead": 0.4,
+				"cacheWrite": 0
+			},
+			"contextWindow": 128000,
+			"maxTokens": 32000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			}
+		},
 		"o1": {
 			"id": "o1",
 			"name": "o1",
@@ -87250,7 +87300,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": true,
-				"supportsReasoningEffort": false
+				"supportsReasoningEffort": false,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-4.20-0309-reasoning": {
@@ -87279,7 +87330,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": true,
-				"supportsReasoningEffort": false
+				"supportsReasoningEffort": false,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-4.20-multi-agent-0309": {
@@ -87320,7 +87372,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
+				"supportsReasoningEffort": true,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-4.3": {
@@ -87362,7 +87415,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
+				"supportsReasoningEffort": true,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-4.5": {
@@ -87404,7 +87458,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true
+				"supportsReasoningEffort": true,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-build": {
@@ -87433,7 +87488,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": true,
-				"supportsReasoningEffort": false
+				"supportsReasoningEffort": false,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-build-0.1": {
@@ -87462,7 +87518,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": true,
-				"supportsReasoningEffort": false
+				"supportsReasoningEffort": false,
+				"supportsImageDetailOriginal": false
 			}
 		},
 		"grok-composer-2.5-fast": {
@@ -87490,7 +87547,8 @@
 				"includeEncryptedReasoning": false,
 				"filterReasoningHistory": true,
 				"omitReasoningEffort": true,
-				"supportsReasoningEffort": false
+				"supportsReasoningEffort": false,
+				"supportsImageDetailOriginal": false
 			}
 		}
 	},

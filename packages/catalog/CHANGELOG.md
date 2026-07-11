@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [16.4.2] - 2026-07-10
+
+### Fixed
+
+- Fixed OpenAI Codex model discovery to include the Codex version header alongside the client_version query parameter.
+
 ## [16.4.1] - 2026-07-10
 
 ### Added

@@ -61,7 +61,7 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { mapWithConcurrencyLimit, normalizeConcurrencyLimit, Semaphore } from "./parallel";
+import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { parseIsolationMode } from "./worktree";
@@ -181,13 +181,13 @@ export function formatResultOutputFallback(result: Pick<SingleResult, "output" |
  */
 function renderDescription(
 	agents: AgentDefinition[],
-	maxConcurrency: number,
 	isolationEnabled: boolean,
 	disabledAgents: string[],
 	batchEnabled: boolean,
 	asyncEnabled: boolean,
 	ircEnabled: boolean,
 	parentSpawns: string,
+	maxConcurrency: number,
 ): string {
 	const spawnPolicy = resolveSpawnPolicy(parentSpawns);
 	const spawningDisabled = !spawnPolicy.enabled;
@@ -209,11 +209,11 @@ function renderDescription(
 		defaultAgent: spawnPolicy.defaultAgent,
 		defaultAgentIsGeneric: spawnPolicy.defaultAgent === DEFAULT_SPAWN_AGENT,
 		allowedAgentsText: spawnPolicy.allowedPromptText,
-		MAX_CONCURRENCY: normalizeConcurrencyLimit(maxConcurrency),
 		isolationEnabled,
 		batchEnabled,
 		asyncEnabled,
 		ircEnabled,
+		MAX_CONCURRENCY: Math.trunc(maxConcurrency),
 	});
 }
 
@@ -522,17 +522,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/** Dynamic description that reflects current disabled-agent settings */
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
-		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription(
 			this.#discoveredAgents,
-			maxConcurrency,
 			isolationMode !== "none",
 			disabledAgents,
 			this.#isBatchEnabled(),
 			this.session.settings.get("async.enabled"),
 			isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			this.session.getSessionSpawns() ?? "*",
+			this.session.settings.get("task.maxConcurrency"),
 		);
 	}
 	private constructor(

@@ -39,6 +39,7 @@ Execution blocks your turn: the call only returns once the work is completely fi
 
 # Context and Communication
 Subagents start blank. They have no access to your conversation history.
+{{#if ircEnabled}}- **Steering delivery:** Parent-to-subagent IRC is delivered immediately as steering; subagents blocked in `job poll` / `irc wait` do not need to poll separately for it.{{/if}}
 {{#if batchEnabled}}
 - Pass large payloads using `local://<path>` URIs, never inline text.
 {{else}}

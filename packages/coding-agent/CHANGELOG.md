@@ -5,6 +5,13 @@
 ### Changed
 
 - Tuned default delegation prompts to prefer one substantial subagent, reserve parallel fan-out for independent substantial workstreams, and route cheap per-item classification through smol completions.
+## [16.4.2] - 2026-07-10
+
+### Fixed
+
+- Fixed an issue where BigInt values in tool arguments failed to serialize during session compaction.
+- Resolved an issue where GPT-5.6 over-delegated tasks by refining task fan-out and concurrency policies in the system prompt.
+- Fixed a race condition in concurrent MCP OAuth token refreshes across processes, ensuring rotating refresh tokens are only refreshed once and preventing stale token errors from clearing valid credentials.
 
 ## [16.4.1] - 2026-07-10
 
