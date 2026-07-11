@@ -56,13 +56,13 @@ describe("AgentLifecycleManager", () => {
 		return registry.register({ id, displayName: "task", kind: "sub", session, sessionFile, status: "idle" });
 	}
 
-	it("adopt arms the TTL: an idle agent is parked — session disposed, ref + sessionFile retained", async () => {
+	it("parks once after a long idle suspension", async () => {
 		vi.useFakeTimers();
 		const stub = makeSessionStub();
 		registerIdleSub("1-Sub", stub.session, "/tmp/1-Sub.jsonl");
 		lifecycle.adopt("1-Sub", { idleTtlMs: TTL });
 
-		vi.advanceTimersByTime(TTL);
+		vi.advanceTimersByTime(TTL * 5);
 		await flushAsync();
 
 		const ref = registry.get("1-Sub");

@@ -6,7 +6,8 @@ const MAX_MESSAGE_LENGTH = 25_000;
 
 const cronSchema = type({
 	action: "'set' | 'cancel' | 'list'",
-	"delay_seconds?": type("number").describe("seconds to wait before delivering the user message"),
+	"delay_seconds?": type("number").describe("seconds to wait before the first delivery"),
+	"interval_seconds?": type("number").describe("seconds between recurring deliveries; omit for a one-shot timer"),
 	"message?": type("string").describe("user message to deliver when the timer fires"),
 	"id?": type("string").describe("scheduled timer id to cancel"),
 });
@@ -17,11 +18,12 @@ interface CronJob {
 	id: string;
 	message: string;
 	dueAt: number;
-	timer: NodeJS.Timeout;
+	intervalMs?: number;
+	timer?: NodeJS.Timeout;
 }
 
 export interface CronDetails {
-	jobs: Array<{ id: string; message: string; dueAt: string }>;
+	jobs: Array<{ id: string; message: string; dueAt: string; intervalSeconds?: number }>;
 }
 
 export type CronTool = ToolDefinition<typeof cronSchema, CronDetails>;
@@ -41,17 +43,27 @@ function jobDetails(jobs: Iterable<CronJob>): CronDetails {
 			id: job.id,
 			message: job.message,
 			dueAt: new Date(job.dueAt).toISOString(),
+			...(job.intervalMs === undefined ? {} : { intervalSeconds: job.intervalMs / 1_000 }),
 		})),
 	};
 }
 
-export function createCronRuntime(api: CronMessageAPI): CronRuntime {
+export function createCronRuntime(api: CronMessageAPI, now: () => number = Date.now): CronRuntime {
 	const jobs = new Map<string, CronJob>();
+	const schedule = (job: CronJob, delayMs: number): void => {
+		job.dueAt = now() + delayMs;
+		job.timer = setTimeout(() => {
+			if (jobs.get(job.id) !== job) return;
+			if (job.intervalMs === undefined) jobs.delete(job.id);
+			else schedule(job, job.intervalMs);
+			api.sendUserMessage(job.message, { deliverAs: "followUp" });
+		}, delayMs);
+	};
 	const tool: CronTool = {
 		name: "cron",
 		label: "Cron",
 		description:
-			"Schedule an in-process one-shot timer that delivers a user message to this model session. Use list or cancel to inspect or remove timers. Timers exist only while this OMP process is running.",
+			"Schedule an in-process one-shot or recurring timer that delivers a user message to this model session. Recurring timers coalesce missed intervals after suspension into one delivery. Use list or cancel to inspect or remove timers. Timers exist only while this OMP process is running.",
 		parameters: cronSchema,
 		async execute(_toolCallId, params) {
 			if (params.action === "list") {
@@ -92,21 +104,31 @@ export function createCronRuntime(api: CronMessageAPI): CronRuntime {
 			if (params.delay_seconds > MAX_DELAY_SECONDS) {
 				throw new Error(`delay_seconds cannot exceed ${MAX_DELAY_SECONDS}`);
 			}
+			if (
+				params.interval_seconds !== undefined &&
+				(!Number.isFinite(params.interval_seconds) || params.interval_seconds <= 0)
+			) {
+				throw new Error("interval_seconds must be a positive finite number when provided");
+			}
+			if (params.interval_seconds !== undefined && params.interval_seconds > MAX_DELAY_SECONDS) {
+				throw new Error(`interval_seconds cannot exceed ${MAX_DELAY_SECONDS}`);
+			}
 			const message = params.message?.trim();
 			if (!message) throw new Error("message is required when action is set");
 			if (message.length > MAX_MESSAGE_LENGTH) {
 				throw new Error(`message cannot exceed ${MAX_MESSAGE_LENGTH} characters`);
 			}
 
-			const id = crypto.randomUUID();
-			const dueAt = Date.now() + params.delay_seconds * 1_000;
-			const timer = setTimeout(() => {
-				jobs.delete(id);
-				api.sendUserMessage(message, { deliverAs: "followUp" });
-			}, params.delay_seconds * 1_000);
-			jobs.set(id, { id, message, dueAt, timer });
+			const job: CronJob = {
+				id: crypto.randomUUID(),
+				message,
+				dueAt: 0,
+				intervalMs: params.interval_seconds === undefined ? undefined : params.interval_seconds * 1_000,
+			};
+			jobs.set(job.id, job);
+			schedule(job, params.delay_seconds * 1_000);
 			return {
-				content: [{ type: "text", text: `Scheduled timer ${id} for ${new Date(dueAt).toISOString()}.` }],
+				content: [{ type: "text", text: `Scheduled timer ${job.id} for ${new Date(job.dueAt).toISOString()}.` }],
 				details: jobDetails(jobs.values()),
 			};
 		},

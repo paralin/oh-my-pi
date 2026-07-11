@@ -1,23 +1,23 @@
-import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type CronParams, type CronRuntime, type CronTool, createCronRuntime } from "../src/cron/index.js";
 
 describe("cron extension", () => {
 	let tool: CronTool;
 	let runtime: CronRuntime;
+	let now: number;
 	const sendUserMessage = vi.fn();
 
 	beforeEach(() => {
 		vi.useFakeTimers();
-		setSystemTime(new Date("2026-07-11T12:00:00.000Z"));
+		now = Date.parse("2026-07-11T12:00:00.000Z");
 		sendUserMessage.mockClear();
-		runtime = createCronRuntime({ sendUserMessage });
+		runtime = createCronRuntime({ sendUserMessage }, () => now);
 		tool = runtime.tool;
 	});
 
 	afterEach(() => {
 		runtime.dispose();
 		vi.useRealTimers();
-		setSystemTime();
 	});
 
 	async function execute(params: CronParams) {
@@ -33,6 +33,58 @@ describe("cron extension", () => {
 		vi.advanceTimersByTime(1);
 		expect(sendUserMessage).toHaveBeenCalledWith("Re-check the pull requests.", { deliverAs: "followUp" });
 
+		const list = await execute({ action: "list" });
+		expect(list.details?.jobs).toEqual([]);
+	});
+
+	it("coalesces nine missed recurring intervals into one catch-up delivery", async () => {
+		await execute({
+			action: "set",
+			delay_seconds: 60,
+			interval_seconds: 60,
+			message: "Check the long-running job.",
+		});
+
+		now = Date.parse("2026-07-11T12:10:00.000Z");
+		vi.runOnlyPendingTimers();
+
+		expect(sendUserMessage).toHaveBeenCalledTimes(1);
+		expect(sendUserMessage).toHaveBeenCalledWith("Check the long-running job.", { deliverAs: "followUp" });
+		const list = await execute({ action: "list" });
+		expect(list.details?.jobs).toEqual([
+			expect.objectContaining({
+				dueAt: "2026-07-11T12:11:00.000Z",
+				intervalSeconds: 60,
+			}),
+		]);
+	});
+
+	it("delivers an overdue one-shot timer once and removes it", async () => {
+		await execute({ action: "set", delay_seconds: 60, message: "Wake once." });
+
+		now = Date.parse("2026-07-11T12:10:00.000Z");
+		vi.runOnlyPendingTimers();
+
+		expect(sendUserMessage).toHaveBeenCalledTimes(1);
+		const list = await execute({ action: "list" });
+		expect(list.details?.jobs).toEqual([]);
+	});
+
+	it("does not replay in-process timers after runtime restart", async () => {
+		await execute({
+			action: "set",
+			delay_seconds: 60,
+			interval_seconds: 60,
+			message: "Do not survive restart.",
+		});
+		runtime.dispose();
+
+		runtime = createCronRuntime({ sendUserMessage }, () => now);
+		tool = runtime.tool;
+		now = Date.parse("2026-07-11T12:10:00.000Z");
+		vi.runOnlyPendingTimers();
+
+		expect(sendUserMessage).not.toHaveBeenCalled();
 		const list = await execute({ action: "list" });
 		expect(list.details?.jobs).toEqual([]);
 	});
