@@ -98,6 +98,60 @@ describe("extension flags vs initial message", () => {
 		expect(initialMessage).toBe("diff-context\nreview the diff");
 	});
 
+	it("keeps a continued session id out of the prompt after extension-aware reparse", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const sink: ExtensionFlagSink = {
+			getFlags: () => extFlags,
+			setFlagValue: () => {},
+		};
+		const parsed = applyExtensionFlags(sink, ["--continue", sessionId]);
+		expect(parsed).not.toBeNull();
+		if (!parsed) return;
+
+		normalizeContinueSessionArgs(parsed);
+		const { initialMessage } = buildInitialMessage({ parsed });
+
+		expect(parsed.resume).toBe(sessionId);
+		expect(parsed.continue).toBe(false);
+		expect(parsed.messages).toEqual([]);
+		expect(initialMessage).toBeUndefined();
+	});
+
+	it("does not consume a UUID-shaped extension flag value before extension-aware reparse", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const rawArgs = ["--continue", "--spawn-peer", sessionId];
+		const startupArgs = parseArgs(rawArgs);
+
+		normalizeContinueSessionArgs(startupArgs);
+		expect(startupArgs.continue).toBe(true);
+		expect(startupArgs.resume).toBeUndefined();
+		expect(startupArgs.messages).toEqual([sessionId]);
+
+		const sink: ExtensionFlagSink = {
+			getFlags: () => extFlags,
+			setFlagValue: () => {},
+		};
+		const extensionArgs = applyExtensionFlags(sink, rawArgs);
+		expect(extensionArgs).not.toBeNull();
+		if (!extensionArgs) return;
+
+		normalizeContinueSessionArgs(extensionArgs);
+		expect(extensionArgs.continue).toBe(true);
+		expect(extensionArgs.resume).toBeUndefined();
+		expect(extensionArgs.messages).toEqual([]);
+	});
+
+	it("resolves a continued session id before a later extension flag is known", () => {
+		const sessionId = "019ea530-ffff-7000-8000-000000000000";
+		const rawArgs = ["--continue", sessionId, "--spawn-peer", "reviewer"];
+		const startupArgs = parseArgs(rawArgs);
+
+		normalizeContinueSessionArgs(startupArgs, rawArgs);
+
+		expect(startupArgs.continue).toBe(false);
+		expect(startupArgs.resume).toBe(sessionId);
+		expect(startupArgs.messages).toEqual(["reviewer"]);
+	});
 	it("documents the pre-fix leak: without the flag map the value becomes the first prompt", () => {
 		// This is exactly the startup parse: extensions have not loaded, so the
 		// flag map is absent. `--spawn-peer` is dropped (it starts with `-`) but
