@@ -1401,6 +1401,7 @@ export async function runRootCommand(
 			},
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
+		normalizeContinueSessionArgs(initialArgs, rawArgs);
 		// GLaDOS Boss root runs default their scratch-handoff file to the persistent
 		// same-day Boss/Quorra notes sidecar, so live continuity and the peer claim
 		// record are one file instead of a per-session agent/ scratch. The boss flag
