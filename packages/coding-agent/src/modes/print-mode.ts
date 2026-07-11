@@ -202,9 +202,14 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		}
 	}
 
-	// Send initial message with attachments
+	// Constructor-owned work such as unread session steering may already be
+	// streaming on resume. Queue the explicit print prompt into that turn instead
+	// of racing it, then wait until the requested work fully settles.
 	if (initialMessage !== undefined) {
-		await logger.time("print:prompt:initial", () => session.prompt(initialMessage, { images: initialImages }));
+		await logger.time("print:prompt:initial", () =>
+			session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" }),
+		);
+		await session.waitForIdle();
 		if (await stopIfBudgetReached()) {
 			await session.dispose();
 			return;
@@ -213,7 +218,8 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 
 	// Send remaining messages
 	for (const message of messages) {
-		await logger.time("print:prompt:next", () => session.prompt(message));
+		await logger.time("print:prompt:next", () => session.prompt(message, { streamingBehavior: "steer" }));
+		await session.waitForIdle();
 		if (await stopIfBudgetReached()) {
 			await session.dispose();
 			return;

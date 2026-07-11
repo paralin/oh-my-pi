@@ -62,6 +62,7 @@ function createMockSession(
 		prompt: async () => {
 			await options.onPrompt?.(event => subscription.callback?.(event));
 		},
+		waitForIdle: async () => {},
 		dispose: async () => {},
 	} as unknown as AgentSession;
 }
@@ -148,6 +149,28 @@ describe("Print-mode silent-abort regression", () => {
 		expect(stderrText).toContain("Rate limit exceeded");
 		// process.exit(1) SHOULD have been called
 		expect(exitSpy).toHaveBeenCalledWith(1);
+	});
+
+	it("queues and settles an initial prompt when resume startup is already busy", async () => {
+		const session = createMockSession([]);
+		let busy = true;
+		let streamingBehavior: unknown;
+		session.prompt = async (_text, options) => {
+			streamingBehavior = options?.streamingBehavior;
+			if (busy && streamingBehavior !== "steer") {
+				throw new Error("Agent is already processing");
+			}
+			return true;
+		};
+		session.waitForIdle = async () => {
+			busy = false;
+		};
+
+		await expect(
+			runPrintMode(session, { mode: "text", initialMessage: "status: reply with one line" }),
+		).resolves.toBe(undefined);
+		expect(streamingBehavior).toBe("steer");
+		expect(busy).toBe(false);
 	});
 
 	it("prints thinking blocks only when printThoughts is enabled", async () => {
