@@ -81,7 +81,11 @@ function resolveContextBudgetStop(
 	};
 }
 
-async function writeFinalAssistantText(session: AgentSession, printThoughts: boolean | undefined): Promise<void> {
+async function writeFinalAssistantText(
+	session: AgentSession,
+	printThoughts: boolean | undefined,
+	writeStdout: (data: string) => void,
+): Promise<void> {
 	const state = session.state;
 	const lastMessage = state.messages[state.messages.length - 1];
 
@@ -105,9 +109,9 @@ async function writeFinalAssistantText(session: AgentSession, printThoughts: boo
 
 	for (const content of assistantMsg.content) {
 		if (content.type === "text") {
-			process.stdout.write(`${sanitizeText(content.text)}\n`);
+			writeStdout(`${sanitizeText(content.text)}\n`);
 		} else if (printThoughts && content.type === "thinking" && content.thinking.trim().length > 0) {
-			process.stdout.write(`${sanitizeText(content.thinking)}\n`);
+			writeStdout(`${sanitizeText(content.thinking)}\n`);
 		}
 	}
 }
@@ -126,6 +130,10 @@ function shouldPrintJsonEvent(session: AgentSession, event: AgentSessionEvent): 
 	return session.settings.get("compaction.maintenanceTrace") !== "loader";
 }
 
+function isBrokenPipeError(err: unknown): boolean {
+	return err instanceof Error && "code" in err && err.code === "EPIPE";
+}
+
 /**
  * Run in print (single-shot) mode.
  * Sends prompts to the agent and outputs the result.
@@ -133,12 +141,50 @@ function shouldPrintJsonEvent(session: AgentSession, event: AgentSessionEvent): 
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
 	const { mode, messages = [], initialMessage, initialImages, printThoughts, goal, contextBudgetStop } = options;
 	let textOutputWritten = false;
+	let outputClosed = false;
+	let outputAbort: Promise<void> | undefined;
+	const closeOutput = (): void => {
+		if (outputClosed) return;
+		outputClosed = true;
+		outputAbort = session.abort({ reason: "print output closed" }).catch(err => {
+			logger.warn("Print-mode output-close abort failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		});
+	};
+	const writeStdout = (data: string): void => {
+		if (outputClosed) return;
+		try {
+			process.stdout.write(data);
+		} catch (err) {
+			if (!isBrokenPipeError(err)) throw err;
+			closeOutput();
+		}
+	};
+	const writeJsonOutput = (value: unknown): void => {
+		writeStdout(`${JSON.stringify(value)}\n`);
+	};
+	const handleStdoutError = (err: Error): void => {
+		if (!isBrokenPipeError(err)) throw err;
+		closeOutput();
+	};
+	process.stdout.on("error", handleStdoutError);
+	using _stdoutErrorListener = {
+		[Symbol.dispose]: () => process.stdout.off("error", handleStdoutError),
+	};
+
+	const stopIfOutputClosed = async (): Promise<boolean> => {
+		if (!outputClosed) return false;
+		await outputAbort;
+		await session.dispose();
+		return true;
+	};
 
 	const stopIfBudgetReached = async (): Promise<boolean> => {
 		const stop = resolveContextBudgetStop(session, contextBudgetStop);
 		if (!stop) return false;
 		if (mode === "text" && !textOutputWritten) {
-			await writeFinalAssistantText(session, printThoughts);
+			await writeFinalAssistantText(session, printThoughts, writeStdout);
 			textOutputWritten = true;
 		}
 		const scratchPath = stop.scratchHandoffFile?.trim() || undefined;
@@ -153,7 +199,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			scratchHandoffFile: scratchPath,
 		};
 		if (mode === "json") {
-			process.stdout.write(`${JSON.stringify(event)}\n`);
+			writeJsonOutput(event);
 		} else if (scratchPath) {
 			process.stderr.write(`Context budget stop: using scratch handoff at ${scratchPath}\n`);
 		} else {
@@ -168,9 +214,10 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	if (mode === "json") {
 		const header = session.sessionManager.getHeader();
 		if (header) {
-			process.stdout.write(`${JSON.stringify(header)}\n`);
+			writeJsonOutput(header);
 		}
 	}
+	if (await stopIfOutputClosed()) return;
 	// Set up extensions for print mode (no UI, no command context)
 	await initializeExtensions(session, {
 		reportSendError: (action, err) => {
@@ -187,7 +234,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	session.subscribe(event => {
 		// In JSON mode, output all events
 		if (mode === "json" && shouldPrintJsonEvent(session, event)) {
-			process.stdout.write(`${JSON.stringify(event)}\n`);
+			writeJsonOutput(event);
 		}
 	});
 
@@ -210,7 +257,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" }),
 		);
 		await session.waitForIdle();
+		if (await stopIfOutputClosed()) return;
 		if (await stopIfBudgetReached()) {
+			if (await stopIfOutputClosed()) return;
 			await session.dispose();
 			return;
 		}
@@ -220,7 +269,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	for (const message of messages) {
 		await logger.time("print:prompt:next", () => session.prompt(message, { streamingBehavior: "steer" }));
 		await session.waitForIdle();
+		if (await stopIfOutputClosed()) return;
 		if (await stopIfBudgetReached()) {
+			if (await stopIfOutputClosed()) return;
 			await session.dispose();
 			return;
 		}
@@ -238,7 +289,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 				display: false,
 			}),
 		);
+		if (await stopIfOutputClosed()) return;
 		if (await stopIfBudgetReached()) {
+			if (await stopIfOutputClosed()) return;
 			await session.dispose();
 			return;
 		}
@@ -246,17 +299,34 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 
 	// In text mode, output final response
 	if (mode === "text" && !textOutputWritten) {
-		await writeFinalAssistantText(session, printThoughts);
+		await writeFinalAssistantText(session, printThoughts, writeStdout);
+		if (await stopIfOutputClosed()) return;
 	}
 
 	// Ensure stdout is fully flushed before returning
 	// This prevents race conditions where the process exits before all output is written
 	await new Promise<void>((resolve, reject) => {
-		process.stdout.write("", err => {
-			if (err) reject(err);
-			else resolve();
-		});
+		try {
+			process.stdout.write("", err => {
+				if (!err) {
+					resolve();
+				} else if (isBrokenPipeError(err)) {
+					closeOutput();
+					resolve();
+				} else {
+					reject(err);
+				}
+			});
+		} catch (err) {
+			if (!isBrokenPipeError(err)) {
+				reject(err);
+				return;
+			}
+			closeOutput();
+			resolve();
+		}
 	});
+	await outputAbort;
 
 	await session.dispose();
 }

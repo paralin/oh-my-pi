@@ -77,6 +77,7 @@ function parseJsonEventType(line: string): string {
 
 describe("Print-mode silent-abort regression", () => {
 	let exitSpy: Mock<typeof process.exit>;
+	let stdoutSpy: Mock<typeof process.stdout.write>;
 	let stderrOutput: string[];
 	let stdoutOutput: string[];
 
@@ -88,7 +89,7 @@ describe("Print-mode silent-abort regression", () => {
 			return true;
 		});
 		exitSpy = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-		vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
+		stdoutSpy = vi.spyOn(process.stdout, "write").mockImplementation((...args: unknown[]) => {
 			const chunk = args[0];
 			if (typeof chunk === "string") stdoutOutput.push(chunk);
 			// Invoke callback if present (runPrintMode flushes stdout before returning)
@@ -187,6 +188,90 @@ describe("Print-mode silent-abort regression", () => {
 		stdoutOutput = [];
 		await runPrintMode(createMockSession([message]), { mode: "text", printThoughts: true });
 		expect(stdoutOutput.join("")).toBe("inspect hidden branch\nfinal answer\n");
+	});
+
+	it("contains a closed JSON output pipe and aborts the active turn", async () => {
+		const brokenPipe = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+		let writes = 0;
+		stdoutSpy.mockImplementation(() => {
+			writes++;
+			throw brokenPipe;
+		});
+		const session = createMockSession([], {
+			onPrompt: emit => {
+				emit({ type: "turn_start" });
+				emit({ type: "turn_end", message: makeAssistantMessage(), toolResults: [] });
+			},
+		});
+		const abort = vi.fn(async () => {});
+		session.abort = abort;
+		const dispose = vi.fn(async () => {});
+		session.dispose = dispose;
+
+		await expect(runPrintMode(session, { mode: "json", initialMessage: "go" })).resolves.toBeUndefined();
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(writes).toBe(1);
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("contains a closed output pipe while writing final text", async () => {
+		const brokenPipe = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+		let writes = 0;
+		stdoutSpy.mockImplementation(() => {
+			writes++;
+			throw brokenPipe;
+		});
+		const message = makeAssistantMessage({
+			content: [
+				{ type: "thinking", thinking: "hidden" },
+				{ type: "text", text: "final answer" },
+			],
+		});
+		const session = createMockSession([message]);
+		const abort = vi.fn(async () => {});
+		session.abort = abort;
+		const dispose = vi.fn(async () => {});
+		session.dispose = dispose;
+
+		await expect(runPrintMode(session, { mode: "text", printThoughts: true })).resolves.toBeUndefined();
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(writes).toBe(1);
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
+	it("contains an asynchronous EPIPE emitted by the JSON output stream", async () => {
+		const brokenPipe = Object.assign(new Error("broken pipe"), { code: "EPIPE" });
+		const listenersBefore = process.stdout.listenerCount("error");
+		const session = createMockSession([], {
+			onPrompt: emit => {
+				emit({ type: "turn_start" });
+				process.stdout.emit("error", brokenPipe);
+				emit({ type: "turn_end", message: makeAssistantMessage(), toolResults: [] });
+			},
+		});
+		const abort = vi.fn(async () => {});
+		session.abort = abort;
+		const dispose = vi.fn(async () => {});
+		session.dispose = dispose;
+
+		await expect(runPrintMode(session, { mode: "json", initialMessage: "go" })).resolves.toBeUndefined();
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(stdoutOutput).toHaveLength(1);
+		expect(dispose).toHaveBeenCalledTimes(1);
+		expect(process.stdout.listenerCount("error")).toBe(listenersBefore);
+	});
+
+	it("preserves failures from unrelated stdout errors", async () => {
+		const outputError = Object.assign(new Error("output failed"), { code: "EIO" });
+		const listenersBefore = process.stdout.listenerCount("error");
+		const session = createMockSession([], {
+			onPrompt: () => {
+				process.stdout.emit("error", outputError);
+			},
+		});
+
+		await expect(runPrintMode(session, { mode: "json", initialMessage: "go" })).rejects.toBe(outputError);
+		expect(process.stdout.listenerCount("error")).toBe(listenersBefore);
 	});
 
 	it("defaults maintenance traces to assistant visibility", () => {
