@@ -151,7 +151,7 @@ describe("ModelHub", () => {
 	});
 
 	describe("role chips and roles view", () => {
-		test("shows configured role chips with thinking glyphs, including custom roles", () => {
+		test("tags the selected model's roles in the detail line, including custom roles", () => {
 			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 			if (!model) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
 			const settings = Settings.isolated({
@@ -173,7 +173,7 @@ describe("ModelHub", () => {
 			expect(rendered).toContain("●smol");
 		});
 
-		test("renders hollow chips for auto-selected role fallbacks", () => {
+		test("list rows carry no role chips; only the selected model's detail line is tagged", () => {
 			const settings = Settings.isolated({});
 			const haiku = makeModel("test", "claude-haiku-4.5");
 			const codex = makeModel("test", "gpt-5.1-codex");
@@ -181,10 +181,11 @@ describe("ModelHub", () => {
 			installTestTheme();
 
 			const rendered = normalize(hub.render(220));
-			// No roles configured: auto-selection still tags the small/reasoning
-			// candidates (smol → haiku, slow → codex), rendered hollow.
-			expect(rendered).toContain("○smol");
-			expect(rendered).toContain("○slow");
+			// Auto-selection tags smol → haiku and slow → codex, but only the
+			// selected model's chips render (in the detail line). With row
+			// chips both would appear at once.
+			const hollow = ["○smol", "○slow"].filter(chip => rendered.includes(chip));
+			expect(hollow).toHaveLength(1);
 			expect(rendered).not.toContain("●smol");
 		});
 
@@ -686,6 +687,85 @@ describe("ModelHub", () => {
 
 			hub.handleInput("\n");
 			expect(onPick.mock.calls[0]?.[0]?.id).toBe("cc-model");
+		});
+	});
+
+	describe("mouse wheel", () => {
+		// SGR wheel reports: button 64 = up, 65 = down. Column 100 lands in the
+		// body pane, column 3 in the sidebar; row 10 is inside the content rows.
+		const WHEEL_UP_BODY = "\x1b[<64;100;10M";
+		const WHEEL_DOWN_BODY = "\x1b[<65;100;10M";
+		const WHEEL_UP_SIDEBAR = "\x1b[<64;3;10M";
+		const WHEEL_DOWN_SIDEBAR = "\x1b[<65;3;10M";
+
+		test("wheel pans the model list without moving the selection and clamps at the ends", () => {
+			const models = Array.from({ length: 40 }, (_, i) => makeModel("test", `model-${String(i).padStart(2, "0")}`));
+			const { hub, onPick } = createHub({ models, scoped: true, hub: { mode: "pick" } });
+
+			const before = normalize(hub.render(220)); // establishes mouse geometry
+			hub.handleInput("\n");
+			expect(onPick).toHaveBeenCalledTimes(1);
+			const initiallySelected = onPick.mock.calls[0]?.[0];
+
+			// Panning reveals rows that were below the fold...
+			for (let i = 0; i < 8; i++) hub.handleInput(WHEEL_DOWN_BODY);
+			const panned = normalize(hub.render(220));
+			const modelIdsIn = (frame: string) => new Set(Array.from(frame.matchAll(/model-\d\d/g), match => match[0]));
+			const beforeIds = modelIdsIn(before);
+			const revealed = [...modelIdsIn(panned)].filter(id => !beforeIds.has(id));
+			expect(revealed.length).toBeGreaterThan(0);
+
+			// ...but never moves the selection: Enter still picks the same model.
+			hub.handleInput("\n");
+			expect(onPick).toHaveBeenCalledTimes(2);
+			expect(onPick.mock.calls[1]?.[0]).toBe(initiallySelected);
+
+			// The window clamps at the bottom instead of wrapping back to the top...
+			for (let i = 0; i < 500; i++) hub.handleInput(WHEEL_DOWN_BODY);
+			const saturated = normalize(hub.render(220));
+			hub.handleInput(WHEEL_DOWN_BODY);
+			expect(normalize(hub.render(220))).toBe(saturated);
+
+			// ...and scrolling back up restores the original window exactly.
+			for (let i = 0; i < 500; i++) hub.handleInput(WHEEL_UP_BODY);
+			expect(normalize(hub.render(220))).toBe(before);
+		});
+
+		test("wheel over the sidebar never changes the active scope or schedules refreshes", () => {
+			vi.useFakeTimers();
+			try {
+				const refreshProvider = vi.fn(async () => {});
+				const { hub } = createHub({
+					models: [makeModel("prov-a", "model-a"), makeModel("prov-b", "model-b")],
+					registry: { refreshProvider },
+				});
+
+				expect(normalize(hub.render(220))).toContain("All available models");
+
+				// Two hops under the old wheel-selects behavior would land on a
+				// provider scope; the viewport pan must leave the scope alone.
+				for (let i = 0; i < 2; i++) hub.handleInput(WHEEL_DOWN_SIDEBAR);
+				expect(normalize(hub.render(220))).toContain("All available models");
+				for (let i = 0; i < 2; i++) hub.handleInput(WHEEL_UP_SIDEBAR);
+				expect(normalize(hub.render(220))).toContain("All available models");
+
+				// No scope change means no provider auto-refresh either.
+				vi.advanceTimersByTime(200); // past the 120ms provider-refresh debounce
+				expect(refreshProvider).not.toHaveBeenCalled();
+			} finally {
+				vi.useRealTimers();
+			}
+		});
+
+		test("wheel in the roles view clamps at the top instead of wrapping to the bottom rows", () => {
+			const { hub } = createHub({ models: [makeModel("test", "model-a")], scoped: true });
+
+			hub.handleInput(UP); // All models → Roles
+			hub.render(220); // establish mouse geometry
+			for (let i = 0; i < 4; i++) hub.handleInput(WHEEL_UP_BODY); // cursor stays on the first role
+			hub.handleInput("\n"); // dive into the rows
+			hub.handleInput("\n"); // activate the cursor row
+			expect(normalize(hub.render(220))).toContain("Assigning DEFAULT");
 		});
 	});
 
