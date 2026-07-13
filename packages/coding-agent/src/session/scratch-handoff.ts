@@ -247,10 +247,10 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"Scratch continuity protocol:",
 		`- Existing scratch org file: ${displayPath}. Its current contents are already in context as continuation state; inspect or update the file only when live state diverges.`,
 		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch updates, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
-		"- Record the loaded skill/command stack in the `Skill stack:` field, in the order it was loaded (e.g. orient -> investigate-issue -> ...), so continuation context reloads and resumes the same stack.",
+		"- Record only the current task's active skill stack in the `Skill stack:` field, in original load order (e.g. orient -> investigate-issue -> ...). Exclude skills that are no longer relevant.",
 		"- Keep `#+TITLE` as a one-line summary of the agent's current purpose when a scratch update is warranted.",
 		"- Keep scratch metadata in root org keywords such as `#+SESSION`, `#+PATH`, and optional `#+PARENT_SCRATCH`; do not add a wrapper heading above the work tree.",
-		"- Resume the active skill/workflow stack recorded in the scratch file or restored session context; do not restart the workflow from its initial capture/orientation step.",
+		"- On resume, load exactly the recorded `Skill stack:` in original order before any task work. NEVER discover, autoload, or substitute unrelated skills; continue the active workflow without restarting its initial capture/orientation step.",
 		"- Treat the scratch file as the durable continuity packet for context pressure, compaction, and process resume, not a progress log for trivial turns.",
 		"- When updating scratch, track work inside the file with org GTD TODO/DONE subheadings. Keep the current work under an active `* TODO ...` heading, record state as bullets under that heading, and add future work as child `** TODO ...` subheadings.",
 		"- A child TODO blocks closing its parent heading. Before marking the parent DONE, complete each child TODO or defer it explicitly with owner, blocker, next action, return condition, and source refs.",
@@ -267,7 +267,7 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 		"- Significant-work exception: if a significant amount of non-trivial work has already been done and completing it is projected to require significant further work after a likely handoff, update scratch before that handoff risk; trivial lookups, small edits, and routine status changes do not qualify.",
 		"- When an update is warranted, refine the same org heading instead of appending duplicate status blocks; add a new TODO subheading only for real child work.",
 		"- Do not rewrite or re-output the whole summary when the file is already current.",
-		"- The scratch file must be a full, comprehensive snapshot of current work so another agent can resume with little to no warm-up: current objective, loaded skill/command stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
+		"- The scratch file must be a full, comprehensive snapshot of current work so another agent can resume with little to no warm-up: current objective, task-relevant active skill stack in load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
 		"- Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch; the scratch document is the resumption index and current-state snapshot, not an artifact dump.",
 		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta; if scratch is stale because an update was warranted, update it into the comprehensive snapshot before handoff.",
 		"- If no update is needed, leave the file unchanged; do not report scratch state to the user.",
@@ -279,11 +279,12 @@ function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPat
 
 export function renderScratchHandoffCloseoutMessage(displayPath: string): string {
 	return [
-		"Context maintenance threshold reached.",
-		`Before doing any more task work, update the existing scratch org file at ${displayPath}.`,
+		"Context maintenance threshold reached. PENCILS DOWN.",
+		`This turn is now scratch-handoff maintenance only. Before any more task work, update the existing scratch org file at ${displayPath}.`,
 		"Do not clear, recreate, truncate, rename, or replace the scratch file with a fresh template.",
-		"Render the current TODO heading as a full, comprehensive snapshot of the current work so another agent can resume with little to no warm-up: objective, loaded skill/command stack, completed work, touched files, current proof, blockers or risks, next action, and source refs.",
-		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path. After the scratch write succeeds, stop without emitting a user-facing scratch status or naming the scratch path; the runtime observes the write directly.",
+		"Update the current TODO heading completely and accurately as a full, comprehensive snapshot so another agent can resume with little to no warm-up: objective, task-relevant active skill stack in original load order, completed work, touched files, current proof, blockers or risks, next action, and source refs.",
+		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path.",
+		"After the scratch write succeeds, END THE TURN immediately. NEVER start or continue task work, invoke another task tool, emit a user-facing scratch status, or name the scratch path. The next turn or agent resumes from the scratch; the runtime observes the write directly.",
 	].join("\n");
 }
 
@@ -319,7 +320,7 @@ export function renderScratchHandoffResumeMessage(input: {
 				: "";
 	return [
 		"Resume this session from the scratch handoff below.",
-		"Reload and continue the skill/command stack recorded in the scratch file, in its original load order, and continue from the scratch file's org TODO subheading state. Continue the work already in progress.",
+		"Before any other work, load exactly the task-relevant skill stack recorded in the scratch file's `Skill stack:` field, in its original load order. NEVER load unrelated skills. Then continue from the scratch file's org TODO subheading state and resume the work already in progress.",
 		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
 		"",
 		scratchContext,

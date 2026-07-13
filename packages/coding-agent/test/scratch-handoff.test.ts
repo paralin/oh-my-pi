@@ -90,12 +90,15 @@ describe("scratch handoff", () => {
 			expect(document).toContain(`#+SESSION: ${sessionManager.getSessionId()}`);
 			expect(document).toContain(`#+PATH: ${scratch.displayPath}`);
 			expect(document).toContain("* TODO Current work");
+			expect(document).toContain("- Skill stack: ");
 			expect(document).not.toContain("* Scratch Handoff");
 			const promptText = session.systemPrompt.join("\n\n");
 			expect(promptText).toContain("Scratch continuity protocol:");
 			expect(promptText).toContain(`Existing scratch org file: ${scratch.displayPath}.`);
 			expect(promptText).toContain("Continue exactly as if no context reset, compaction, or handoff occurred.");
 			expect(promptText).toContain("Do not mention, log, summarize, or count scratch loading");
+			expect(promptText).toContain("Record only the current task's active skill stack");
+			expect(promptText).toContain("load exactly the recorded `Skill stack:`");
 			expect(promptText).toContain("Keep `#+TITLE` as a one-line summary");
 			expect(promptText).toContain("Keep scratch metadata in root org keywords");
 			expect(promptText).toContain("Keep the current work under an active `* TODO ...` heading");
@@ -115,7 +118,7 @@ describe("scratch handoff", () => {
 			expect(scratchContext.content).toEqual([
 				expect.objectContaining({
 					text: expect.stringContaining(
-						"Reload and continue the skill/command stack recorded in the scratch file",
+						"Before any other work, load exactly the task-relevant skill stack recorded in the scratch file's `Skill stack:` field",
 					),
 				}),
 			]);

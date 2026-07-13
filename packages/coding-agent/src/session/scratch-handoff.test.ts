@@ -193,6 +193,9 @@ describe("scratch handoff prompt", () => {
 				date: new Date("2026-06-30T00:00:00.000Z"),
 			});
 
+			expect(context?.scratchText).toContain("- Skill stack: ");
+			expect(context?.prompt).toContain("Record only the current task's active skill stack");
+			expect(context?.prompt).toContain("load exactly the recorded `Skill stack:`");
 			expect(context?.prompt).toContain("Org wrapping the scratch document is unnecessary");
 			expect(context?.prompt).toContain("do not run a formatter solely for scratch-handoff text");
 			expect(context?.prompt).toContain("Scratch continuity is internal maintenance, not task evidence.");
@@ -229,15 +232,33 @@ describe("scratch handoff prompt", () => {
 		}
 	});
 
-	it("asks threshold closeout to write a comprehensive snapshot and link artifacts", () => {
+	it("puts pencils down after a complete threshold closeout snapshot", () => {
 		const prompt = renderScratchHandoffCloseoutMessage("agent/current.org");
 
+		expect(prompt).toContain("PENCILS DOWN");
+		expect(prompt).toContain("scratch-handoff maintenance only");
+		expect(prompt).toContain("completely and accurately");
 		expect(prompt).toContain("full, comprehensive snapshot");
+		expect(prompt).toContain("task-relevant active skill stack in original load order");
 		expect(prompt).toContain("little to no warm-up");
 		expect(prompt).toContain("Org-link artifacts");
 		expect(prompt).toContain("Do not clear, recreate, truncate, rename, or replace");
-		expect(prompt).toContain("stop without emitting a user-facing scratch status");
+		expect(prompt).toContain("END THE TURN immediately");
+		expect(prompt).toContain("NEVER start or continue task work");
+		expect(prompt).toContain("The next turn or agent resumes from the scratch");
 		expect(prompt).not.toContain("stop with a brief note");
+	});
+	it("resumes by loading exactly the recorded skill stack before work", () => {
+		const message = renderScratchHandoffResumeMessage({
+			displayPath: "agent/current.org",
+			scratchText: "- Skill stack: orient -> investigate-issue",
+		});
+
+		expect(message).toContain("Before any other work");
+		expect(message).toContain("load exactly the task-relevant skill stack");
+		expect(message).toContain("`Skill stack:` field");
+		expect(message).toContain("NEVER load unrelated skills");
+		expect(message).toContain("- Skill stack: orient -> investigate-issue");
 	});
 });
 
