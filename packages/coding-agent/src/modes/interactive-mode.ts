@@ -101,6 +101,7 @@ import {
 } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
 import { HistoryStorage } from "../session/history-storage";
+import { latestPersistedScratchHandoffPathSelection } from "../session/scratch-handoff";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
@@ -976,7 +977,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
-		await this.#reconcileModeFromSession();
+		// Scratch compaction is an internal continuity boundary, not a user pause.
+		// Ordinary resumes still pause active goals before the user re-engages.
+		// The persisted read marker identifies the boundary without changing the
+		// session's mode history.
+		const resumedAfterScratchHandoff =
+			latestPersistedScratchHandoffPathSelection(this.sessionManager.getBranch()) !== undefined;
+		await this.#reconcileModeFromSession({ preserveActiveGoal: resumedAfterScratchHandoff });
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no

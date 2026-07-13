@@ -11,6 +11,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { ModelRegistry } from "../src/config/model-registry";
 import { InteractiveMode } from "../src/modes/interactive-mode";
+import { SCRATCH_HANDOFF_READ_CUSTOM_TYPE } from "../src/session/scratch-handoff";
 
 function makeTool(name: string): AgentTool {
 	return {
@@ -230,6 +231,70 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 
 		expect(created.planModeEnabled).toBe(false);
 		expect(session?.getPlanModeState()).toBeUndefined();
+	});
+
+	it("preserves an active goal when startup resumes after scratch handoff", async () => {
+		const created = createHarness(Settings.isolated({ "goal.enabled": true, "compaction.enabled": false }), {
+			extraRegistryTools: [makeTool("goal")],
+			builtInToolNames: ["read", "resolve", "goal"],
+		});
+		const now = Date.now();
+		const goal = {
+			id: "goal-scratch-handoff",
+			objective: "Ship the release",
+			status: "active",
+			tokensUsed: 12,
+			timeUsedSeconds: 3,
+			createdAt: now,
+			updatedAt: now,
+		};
+		created.sessionManager.appendModeChange("goal", { goal });
+		created.sessionManager.appendCustomMessageEntry(
+			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+			[{ type: "text", text: "Current scratch continuity state." }],
+			false,
+			{ path: "agent/current.org" },
+			"agent",
+		);
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(created.goalModeEnabled).toBe(true);
+		expect(created.goalModePaused).toBe(false);
+		expect(session?.getActiveToolNames()).toContain("goal");
+		expect(session?.getGoalModeState()).toMatchObject({
+			enabled: true,
+			mode: "active",
+			goal,
+		});
+	});
+
+	it("keeps ordinary active-goal startup resume paused", async () => {
+		const created = createHarness(Settings.isolated({ "goal.enabled": true, "compaction.enabled": false }), {
+			extraRegistryTools: [makeTool("goal")],
+			builtInToolNames: ["read", "resolve", "goal"],
+		});
+		const now = Date.now();
+		created.sessionManager.appendModeChange("goal", {
+			goal: {
+				id: "goal-ordinary-resume",
+				objective: "Ship the release",
+				status: "active",
+				tokensUsed: 12,
+				timeUsedSeconds: 3,
+				createdAt: now,
+				updatedAt: now,
+			},
+		});
+
+		await created.init({ suppressWelcomeIntro: true });
+
+		expect(created.goalModeEnabled).toBe(false);
+		expect(created.goalModePaused).toBe(true);
+		expect(session?.getGoalModeState()).toMatchObject({
+			enabled: false,
+			goal: { id: "goal-ordinary-resume", status: "paused" },
+		});
 	});
 
 	it("does not enter plan mode when plan mode is globally disabled", async () => {

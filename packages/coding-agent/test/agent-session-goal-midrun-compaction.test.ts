@@ -205,6 +205,18 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
 	});
+	it("preserves active goal state through manual scratch handoff compaction", async () => {
+		const { session } = await createHarness(
+			{ "compaction.strategy": "handoff" },
+			{ scratchHandoffDisplayPath: "agent/current.org" },
+		);
+		const state = activeGoalState();
+		session.setGoalModeState(state);
+
+		await session.compact();
+
+		expect(session.getGoalModeState()).toEqual(state);
+	});
 
 	it("falls back to in-place compaction for mid-run handoff strategy", async () => {
 		const { session, observedContexts } = await createHarness({ "compaction.strategy": "handoff" });
@@ -285,12 +297,14 @@ describe("AgentSession mid-run threshold compaction", () => {
 			},
 			{ modelContextWindow: 55_000, scratchHandoffDisplayPath: "agent/current.org" },
 		);
+		session.setGoalModeState(activeGoalState());
 		const events: AgentSessionEvent[] = [];
 		session.subscribe(event => events.push(event));
 
 		await session.prompt("work on the release");
 		await session.waitForIdle();
 
+		expect(session.getGoalModeState()).toMatchObject({ enabled: true, goal: { status: "active" } });
 		expect(observedContexts).toHaveLength(1);
 		expect(events).toContainEqual(
 			expect.objectContaining({
