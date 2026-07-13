@@ -57,7 +57,11 @@ describe("loadAllExtensions MCP parity with /mcp list (issue #3827)", () => {
 			}),
 		);
 
-		const settings = await Settings.init({ inMemory: true, cwd: projectDir });
+		const settings = await Settings.init({
+			inMemory: true,
+			cwd: projectDir,
+			overrides: { disabledProviders: [] },
+		});
 		initializeWithSettings(settings);
 	});
 

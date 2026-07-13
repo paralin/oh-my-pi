@@ -234,8 +234,8 @@ describe("evaluateCodexAutoRedeem", () => {
 			input([report(1.0, 3 * DAY, 1)], { settings: { autoRedeem: false, minBlockedMinutes: 60, keepCredits: 0 } }),
 		);
 		expect(decision).toEqual({ redeem: false, reason: "disabled" });
-		// The public setting defaults to prompt-on-eligibility, not silent spend.
-		expect(SETTINGS_SCHEMA["codexResets.autoRedeem"].default).toBe("unset");
+		// The public setting defaults to disabling checks; explicit "unset" still prompts on eligibility.
+		expect(SETTINGS_SCHEMA["codexResets.autoRedeem"].default).toBe("no");
 		expect(shouldEvaluateCodexAutoRedeem("unset")).toBe(true);
 		expect(shouldPromptCodexAutoRedeem("unset")).toBe(true);
 		expect(shouldEvaluateCodexAutoRedeem("yes")).toBe(true);
@@ -245,7 +245,7 @@ describe("evaluateCodexAutoRedeem", () => {
 	});
 
 	it("migrates legacy boolean autoRedeem config to the tri-state policy", () => {
-		expect(Settings.isolated().get("codexResets.autoRedeem")).toBe("unset");
+		expect(Settings.isolated().get("codexResets.autoRedeem")).toBe("no");
 		expect(Settings.isolated({ "codexResets.autoRedeem": true }).get("codexResets.autoRedeem")).toBe("yes");
 		expect(Settings.isolated({ "codexResets.autoRedeem": false }).get("codexResets.autoRedeem")).toBe("no");
 	});

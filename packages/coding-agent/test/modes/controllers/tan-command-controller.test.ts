@@ -105,6 +105,7 @@ function createContext(overrides?: {
 	const session = {
 		isStreaming: overrides?.isStreaming ?? false,
 		model: overrides?.model ?? model,
+		agent: { promptCacheKey: undefined },
 		asyncJobManager: { register },
 		sessionId: "parent-session",
 		configuredThinkingLevel: vi.fn(() => undefined),

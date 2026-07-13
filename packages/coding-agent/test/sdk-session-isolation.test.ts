@@ -231,7 +231,7 @@ describe("createAgentSession session storage isolation", () => {
 				modelRegistry: sharedModelRegistry,
 				sessionManager: resumedManager,
 				model,
-				settings: Settings.isolated({ "secrets.enabled": true }),
+				settings: Settings.isolated({ "secrets.enabled": true, "scratchHandoff.enabled": false }),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],

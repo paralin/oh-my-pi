@@ -64,13 +64,13 @@ describe("createTools", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("creates all builtin tools by default", async () => {
+	it("creates the enabled builtin tools by default", async () => {
 		const session = createTestSession();
 		const tools = await createTools(session);
 		const names = tools.map(t => t.name);
 
-		// Core tools should always be present
-		expect(names).toContain("eval");
+		// Eval and todo are opt-in; the other core tools remain available.
+		expect(names).not.toContain("eval");
 		expect(names).toContain("bash");
 		expect(names).toContain("read");
 		expect(names).toContain("edit");
@@ -79,7 +79,7 @@ describe("createTools", () => {
 		expect(names).toContain("glob");
 		expect(names).toContain("lsp");
 		expect(names).toContain("task");
-		expect(names).toContain("todo");
+		expect(names).not.toContain("todo");
 		expect(names).toContain("web_search");
 		expect(names).toContain("resolve");
 		expect(names).toContain("goal");
@@ -130,7 +130,12 @@ describe("createTools", () => {
 	});
 
 	it("still exposes eval when python kernel is unavailable (dispatches to js)", async () => {
-		const session = createTestSession();
+		const session = createTestSession({
+			settings: createSettingsWithOverrides({
+				"eval.py": true,
+				"eval.js": true,
+			}),
+		});
 		vi.spyOn(
 			await import("@oh-my-pi/pi-coding-agent/eval/py/kernel"),
 			"checkPythonKernelAvailability",
@@ -218,7 +223,7 @@ describe("createTools", () => {
 		expect(tools.map(t => t.name)).not.toContain("ask");
 
 		const requested = await createTools(session, ["ask", "read"]);
-		expect(requested.map(t => t.name)).toEqual(["read", "resolve"]);
+		expect(requested.map(t => t.name)).toEqual(["read", "goal", "resolve"]);
 	});
 
 	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {

@@ -1265,9 +1265,13 @@ export class Settings {
 					break;
 				case "openai-only":
 					setTier("openai", "priority");
+					setTier("anthropic", "none");
+					setTier("google", "none");
 					break;
 				case "claude-only":
 					setTier("anthropic", "priority");
+					setTier("openai", "none");
+					setTier("google", "none");
 					break;
 				case "auto":
 				case "default":

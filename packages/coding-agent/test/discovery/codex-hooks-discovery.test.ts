@@ -28,7 +28,11 @@ describe("codex hook discovery", () => {
 		tempCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-codex-hooks-cwd-"));
 		process.env.HOME = tempHome;
 		vi.spyOn(os, "homedir").mockReturnValue(tempHome);
-		const settings = await Settings.init({ inMemory: true, cwd: tempCwd });
+		const settings = await Settings.init({
+			inMemory: true,
+			cwd: tempCwd,
+			overrides: { disabledProviders: [] },
+		});
 		initializeWithSettings(settings);
 		await fs.mkdir(path.join(tempHome, ".codex", "hooks"), { recursive: true });
 	});

@@ -1,5 +1,6 @@
-import { beforeAll, describe, expect, test, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, test, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
@@ -66,6 +67,12 @@ describe("InteractiveMode.showStatus", () => {
 	beforeAll(async () => {
 		// showStatus uses the global theme instance
 		await initTheme();
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true });
+	});
+
+	afterAll(() => {
+		resetSettingsForTest();
 	});
 
 	test("coalesces immediately-sequential status messages", () => {

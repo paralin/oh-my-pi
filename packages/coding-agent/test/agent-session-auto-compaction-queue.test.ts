@@ -133,6 +133,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 			modelRegistry,
 			extensionRunner,
 		});
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.thresholdTokens", -1);
+		session.settings.set("compaction.thresholdPercent", -1);
+		session.settings.set("todo.enabled", true);
 	});
 
 	afterEach(async () => {

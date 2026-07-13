@@ -114,6 +114,9 @@ describe("AgentSession auto-compaction progress guard", () => {
 			settings: Settings.isolated({
 				// Auto-continue ON so the guarded auto-continue path is exercised.
 				"compaction.autoContinue": true,
+				"compaction.strategy": "snapcompact",
+				"compaction.thresholdTokens": -1,
+				"todo.enabled": true,
 			}),
 			modelRegistry,
 			extensionRunner,

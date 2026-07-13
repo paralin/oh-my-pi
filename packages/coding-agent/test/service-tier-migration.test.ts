@@ -56,6 +56,7 @@ describe("serviceTier → tier.* settings migration", () => {
 		const claude = await loadWith({ serviceTier: "claude-only" });
 		expect(claude.get("tier.anthropic")).toBe("priority");
 		expect(claude.get("tier.openai")).toBe("none");
+		expect(claude.get("tier.google")).toBe("none");
 	});
 
 	it("maps plain OpenAI tiers onto the OpenAI family", async () => {
@@ -75,7 +76,7 @@ describe("serviceTier → tier.* settings migration", () => {
 
 	it("leaves a fresh config on the per-family defaults", async () => {
 		const settings = await loadWith({});
-		expect(settings.get("tier.openai")).toBe("none");
+		expect(settings.get("tier.openai")).toBe("default");
 		expect(settings.get("tier.subagent")).toBe("inherit");
 		expect(settings.get("tier.advisor")).toBe("none");
 	});

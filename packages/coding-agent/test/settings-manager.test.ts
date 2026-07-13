@@ -116,6 +116,54 @@ describe("Settings", () => {
 	});
 
 	describe("defaults", () => {
+		it("resolves the built-in operator defaults without a user config", async () => {
+			expect(await Bun.file(getConfigPath()).exists()).toBe(false);
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("disabledProviders")).toEqual([
+				"claude",
+				"claude-plugins",
+				"codex",
+				"gemini",
+				"opencode",
+				"github",
+				"cursor",
+				"cline",
+				"vscode",
+				"windsurf",
+			]);
+			expect(settings.get("defaultThinkingLevel")).toBe("auto");
+			expect(settings.get("tier.openai")).toBe("default");
+			expect(settings.get("statusLine.preset")).toBe("custom");
+			expect(settings.get("statusLine.leftSegments")).toEqual([
+				"model",
+				"mode",
+				"collab",
+				"path",
+				"pr",
+				"context_pct",
+				"cost",
+			]);
+			expect(settings.get("statusLine.rightSegments")).toEqual(["session_name"]);
+			expect(settings.get("codexResets.autoRedeem")).toBe("no");
+			expect(settings.get("eval.py")).toBe(false);
+			expect(settings.get("eval.js")).toBe(false);
+			expect(settings.get("compaction.strategy")).toBe("handoff");
+			expect(settings.get("compaction.handoffSaveToDisk")).toBe(true);
+			expect(settings.get("compaction.thresholdTokens")).toBe(242000);
+			expect(settings.get("scratchHandoff.enabled")).toBe(true);
+			expect(settings.get("scratchHandoff.rootDir")).toBe("agent");
+			expect(settings.get("todo.enabled")).toBe(false);
+			expect(settings.get("dev.autoqa.consent")).toBe("denied");
+			expect(settings.get("startup.checkUpdate")).toBe(false);
+
+			expect(settings.get("setupVersion")).toBe(0);
+			expect(settings.get("modelRoles")).toEqual({});
+			expect(settings.get("providers.webSearch")).toBe("auto");
+			expect(settings.get("providers.codexHomes")).toEqual([]);
+		});
+
 		it("keeps eight inline images live by default", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);

@@ -294,6 +294,28 @@ const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["job", "irc"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+const DEFAULT_DISABLED_PROVIDERS: string[] = [
+	"claude",
+	"claude-plugins",
+	"codex",
+	"gemini",
+	"opencode",
+	"github",
+	"cursor",
+	"cline",
+	"vscode",
+	"windsurf",
+];
+const DEFAULT_STATUS_LINE_LEFT_SEGMENTS: StatusLineSegmentId[] = [
+	"model",
+	"mode",
+	"collab",
+	"path",
+	"pr",
+	"context_pct",
+	"cost",
+];
+const DEFAULT_STATUS_LINE_RIGHT_SEGMENTS: StatusLineSegmentId[] = ["session_name"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -488,7 +510,7 @@ export const SETTINGS_SCHEMA = {
 
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 
-	disabledProviders: { type: "array", default: EMPTY_STRING_ARRAY },
+	disabledProviders: { type: "array", default: DEFAULT_DISABLED_PROVIDERS },
 
 	"providers.maxInFlightRequests": {
 		type: "record",
@@ -573,7 +595,7 @@ export const SETTINGS_SCHEMA = {
 	"statusLine.preset": {
 		type: "enum",
 		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
-		default: "default",
+		default: "custom",
 		ui: {
 			tab: "appearance",
 			group: "Status Line",
@@ -762,9 +784,9 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.leftSegments": { type: "array", default: DEFAULT_STATUS_LINE_LEFT_SEGMENTS },
 
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
+	"statusLine.rightSegments": { type: "array", default: DEFAULT_STATUS_LINE_RIGHT_SEGMENTS },
 
 	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
 
@@ -974,7 +996,7 @@ export const SETTINGS_SCHEMA = {
 	defaultThinkingLevel: {
 		type: "enum",
 		values: [...THINKING_EFFORTS, AUTO_THINKING],
-		default: "high",
+		default: AUTO_THINKING,
 		ui: {
 			tab: "model",
 			group: "Thinking",
@@ -1293,7 +1315,7 @@ export const SETTINGS_SCHEMA = {
 	"tier.openai": {
 		type: "enum",
 		values: SERVICE_TIER_OPENAI_VALUES,
-		default: "none",
+		default: "default",
 		ui: {
 			tab: "model",
 			group: "Sampling",
@@ -1644,7 +1666,7 @@ export const SETTINGS_SCHEMA = {
 
 	"startup.checkUpdate": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "interaction",
 			group: "Startup & Updates",
@@ -1965,7 +1987,7 @@ export const SETTINGS_SCHEMA = {
 	"compaction.strategy": {
 		type: "enum",
 		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
-		default: "snapcompact",
+		default: "handoff",
 		ui: {
 			tab: "context",
 			group: "Compaction",
@@ -2055,7 +2077,7 @@ export const SETTINGS_SCHEMA = {
 	},
 	"compaction.thresholdTokens": {
 		type: "number",
-		default: -1,
+		default: 242000,
 		ui: {
 			tab: "context",
 			group: "Compaction",
@@ -2068,6 +2090,7 @@ export const SETTINGS_SCHEMA = {
 				{ value: "100000", label: "100K tokens", description: "Half of a 200K window" },
 				{ value: "150000", label: "150K tokens", description: "Three-quarters of a 200K window" },
 				{ value: "200000", label: "200K tokens", description: "Full standard context window" },
+				{ value: "242000", label: "242K tokens", description: "Built-in handoff threshold" },
 				{ value: "300000", label: "300K tokens", description: "Large context window" },
 				{ value: "500000", label: "500K tokens", description: "Very large context window" },
 			],
@@ -2076,7 +2099,7 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.handoffSaveToDisk": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "context",
 			group: "Compaction",
@@ -2087,7 +2110,7 @@ export const SETTINGS_SCHEMA = {
 
 	"scratchHandoff.enabled": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "context",
 			group: "Scratch Handoff",
@@ -3332,7 +3355,7 @@ export const SETTINGS_SCHEMA = {
 	// Eval (per-backend toggles; add more as new backends ship, e.g. eval.ts)
 	"eval.py": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
@@ -3343,7 +3366,7 @@ export const SETTINGS_SCHEMA = {
 
 	"eval.js": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "shell",
 			group: "Eval & Runtimes",
@@ -3476,7 +3499,7 @@ export const SETTINGS_SCHEMA = {
 	// Todo tool
 	"todo.enabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
@@ -4879,7 +4902,7 @@ export const SETTINGS_SCHEMA = {
 	"codexResets.autoRedeem": {
 		type: "enum",
 		values: ["unset", "yes", "no"] as const,
-		default: "unset" as const,
+		default: "no" as const,
 		ui: {
 			tab: "providers",
 			group: "Services",
@@ -5077,7 +5100,7 @@ export const SETTINGS_SCHEMA = {
 	"dev.autoqa.consent": {
 		type: "enum",
 		values: ["unset", "granted", "denied"] as const,
-		default: "unset" as const,
+		default: "denied" as const,
 	},
 
 	"gc.blobs": { type: "boolean", default: true },

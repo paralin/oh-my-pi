@@ -71,6 +71,7 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		"compaction.enabled": false,
 		"goal.enabled": true,
 		"plan.enabled": true,
+		"todo.enabled": true,
 	});
 	const bootstrapToolSession = createToolSession(tempDir.path(), settings);
 	const initialTools = await createTools(bootstrapToolSession);
