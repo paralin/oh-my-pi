@@ -3,7 +3,10 @@ full. This turn is scratch-handoff maintenance only.
 
 Update the scratch handoff completely and accurately with:
 - Current objective
-- Task-relevant active skill stack in original load order
+- Only skills required by the current open TODO or next concrete action, in
+  original relative load order. NEVER copy session history. Remove
+  completed-phase, one-shot, stale, superseded, duplicate, and merely historical
+  skills; an empty stack is valid.
 - Work completed
 - Files changed
 - Verification already run

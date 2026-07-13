@@ -97,8 +97,10 @@ describe("scratch handoff", () => {
 			expect(promptText).toContain(`Existing scratch org file: ${scratch.displayPath}.`);
 			expect(promptText).toContain("Continue exactly as if no context reset, compaction, or handoff occurred.");
 			expect(promptText).toContain("Do not mention, log, summarize, or count scratch loading");
-			expect(promptText).toContain("Record only the current task's active skill stack");
-			expect(promptText).toContain("load exactly the recorded `Skill stack:`");
+			expect(promptText).toContain("minimal continuation dependency list, not session history");
+			expect(promptText).toContain("current open TODO or next concrete action");
+			expect(promptText).toContain("NEVER mechanically replay the full field");
+			expect(promptText).not.toContain("load exactly the recorded `Skill stack:`");
 			expect(promptText).toContain("Keep `#+TITLE` as a one-line summary");
 			expect(promptText).toContain("Keep scratch metadata in root org keywords");
 			expect(promptText).toContain("Keep the current work under an active `* TODO ...` heading");
@@ -118,8 +120,18 @@ describe("scratch handoff", () => {
 			expect(scratchContext.content).toEqual([
 				expect.objectContaining({
 					text: expect.stringContaining(
-						"Before any other work, load exactly the task-relevant skill stack recorded in the scratch file's `Skill stack:` field",
+						"Load only relevant entries from its `Skill stack:` field, preserving their recorded order",
 					),
+				}),
+			]);
+			expect(scratchContext.content).toEqual([
+				expect.objectContaining({
+					text: expect.stringContaining("NEVER mechanically replay the full field"),
+				}),
+			]);
+			expect(scratchContext.content).toEqual([
+				expect.objectContaining({
+					text: expect.not.stringContaining("Before any other work, load exactly"),
 				}),
 			]);
 			const scratchText = Array.isArray(scratchContext.content)

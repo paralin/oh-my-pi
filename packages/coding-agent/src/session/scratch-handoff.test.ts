@@ -194,8 +194,11 @@ describe("scratch handoff prompt", () => {
 			});
 
 			expect(context?.scratchText).toContain("- Skill stack: ");
-			expect(context?.prompt).toContain("Record only the current task's active skill stack");
-			expect(context?.prompt).toContain("load exactly the recorded `Skill stack:`");
+			expect(context?.prompt).toContain("minimal continuation dependency list, not session history");
+			expect(context?.prompt).toContain("current open TODO or next concrete action");
+			expect(context?.prompt).toContain("Leave it empty when no skill is currently required");
+			expect(context?.prompt).toContain("NEVER mechanically replay the full field");
+			expect(context?.prompt).not.toContain("load exactly the recorded `Skill stack:`");
 			expect(context?.prompt).toContain("Org wrapping the scratch document is unnecessary");
 			expect(context?.prompt).toContain("do not run a formatter solely for scratch-handoff text");
 			expect(context?.prompt).toContain("Scratch continuity is internal maintenance, not task evidence.");
@@ -239,7 +242,9 @@ describe("scratch handoff prompt", () => {
 		expect(prompt).toContain("scratch-handoff maintenance only");
 		expect(prompt).toContain("completely and accurately");
 		expect(prompt).toContain("full, comprehensive snapshot");
-		expect(prompt).toContain("task-relevant active skill stack in original load order");
+		expect(prompt).toContain("only skills required by the current open TODO or next concrete action");
+		expect(prompt).toContain("skill stack is not session history");
+		expect(prompt).toContain("leave it empty when none are required");
 		expect(prompt).toContain("little to no warm-up");
 		expect(prompt).toContain("Org-link artifacts");
 		expect(prompt).toContain("Do not clear, recreate, truncate, rename, or replace");
@@ -248,17 +253,21 @@ describe("scratch handoff prompt", () => {
 		expect(prompt).toContain("The next turn or agent resumes from the scratch");
 		expect(prompt).not.toContain("stop with a brief note");
 	});
-	it("resumes by loading exactly the recorded skill stack before work", () => {
+	it("resumes with judgment instead of replaying historical skills", () => {
 		const message = renderScratchHandoffResumeMessage({
 			displayPath: "agent/current.org",
-			scratchText: "- Skill stack: orient -> investigate-issue",
+			scratchText:
+				"- Skill stack: orient -> investigate-issue -> write-review -> investigate-issue\n- Next action: fix parser",
 		});
 
-		expect(message).toContain("Before any other work");
-		expect(message).toContain("load exactly the task-relevant skill stack");
-		expect(message).toContain("`Skill stack:` field");
-		expect(message).toContain("NEVER load unrelated skills");
-		expect(message).toContain("- Skill stack: orient -> investigate-issue");
+		expect(message).toContain("current open TODO and next action");
+		expect(message).toContain("Load only relevant entries");
+		expect(message).toContain("Skip clearly irrelevant, stale, historical, or duplicate entries");
+		expect(message).toContain("apply normal skill matching");
+		expect(message).toContain("NEVER mechanically replay the full field");
+		expect(message).not.toContain("Before any other work");
+		expect(message).not.toContain("load exactly");
+		expect(message).toContain("- Skill stack: orient -> investigate-issue -> write-review -> investigate-issue");
 	});
 });
 
