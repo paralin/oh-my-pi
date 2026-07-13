@@ -52,6 +52,7 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { GLADOS_BOSS_FLAG, resolveBossScratchHandoffFile } from "./glados/boss-extension";
+import { registerDaemonProjectPresence } from "./launch/presence";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -931,6 +932,64 @@ export async function buildSessionOptions(
 		if (!options.model) options.model = scopedModels[0].model;
 	}
 
+	const hasReasoningSlideModel = parsed.reasoningSlideModel !== undefined;
+	const hasReasoningSlideTurns = parsed.reasoningSlideTurns !== undefined;
+	const hasReasoningSlideOnAction = parsed.reasoningSlideOnAction === true;
+	if (hasReasoningSlideModel && hasReasoningSlideTurns === hasReasoningSlideOnAction) {
+		throw new Error(
+			"--reasoning-slide-model requires exactly one trigger: --reasoning-slide-turns or --reasoning-slide-on-action",
+		);
+	}
+	if ((hasReasoningSlideTurns || hasReasoningSlideOnAction) && !hasReasoningSlideModel) {
+		throw new Error("--reasoning-slide-turns/--reasoning-slide-on-action require --reasoning-slide-model");
+	}
+	if (parsed.reasoningSlidePlan && !hasReasoningSlideModel) {
+		throw new Error("--reasoning-slide-plan requires a reasoning slide (--reasoning-slide-model + trigger)");
+	}
+	if (parsed.reasoningSlidePlanAt !== undefined && !parsed.reasoningSlidePlan) {
+		throw new Error("--reasoning-slide-plan-at requires --reasoning-slide-plan");
+	}
+	if (hasReasoningSlideModel) {
+		let afterTurns: number | undefined;
+		if (hasReasoningSlideTurns) {
+			afterTurns = Number(parsed.reasoningSlideTurns);
+			if (!Number.isSafeInteger(afterTurns) || afterTurns < 1) {
+				throw new Error("--reasoning-slide-turns must be a positive integer");
+			}
+		}
+		let planAtTurn: number | undefined;
+		if (parsed.reasoningSlidePlanAt !== undefined) {
+			planAtTurn = Number(parsed.reasoningSlidePlanAt);
+			const belowTurns = afterTurns === undefined || planAtTurn < afterTurns;
+			if (!Number.isSafeInteger(planAtTurn) || planAtTurn < 1 || !belowTurns) {
+				throw new Error("--reasoning-slide-plan-at must be a positive integer below --reasoning-slide-turns");
+			}
+		}
+		const resolved = resolveCliModel({
+			cliModel: parsed.reasoningSlideModel,
+			modelRegistry,
+			preferences: modelMatchPreferences,
+		});
+		if (resolved.warning) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+		}
+		if (resolved.error || !resolved.model) {
+			throw new Error(resolved.error ?? `Model "${parsed.reasoningSlideModel}" not found`);
+		}
+		if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
+			throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
+		}
+		options.reasoningSlide = {
+			target: resolved.model,
+			afterTurns,
+			onFirstAction: hasReasoningSlideOnAction || undefined,
+			thinkingLevel: resolved.thinkingLevel,
+			plan: parsed.reasoningSlidePlan === true,
+			planAtTurn,
+			checklist: parsed.reasoningSlideChecklist === true,
+		};
+	}
+
 	// Thinking level
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
@@ -1017,6 +1076,7 @@ interface RunRootCommandDependencies {
 	settings?: Settings;
 	forceSetupWizard?: boolean;
 }
+const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
 
 function toRuntimeCodexHomeChain(credentials: CodexHomeCredential[]): RuntimeApiKeyChainCredential[] {
 	return credentials.map(credential => ({
@@ -1031,7 +1091,7 @@ function toRuntimeCodexHomeChain(credentials: CodexHomeCredential[]): RuntimeApi
 export async function runRootCommand(
 	parsed: Args,
 	rawArgs: string[],
-	deps: RunRootCommandDependencies = {},
+	deps: RunRootCommandDependencies = DEFAULT_RUN_ROOT_DEPENDENCIES,
 ): Promise<void> {
 	logger.startTiming();
 	startStartupWatchdog();
@@ -1308,6 +1368,9 @@ export async function runRootCommand(
 	}
 
 	await pluginPreloadPromise;
+	if (deps === DEFAULT_RUN_ROOT_DEPENDENCIES) {
+		await logger.time("registerDaemonProjectPresence", registerDaemonProjectPresence, cwd);
+	}
 
 	scheduleMarketplaceAutoUpdate({
 		autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
