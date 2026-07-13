@@ -7,20 +7,13 @@ describe("generic agent-arg / env passthrough", () => {
 			"--model",
 			"anthropic/claude-opus-4-8",
 			"--agent-arg",
-			"--reasoning-slide-model",
+			"--downshift",
+			"--agent-arg",
+			"--downshift-into",
 			"--agent-arg",
 			"google/gemini-3.5-flash",
-			"--agent-arg",
-			"--reasoning-slide-turns",
-			"--agent-arg",
-			"3",
 		]);
-		expect(cfg.agentArgs).toEqual([
-			"--reasoning-slide-model",
-			"google/gemini-3.5-flash",
-			"--reasoning-slide-turns",
-			"3",
-		]);
+		expect(cfg.agentArgs).toEqual(["--downshift", "--downshift-into", "google/gemini-3.5-flash"]);
 
 		const env = buildHarborEnv(cfg, "/tmp/models.yml", null, "test");
 		expect(JSON.parse(env.OMP_BENCH_AGENT_ARGS ?? "[]")).toEqual(cfg.agentArgs);
@@ -94,5 +87,43 @@ describe("parseArgs validation", () => {
 	it("defaults to a generic, dataset-agnostic jobs directory", () => {
 		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8"]);
 		expect(cfg.jobsDir.endsWith("/runs/harbor")).toBe(true);
+	});
+});
+
+describe("environment backends", () => {
+	it("defaults to docker with the host.docker.internal gateway", () => {
+		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8"]);
+		expect(cfg.envType).toBe("docker");
+		expect(cfg.gatewayUrl).toBe("http://host.docker.internal:4000");
+	});
+
+	it("apple-container swaps the default gateway host to the vmnet bridge address", () => {
+		const cfg = parseArgs(["--model", "anthropic/claude-opus-4-8", "--environment", "apple-container"]);
+		expect(cfg.envType).toBe("apple-container");
+		expect(cfg.gatewayUrl).toBe("http://192.168.64.1:4000");
+	});
+
+	it("an explicit --gateway-url wins over the apple-container default, regardless of flag order", () => {
+		const cfg = parseArgs([
+			"--model",
+			"anthropic/claude-opus-4-8",
+			"--gateway-url",
+			"http://10.0.0.5:9999",
+			"--environment",
+			"apple-container",
+		]);
+		expect(cfg.gatewayUrl).toBe("http://10.0.0.5:9999");
+	});
+
+	it("rejects --host-network with apple-container (compose overlay is docker-only)", () => {
+		expect(() =>
+			parseArgs(["--model", "anthropic/claude-opus-4-8", "--environment", "apple-container", "--host-network"]),
+		).toThrow(/docker-only/);
+	});
+
+	it("rejects an invalid --environment value", () => {
+		expect(() => parseArgs(["--model", "anthropic/claude-opus-4-8", "--environment", "podman"])).toThrow(
+			/--environment must be/,
+		);
 	});
 });

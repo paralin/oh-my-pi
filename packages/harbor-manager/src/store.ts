@@ -27,13 +27,16 @@ export interface RunRow {
 	dataset: string;
 	agent: string;
 	models: string;
-	slide: string | null;
+	/** JSON downshift config (`{ into?: string }`); older rows may hold legacy reasoning-slide JSON. */
+	downshift: string | null;
 	/** Benchmark-specific launch configuration. */
 	config: Record<string, unknown>;
 	/** Role inside the experiment (baseline vs treatment); "" when unspecified. */
 	role: RunRole;
-	/** One-line description of what this arm tests (e.g. "slide→flash after 8 turns"). */
+	/** One-line description of what this arm tests (e.g. "downshift→flash at first edit/write"). */
 	note: string;
+	/** Display-name override for the arm; "" falls back to the jobName-derived arm label. */
+	label: string;
 	status: RunStatus;
 	pid: number | null;
 	exitCode: number | null;
@@ -75,7 +78,7 @@ export interface LaunchRecord {
 	dataset: string;
 	agent: string;
 	models: string[];
-	slide?: { model: string; turns?: number; onAction?: boolean; plan?: boolean };
+	downshift?: { into?: string };
 	pid: number;
 	role?: RunRole;
 	note?: string;
@@ -89,9 +92,10 @@ CREATE TABLE IF NOT EXISTS runs (
 	dataset TEXT NOT NULL DEFAULT '',
 	agent TEXT NOT NULL DEFAULT 'omp',
 	models TEXT NOT NULL DEFAULT '',
-	slide TEXT,
+	downshift TEXT,
 	role TEXT NOT NULL DEFAULT '',
 	note TEXT NOT NULL DEFAULT '',
+	label TEXT NOT NULL DEFAULT '',
 	config_json TEXT NOT NULL DEFAULT '{}',
 	status TEXT NOT NULL DEFAULT 'running',
 	pid INTEGER,
@@ -150,6 +154,7 @@ export class RunStore {
 		);
 		if (!runColumns.has("role")) this.#db.run("ALTER TABLE runs ADD COLUMN role TEXT NOT NULL DEFAULT ''");
 		if (!runColumns.has("note")) this.#db.run("ALTER TABLE runs ADD COLUMN note TEXT NOT NULL DEFAULT ''");
+		if (!runColumns.has("label")) this.#db.run("ALTER TABLE runs ADD COLUMN label TEXT NOT NULL DEFAULT ''");
 		if (!runColumns.has("benchmark")) {
 			this.#db.run("ALTER TABLE runs ADD COLUMN benchmark TEXT NOT NULL DEFAULT 'harbor'");
 		}
@@ -159,6 +164,12 @@ export class RunStore {
 		if (!runColumns.has("score")) this.#db.run("ALTER TABLE runs ADD COLUMN score REAL");
 		if (!runColumns.has("metrics_json")) {
 			this.#db.run("ALTER TABLE runs ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'");
+		}
+		if (runColumns.has("slide") && !runColumns.has("downshift")) {
+			this.#db.run("ALTER TABLE runs RENAME COLUMN slide TO downshift");
+		}
+		if (!runColumns.has("slide") && !runColumns.has("downshift")) {
+			this.#db.run("ALTER TABLE runs ADD COLUMN downshift TEXT");
 		}
 		const traceColumns = new Set(
 			(this.#db.query("PRAGMA table_info(trials)").all() as Array<{ name: string }>).map(c => c.name),
@@ -176,7 +187,7 @@ export class RunStore {
 		this.#db
 			.query(
 				`INSERT INTO runs
-				 (job_name, benchmark, dataset, agent, models, slide, role, note, config_json, status, pid, created_at)
+				 (job_name, benchmark, dataset, agent, models, downshift, role, note, config_json, status, pid, created_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
 				 ON CONFLICT(job_name) DO UPDATE SET
 					benchmark = excluded.benchmark, pid = excluded.pid, status = 'running',
@@ -190,7 +201,7 @@ export class RunStore {
 				launch.dataset,
 				launch.agent,
 				launch.models.join(","),
-				launch.slide ? JSON.stringify(launch.slide) : null,
+				launch.downshift ? JSON.stringify(launch.downshift) : null,
 				launch.role ?? "",
 				launch.note ?? "",
 				JSON.stringify(launch.config ?? {}),
@@ -217,13 +228,13 @@ export class RunStore {
 		return row?.goal ?? "";
 	}
 
-	/** Set role/note metadata on an existing run row. */
-	setRunMeta(jobName: string, meta: { role?: RunRole; note?: string }): boolean {
+	/** Set role/note/label metadata on an existing run row. */
+	setRunMeta(jobName: string, meta: { role?: RunRole; note?: string; label?: string }): boolean {
 		const existing = this.getRun(jobName);
 		if (!existing) return false;
 		this.#db
-			.query("UPDATE runs SET role = ?, note = ? WHERE job_name = ?")
-			.run(meta.role ?? existing.role, meta.note ?? existing.note, jobName);
+			.query("UPDATE runs SET role = ?, note = ?, label = ? WHERE job_name = ?")
+			.run(meta.role ?? existing.role, meta.note ?? existing.note, meta.label ?? existing.label, jobName);
 		return true;
 	}
 
@@ -413,10 +424,11 @@ function rowToRun(r: Record<string, unknown>): RunRow {
 		dataset: String(r.dataset),
 		agent: String(r.agent),
 		models: String(r.models),
-		slide: r.slide === null ? null : String(r.slide),
+		downshift: r.downshift === null ? null : String(r.downshift),
 		config: JSON.parse(String(r.config_json ?? "{}")),
 		role: String(r.role ?? "") as RunRole,
 		note: String(r.note ?? ""),
+		label: String(r.label ?? ""),
 		status: String(r.status) as RunStatus,
 		pid: r.pid === null ? null : Number(r.pid),
 		exitCode: r.exit_code === null ? null : Number(r.exit_code),

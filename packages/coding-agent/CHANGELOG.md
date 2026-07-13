@@ -2,9 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced the `--reasoning-slide-*` flag family (`--reasoning-slide-model`, `--reasoning-slide-turns`, `--reasoning-slide-on-action`, `--reasoning-slide-plan`, `--reasoning-slide-plan-at`, `--reasoning-slide-checklist`) with a single downshift mechanism: `--downshift` switches from the starting model to a fast/cheap target at the first completed turn that starts execution — the todo-list init the plan nudge asks for, or any edit/write tool — always with the hidden plan nudge before the switch and the verify-before-finishing checklist after it (the configuration that won benchmark testing). `--downshift-into <model>` overrides the default "smol"-role target and implies `--downshift`; `--no-downshift` force-disables. The fixed-turn trigger and per-piece plan/checklist toggles are gone.
+
 ### Added
 
 - Added the `--service-tier` launch flag to temporarily override `tier.openai` for a normal session
+- Added `--downshift` / `--downshift-into <model>` / `--no-downshift`: start on a strong model, then hand off to a fast/cheap one (default the `smol` role) at the first edit/write tool call *after* the todo list has been initialized. The starting model handles all planning and todo initialization, and begins implementation, before handing off; the fast model includes a verify checklist before finishing. Enable per-user with the `downshift.enabled` setting; force it mid-session with the new `/downshift` slash command, which arms the switch.
 - Added display setting to toggle between collapsing or keeping compacted history inline, now applied to live session displays
 - Added a compact session-only model picker (Alt+P) for quick model switching without changing roles
 - Added `@` search to the Alt+P / `/switch` picker: it lists configured Ctrl+P quick roles in matching segment colors and applies the selected role's model and thinking for the current session.
@@ -15,6 +20,7 @@
 ### Changed
 
 - Updated built-in coding-agent defaults for provider selection, reasoning, status display, handoff compaction, scratch continuity, tool availability, Codex resets, update checks, and AutoQA consent.
+- Refined the downshift planning instructions to require a super-detailed todo list with one item per concrete step, each specifying its target and verification method
 - Updated tangential agent forks to ignore parent session history and focus exclusively on the new request
 - Hardened `/tan` fork isolation: the clone's inherited todo list is cleared at fork (parent todo reminders no longer drag the tan back onto the parent's task), the fork notice warns that the parent is concurrently editing the same working directory, and the notice is re-injected after each compaction so the fork boundary survives summarization
 - Added visual markers in the transcript for elided tool calls that have no corresponding result
@@ -23,6 +29,7 @@
 
 ### Removed
 
+- Removed the `--downshift-boomerang` feature and its associated configuration setting
 - Removed the unreliable Bing and Yahoo HTML-scraping web search providers
 
 ### Fixed
@@ -30,12 +37,14 @@
 - Fixed scratch handoffs prompting agents to continue working after writing the handoff and successor agents loading unrelated skills; closeout is now pencils-down, records only current/next-task skill dependencies instead of session history, and resumes with relevance judgment rather than mechanical stack replay.
 - Fixed active Goal Mode state being paused when a session resumed after scratch handoff; startup now preserves the active goal through scratch continuity without changing ordinary session-resume safety.
 - Fixed a large final tool result consuming the reserved scratch-closeout headroom and forcing direct handoff before the agent could update its scratch file; OMP now offloads only enough newest results to a recoverable `artifact://` placeholder, preserves the longest byte-identical prompt-cache prefix, retries the same closeout turn, and keeps direct handoff when provider-reported usage itself is over budget.
+- Fixed `/tan` and `/fork` clones cold-missing the provider prompt cache: the per-turn supersede/useless-result prune rewrote the live context without persisting it, so file-based forks and resume rebuilt a divergent (un-pruned) prefix and re-wrote the entire cache
+- Fixed `/tan` pinning the clone's prompt-cache key to the parent's session id instead of the parent's effective cache key, dropping shard affinity when the parent was itself a fork or tan
 - Fixed inconsistent history rendering when toggling the display setting for compacted items
 - Fixed configured `retry.fallbackChains` never engaging on non-retryable provider errors (e.g. "Cloud Code Assist API returned an empty response"): a hard error on a model covered by a fallback chain now switches to the next candidate instead of failing the turn, while still never backoff-retrying the failing model itself
 - Fixed transcript rebuilds (compaction, `/compact`, and toggling history display) repainting content below stale scrollback when collapsing history; rebuilds now correctly clear the scrollback buffer when history is collapsed
 - Improved auto-compaction to automatically drop images and elide content when context is tight, and added persistent warning badges to the compaction divider when manual intervention is required
 - Fixed backgrounded Bash blocks continuing to repaint with live and final job output; they now freeze with a compact job notice while completion is delivered separately
-- Fixed `--reasoning-slide-plan` silently ending the run with no code written when the model answered the plan nudge with a text-only reply (no tool call): the agent loop treats a tool-call-free turn as a natural stop and never prompts again, which the nudge's own "write the plan in your next reply" instruction makes common. The nudge now explicitly tells the model this is a checkpoint, not a final answer, and the session forces one more turn whenever a post-nudge reply lands with zero tool calls
+- Fixed the downshift plan nudge silently ending the run with no code written when the model answered with a text-only reply (no tool call): the agent loop treats a tool-call-free turn as a natural stop and never prompts again, which the nudge's own "write the plan in your next reply" instruction makes common. The nudge now explicitly tells the model this is a checkpoint, not a final answer, and the session forces one more turn whenever a post-nudge reply lands with zero tool calls
 - Fixed launch tool rendering stacking a stale pending header over a bare `✓ Launch` line and raw text: the tool now uses a merged registry renderer with one per-op status header (op, target, `state · pid · uptime` meta), stripped log cursor suffixes, capped collapsed log/list previews, and a launch tool glyph
 - Fixed confusing launch start/wait results when readiness timed out with the log pattern already matched (readiness needs log AND port): the result printed a contradictory `Ready: <match>` next to `Readiness timed out` without naming the failing condition. Daemon snapshots now carry the unmet conditions (`readyPending`), and start/wait results state exactly what never happened (e.g. `port 3100 on 127.0.0.1 never accepted connections`); the TUI shows a `waiting on port` badge on starting daemons
 - Fixed the in-process `stat` builtin mangling BSD-style invocations like `stat -f "%Sm %N" file` (macOS muscle memory): GNU `-f` means `--file-system`, so the format string was treated as a file operand — printing filesystem info for the real operands and erroring with `cannot read file system information for '%Sm %N'`. A `-f` whose format value contains `%` is now detected as BSD syntax and translated to the GNU equivalent (`%Sm`→`%y`, `%N`→`%n`, `%z`→`%s`, epoch/`S`-form times, owner/group/permission and `H`/`L` sub-field directives, `-L`/`-n`/`-q`/`-F` flag clusters, with `%n`/`%t` as literal newline/tab); directives with no GNU counterpart fail with a clear `unsupported BSD format directive` error
