@@ -3,6 +3,7 @@
  */
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
@@ -46,6 +47,7 @@ export interface Args {
 	systemPrompt?: string;
 	appendSystemPrompt?: string;
 	thinking?: ConfiguredThinkingLevel;
+	serviceTier?: (typeof SERVICE_TIER_OPENAI_VALUES)[number];
 	hideThinking?: boolean;
 	advisor?: boolean;
 	continue?: boolean;
@@ -107,6 +109,7 @@ const PARSE_DEPS: ParseDeps = {
 	builtinToolNames: BUILTIN_TOOL_NAMES,
 	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
+	serviceTierValues: SERVICE_TIER_OPENAI_VALUES,
 };
 
 const WINDOWS_PATH_VALUE_FLAGS: ReadonlySet<string> = new Set(["--extension", "-e", "--hook"]);

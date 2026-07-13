@@ -30,6 +30,7 @@
  * real implementations at the dispatch site.
  */
 
+import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
 
@@ -48,6 +49,7 @@ export interface ParseDeps {
 	builtinToolNames: readonly string[];
 	normalizeToolNames: (values: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
+	serviceTierValues: readonly string[];
 }
 
 export type StringSetter = (result: Args, value: string, deps: ParseDeps) => void;
@@ -223,6 +225,16 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			deps.logger.warn("Invalid thinking level passed to --thinking", {
 				level: value,
 				validThinkingLevels: deps.thinkingEfforts,
+			});
+		}
+	},
+	"--service-tier": (result, value, deps) => {
+		if (deps.serviceTierValues.includes(value)) {
+			result.serviceTier = value as ServiceTierOpenAISettingValue;
+		} else {
+			deps.logger.warn("Invalid service tier passed to --service-tier", {
+				value,
+				validValues: deps.serviceTierValues,
 			});
 		}
 	},

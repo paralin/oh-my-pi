@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added the `--service-tier` launch flag to temporarily override `tier.openai` for a normal session
 - Added display setting to toggle between collapsing or keeping compacted history inline, now applied to live session displays
 - Added a compact session-only model picker (Alt+P) for quick model switching without changing roles
 - Added `@` search to the Alt+P / `/switch` picker: it lists configured Ctrl+P quick roles in matching segment colors and applies the selected role's model and thinking for the current session.

@@ -1183,6 +1183,11 @@ export async function runRootCommand(
 		// setup-time checks (e.g. #wrapToolForAcpPermission) also see the yolo intent.
 		settingsInstance.override("tools.approvalMode", "yolo");
 	}
+	if (parsedArgs.serviceTier !== undefined) {
+		// Runtime override (not persisted); when omitted, the configured tier.openai
+		// value remains effective, including values loaded from --config overlays.
+		settingsInstance.override("tier.openai", parsedArgs.serviceTier);
+	}
 	if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 		applyRpcDefaultSettingOverrides(settingsInstance);
 	} else if (parsedArgs.mode === "acp") {
