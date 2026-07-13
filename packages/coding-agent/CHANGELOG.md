@@ -28,6 +28,7 @@
 ### Fixed
 
 - Fixed scratch handoffs prompting agents to continue working after writing the handoff and successor agents loading unrelated skills; closeout is now pencils-down, records only current/next-task skill dependencies instead of session history, and resumes with relevance judgment rather than mechanical stack replay.
+- Fixed a large final tool result consuming the reserved scratch-closeout headroom and forcing direct handoff before the agent could update its scratch file; OMP now offloads only enough newest results to a recoverable `artifact://` placeholder, preserves the longest byte-identical prompt-cache prefix, retries the same closeout turn, and keeps direct handoff when provider-reported usage itself is over budget.
 - Fixed inconsistent history rendering when toggling the display setting for compacted items
 - Fixed configured `retry.fallbackChains` never engaging on non-retryable provider errors (e.g. "Cloud Code Assist API returned an empty response"): a hard error on a model covered by a fallback chain now switches to the next candidate instead of failing the turn, while still never backoff-retrying the failing model itself
 - Fixed transcript rebuilds (compaction, `/compact`, and toggling history display) repainting content below stale scrollback when collapsing history; rebuilds now correctly clear the scrollback buffer when history is collapsed

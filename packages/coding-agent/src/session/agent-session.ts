@@ -10599,11 +10599,22 @@ export class AgentSession {
 			keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
 		});
 		const regions = collectShakeRegions(branchEntries, config);
+		return await this.#applyShakeRegions(mode, regions);
+	}
+
+	async #applyShakeRegions(
+		mode: Exclude<ShakeMode, "images">,
+		regions: ShakeRegion[],
+		requireArtifact = false,
+	): Promise<ShakeResult> {
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
 		const artifactId = await this.#saveShakeArtifact(regions);
+		if (requireArtifact && artifactId === undefined) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		}
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
 		let toolResultsDropped = 0;
@@ -11529,7 +11540,63 @@ export class AgentSession {
 		return triggerTokens > 0 && contextTokens >= triggerTokens;
 	}
 
-	#stopBeforeOversizedScratchHandoffRequest(context: AgentContext): AgentPreModelCallResult {
+	async #elideRecentToolResultsForScratchCloseout(
+		context: AgentContext,
+		contextWindow: number,
+		promptBudget: number,
+		contextTokens: number,
+	): Promise<number | undefined> {
+		const lastAssistant = context.messages.findLast(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		const providerTokens = lastAssistant ? calculateContextTokens(lastAssistant.usage) : 0;
+		if (providerTokens > promptBudget) return undefined;
+
+		await this.#messageEndPersistenceTail;
+		const branchEntries = this.sessionManager.getBranch();
+		const regions = collectShakeRegions(
+			branchEntries,
+			this.#withPlanProtection({
+				...AGGRESSIVE_SHAKE_CONFIG,
+				fenceMinTokens: Number.MAX_SAFE_INTEGER,
+				keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
+			}),
+		).filter((region): region is Extract<ShakeRegion, { kind: "toolResult" }> => region.kind === "toolResult");
+		if (regions.length === 0) return undefined;
+
+		// Rewrite from the tail backward so the changed boundary lands as late as
+		// possible and the provider can reuse the longest byte-identical cached prefix.
+		const targetSavings = contextTokens - promptBudget;
+		const selected: ShakeRegion[] = [];
+		let estimatedSavings = 0;
+		for (let index = regions.length - 1; index >= 0 && estimatedSavings < targetSavings; index--) {
+			const region = regions[index];
+			selected.push(region);
+			estimatedSavings += Math.max(
+				0,
+				region.tokens - countTokens(this.#shakeElidePlaceholder(region, selected.length - 1, "artifact")),
+			);
+		}
+		selected.reverse();
+
+		const result = await this.#applyShakeRegions("elide", selected, true);
+		if (result.toolResultsDropped === 0 || result.artifactId === undefined) return undefined;
+
+		context.messages.splice(0, context.messages.length, ...this.agent.state.messages);
+		const reducedTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
+		const outcome =
+			reducedTokens <= promptBudget
+				? "to preserve the scratch closeout turn"
+				: "but the scratch closeout turn still exceeds the prompt budget";
+		this.emitNotice(
+			"info",
+			`Elided ${result.toolResultsDropped} recent tool result${result.toolResultsDropped === 1 ? "" : "s"} (~${result.tokensFreed.toLocaleString()} tokens) to artifact://${result.artifactId} ${outcome}.`,
+			"compaction",
+		);
+		return reducedTokens;
+	}
+
+	async #stopBeforeOversizedScratchHandoffRequest(context: AgentContext): Promise<AgentPreModelCallResult> {
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (!scratchPath) return;
 		const contextWindow = this.model?.contextWindow ?? 0;
@@ -11541,9 +11608,22 @@ export class AgentSession {
 		const promptBudget = Math.max(0, contextWindow - reserveTokens);
 		if (promptBudget <= 0) return;
 
-		const contextTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
+		const initialContextTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings) && contextTokens <= promptBudget) return;
+		if (
+			!shouldCompact(initialContextTokens, contextWindow, compactionSettings) &&
+			initialContextTokens <= promptBudget
+		)
+			return;
+		const contextTokens =
+			this.#scratchHandoffCloseout && initialContextTokens > promptBudget
+				? ((await this.#elideRecentToolResultsForScratchCloseout(
+						context,
+						contextWindow,
+						promptBudget,
+						initialContextTokens,
+					)) ?? initialContextTokens)
+				: initialContextTokens;
 		if (this.#scratchHandoffCloseout && contextTokens <= promptBudget) {
 			logger.debug("Allowing scratch-handoff closeout request before reset", {
 				contextTokens,

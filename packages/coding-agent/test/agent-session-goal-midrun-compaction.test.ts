@@ -220,6 +220,60 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts[1].join("\n")).toContain("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
 	});
 
+	it("artifact-elides a final tool result so the queued scratch closeout still runs", async () => {
+		const readTool: AgentTool = {
+			name: "read",
+			label: "Read",
+			description: "Mock oversized read tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "oversized-read\n".repeat(8_000) }] }),
+		};
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 40_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{
+				modelContextWindow: 68_000,
+				responseForCall: index => ({
+					role: "assistant",
+					content:
+						index === 0
+							? [{ type: "toolCall", id: "read-oversized", name: "read", arguments: {} }]
+							: [{ type: "text", text: "Scratch closeout complete." }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: highUsage(index === 0 ? 50_000 : 200),
+					stopReason: index === 0 ? "toolUse" : "stop",
+					timestamp: Date.now() + index,
+				}),
+				scratchHandoffDisplayPath: "agent/current.org",
+				tools: [readTool],
+			},
+		);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(2);
+		expect(observedContexts[1].slice(0, observedContexts[0].length)).toEqual(observedContexts[0]);
+		expect(observedContexts[1].join("\n")).toContain("Context maintenance threshold reached");
+		expect(observedContexts[1].join("\n")).toContain("[shaken");
+		expect(observedContexts[1].join("\n")).toContain("artifact://");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				source: "compaction",
+				message: expect.stringContaining("preserve the scratch closeout turn"),
+			}),
+		);
+	});
+
 	it("stops before an oversized scratch-handoff continuation request", async () => {
 		const { session, observedContexts } = await createHarness(
 			{
