@@ -348,6 +348,27 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toContain("Read files, directories, archives");
 	});
 
+	it("uses caller settings when expanding the OMP documentation root", async () => {
+		const pattern = "GPT-5 Harmony-Header Leakage";
+		const hiddenTool = new GrepTool(createSession());
+		const completeTool = new GrepTool(
+			createSession({
+				settings: Settings.isolated({
+					"grep.contextBefore": 0,
+					"grep.contextAfter": 0,
+					"docs.hideInternal": false,
+				}),
+			}),
+		);
+
+		const hiddenResult = await hiddenTool.execute("test-hidden", { pattern, path: "omp://" });
+		const completeResult = await completeTool.execute("test-complete", { pattern, path: "omp://" });
+
+		expect(getResultText(hiddenResult)).not.toContain(pattern);
+		expect(getResultText(completeResult)).toContain(pattern);
+		expect(getResultText(completeResult)).toContain("# omp://ERRATA-GPT5-HARMONY.md");
+	});
+
 	it("throws when internal URL has no sourcePath", async () => {
 		const session = createSession();
 		const tool = new GrepTool(session);

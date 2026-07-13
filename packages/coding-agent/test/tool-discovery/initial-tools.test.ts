@@ -27,6 +27,7 @@ const allToolsSettings = Settings.isolated({
 	"browser.enabled": true,
 	"checkpoint.enabled": true,
 	"todo.enabled": true,
+	"eval.js": true,
 	"memory.backend": "mnemopi",
 	"autolearn.enabled": true,
 	"tools.discoveryMode": "all",

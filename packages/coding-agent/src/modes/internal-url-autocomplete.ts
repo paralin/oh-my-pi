@@ -93,6 +93,7 @@ export function extractInternalUrlContext(textBeforeCursor: string): InternalUrl
 export async function getInternalUrlSuggestions(
 	textBeforeCursor: string,
 	cwd?: string,
+	settings?: unknown,
 ): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 	const ctx = extractInternalUrlContext(textBeforeCursor);
 	if (!ctx) return null;
@@ -100,7 +101,7 @@ export async function getInternalUrlSuggestions(
 	const candidates = await InternalUrlRouter.instance().complete(
 		ctx.scheme,
 		ctx.query,
-		cwd === undefined ? undefined : { cwd },
+		cwd === undefined && settings === undefined ? undefined : { cwd, settings },
 	);
 	if (!candidates || candidates.length === 0) return null;
 

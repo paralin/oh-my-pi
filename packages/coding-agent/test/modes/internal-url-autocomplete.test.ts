@@ -4,6 +4,7 @@ import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { resetActiveRulesForTests, setActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { SSHHost } from "@oh-my-pi/pi-coding-agent/capability/ssh";
 import type { CapabilityResult } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
@@ -38,6 +39,7 @@ describe("internal-url-autocomplete", () => {
 	afterEach(() => {
 		resetActiveSkillsForTests();
 		resetActiveRulesForTests();
+		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
 
@@ -130,6 +132,18 @@ describe("internal-url-autocomplete", () => {
 			expect(spy.mock.calls[0]?.[1]).toEqual({ cwd: "/tmp/proj" });
 		});
 
+		it("uses caller settings for OMP documentation visibility", async () => {
+			const hidden = await getInternalUrlSuggestions("omp://ERRATA", undefined, Settings.isolated());
+			const complete = await getInternalUrlSuggestions(
+				"omp://ERRATA",
+				undefined,
+				Settings.isolated({ "docs.hideInternal": false }),
+			);
+
+			expect(hidden).toBeNull();
+			expect(complete?.items.map(item => item.value)).toContain("omp://ERRATA-GPT5-HARMONY.md");
+		});
+
 		it("percent-encodes a configured ssh host with reserved characters while matching a raw query", async () => {
 			const result: CapabilityResult<SSHHost> = {
 				items: [
@@ -219,6 +233,15 @@ describe("internal-url-autocomplete", () => {
 			const result = await provider.getSuggestions([line], 0, line.length);
 			expect(result?.prefix).toBe("skill://hum");
 			expect(result?.items.map(i => i.value)).toEqual(["skill://humanizer"]);
+		});
+
+		it("threads initialized settings into OMP suggestions", async () => {
+			await Settings.init({ inMemory: true, overrides: { "docs.hideInternal": false } });
+			const provider = new PromptActionAutocompleteProvider([], process.cwd(), []);
+			const line = "look at omp://ERRATA";
+			const result = await provider.getSuggestions([line], 0, line.length);
+
+			expect(result?.items.map(item => item.value)).toContain("omp://ERRATA-GPT5-HARMONY.md");
 		});
 
 		it("applies the selected url candidate in place", async () => {
