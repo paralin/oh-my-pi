@@ -189,6 +189,24 @@ describe("scratch handoff", () => {
 			authStorage.close();
 		}
 	});
+	it("runs the budget-stop closeout turn immediately when headroom remains", async () => {
+		const { session, authStorage } = await createTestSession({ scratchFile: "handoffs/current.org" });
+		const prompt = vi.spyOn(session, "promptCustomMessage").mockResolvedValue();
+		try {
+			const started = await session.requestScratchHandoffCloseoutForBudgetStop(42);
+			expect(started).toBe(true);
+			expect(prompt).toHaveBeenCalledTimes(1);
+			expect(prompt.mock.calls[0]?.[0]).toEqual(
+				expect.objectContaining({
+					customType: "scratch-handoff-closeout",
+					content: expect.stringContaining("PENCILS DOWN"),
+				}),
+			);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
 
 	it("preserves pre-compaction background task completion in the same session", async () => {
 		const { session, authStorage } = await createTestSession();

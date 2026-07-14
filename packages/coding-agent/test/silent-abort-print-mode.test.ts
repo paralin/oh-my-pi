@@ -6,7 +6,7 @@
  * (and exit with code 1). This test verifies the guard skips silent-abort.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -47,6 +47,7 @@ function createMockSession(
 		onPrompt?: (emit: (event: AgentSessionEvent) => void) => void | Promise<void>;
 		cwd?: string;
 		contextUsage?: { tokens: number; contextWindow: number; percent?: number };
+		onBudgetStopCloseout?: () => Promise<boolean>;
 	} = {},
 ): AgentSession {
 	const subscription: { callback?: (event: AgentSessionEvent) => void } = {};
@@ -60,6 +61,7 @@ function createMockSession(
 			"compaction.maintenanceTrace": options.maintenanceTrace ?? "assistant",
 		}),
 		getContextUsage: () => options.contextUsage,
+		requestScratchHandoffCloseoutForBudgetStop: async () => options.onBudgetStopCloseout?.() ?? false,
 		subscribe: (callback: (event: AgentSessionEvent) => void) => {
 			subscription.callback = callback;
 			return () => {
@@ -170,7 +172,46 @@ describe("Print-mode silent-abort regression", () => {
 		expect(getPrintModeExitCode(createMockSession([makeAssistantMessage()]))).toBe(0);
 	});
 
-	it("omits an unfilled scratch template from the budget-stop event", async () => {
+	it("runs one bounded scratch closeout before naming it in the budget-stop event", async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "omp-print-mode-"));
+		const scratchPath = join(cwd, "scratch.org");
+		await writeFile(scratchPath, "#+TITLE: Current agent work\n* TODO Current work\n");
+		let closeoutCalls = 0;
+		try {
+			const session = createMockSession([], {
+				cwd,
+				contextUsage: { tokens: 10, contextWindow: 100, percent: 10 },
+				onBudgetStopCloseout: async () => {
+					closeoutCalls++;
+					await writeFile(
+						scratchPath,
+						[
+							"#+TITLE: Current agent work",
+							"* TODO Current work",
+							"- Objective: preserve the handoff",
+							"- Verification: focused test",
+						].join("\n"),
+					);
+					return true;
+				},
+			});
+			await runPrintMode(session, {
+				mode: "json",
+				initialMessage: "stop now",
+				contextBudgetStop: { stopAtTokens: 1, scratchHandoffFile: scratchPath },
+			});
+			const stopEvent = stdoutOutput
+				.map(line => JSON.parse(line) as { type?: string; scratchHandoffFile?: string })
+				.find(event => event.type === "context_budget_stop");
+			expect(closeoutCalls).toBe(1);
+			expect(await readFile(scratchPath, "utf8")).toContain("- Objective: preserve the handoff");
+			expect(stopEvent?.scratchHandoffFile).toBe(scratchPath);
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("omits an unfilled scratch template when no closeout headroom remains", async () => {
 		const cwd = await mkdtemp(join(tmpdir(), "omp-print-mode-"));
 		const scratchPath = join(cwd, "scratch.org");
 		await writeFile(
@@ -191,14 +232,16 @@ describe("Print-mode silent-abort regression", () => {
 			].join("\n"),
 		);
 		try {
-			await runPrintMode(
-				createMockSession([], { cwd, contextUsage: { tokens: 10, contextWindow: 100, percent: 10 } }),
-				{
-					mode: "json",
-					initialMessage: "stop now",
-					contextBudgetStop: { stopAtTokens: 1, scratchHandoffFile: scratchPath },
-				},
-			);
+			const session = createMockSession([], {
+				cwd,
+				contextUsage: { tokens: 10, contextWindow: 100, percent: 10 },
+				onBudgetStopCloseout: async () => false,
+			});
+			await runPrintMode(session, {
+				mode: "json",
+				initialMessage: "stop now",
+				contextBudgetStop: { stopAtTokens: 1, scratchHandoffFile: scratchPath },
+			});
 			const stopEvent = stdoutOutput
 				.map(line => JSON.parse(line) as { type?: string; scratchHandoffFile?: string })
 				.find(event => event.type === "context_budget_stop");

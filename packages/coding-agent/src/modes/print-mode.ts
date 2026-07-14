@@ -227,7 +227,13 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			await writeFinalAssistantText(session, printThoughts, writeStdout);
 			textOutputWritten = true;
 		}
-		const scratchPath = await scratchHandoffFileIfWritten(session, stop.scratchHandoffFile?.trim() || undefined);
+		const configuredScratchPath = stop.scratchHandoffFile?.trim() || undefined;
+		let closeoutRan = false;
+		if (configuredScratchPath && typeof session.requestScratchHandoffCloseoutForBudgetStop === "function") {
+			closeoutRan = await session.requestScratchHandoffCloseoutForBudgetStop(stop.tokens);
+			if (closeoutRan) await session.waitForIdle();
+		}
+		const scratchPath = closeoutRan ? await scratchHandoffFileIfWritten(session, configuredScratchPath) : undefined;
 		const event = {
 			type: "context_budget_stop",
 			contextUsage: {

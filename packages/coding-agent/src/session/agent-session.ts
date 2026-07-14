@@ -3567,6 +3567,29 @@ export class AgentSession {
 	getScratchHandoffDisplayPath(): string | undefined {
 		return this.#scratchHandoffDisplayPath;
 	}
+	/**
+	 * requestScratchHandoffCloseoutForBudgetStop runs one bounded pencils-down
+	 * turn when the current context still leaves room for the handoff prompt.
+	 */
+	async requestScratchHandoffCloseoutForBudgetStop(triggerContextTokens?: number): Promise<boolean> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return false;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		const compactionSettings = this.settings.getGroup("compaction");
+		const closeoutTriggerTokens = this.#scratchHandoffCloseoutTriggerTokens(
+			contextWindow,
+			compactionSettings,
+			scratchPath,
+		);
+		if (closeoutTriggerTokens <= 0) return false;
+		const contextTokens = compactionContextTokens(
+			this.getContextUsage({ contextWindow })?.tokens ?? 0,
+			this.#estimateStoredContextTokens(),
+		);
+		if (contextTokens > closeoutTriggerTokens) return false;
+		return this.#requestScratchHandoffCloseout(triggerContextTokens ?? contextTokens, true);
+	}
 
 	emitBossInboxMessage(message: BossInboxRecord): void {
 		this.#emit({ type: "boss_inbox_message", message });
@@ -3613,9 +3636,9 @@ export class AgentSession {
 		});
 	}
 
-	async #requestScratchHandoffCloseout(triggerContextTokens?: number): Promise<void> {
+	async #requestScratchHandoffCloseout(triggerContextTokens?: number, runImmediately = false): Promise<boolean> {
 		const scratchPath = this.#scratchHandoffDisplayPath;
-		if (scratchPath === undefined) return;
+		if (scratchPath === undefined) return false;
 		const existing = this.#scratchHandoffCloseout;
 		if (existing?.scratchPath === scratchPath) {
 			if (
@@ -3624,24 +3647,31 @@ export class AgentSession {
 			) {
 				existing.triggerContextTokens = triggerContextTokens;
 			}
-			return;
+			if (runImmediately) await this.waitForIdle();
+			return true;
 		}
 		this.#scratchHandoffCloseout = {
 			scratchPath,
 			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
 			triggerContextTokens,
 		};
-		await this.#queueCustomMessage(
-			{
-				customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
-				content: renderScratchHandoffCloseoutMessage(scratchPath),
-				display: true,
-				attribution: "agent",
-				details: { path: scratchPath, triggerContextTokens },
-			},
-			"steer",
-			`scratch handoff: update ${scratchPath}`,
-		);
+		const message = {
+			customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
+			content: renderScratchHandoffCloseoutMessage(scratchPath),
+			display: true,
+			attribution: "agent" as const,
+			details: { path: scratchPath, triggerContextTokens },
+		};
+		if (runImmediately) {
+			this.#toolChoiceQueue.pushOnce(
+				{ type: "tool", name: "write" },
+				{ label: "scratch-handoff-closeout", now: true },
+			);
+			await this.promptCustomMessage(message);
+		} else {
+			await this.#queueCustomMessage(message, "steer", `scratch handoff: update ${scratchPath}`);
+		}
+		return true;
 	}
 
 	async #finishScratchHandoffCloseoutIfReady(
