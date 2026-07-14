@@ -6,11 +6,15 @@
  * (and exit with code 1). This test verifies the guard skips silent-abort.
  */
 import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
+import { getPrintModeExitCode, runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 
@@ -41,6 +45,8 @@ function createMockSession(
 	options: {
 		maintenanceTrace?: "loader" | "assistant" | "debug";
 		onPrompt?: (emit: (event: AgentSessionEvent) => void) => void | Promise<void>;
+		cwd?: string;
+		contextUsage?: { tokens: number; contextWindow: number; percent?: number };
 	} = {},
 ): AgentSession {
 	const subscription: { callback?: (event: AgentSessionEvent) => void } = {};
@@ -48,11 +54,12 @@ function createMockSession(
 		state: { messages },
 		sessionManager: {
 			getHeader: () => undefined,
+			getCwd: () => options.cwd ?? process.cwd(),
 		},
-		extensionRunner: undefined,
 		settings: Settings.isolated({
 			"compaction.maintenanceTrace": options.maintenanceTrace ?? "assistant",
 		}),
+		getContextUsage: () => options.contextUsage,
 		subscribe: (callback: (event: AgentSessionEvent) => void) => {
 			subscription.callback = callback;
 			return () => {
@@ -150,6 +157,56 @@ describe("Print-mode silent-abort regression", () => {
 		expect(stderrText).toContain("Rate limit exceeded");
 		// process.exit(1) SHOULD have been called
 		expect(exitSpy).toHaveBeenCalledWith(1);
+	});
+
+	it("maps a JSON-mode provider error to a non-zero process status", () => {
+		const errorMsg = makeAssistantMessage({
+			stopReason: "error",
+			errorMessage: "Unable to connect",
+			content: [],
+		});
+
+		expect(getPrintModeExitCode(createMockSession([errorMsg]))).toBe(1);
+		expect(getPrintModeExitCode(createMockSession([makeAssistantMessage()]))).toBe(0);
+	});
+
+	it("omits an unfilled scratch template from the budget-stop event", async () => {
+		const cwd = await mkdtemp(join(tmpdir(), "omp-print-mode-"));
+		const scratchPath = join(cwd, "scratch.org");
+		await writeFile(
+			scratchPath,
+			[
+				"#+TITLE: Current agent work",
+				"",
+				"* TODO Current work",
+				"- Objective: ",
+				"- Skill stack: ",
+				"- Work completed: ",
+				"- Files changed: ",
+				"- Verification: ",
+				"- Blockers or risks: ",
+				"- Next action: ",
+				"- Source refs: ",
+				"",
+			].join("\n"),
+		);
+		try {
+			await runPrintMode(
+				createMockSession([], { cwd, contextUsage: { tokens: 10, contextWindow: 100, percent: 10 } }),
+				{
+					mode: "json",
+					initialMessage: "stop now",
+					contextBudgetStop: { stopAtTokens: 1, scratchHandoffFile: scratchPath },
+				},
+			);
+			const stopEvent = stdoutOutput
+				.map(line => JSON.parse(line) as { type?: string; scratchHandoffFile?: string })
+				.find(event => event.type === "context_budget_stop");
+			expect(stopEvent).toBeDefined();
+			expect(stopEvent?.scratchHandoffFile).toBeUndefined();
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
 	});
 
 	it("queues and settles an initial prompt when resume startup is already busy", async () => {

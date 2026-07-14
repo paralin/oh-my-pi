@@ -5,12 +5,42 @@
  * - `omp -p "prompt"` - text output
  * - `omp --mode json "prompt"` - JSON event stream
  */
+
+import { readFile } from "node:fs/promises";
+
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
+import { resolveToCwd } from "../tools/path-utils";
 import { initializeExtensions } from "./runtime-init";
+
+function scratchHandoffHasContent(text: string): boolean {
+	const fieldPattern =
+		/^-\s+(?:Objective|Skill stack|Work completed|Files changed|Verification|Blockers or risks|Next action|Source refs):[ \t]*(\S.*)$/gm;
+	return fieldPattern.test(text);
+}
+
+async function scratchHandoffFileIfWritten(
+	session: AgentSession,
+	scratchPath: string | undefined,
+): Promise<string | undefined> {
+	if (!scratchPath) return undefined;
+	let absolutePath: string;
+	try {
+		absolutePath = resolveToCwd(scratchPath, session.sessionManager.getCwd());
+	} catch {
+		return undefined;
+	}
+	let text: string;
+	try {
+		text = await readFile(absolutePath, "utf8");
+	} catch {
+		return undefined;
+	}
+	return scratchHandoffHasContent(text) ? scratchPath : undefined;
+}
 
 export interface ContextBudgetStopOptions {
 	/** Stop when context usage reaches this percent of the selected model window. */
@@ -116,6 +146,16 @@ async function writeFinalAssistantText(
 	}
 }
 
+/**
+ * getPrintModeExitCode returns a non-zero status when the final assistant turn
+ * reports a provider error, including JSON mode where output is streamed before
+ * the process exits.
+ */
+export function getPrintModeExitCode(session: AgentSession): number {
+	const lastMessage = session.state.messages.at(-1);
+	return lastMessage?.role === "assistant" && lastMessage.stopReason === "error" ? 1 : 0;
+}
+
 function isMaintenanceTraceEvent(event: AgentSessionEvent): boolean {
 	return (
 		event.type === "maintenance_trace_start" ||
@@ -187,7 +227,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			await writeFinalAssistantText(session, printThoughts, writeStdout);
 			textOutputWritten = true;
 		}
-		const scratchPath = stop.scratchHandoffFile?.trim() || undefined;
+		const scratchPath = await scratchHandoffFileIfWritten(session, stop.scratchHandoffFile?.trim() || undefined);
 		const event = {
 			type: "context_budget_stop",
 			contextUsage: {

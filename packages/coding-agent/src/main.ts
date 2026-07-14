@@ -1595,7 +1595,8 @@ export async function runRootCommand(
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 			stopStartupWatchdog();
-			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
+			const printMode = await import("./modes/print-mode");
+			const runPrintMode: RunPrintMode = printMode.runPrintMode;
 			await runPrintMode(session, {
 				mode,
 				messages: initialArgs.messages,
@@ -1618,9 +1619,10 @@ export async function runRootCommand(
 			if ($env.PI_TIMING) {
 				logger.printTimings();
 			}
+			const exitCode = printMode.getPrintModeExitCode(session);
 			await session.dispose();
 			stopThemeWatcher();
-			await postmortem.quit(0);
+			await postmortem.quit(exitCode);
 		}
 	}
 }
