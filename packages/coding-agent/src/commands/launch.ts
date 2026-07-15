@@ -161,9 +161,6 @@ export default class Index extends Command {
 		"print-thoughts": Flags.boolean({
 			description: "Include thinking blocks in print mode text output",
 		}),
-		"boss-inbox": Flags.boolean({
-			description: "Enable file-backed worker-to-boss messages via the IRC tool",
-		}),
 		"max-time": Flags.string({
 			description: "Stop the session after this duration (e.g., 600, 10m, 1h)",
 		}),

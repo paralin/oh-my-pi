@@ -10,7 +10,6 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
-import { DurableBashJobStore, type DurableBashMetadata } from "../async/durable-bash";
 import { type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
@@ -203,18 +202,6 @@ interface ManagedBashJobHandle {
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	stopUpdates: () => void;
-}
-
-interface ManagedBashJobOptions {
-	command: string;
-	commandCwd: string;
-	timeoutMs: number | undefined;
-	timeoutSec: number | undefined;
-	requestedTimeoutSec?: number;
-	notices?: readonly string[];
-	resolvedEnv?: Record<string, string>;
-	onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
-	forwardUpdates: boolean;
 }
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
@@ -416,7 +403,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			hasGrep: isToolActive("grep", this.session.settings.get("grep.enabled")),
 			hasGlob: isToolActive("glob", this.session.settings.get("glob.enabled")),
 			hasRead: isToolActive("read", true),
-			hasLaunch: isToolActive("launch", this.session.settings.get("launch.enabled")),
+			hasLaunch: isToolActive("hub", this.session.settings.get("launch.enabled")),
 			hasEval: isToolActive(
 				"eval",
 				evalBackends.python || evalBackends.js || evalBackends.ruby || evalBackends.julia,
@@ -433,7 +420,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	readonly #asyncEnabled: boolean;
 	readonly #autoBackgroundEnabled: boolean;
 	readonly #autoBackgroundThresholdMs: number;
-	readonly #durableStore: DurableBashJobStore | undefined;
 
 	constructor(private readonly session: ToolSession) {
 		this.#asyncEnabled = this.session.settings.get("async.enabled");
@@ -445,18 +431,6 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			),
 		);
 		this.parameters = this.#asyncEnabled ? bashSchemaWithAsync : bashSchemaBase;
-		const sessionFile = this.session.getSessionFile?.();
-		this.#durableStore =
-			this.#asyncEnabled && this.session.asyncJobManager && sessionFile
-				? new DurableBashJobStore(sessionFile)
-				: undefined;
-		if (this.#durableStore) {
-			for (const metadata of this.#durableStore.list()) {
-				if (!this.session.asyncJobManager?.getJob(metadata.id)) {
-					this.#registerDurableBashJob(metadata);
-				}
-			}
-		}
 	}
 
 	#formatResultOutput(result: BashResult | BashInteractiveResult): string {
@@ -593,132 +567,17 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		return result.content.find(block => block.type === "text")?.text ?? "";
 	}
 
-	#registerDurableBashJob(
-		restored: DurableBashMetadata | undefined,
-		options?: ManagedBashJobOptions,
-	): ManagedBashJobHandle {
-		const manager = this.session.asyncJobManager;
-		const store = this.#durableStore;
-		if (!manager || !store || (!restored && !options)) {
-			throw new ToolError("Durable background job manager unavailable for this session.");
-		}
-		let metadata = restored;
-		const command = metadata?.command ?? options!.command;
-		const label = command.length > 120 ? `${command.slice(0, 117)}...` : command;
-		let latestText = metadata ? store.readOutput(metadata).output : "";
-		let forwardUpdates = options?.forwardUpdates ?? false;
-		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
-
-		const jobId = manager.register(
-			"bash",
-			label,
-			async ({ jobId, signal: runSignal, lifecycleSignal, reportProgress }) => {
-				try {
-					if (!metadata) {
-						const artifact = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
-						metadata = store.start({
-							id: jobId,
-							ownerId: this.session.getAgentId?.() ?? undefined,
-							command: options!.command,
-							cwd: options!.commandCwd,
-							env: options!.resolvedEnv,
-							timeoutMs: options!.timeoutMs,
-							requestedTimeoutSec: options!.requestedTimeoutSec,
-							notices: options!.notices,
-							outputPath: artifact.path ?? undefined,
-							artifactId: artifact.id ?? undefined,
-							shellConfig: this.session.settings.getShellConfig(),
-						});
-					}
-					const active = metadata;
-					latestText = store.readOutput(active).output;
-					if (latestText) {
-						await reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
-					}
-					const status = await store.wait(active, runSignal, lifecycleSignal);
-					const output = store.readOutput(active);
-					latestText = output.output;
-					const timeoutSec = active.timeoutMs === undefined ? undefined : active.timeoutMs / 1_000;
-					if (status.error) {
-						throw new ToolError(latestText ? `${latestText}\n\n[${status.error}]` : status.error);
-					}
-					if (status.cancelled || status.timedOut) {
-						const reason = status.timedOut
-							? `Command timed out after ${timeoutSec ?? 0} seconds`
-							: "Command aborted";
-						throw new ToolError(latestText ? `${latestText}\n\n[${reason}]` : reason);
-					}
-					const result: BashResult = {
-						exitCode: status.exitCode,
-						cancelled: false,
-						workingDir: active.cwd,
-						output: output.output,
-						truncated: output.truncated,
-						totalLines: output.totalLines,
-						totalBytes: output.totalBytes,
-						outputLines: output.totalLines,
-						outputBytes: Buffer.byteLength(output.output),
-						...(active.artifactId ? { artifactId: active.artifactId } : {}),
-					};
-					const finalResult = await this.#buildCompletedResult(result, timeoutSec, {
-						requestedTimeoutSec: active.requestedTimeoutSec,
-						notices: active.notices,
-						wallTimeMs: Math.max(0, status.finishedAt - active.startTime),
-					});
-					const finalText = this.#extractTextResult(finalResult);
-					latestText = finalText;
-					completion.resolve({ kind: "completed", result: finalResult });
-					if (finalResult.isError === true) throw new ToolError(finalText);
-					await reportProgress(finalText, { async: { state: "completed", jobId, type: "bash" } });
-					return finalText;
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					latestText = message;
-					completion.resolve({ kind: "failed", error });
-					await reportProgress(message, { async: { state: "failed", jobId, type: "bash" } });
-					throw error;
-				}
-			},
-			{
-				id: metadata?.id,
-				ownerId: metadata?.ownerId ?? this.session.getAgentId?.() ?? undefined,
-				startTime: metadata?.startTime,
-				persistent: true,
-				refresh: async () => {
-					if (!metadata) return latestText;
-					const resultText = store.readOutput(metadata).output;
-					const status = store.readStatus(metadata);
-					if (!status) return resultText;
-					if (status.cancelled) return { status: "cancelled", resultText };
-					if (status.error || status.timedOut || status.exitCode !== 0) {
-						return { status: "failed", errorText: status.error ?? resultText };
-					}
-					return { status: "completed", resultText };
-				},
-				onProgress: async (text, details) => {
-					latestText = text;
-					if (!forwardUpdates) return;
-					await options?.onUpdate?.({
-						content: [{ type: "text", text }],
-						details: (details ?? {}) as BashToolDetails,
-					});
-				},
-			},
-		);
-		return {
-			jobId,
-			completion: completion.promise,
-			getLatestText: () => latestText,
-			stopUpdates: () => {
-				forwardUpdates = false;
-			},
-		};
-	}
-
-	#startManagedBashJob(options: ManagedBashJobOptions): ManagedBashJobHandle {
-		if (this.#durableStore) {
-			return this.#registerDurableBashJob(undefined, options);
-		}
+	#startManagedBashJob(options: {
+		command: string;
+		commandCwd: string;
+		timeoutMs: number | undefined;
+		timeoutSec: number | undefined;
+		requestedTimeoutSec?: number;
+		notices?: readonly string[];
+		resolvedEnv?: Record<string, string>;
+		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
+		forwardUpdates: boolean;
+	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
 			throw new ToolError("Background job manager unavailable for this session.");
