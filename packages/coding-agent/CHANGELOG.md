@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [16.5.2] - 2026-07-14
+
 ### Breaking Changes
 
-- Replaced the `--reasoning-slide-*` flag family (`--reasoning-slide-model`, `--reasoning-slide-turns`, `--reasoning-slide-on-action`, `--reasoning-slide-plan`, `--reasoning-slide-plan-at`, `--reasoning-slide-checklist`) with a single downshift mechanism: `--downshift` switches from the starting model to a fast/cheap target at the first completed turn that starts execution — the todo-list init the plan nudge asks for, or any edit/write tool — always with the hidden plan nudge before the switch and the verify-before-finishing checklist after it (the configuration that won benchmark testing). `--downshift-into <model>` overrides the default "smol"-role target and implies `--downshift`; `--no-downshift` force-disables. The fixed-turn trigger and per-piece plan/checklist toggles are gone.
+- Removed the separate `selector` parameters from `read` and `grep`; line ranges and read modes must now be appended to `path`.
 
 ### Added
 
@@ -49,8 +51,134 @@
 - Fixed confusing launch start/wait results when readiness timed out with the log pattern already matched (readiness needs log AND port): the result printed a contradictory `Ready: <match>` next to `Readiness timed out` without naming the failing condition. Daemon snapshots now carry the unmet conditions (`readyPending`), and start/wait results state exactly what never happened (e.g. `port 3100 on 127.0.0.1 never accepted connections`); the TUI shows a `waiting on port` badge on starting daemons
 - Fixed the in-process `stat` builtin mangling BSD-style invocations like `stat -f "%Sm %N" file` (macOS muscle memory): GNU `-f` means `--file-system`, so the format string was treated as a file operand — printing filesystem info for the real operands and erroring with `cannot read file system information for '%Sm %N'`. A `-f` whose format value contains `%` is now detected as BSD syntax and translated to the GNU equivalent (`%Sm`→`%y`, `%N`→`%n`, `%z`→`%s`, epoch/`S`-form times, owner/group/permission and `H`/`L` sub-field directives, `-L`/`-n`/`-q`/`-F` flag clusters, with `%n`/`%t` as literal newline/tab); directives with no GNU counterpart fail with a clear `unsupported BSD format directive` error
 - Fixed the remaining GNU-flavored shell builtins that broke under macOS/BSD muscle memory, using the same unambiguous-detection approach as the `stat` fix (only invocations that are invalid or nonsensical under GNU semantics are reinterpreted; unsupported BSD forms fail loudly instead of producing wrong output): `date -r <epoch>` formats the epoch when no such file exists (GNU `-r FILE` mtime preserved), signed `date -v±N<unit>` adjustments translate to `-d` relative dates and `-j` is accepted (`-j -f` strptime parse mode and field-set `-v` error clearly); `sed -i '' 's/…/…/' file` drops the BSD empty backup-suffix token instead of treating it as the script; `mktemp -t prefix` without X's creates `$TMPDIR/prefix.XXXXXXXXXX` (the GNU `too few X's` error path); `tail -r` reverses input by delegating to `tac` (with `-n`/`-c`/`-f` combinations erroring clearly); `find -E` maps to `-regextype posix-extended` ahead of the expression; `base64 -D` decodes as an alias of `-d`; and `ln -sfh` works via a `-h` alias of `--no-dereference` (clap's `-h` help short is dropped to match real GNU/BSD ln; `--help` unchanged)
+- Added a `generate_image.enabled` setting (Settings › Tools › Generate Image) to allow toggling the image generation tool.
+
+### Changed
+
+- Expanded provider rate-limit response header ingestion to all supported providers with header parsers (previously Anthropic-only), enabling proactive account rotation for multi-account sessions before hitting 429 errors.
+- Restored CPU model metadata in workstation prompts on non-Linux hosts.
+
+### Fixed
+
+- Fixed `omp config list --json` output truncation at 64 KiB when stdout is piped.
+- Fixed vim-style navigation (`h`/`j`/`k`/`l`) under the Kitty keyboard protocol.
+- Fixed `/guided-goal` throwing `Model not found` errors on websocket-only Codex models by routing the interview through the session's provider transport and reusing a single isolated side session.
+- Fixed `tool_result` extension handlers being unable to rewrite the model-visible content of a thrown tool failure.
+- Fixed intermittent Perplexity OAuth web search failures (401 errors) caused by transient transport drops on the ask endpoint.
+- Fixed the `generate_image` tool ignoring `--no-tools` and explicit tool whitelists.
+- Fixed markerless prose thinking preambles incorrectly becoming session titles when title models omit the `<title>` marker.
+- Fixed the agent recreating a todo list immediately after a user clears it with `/todo rm`.
+- Fixed internal-URL autocomplete (`agent://`, `skill://`, `omp://`, etc.) not triggering inside slash command arguments.
+- Fixed the browser tool hanging indefinitely during tab closure when the headless Chromium process is wedged on Windows.
+- Fixed `history://` URLs failing to resolve for unregistered, released, or resumed subagents by falling back to scanning artifacts directories on disk.
+- Fixed eval cells treating `timeout: 0` as a one-second deadline and reporting session-deadline cancellations as user aborts.
+- Fixed MCP OAuth dynamic client registration for pathful authorization-server issuers by preserving the discovered registration endpoint.
+- Fixed the `launch` tool failing to start Windows executables due to double-escaped PTY commands and arguments.
+- Fixed the built-in advisor warning `Advisor unavailable` for silent reviews: a content-less stop is a valid "nothing to add" outcome and is never retried or warned about, regardless of reported token usage ([#5212](https://github.com/can1357/oh-my-pi/issues/5212) follow-up).
+- Fixed `read`, `edit`, and `grep` tools failing on paths with a stray leading colon emitted by some models.
+- Fixed git plugin re-installs retaining stale commits by fetching Bun's cached clone before updating the lockfile pin.
+- Fixed overlapping Bash timeout and interrupt cleanup to explicitly abort isolated shells instead of leaving child processes running.
+- Fixed a bug where generic provider aborts arriving as `stopReason: "error"` were not auto-retried.
+- Fixed switching from a vision model to a text-only model mid-session sending historical image blocks to the new provider.
+- Fixed inline images in Agent Hub transcripts by routing replayed images through the shared image budget and Kitty placeholder renderer.
+- Fixed OSC 5522 paste in direct API-key login prompts being routed to the hidden main chat editor instead of the focused credential field.
+- Fixed plugin installation failures when an ES module extension synchronously requires CommonJS helpers.
+- Fixed GitHub code search rejecting empty optional date placeholders.
+- Fixed `/tree` navigation onto a `/skill:` injection node landing on the incorrect entry.
+- Fixed interactive TUI sessions crashing with concurrent JS runtime errors when the JS eval worker falls back to the in-process inline path.
+- Fixed compaction aborting instead of trying an authenticated fallback model when Amazon Bedrock credential resolution fails.
+- Fixed full-context forks and `/tan` clones cold-missing OpenAI prompt caches by properly persisting and inheriting provider prompt-cache keys.
+- Fixed Codex advisor requests using local session labels as provider session IDs.
+- Fixed macOS stdio MCP servers launching in a detached session, allowing the TCC Apple Events permission prompt to trigger.
+- Fixed the ask tool timeout to auto-select the recommended option when the UI selector does not settle.
+- Fixed LSP workspace diagnostics for Go workspaces to correctly recognize `go.work` roots and include all used modules.
+- Fixed interactive OAuth login success messages waiting on background model discovery.
+- Fixed Windows bash tool crashes when an explicit timeout fires while a piped command is still streaming.
+- Fixed subagent `yield` tool calls being discarded when the soft request budget hard-aborted the same assistant turn.
+- Fixed `--tools` filtering in interactive sessions disabling deferred MCP tools.
+- Fixed kept-alive task subagents entering repeated provider-call loops after an IRC wake and terminal yield.
+- Fixed manual `/compact` with the snapcompact strategy hard-failing on text-only active models.
+- Fixed the empty-editor `←←` gesture trapping input when opening the Agent Hub from persisted/parked subagents.
+- Fixed eval `read()` URI handling in Python and JS runtimes to correctly delegate URI reads and pass pagination arguments.
+- Fixed discovered plugin `.mcp.json` stdio servers launching relative `command` or `cwd` values against the session cwd instead of the plugin's config directory.
+- Fixed Model Hub DEFAULT role assignments with `auto` retaining a stale concrete reasoning suffix after restart.
+- Fixed configured `retry.fallbackChains` failing to engage on non-retryable provider errors.
+- Fixed backgrounded Bash blocks continuing to repaint with live output after completion.
+- Fixed `--reasoning-slide-plan` silently ending the run with no code written when the model answered with a text-only reply.
+- Fixed launch tool rendering issues, including stacked pending headers and confusing start/wait results when readiness timed out.
+- Fixed the in-process `stat` and other GNU-flavored shell builtins (such as `date`, `sed`, `mktemp`, `tail`, `find`, `base64`, and `ln`) mangling or failing on macOS/BSD-style invocations.
+
+## [16.5.1] - 2026-07-14
+
+### Changed
+
+- Enhanced Anthropic credential and usage management to support organization-scoped accounts, including displaying organization names in /usage, /logout, omp token --list, and OAuth login success messages, resolving active-account matching for shared organizations, and deduplicating identities during migration.
+
+### Fixed
+
+- Fixed compatibility of GNU-flavored shell builtins (such as stat, date, sed, mktemp, tail, find, base64, and ln) when invoked with macOS/BSD-style arguments.
+- Fixed subagent model and thinking level resolution to correctly respect the configured modelRoles.task selector instead of intermittently falling back to the parent session's model.
+- Fixed TUI rendering issues, including preventing macOS runtime diagnostics from painting into the viewport, bounding transcript retention in long sessions, and fixing scrollback repainting when collapsing history.
+- Fixed /tan and /fork clones failing to inherit or persist the parent session's prompt cache keys.
+- Fixed Python and JavaScript evaluation kernels suspending the CLI on subprocess foregrounding, deadlocking on non-serializable values, or losing in-flight subagent work during external aborts.
+- Fixed configured retry.fallbackChains failing to engage when encountering non-retryable provider errors.
+- Improved auto-compaction to automatically drop images and elide content when context is tight, and added persistent warning badges to the compaction divider when manual intervention is required.
+- Fixed the downshift plan nudge silently ending runs with no code written when the model answered with a text-only reply.
+- Fixed launch tool rendering and status reporting, including resolving contradictory readiness timeout messages and preventing backgrounded Bash blocks from continuing to repaint.
+- Fixed Advisor containment and timing issues, preventing hallucinated tool calls from contaminating later advice and ensuring late-arriving transcript deltas are coalesced before advisor calls.
+- Fixed omp update on npm-managed Windows installations to prevent downloaded release binaries from overwriting npm launchers.
+- Fixed --max-time duration values (e.g., 5s, 10m, 1h) being ignored instead of setting a session deadline.
+- Fixed omp plugin install --force failing with a dependency loop when replacing an existing pinned Git plugin source.
+- Fixed MCP tools receiving session image attachments as raw local:// URIs instead of resolving them to local filesystem paths.
+- Fixed Pyright LSP semantic requests hanging during startup.
+- Fixed Codex web search requests for GPT-5.6 Responses-Lite models.
+- Fixed custom model/provider configuration discovery to correctly load ~/.omp/agent/models.yaml when models.yml is absent.
+
+## [16.5.0] - 2026-07-13
+
+### Breaking Changes
+
+- Replaced the `--reasoning-slide-*` flag family with a unified `--prewalk` mechanism (`--prewalk`, `--prewalk-into <model>`, and `--no-prewalk`) to manage model handoffs during execution.
+
+### Added
+
+- Added a new `--prewalk` execution flow (with `--prewalk-into <model>` and `--no-prewalk` overrides) that starts tasks on a strong model for planning and todo initialization before handing off to a faster, cheaper model for implementation.
+ - Added a status line annotation for the active prewalk phase (armed or active).
+ - Added the `tui.scrollbackRebuild` setting to gate the erase-and-replay native scrollback rebuild mechanism (defaults to off).
+- Added a display setting to toggle between collapsing or keeping compacted history inline in live session displays.
+- Added a compact session-only model picker (Alt+P) for quick model switching, featuring `@` search to quickly list and apply configured quick roles.
+- Redesigned Agent Hub entries into a cleaner two-line card layout showing identity, active model, reasoning level, age, and task description.
+- Added a project-scoped `launch` tool (gated by `launch.enabled`) for managing shared long-running services and debuggers, featuring readiness probes, bounded logs, PTY input, restart policies, and automatic teardown.
+- Added support for `detached` launches, allowing standalone services to survive broker shutdowns and reconnect to subsequent sessions.
+
+### Changed
+
+- Updated JSON logs (`--mode json`) to include provider payloads in auto-compaction events.
+- Updated tangential agent forks (`/tan`) to ignore parent session history and focus exclusively on the new request, hardening isolation with cleared todo lists and concurrent editing warnings.
+- Added visual markers in the transcript for elided tool calls that have no corresponding result.
+- Updated the status event log to prioritize the most recent entries in the display window.
+- Upgraded `@agentclientprotocol/sdk` to version 1.2.1.
+
+### Fixed
+
+- Fixed terminal scrollback duplication issues with expanded streaming edit previews (Ctrl+O) by using a viewport-sized tail window.
+- Fixed custom model role resolution and alias parsing, ensuring canonical role selectors (`@role`) and thinking suffixes resolve correctly across all configuration surfaces.
+- Fixed quadratic growth in JSON logs by eliding redundant message snapshots and payloads.
+- Fixed prompt cache misses and incorrect cache key pinning for `/tan` and `/fork` clones.
+- Fixed inconsistent history rendering and scrollback repainting when toggling the display setting for compacted items.
+- Fixed `retry.fallbackChains` failing to engage on non-retryable provider errors, ensuring the agent correctly falls back to the next candidate model.
+- Improved auto-compaction to automatically drop images and elide content when context is tight, and added persistent warning badges when manual intervention is required.
+- Fixed backgrounded Bash blocks continuing to repaint with live output; they now freeze with a compact job notice while completion is delivered separately.
+- Fixed rendering, status display, and PTY control sequence formatting issues in the `launch` tool.
+- Fixed in-process shell builtins (including `stat`, `date`, `sed`, `mktemp`, `tail`, `find`, `base64`, and `ln`) to correctly detect and translate macOS/BSD-style arguments and flags, preventing failures caused by GNU-only assumptions.
+
+### Removed
+
+- Removed the `--prewalk-boomerang` feature and its associated configuration setting.
+- Removed the unreliable Bing and Yahoo HTML-scraping web search providers.
 
 ## [16.4.8] - 2026-07-12
+
 ### Added
 
 - Added a predicate form to the browser run's `wait()` helper: `wait(fn, { timeout?, interval? })` polls the function (sync or async) until truthy and resolves with that value, failing with a named timeout error (deadline clamped under the cell budget so it always beats the opaque whole-cell timeout) instead of Bun's `sleep expects a number` or a whole-cell stall from in-page polling Promises; both `wait` forms now register in the stall diagnosis of cell timeouts

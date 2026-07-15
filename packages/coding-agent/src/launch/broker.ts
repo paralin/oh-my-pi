@@ -4,13 +4,15 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Process, type PtyRunResult, PtySession } from "@oh-my-pi/pi-natives";
 import { isEexist, isEnoent, logger, postmortem, sanitizeText } from "@oh-my-pi/pi-utils";
-import { truncateHead, truncateTail } from "../session/streaming-output";
+import { truncateHead, truncateHeadBytes, truncateTail, truncateTailBytes } from "../session/streaming-output";
 import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint } from "./paths";
 import { hasLiveDaemonProjectPresence } from "./presence";
 import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
+	DAEMON_PTY_COLUMNS,
+	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonOperation,
 	type DaemonReadySpec,
@@ -74,11 +76,13 @@ interface BrokerLease {
 	instanceId: string;
 }
 
+interface DaemonLogRead {
+	text: string;
+	terminalText: string;
+}
+
 function quoteShellArg(value: string): string {
 	return `'${value.replaceAll("'", `'\\''`)}'`;
-}
-function quoteCmdArg(value: string): string {
-	return `"${value.replaceAll('"', '""')}"`;
 }
 
 function terminalState(state: DaemonSnapshot["state"]): boolean {
@@ -141,8 +145,7 @@ class DaemonLog {
 		return new DaemonLog(logPath, previousPath, file, file.writer());
 	}
 
-	append(raw: string): string {
-		const text = sanitizeText(raw);
+	append(text: string): string {
 		if (text.length === 0 || this.#closed) return text;
 		const bytes = Buffer.byteLength(text, "utf8");
 		this.#queue = this.#queue.then(async () => {
@@ -154,7 +157,7 @@ class DaemonLog {
 		return text;
 	}
 
-	async read(head: boolean, lines: number, grep?: string): Promise<string> {
+	async read(head: boolean, lines: number, grep?: string): Promise<DaemonLogRead> {
 		await this.#queue;
 		await this.#writer.flush();
 		return DaemonLog.readFiles(this.#path, this.#previousPath, head, lines, grep);
@@ -167,19 +170,19 @@ class DaemonLog {
 		await this.#writer.end();
 	}
 
-	static async readDir(dir: string, head: boolean, lines: number, grep?: string): Promise<string> {
-		return DaemonLog.readFiles(path.join(dir, LOG_FILE), path.join(dir, PREVIOUS_LOG_FILE), head, lines, grep);
-	}
-
 	static async readFiles(
 		logPath: string,
 		previousPath: string,
 		head: boolean,
 		lines: number,
 		grep?: string,
-	): Promise<string> {
+	): Promise<DaemonLogRead> {
 		const [previous, current] = await Promise.all([fileTextSlice(previousPath, head), fileTextSlice(logPath, head)]);
-		let text = sanitizeText(`${previous}${previous && current && !previous.endsWith("\n") ? "\n" : ""}${current}`);
+		const combined = `${previous}${previous && current && !previous.endsWith("\n") ? "\n" : ""}${current}`;
+		const terminalText = head
+			? truncateHeadBytes(combined, LOG_READ_BYTES).text
+			: truncateTailBytes(combined, LOG_READ_BYTES).text;
+		let text = sanitizeText(terminalText);
 		if (grep) {
 			let pattern: RegExp;
 			try {
@@ -193,7 +196,10 @@ class DaemonLog {
 				.join("\n");
 		}
 		const options = { maxLines: lines, maxBytes: 256 * 1024 };
-		return head ? truncateHead(text, options).content : truncateTail(text, options).content;
+		return {
+			text: head ? truncateHead(text, options).content : truncateTail(text, options).content,
+			terminalText,
+		};
 	}
 
 	async #rotate(): Promise<void> {
@@ -425,6 +431,13 @@ class DaemonBroker {
 		if (spec.detached && spec.pty) {
 			throw new Error("A detached daemon cannot allocate a PTY");
 		}
+		if (
+			spec.pty &&
+			process.platform === "win32" &&
+			[".bat", ".cmd"].includes(path.extname(spec.application).toLowerCase())
+		) {
+			throw new Error('Windows batch files require application "cmd.exe" with the batch path after "/c"');
+		}
 		const existing = this.#records.get(spec.name);
 		if (existing) await this.#refreshDetached(existing);
 		if (existing && !terminalState(existing.snapshot.state)) {
@@ -511,38 +524,47 @@ class DaemonBroker {
 	}
 
 	async #launchPty(record: ManagedDaemon, generation: number): Promise<void> {
-		const pidPath = path.join(record.dir, "process.pid");
-		await fs.rm(pidPath, { force: true });
-		const argv = [record.spec.application, ...record.spec.args];
-		const command =
-			process.platform === "win32"
-				? argv.map(quoteCmdArg).join(" ")
-				: [`printf '%s' "$$" > ${quoteShellArg(pidPath)}`, `exec ${argv.map(quoteShellArg).join(" ")}`].join("; ");
 		const session = new PtySession();
 		record.pty = session;
-		const shell = process.platform === "win32" ? process.env.COMSPEC : process.env.SHELL;
-		void session
-			.start(
+		const options = {
+			cwd: record.spec.cwd,
+			env: workerEnvFromParent({ TERM: "xterm-256color", ...record.spec.env }),
+			cols: DAEMON_PTY_COLUMNS,
+			rows: DAEMON_PTY_ROWS,
+		};
+		const onChunk = (error: Error | null, chunk: string): void => {
+			if (generation !== record.generation) return;
+			if (error) record.log?.append(`PTY output error: ${error.message}\n`);
+			if (chunk) this.#onOutput(record, generation, chunk);
+		};
+		let run: Promise<PtyRunResult>;
+		if (process.platform === "win32") {
+			run = session.startArgv(
 				{
-					command,
-					cwd: record.spec.cwd,
-					env: workerEnvFromParent({ TERM: "xterm-256color", ...record.spec.env }),
-					cols: 120,
-					rows: 40,
-					shell,
+					application: record.spec.application,
+					args: record.spec.args,
+					...options,
 				},
-				(error, chunk) => {
-					if (generation !== record.generation) return;
-					if (error) record.log?.append(`PTY output error: ${error.message}\n`);
-					if (chunk) this.#onOutput(record, generation, chunk);
-				},
-			)
+				onChunk,
+			);
+		} else {
+			const pidPath = path.join(record.dir, "process.pid");
+			await fs.rm(pidPath, { force: true });
+			const argv = [record.spec.application, ...record.spec.args];
+			const command = [
+				`printf '%s' "$$" > ${quoteShellArg(pidPath)}`,
+				`exec ${argv.map(quoteShellArg).join(" ")}`,
+			].join("; ");
+			run = session.start({ command, shell: process.env.SHELL, ...options }, onChunk);
+		}
+		void run
 			.then(result => this.#onPtyExit(record, generation, result))
 			.catch(error =>
 				this.#settle(record, generation, undefined, error instanceof Error ? error.message : String(error)),
 			);
 
 		if (process.platform === "win32") return;
+		const pidPath = path.join(record.dir, "process.pid");
 		const deadline = Date.now() + 5_000;
 		const pidFile = Bun.file(pidPath);
 		while (Date.now() < deadline && generation === record.generation) {
@@ -626,9 +648,10 @@ class DaemonBroker {
 
 	#onOutput(record: ManagedDaemon, generation: number, raw: string): void {
 		if (generation !== record.generation) return;
-		const text = record.log?.append(raw) ?? sanitizeText(raw);
+		const output = raw.toWellFormed();
+		const text = record.log?.append(output) ?? output;
 		record.snapshot.outputBytes += Buffer.byteLength(text, "utf8");
-		this.#trackOutput(record, generation, text);
+		this.#trackOutput(record, generation, sanitizeText(text));
 	}
 
 	async #readDetachedOutput(record: ManagedDaemon, generation: number): Promise<void> {
@@ -753,13 +776,20 @@ class DaemonBroker {
 			timedOut = !changed;
 		}
 		const lines = Math.max(1, Math.min(1_000, Math.floor(operation.lines)));
-		const text = record.log
+		const output = record.log
 			? await record.log.read(operation.head, lines, operation.grep)
-			: await DaemonLog.readDir(record.dir, operation.head, lines, operation.grep);
+			: await DaemonLog.readFiles(
+					path.join(record.dir, LOG_FILE),
+					path.join(record.dir, PREVIOUS_LOG_FILE),
+					operation.head,
+					lines,
+					operation.grep,
+				);
 		return {
 			op: "logs",
 			name: record.snapshot.name,
-			text,
+			text: output.text,
+			terminalText: record.spec.pty && operation.grep === undefined ? output.terminalText : undefined,
 			cursor: record.snapshot.outputBytes,
 			timedOut,
 			state: record.snapshot.state,

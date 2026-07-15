@@ -112,7 +112,7 @@ import {
 	obfuscateProviderContext,
 	SecretObfuscator,
 } from "./secrets";
-import { AgentSession, type Downshift, type PlanYolo } from "./session/agent-session";
+import { AgentSession, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { appendSessionBossInboxMessage } from "./session/boss-inbox";
@@ -122,6 +122,7 @@ import {
 	convertToLlm,
 	createCustomMessage,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	replaceLlmImagesWithText,
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
@@ -420,8 +421,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	/** Downshift from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
-	downshift?: Downshift;
+	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
+	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve on the model's first resolve call, then switch to execute. */
 	planYolo?: PlanYolo;
 
@@ -902,6 +903,7 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
+		localProtocolOptions: ctx.localProtocolOptions,
 	};
 }
 
@@ -1912,10 +1914,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// to mirror the AsyncJobManager ownership rule.
 		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
-		// Add image tools when the active model or configured image providers can generate images.
-		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
-		if (imageGenTools.length > 0) {
-			customTools.push(...(imageGenTools as unknown as CustomTool[]));
+		// Add image tools when generation is enabled and either no explicit tool
+		// whitelist was given or it names `generate_image`. Unlike built-in tools
+		// (filtered in `createTools`), custom tools are force-activated via
+		// `alwaysInclude` below, so an explicit `--no-tools`/whitelist must be
+		// honored here or image-gen would leak past every filter (issue #5305).
+		const imageGenRequested = !options.toolNames || options.toolNames.includes("generate_image");
+		if (settings.get("generate_image.enabled") && imageGenRequested) {
+			const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
+			if (imageGenTools.length > 0) {
+				customTools.push(...(imageGenTools as unknown as CustomTool[]));
+			}
 		}
 
 		if (settings.get("speechgen.enabled")) {
@@ -2085,7 +2094,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 		// Resolve deferred --model/subagent patterns now that extension models are
-		// registered. Expand role aliases (`pi/smol`) and comma chains to concrete
+		// registered. Expand role aliases (`@smol`) and comma chains to concrete
 		// selectors first so deferred resolution accepts everything the immediate
 		// path (resolveModelOverride → resolveModelRoleValue) accepts.
 		if (!model && deferredModelPatterns.length > 0) {
@@ -2307,6 +2316,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRegistry,
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
+			localProtocolOptions,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -2325,6 +2335,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				session.abort({ reason: USER_INTERRUPT_LABEL });
 			},
 			settings,
+			localProtocolOptions,
 			autoApprove: options.autoApprove ?? false,
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
@@ -2742,36 +2753,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const slashCommands = await slashCommandsPromise;
 
-		// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
+		// Keep image blocks off the wire when they'd be rejected: either the user
+		// disabled images (`images.blockImages`) or the active model has no vision
+		// support. The latter covers switching from a vision model to a text-only
+		// one mid-session — historical image blocks would otherwise be replayed to
+		// a provider that 400s on them (#5400). Read both dynamically so a `/model`
+		// switch or setting change takes effect on the next turn.
 		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
 			const converted = convertToLlm(messages);
-			// Check setting dynamically so mid-session changes take effect
-			if (!settings.get("images.blockImages")) {
-				return converted;
+			if (settings.get("images.blockImages")) {
+				return replaceLlmImagesWithText(converted, "Image reading is disabled.");
 			}
-			// Filter out ImageContent from all messages, replacing with text placeholder
-			return converted.map(msg => {
-				if (msg.role === "user" || msg.role === "toolResult") {
-					const content = msg.content;
-					if (Array.isArray(content)) {
-						const hasImages = content.some(c => c.type === "image");
-						if (hasImages) {
-							const filteredContent = content
-								.map(c =>
-									c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c,
-								)
-								.filter((c, i, arr) => {
-									// Dedupe consecutive "Image reading is disabled." texts
-									if (!(c.type === "text" && c.text === "Image reading is disabled." && i > 0)) return true;
-									const prev = arr[i - 1];
-									return !(prev.type === "text" && prev.text === "Image reading is disabled.");
-								});
-							return { ...msg, content: filteredContent };
-						}
-					}
-				}
-				return msg;
-			});
+			const activeModel = agent?.state.model ?? model;
+			if (activeModel && !activeModel.input.includes("image")) {
+				return replaceLlmImagesWithText(
+					converted,
+					"[image omitted: the active model does not support image input]",
+				);
+			}
+			return converted;
 		};
 
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
@@ -2994,7 +2994,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
-			downshift: options.downshift,
+			prewalk: options.prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,

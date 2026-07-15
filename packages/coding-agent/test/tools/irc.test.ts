@@ -505,8 +505,7 @@ describe("IRC", () => {
 				{
 					to: "0-AbortedTranscript",
 					outcome: "failed",
-					error:
-						'Agent "0-AbortedTranscript" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://0-AbortedTranscript.',
+					error: 'Agent "0-AbortedTranscript" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://0-AbortedTranscript.',
 				},
 			]);
 		});

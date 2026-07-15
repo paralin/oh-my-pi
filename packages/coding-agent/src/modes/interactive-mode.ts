@@ -71,7 +71,7 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import { type GuidedGoalMessage, runGuidedGoalTurn } from "../goals/guided-setup";
+import { type GuidedGoalMessage, newGuidedGoalSessionId, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
@@ -666,6 +666,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));
+		this.ui.setScrollbackRebuild(settings.get("tui.scrollbackRebuild"));
 		// OSC 66 text-sizing is Kitty-only; resolve the setting against the terminal's
 		// capability (`TERMINAL.textSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
@@ -3122,8 +3123,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 			const messages: GuidedGoalMessage[] = [{ role: "user", content: initial }];
 			let latestDraftObjective: string | undefined;
+			// One Codex side session for the whole interview: every follow-up turn
+			// reuses it so a multi-question interview shares a single websocket-only
+			// Codex socket instead of leaking one per turn (#5471 review).
+			const guidedGoalSessionId = newGuidedGoalSessionId(this.session);
 			for (let turn = 0; turn < 6; turn++) {
-				const result = await runGuidedGoalTurn(this.session, { messages });
+				const result = await runGuidedGoalTurn(this.session, { messages, sideSessionId: guidedGoalSessionId });
 				if (result.objective?.trim()) latestDraftObjective = result.objective.trim();
 				if (result.kind === "question") {
 					messages.push({ role: "assistant", content: result.question });
@@ -4163,7 +4168,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#selectorController.showDebugSelector();
 	}
 
-	showAgentHub(options?: { requireContent?: boolean }): void {
+	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
