@@ -1364,13 +1364,39 @@ describe("AgentSession handoff", () => {
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
 	});
 
-	it("preserves session and scratch identity across repeated bare /compact calls", async () => {
+	it("runs the scratch closeout turn before repeated bare /compact calls", async () => {
 		await session.dispose();
 		const scratchPath = "agent/current.org";
 		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
 		fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
 		fs.writeFileSync(scratchAbsolutePath, "Scratch objective for manual compact", "utf8");
 		events = [];
+		let closeoutTurnCount = 0;
+		const streamFn: StreamFn = requestModel => {
+			closeoutTurnCount++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: "Scratch handoff ready." }],
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					stopReason: "stop",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: Date.now(),
+				};
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		};
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -1379,6 +1405,7 @@ describe("AgentSession handoff", () => {
 					tools: [],
 					messages: [],
 				},
+				streamFn,
 			}),
 			sessionManager,
 			settings: Settings.isolated({
@@ -1392,8 +1419,6 @@ describe("AgentSession handoff", () => {
 			scratchHandoffDisplayPath: scratchPath,
 		});
 		session.subscribe(event => events.push(event));
-		// A bare manual /compact must compact around scratch state without an LLM
-		// summary or a new session identity.
 		const compactSpy = vi.spyOn(compactionModule, "compact");
 		const previousSessionId = session.sessionId;
 		const previousScratchPath = session.getScratchHandoffDisplayPath();
@@ -1401,6 +1426,7 @@ describe("AgentSession handoff", () => {
 
 		const firstResult = await session.compact();
 
+		expect(closeoutTurnCount).toBe(1);
 		expect(compactSpy).not.toHaveBeenCalled();
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "manual", action: "scratch-handoff" });
 		expect(events).toContainEqual(
@@ -1414,9 +1440,13 @@ describe("AgentSession handoff", () => {
 			return entry.type === "custom_message" && entry.customType === "scratch-handoff-read";
 		});
 		expect(scratchEntry?.type).toBe("custom_message");
+		const closeoutEntry = sessionManager.getEntries().find(entry => {
+			return entry.type === "custom_message" && entry.customType === "scratch-handoff-closeout";
+		});
+		expect(closeoutEntry?.type).toBe("custom_message");
 
-		// A second bare /compact preserves the same logical and durable identities.
 		await session.compact();
+		expect(closeoutTurnCount).toBe(2);
 		expect(session.getScratchHandoffDisplayPath()).toBe(previousScratchPath);
 		expect(session.sessionId).toBe(previousSessionId);
 		expect(sessionManager.getSessionFile()).toBe(previousSessionFile);

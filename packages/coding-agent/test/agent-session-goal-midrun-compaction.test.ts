@@ -205,7 +205,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts.length).toBeGreaterThanOrEqual(2);
 		expect(observedContexts[1].join("\n")).toContain("ACTIVE-GOAL-MID-RUN-COMPACTED");
 	});
-	it("preserves active goal state through manual scratch handoff compaction", async () => {
+	it("keeps the goal active through manual scratch handoff closeout and compaction", async () => {
 		const { session } = await createHarness(
 			{ "compaction.strategy": "handoff" },
 			{ scratchHandoffDisplayPath: "agent/current.org" },
@@ -215,7 +215,19 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 		await session.compact();
 
-		expect(session.getGoalModeState()).toEqual(state);
+		const goalState = session.getGoalModeState();
+		expect(goalState).toEqual(
+			expect.objectContaining({
+				enabled: true,
+				mode: "active",
+				goal: expect.objectContaining({
+					id: state.goal.id,
+					objective: state.goal.objective,
+					status: "active",
+				}),
+			}),
+		);
+		expect(goalState?.goal.tokensUsed).toBeGreaterThan(0);
 	});
 
 	it("falls back to in-place compaction for mid-run handoff strategy", async () => {

@@ -2027,6 +2027,7 @@ export class AgentSession {
 				scratchPath: string;
 				baselineWriteCount: number;
 				triggerContextTokens?: number;
+				reason: AutoCompactionReason;
 		  }
 		| undefined;
 
@@ -3753,7 +3754,11 @@ export class AgentSession {
 		});
 	}
 
-	async #requestScratchHandoffCloseout(triggerContextTokens?: number, runImmediately = false): Promise<boolean> {
+	async #requestScratchHandoffCloseout(
+		triggerContextTokens?: number,
+		runImmediately = false,
+		reason: AutoCompactionReason = "threshold",
+	): Promise<boolean> {
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (scratchPath === undefined) return false;
 		const existing = this.#scratchHandoffCloseout;
@@ -3771,6 +3776,7 @@ export class AgentSession {
 			scratchPath,
 			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
 			triggerContextTokens,
+			reason,
 		};
 		const message = {
 			customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
@@ -3807,8 +3813,8 @@ export class AgentSession {
 			);
 		}
 		this.#scratchHandoffCloseout = undefined;
-		return await this.#runAutoCompaction("threshold", false, false, allowDefer, {
-			autoContinue,
+		return await this.#runAutoCompaction(closeout.reason, false, false, allowDefer, {
+			autoContinue: closeout.reason === "manual" ? false : autoContinue,
 			triggerContextTokens: closeout.triggerContextTokens,
 		});
 	}
@@ -11341,51 +11347,29 @@ export class AgentSession {
 	}
 
 	/**
-	 * Manual `/compact` clean-break path: compact the current session around its
-	 * scratch handoff instead of summarizing. Mirrors `compact()`'s
-	 * disconnect/abort/reconnect setup, then drives the same
-	 * `#compactScratchHandoffSession` path used by automatic maintenance under a
-	 * `manual` reason. No auto-continue: the operator issued `/compact` and drives
-	 * the next turn.
+	 * Manual `/compact` clean-break path: run the ordinary scratch closeout turn,
+	 * then compact the current session around the updated handoff under a `manual`
+	 * maintenance reason. Waiting for tracked post-turn work keeps the command
+	 * active through the context rebuild. No auto-continue: the operator issued
+	 * `/compact` and drives the next task turn.
 	 */
 	async #runManualScratchHandoffCompaction(): Promise<CompactionResult> {
-		if (this.#compactionAbortController) {
-			throw new Error("Compaction already in progress");
-		}
 		const scratchPath = this.#scratchHandoffDisplayPath;
 		if (scratchPath === undefined) {
 			throw new Error("Scratch handoff is not active for this session.");
 		}
 		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
-		const compactionAbortController = new AbortController();
-		this.#compactionAbortController = compactionAbortController;
-		try {
-			this.#disconnectFromAgent();
-			await this.abort({ goalReason: "internal", preserveCompaction: true });
-			const trace = this.#createMaintenanceTrace("scratch-handoff", "manual", undefined, scratchPath);
-			await this.#emitMaintenanceTraceStart(trace);
-			await this.#emitMaintenanceTraceDelta(trace, "activity", "Started scratch handoff from the current session.");
-			await this.#emitSessionEvent({ type: "auto_compaction_start", reason: "manual", action: "scratch-handoff" });
-			await this.#compactScratchHandoffSession(trace);
-			await this.#emitSessionEvent({
-				type: "auto_compaction_end",
-				action: "scratch-handoff",
-				result: undefined,
-				aborted: false,
-				willRetry: false,
-			});
-			await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
-			return {
-				summary: `Scratch handoff: compacted the current session around ${scratchPath}.`,
-				firstKeptEntryId: getLatestCompactionEntry(this.sessionManager.getBranch())?.firstKeptEntryId ?? "",
-				tokensBefore,
-			};
-		} finally {
-			if (this.#compactionAbortController === compactionAbortController) {
-				this.#compactionAbortController = undefined;
-			}
-			this.#reconnectToAgent();
+		await this.#requestScratchHandoffCloseout(tokensBefore, true, "manual");
+		await this.waitForIdle();
+		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		if (!compactionEntry) {
+			throw new Error("Scratch handoff compaction did not complete.");
 		}
+		return {
+			summary: `Scratch handoff: compacted the current session around ${scratchPath}.`,
+			firstKeptEntryId: compactionEntry.firstKeptEntryId,
+			tokensBefore,
+		};
 	}
 
 	/**

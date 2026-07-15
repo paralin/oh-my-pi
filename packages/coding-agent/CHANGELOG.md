@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed bare `/compact` skipping the scratch-handoff closeout turn and immediately clearing the transcript; manual compaction now updates the scratch file through the normal visible handoff sequence before rebuilding context.
+
 ## [16.5.2] - 2026-07-14
 
 ### Breaking Changes
