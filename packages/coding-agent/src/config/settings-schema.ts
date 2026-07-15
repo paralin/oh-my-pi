@@ -2975,7 +2975,26 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "Rules (TTSR)",
 			label: "TTSR",
-			description: "Interrupt the agent mid-stream when output matches rule patterns (Time-Traveling Stream Rules)",
+			description: "Monitor agent output for matching rule patterns (Time-Traveling Stream Rules)",
+		},
+	},
+	"ttsr.action": {
+		type: "enum",
+		values: ["steer", "kill"] as const,
+		default: "steer",
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "TTSR Action",
+			description: "How to handle a matched TTSR rule",
+			options: [
+				{
+					value: "steer",
+					label: "steer",
+					description: "Keep the session alive and steer the agent to correct course",
+				},
+				{ value: "kill", label: "kill", description: "Abort the stream and retry with the rule reminder" },
+			],
 		},
 	},
 
@@ -5351,6 +5370,7 @@ export interface CommitSettings {
 
 export interface TtsrSettings {
 	enabled: boolean;
+	action?: SettingValue<"ttsr.action">;
 	contextMode: "discard" | "keep";
 	interruptMode: "never" | "prose-only" | "tool-only" | "always";
 	repeatMode: "once" | "after-gap";

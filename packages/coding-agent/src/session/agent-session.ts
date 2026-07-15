@@ -297,6 +297,7 @@ import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import ttsrSteerTemplate from "../prompts/system/ttsr-steer.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
@@ -2019,6 +2020,8 @@ export class AgentSession {
 		| {
 				scratchPath: string;
 				baselineWriteCount: number;
+				/** One-shot: later tool continuations in the closeout MUST keep their results. */
+				elideToolResultsBeforeNextRequest: boolean;
 				triggerContextTokens?: number;
 				reason: AutoCompactionReason;
 		  }
@@ -3743,6 +3746,7 @@ export class AgentSession {
 		this.#scratchHandoffCloseout = {
 			scratchPath,
 			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
+			elideToolResultsBeforeNextRequest: true,
 			triggerContextTokens,
 			reason,
 		};
@@ -5864,9 +5868,41 @@ export class AgentSession {
 		return manager.checkAstSnapshot(digest, matchContext);
 	}
 
+	#hasQueuedTtsrSteering(ruleName: string): boolean {
+		for (const message of this.agent.peekSteeringQueue()) {
+			if (message.role !== "custom" || message.customType !== "ttsr-injection") continue;
+			if (this.#extractTtsrRuleNames(message.details).includes(ruleName)) return true;
+		}
+		return false;
+	}
+
+	#queueTtsrSteering(rules: Rule[]): void {
+		const queuedRules = rules.filter(rule => !this.#hasQueuedTtsrSteering(rule.name));
+		if (queuedRules.length === 0) return;
+		const content = queuedRules
+			.map(rule =>
+				prompt.render(ttsrSteerTemplate, {
+					name: rule.name,
+					path: this.#displayRulePath(rule.path),
+					content: rule.content,
+				}),
+			)
+			.join("\n\n");
+		const details = { rules: queuedRules.map(rule => rule.name) };
+		this.agent.steer({
+			role: "custom",
+			customType: "ttsr-injection",
+			content,
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+	}
+
 	/**
-	 * Route TTSR matches to either a per-tool injection or a stream-interrupting
-	 * retry. Returns true when the stream was aborted and the caller should stop
+	 * Route TTSR matches through the configured steering or interrupt path.
+	 * Returns true when the stream was aborted and the caller should stop
 	 * processing this event.
 	 */
 	#handleTtsrMatches(
@@ -5874,6 +5910,11 @@ export class AgentSession {
 		matchContext: TtsrMatchContext,
 		targetMessageTimestamp: number | undefined,
 	): boolean {
+		if (this.#ttsrManager?.getSettings().action === "steer") {
+			this.#queueTtsrSteering(matches);
+			this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+			return false;
+		}
 		// Decide first: a non-interrupting tool-source match attaches to the
 		// specific tool call's result instead of driving a loop-wide follow-up.
 		const shouldInterrupt = this.#shouldInterruptForTtsrMatch(matches, matchContext);
@@ -11590,6 +11631,9 @@ export class AgentSession {
 		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
 		const promptBudget = Math.max(0, contextWindow - reserveTokens);
 		if (promptBudget <= 0) return;
+		const closeout = this.#scratchHandoffCloseout;
+		const elideToolResults = closeout?.elideToolResultsBeforeNextRequest === true;
+		if (elideToolResults) closeout.elideToolResultsBeforeNextRequest = false;
 
 		const initialContextTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
@@ -11599,7 +11643,7 @@ export class AgentSession {
 		)
 			return;
 		const contextTokens =
-			this.#scratchHandoffCloseout && initialContextTokens > promptBudget
+			elideToolResults && initialContextTokens > promptBudget
 				? ((await this.#elideRecentToolResultsForScratchCloseout(
 						context,
 						contextWindow,

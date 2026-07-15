@@ -2,8 +2,8 @@
  * Time Traveling Stream Rules (TTSR) Manager
  *
  * Manages rules that get injected mid-stream when their condition pattern matches
- * the agent's output. When a match occurs, the stream is aborted, the rule is
- * injected as a system reminder, and the request is retried.
+ * the agent's output. AgentSession applies the configured action: steer keeps the
+ * stream alive and queues a correction, while kill aborts and retries.
  */
 import * as path from "node:path";
 import { AstMatchStrictness, astMatch } from "@oh-my-pi/pi-natives";
@@ -54,6 +54,7 @@ interface InjectionRecord {
 
 const DEFAULT_SETTINGS: Required<TtsrSettings> = {
 	enabled: true,
+	action: "steer",
 	contextMode: "discard",
 	interruptMode: "always",
 	repeatMode: "once",

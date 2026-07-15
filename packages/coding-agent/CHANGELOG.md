@@ -2,7 +2,9 @@
 
 ## [Unreleased]
 
-### Fixed
+### Added
+
+- Added the `ttsr.action` setting (`"steer"` by default, `"kill"` for interrupt/retry compatibility); steering keeps the session alive and injects the matched rule as a hidden correction message.
 
 - Fixed bare `/compact` skipping the scratch-handoff closeout turn and immediately clearing the transcript; manual compaction now updates the scratch file through the normal visible handoff sequence before rebuilding context.
 ## [17.0.0] - 2026-07-15

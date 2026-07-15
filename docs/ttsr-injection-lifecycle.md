@@ -9,6 +9,7 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 - [`../src/session/agent-session.ts`](../packages/coding-agent/src/session/agent-session.ts)
 - [`../src/session/session-manager.ts`](../packages/coding-agent/src/session/session-manager.ts)
 - [`../src/prompts/system/ttsr-interrupt.md`](../packages/coding-agent/src/prompts/system/ttsr-interrupt.md)
+- [`../src/prompts/system/ttsr-steer.md`](../packages/coding-agent/src/prompts/system/ttsr-steer.md)
 - [`../src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`../src/extensibility/extensions/types.ts`](../packages/coding-agent/src/extensibility/extensions/types.ts)
 - [`../src/extensibility/hooks/types.ts`](../packages/coding-agent/src/extensibility/hooks/types.ts)
@@ -59,6 +60,7 @@ AST conditions only evaluate on **edit/write tool-argument streams** — they ne
 ### Setting gating
 
 `TtsrSettings.enabled` gates the manager: when `ttsr.enabled === false`, `addRule()` refuses registration and `checkDelta()`/`checkSnapshot()`/`checkAstSnapshot()`/`hasRules()`/`hasAstRules()` all return empty/false, so no matching runs.
+`ttsr.action` selects the match response. The fork default is `"steer"`: matched rules are queued as hidden steering `custom` messages using `ttsr-steer.md`, the current stream is not aborted, and the normal agent loop continues with the correction. `"kill"` preserves the interrupt/retry path below. `ttsr.action: "steer"` takes precedence over `ttsr.interruptMode`; the latter still controls kill-mode and per-rule non-interrupting behavior.
 
 ## 2. Streaming monitor lifecycle
 
@@ -80,7 +82,8 @@ When assistant updates arrive and rules exist:
 
 `checkDelta()`/`checkSnapshot()` iterate registered rules and return all matching rules that pass scope, global path-glob, regex condition, and repeat policy checks. `checkAstSnapshot()` applies the same scope/path/repeat gates, then runs each candidate rule's `astCondition` patterns against the snapshot via the native `astMatch` engine. It is throttled per stream key: an identical consecutive snapshot (common when only non-source arguments change between deltas) is skipped without re-running the matcher. Both paths feed their matches through the same trigger-decision handler.
 
-## 3. Trigger decision and immediate abort path
+## 3. Trigger decision and action paths
+With `ttsr.action === "steer"`, matched rules are deduplicated against already queued TTSR steering messages, rendered with `ttsr-steer.md`, and queued through `agent.steer(...)`. The `ttsr_triggered` event is emitted, but no abort, retry gate, or partial-message discard occurs. The core agent loop delivers the hidden steering message before its next model call.
 
 When one or more rules match and at least one matched rule allows interruption:
 
