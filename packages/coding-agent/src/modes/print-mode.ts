@@ -12,6 +12,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
+import { SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE } from "../session/scratch-handoff";
 import { flushTelemetryExport } from "../telemetry-export";
 import { resolveToCwd } from "../tools/path-utils";
 import { initializeExtensions } from "./runtime-init";
@@ -252,6 +253,20 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			process.stderr.write("Context budget stop: no scratch handoff file configured\n");
 		}
 		return true;
+	};
+	const removeContextBudgetStop =
+		contextBudgetStop && typeof session.agent?.addBeforeModelCall === "function"
+			? session.agent.addBeforeModelCall(context => {
+					const lastMessage = context.messages.at(-1);
+					if (lastMessage?.role === "custom" && lastMessage.customType === SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE) {
+						return undefined;
+					}
+					if (!resolveContextBudgetStop(session, contextBudgetStop)) return undefined;
+					return { stop: true, reason: "context-budget" };
+				})
+			: undefined;
+	using _contextBudgetStop = {
+		[Symbol.dispose]: () => removeContextBudgetStop?.(),
 	};
 
 	await session.sessionManager.ensureOnDisk?.();

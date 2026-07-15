@@ -309,6 +309,42 @@ describe("Agent", () => {
 			{ systemPrompt: "prompt-two", toolNames: ["alpha", "beta"] },
 		]);
 	});
+	it("stops before the next provider call when an added pre-model callback requests it", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		const tool: AgentTool<typeof toolSchema, undefined> = {
+			name: "record",
+			label: "Record",
+			description: "Record a value",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "recorded" }], details: undefined };
+			},
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "record", arguments: { value: "crossed" } }] },
+				{ content: ["should not be requested"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, tools: [tool], messages: [] },
+			streamFn: mock.stream,
+		});
+		let hostCallbackCalls = 0;
+		agent.setBeforeModelCall(() => {
+			hostCallbackCalls++;
+		});
+		const removeBudgetStop = agent.addBeforeModelCall(() =>
+			mock.calls.length >= 1 ? { stop: true, reason: "context-budget" } : undefined,
+		);
+
+		await agent.prompt("record");
+		removeBudgetStop();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(hostCallbackCalls).toBe(2);
+		expect(agent.state.messages.at(-1)?.role).toBe("toolResult");
+	});
 
 	it("prompt() drops stale forced toolChoice after same-turn tool refresh", async () => {
 		const toolSchema = z.object({ value: z.string() });

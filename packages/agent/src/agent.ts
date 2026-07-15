@@ -392,6 +392,9 @@ export class Agent {
 	#beforeSteeringPoll?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#beforeModelCall?: (context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>;
+	#additionalBeforeModelCalls = new Set<
+		(context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>
+	>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
@@ -769,6 +772,19 @@ export class Agent {
 		fn: ((context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>) | undefined,
 	): void {
 		this.#beforeModelCall = fn;
+	}
+
+	/**
+	 * Add a pre-model callback without replacing callbacks owned by the host.
+	 * Returns a disposer that removes only this callback.
+	 */
+	addBeforeModelCall(
+		fn: (context: AgentContext) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>,
+	): () => void {
+		this.#additionalBeforeModelCalls.add(fn);
+		return () => {
+			this.#additionalBeforeModelCalls.delete(fn);
+		};
 	}
 
 	/**
@@ -1166,7 +1182,13 @@ export class Agent {
 				}
 				context.systemPrompt = this.#state.systemPrompt;
 				context.tools = this.#state.tools;
-				return await this.#beforeModelCall?.(context);
+				const result = await this.#beforeModelCall?.(context);
+				if (result?.stop) return result;
+				for (const callback of this.#additionalBeforeModelCalls) {
+					const callbackResult = await callback(context);
+					if (callbackResult?.stop) return callbackResult;
+				}
+				return undefined;
 			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
