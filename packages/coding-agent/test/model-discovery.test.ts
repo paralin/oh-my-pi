@@ -966,6 +966,40 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(llama?.input).toEqual(["text", "image"]);
 	});
 
+	test("llama.cpp discovery routes Qwen models to chat-completions with the chat-template disable dialect", async () => {
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:8080/models") {
+				return new Response(
+					JSON.stringify({ data: [{ id: "qwen3-8b" }, { id: "ternary-bonsai-27b-q2_0" }, { id: "llama-3.1-8b" }] }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			if (url === "http://127.0.0.1:8080/props") {
+				return new Response(
+					JSON.stringify({ default_generation_settings: { n_ctx: 32768, params: { max_tokens: -1, n_predict: -1 } } }),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+
+		for (const id of ["qwen3-8b", "ternary-bonsai-27b-q2_0"]) {
+			const qwen = registry.find("llama.cpp", id);
+			expect(qwen?.reasoning).toBe(true);
+			expect(qwen?.api).toBe("openai-completions");
+			expect(qwen?.compat?.thinkingFormat).toBe("qwen-chat-template");
+			expect(qwen?.compat?.reasoningDisableMode).toBe("qwen-template-false");
+		}
+
+		const plain = registry.find("llama.cpp", "llama-3.1-8b");
+		expect(plain?.reasoning).toBe(false);
+		expect(plain?.api).toBe("openai-responses");
+		expect(plain?.compat?.reasoningDisableMode).not.toBe("qwen-template-false");
+	});
+
 	test("llama.cpp discovery marks per-model architecture image modalities as vision-capable", async () => {
 		const fetchMock: FetchImpl = async input => {
 			const url = String(input);

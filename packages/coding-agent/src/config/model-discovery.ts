@@ -513,6 +513,15 @@ async function discoverLlamaCppServerMetadata(
 	}
 }
 
+/**
+ * PrismLM Ternary/1-bit Bonsai GGUFs are Qwen3.6-27B derivatives served locally
+ * via llama.cpp; their ids do not contain "qwen", so match them explicitly here
+ * rather than broadening the global `isQwenModelId` predicate.
+ */
+function isBonsaiQwenGguf(id: string): boolean {
+	return /(?:ternary-)?bonsai-27b/i.test(id);
+}
+
 export async function discoverLlamaCppModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -554,18 +563,22 @@ export async function discoverLlamaCppModels(
 			serverMetadata?.contextWindow ??
 			item.trainingContextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		// Local llama.cpp Qwen-family builds (including the Qwen3.6-based Ternary
-		// Bonsai) ship a jinja chat template that defaults `enable_thinking: true`.
-		// Discovery would otherwise stamp `reasoning: false` and an empty compat,
-		// so `--thinking off` never reaches the wire and the model keeps thinking.
-		// Mark them as reasoning models with the Qwen disable dialect so the
-		// caller-disabled path emits `enable_thinking: false`.
-		const isQwenThinker = isQwenModelId(id);
+		// Qwen-family local llama.cpp builds (and the Qwen3.6-based PrismLM
+		// Ternary Bonsai) ship a jinja chat template that defaults
+		// `enable_thinking: true`. omp emits `preserve_thinking` inside
+		// `chat_template_kwargs` for Qwen, so the thinking toggle has to ride in
+		// `chat_template_kwargs` too (`qwen-template-false`). Discovery would
+		// otherwise stamp `reasoning: false` with an empty compat, so
+		// `--thinking off` never reaches the wire and the model keeps thinking.
+		// Route them through chat-completions, since the Responses path (the
+		// implicit provider's default) has no equivalent disable encoding.
+		// Non-Qwen local models keep the configured api.
+		const isQwenThinker = isQwenModelId(id) || isBonsaiQwenGguf(id);
 		discovered.push(
 			buildModel({
 				id,
 				name: id,
-				api: providerConfig.api,
+				api: isQwenThinker ? "openai-completions" : providerConfig.api,
 				provider: providerConfig.provider,
 				baseUrl,
 				reasoning: isQwenThinker,
@@ -575,23 +588,16 @@ export async function discoverLlamaCppModels(
 				contextWindow,
 				maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
 				headers,
-				compat: isQwenThinker
-					? {
-							supportsStore: false,
-							supportsDeveloperRole: false,
-							supportsReasoningEffort: false,
-							supportsReasoningParams: true,
-							// llama.cpp's server honors `enable_thinking` only inside
-							// `chat_template_kwargs` (the vLLM/SGLang convention), not the
-							// top-level field, so use the chat-template dialect.
-							thinkingFormat: "qwen-chat-template",
-							reasoningDisableMode: "qwen-template-false",
-						}
-					: {
-							supportsStore: false,
-							supportsDeveloperRole: false,
-							supportsReasoningEffort: false,
-						},
+				compat: {
+					supportsStore: false,
+					supportsDeveloperRole: false,
+					supportsReasoningEffort: false,
+					...(isQwenThinker && {
+						supportsReasoningParams: true,
+						thinkingFormat: "qwen-chat-template",
+						reasoningDisableMode: "qwen-template-false",
+					}),
+				},
 			} as ModelSpec<Api>),
 		);
 	}

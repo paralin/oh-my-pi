@@ -60,11 +60,7 @@ export const isAnthropicNamespacedModelId = memo((modelId: string): boolean => {
 
 /** Qwen family ids (substring match — Qwen SKUs have no stable prefix shape). */
 export const isQwenModelId = memo((modelId: string): boolean => {
-	const id = modelId.toLowerCase();
-	// Ternary Bonsai (PrismLM) is a Qwen3.6-27B derivative that ships the Qwen
-	// chat template (`enable_thinking`), so it needs the Qwen thinking-dialect
-	// compat even though its id reads "bonsai", not "qwen".
-	return id.includes("qwen") || id.includes("bonsai");
+	return modelId.toLowerCase().includes("qwen");
 });
 
 /** Gemma open-weights family (`gemma-3-27b-it`, `google/gemma-4-E2B-it`, `gemma2-9b`). */
