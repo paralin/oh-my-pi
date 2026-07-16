@@ -327,8 +327,8 @@ describe("system prompt tool inventory", () => {
 		});
 		const text = systemPrompt.join("\n\n");
 
-		expect(text).toContain("ONE capable `task` subagent a large, complete assignment");
-		expect(text).toContain("files/functions/items alone are not workstreams");
+		expect(text).toContain("Prefer ONE capable `task` subagent");
+		expect(text).toContain("NEVER split related work by file, function, or item");
 		expect(text).toContain('`completion()` with the `"smol"` model');
 	});
 });

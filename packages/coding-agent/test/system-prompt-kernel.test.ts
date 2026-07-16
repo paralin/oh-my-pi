@@ -84,3 +84,54 @@ describe("system prompt Kernel field", () => {
 		expect(systemPrompt.join("\n\n")).toContain("Kernel: Darwin Kernel Version 25.5.0:");
 	});
 });
+
+describe("system prompt project contract gate", () => {
+	let tempDir = "";
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
+
+	beforeEach(() => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-contract-"));
+		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-contract-home-"));
+		originalHome = process.env.HOME;
+		process.env.HOME = tempHomeDir;
+	});
+
+	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+
+	it("gates project-owned guidance while retaining harness mechanics", async () => {
+		const bare = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const contracted = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [{ path: "AGENTS.md", content: "# Project contract" }],
+			skills: [],
+			rules: [],
+			toolNames: [],
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir, agentsMdFiles: ["AGENTS.md"] },
+		});
+		const barePrompt = bare.systemPrompt[0] ?? "";
+		const contractedPrompt = contracted.systemPrompt[0] ?? "";
+
+		expect(barePrompt).toContain("# Engineering Principles");
+		expect(barePrompt).toContain("EXECUTION WORKFLOW");
+		expect(barePrompt).toContain("<completeness>");
+		expect(barePrompt).toContain("<evidence-and-output>");
+		expect(contractedPrompt).not.toContain("# Engineering Principles");
+		expect(contractedPrompt).not.toContain("EXECUTION WORKFLOW");
+		expect(contractedPrompt).not.toContain("<completeness>");
+		expect(contractedPrompt).not.toContain("<evidence-and-output>");
+		for (const promptText of [barePrompt, contractedPrompt]) {
+			expect(promptText).toContain("<system-conventions>");
+			expect(promptText).toContain("TOOL POLICY");
+			expect(promptText).toContain("<contract>");
+			expect(promptText).toContain("<yielding>");
+		}
+	});
+});
