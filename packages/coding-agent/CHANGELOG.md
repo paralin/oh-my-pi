@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Fixed automatic scratch handoff rebuilding directly from a stale scratch snapshot when the closeout request exceeded the prompt budget; OMP now rebuilds first, then delivers the pending `PENCILS DOWN` closeout in the smaller context before continuing.
+
 - Limited scratch-closeout artifact elision to the first closeout request so ordinary tool continuations retain their results.
 
 - Fixed bare `/compact` skipping the scratch-handoff closeout turn and immediately clearing the transcript; manual compaction now updates the scratch file through the normal visible handoff sequence before rebuilding context.

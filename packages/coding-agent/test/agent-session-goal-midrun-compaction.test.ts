@@ -364,13 +364,19 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 		expect(observedContexts[1].join("\n")).toContain("artifact://");
 		expect(
+			session.messages
+				.map(message => JSON.stringify(message))
+				.join("\n")
+				.match(/PENCILS DOWN/g),
+		).toHaveLength(1);
+		expect(
 			events.filter(
 				event => event.type === "notice" && event.message.includes("preserve the scratch closeout turn"),
 			),
 		).toHaveLength(1);
 	});
 
-	it("stops before an oversized scratch-handoff continuation request", async () => {
+	it("preserves an oversized scratch closeout for the rebuilt context", async () => {
 		const { session, observedContexts } = await createHarness(
 			{
 				"compaction.strategy": "handoff",
@@ -390,6 +396,9 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 		expect(session.getGoalModeState()).toMatchObject({ enabled: true, goal: { status: "active" } });
 		expect(observedContexts).toHaveLength(1);
+		expect(observedContexts[0].join("\n")).not.toContain("PENCILS DOWN");
+		const rebuiltContext = session.messages.map(message => JSON.stringify(message)).join("\n");
+		expect(rebuiltContext.match(/PENCILS DOWN/g)).toHaveLength(1);
 		expect(events).toContainEqual(
 			expect.objectContaining({
 				type: "notice",
@@ -399,6 +408,36 @@ describe("AgentSession mid-run threshold compaction", () => {
 			}),
 		);
 		expect(events).toContainEqual({ type: "auto_compaction_start", reason: "threshold", action: "scratch-handoff" });
+
+		await session.prompt("continue after rebuild");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(2);
+		expect(observedContexts[1].join("\n").match(/PENCILS DOWN/g)).toHaveLength(1);
+		expect(observedContexts[1].join("\n")).toContain("full, comprehensive snapshot");
+	});
+
+	it("keeps one queued closeout after an oversized direct rebuild", async () => {
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 40_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{ modelContextWindow: 55_000, scratchHandoffDisplayPath: "agent/current.org" },
+		);
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(1);
+		expect(
+			session.messages
+				.map(message => JSON.stringify(message))
+				.join("\n")
+				.match(/PENCILS DOWN/g),
+		).toHaveLength(1);
 	});
 
 	it("queues scratch closeout before threshold when only closeout headroom remains", async () => {

@@ -3749,13 +3749,11 @@ export class AgentSession {
 		});
 	}
 
-	async #requestScratchHandoffCloseout(
-		triggerContextTokens?: number,
-		runImmediately = false,
-		reason: AutoCompactionReason = "threshold",
-	): Promise<boolean> {
-		const scratchPath = this.#scratchHandoffDisplayPath;
-		if (scratchPath === undefined) return false;
+	#stageScratchHandoffCloseout(
+		scratchPath: string,
+		triggerContextTokens: number | undefined,
+		reason: AutoCompactionReason,
+	): boolean {
 		const existing = this.#scratchHandoffCloseout;
 		if (existing?.scratchPath === scratchPath) {
 			if (
@@ -3764,8 +3762,7 @@ export class AgentSession {
 			) {
 				existing.triggerContextTokens = triggerContextTokens;
 			}
-			if (runImmediately) await this.waitForIdle();
-			return true;
+			return false;
 		}
 		this.#scratchHandoffCloseout = {
 			scratchPath,
@@ -3774,6 +3771,21 @@ export class AgentSession {
 			triggerContextTokens,
 			reason,
 		};
+		return true;
+	}
+
+	async #requestScratchHandoffCloseout(
+		triggerContextTokens?: number,
+		runImmediately = false,
+		reason: AutoCompactionReason = "threshold",
+	): Promise<boolean> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return false;
+		const created = this.#stageScratchHandoffCloseout(scratchPath, triggerContextTokens, reason);
+		if (!created) {
+			if (runImmediately) await this.waitForIdle();
+			return true;
+		}
 		const message = {
 			customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
 			content: renderScratchHandoffCloseoutMessage(scratchPath),
@@ -5091,6 +5103,11 @@ export class AgentSession {
 					scratchPath: preProviderScratchStop.scratchPath,
 					toolUseCanScratchHandoff,
 				});
+				this.#stageScratchHandoffCloseout(
+					preProviderScratchStop.scratchPath,
+					preProviderScratchStop.contextTokens,
+					"threshold",
+				);
 				const compactionTask = this.#runAutoCompaction("threshold", false, false, true, {
 					suppressHandoff: !toolUseCanScratchHandoff,
 					triggerContextTokens: preProviderScratchStop.contextTokens,
@@ -11312,6 +11329,16 @@ export class AgentSession {
 			scratchEntryId,
 			tokensBefore,
 		);
+		const closeout = this.#scratchHandoffCloseout;
+		if (closeout) {
+			this.sessionManager.appendCustomMessageEntry(
+				SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
+				renderScratchHandoffCloseoutMessage(closeout.scratchPath),
+				true,
+				{ path: closeout.scratchPath, triggerContextTokens: closeout.triggerContextTokens },
+				"agent",
+			);
+		}
 		await this.sessionManager.ensureOnDisk();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
