@@ -1021,7 +1021,7 @@ export class ModelRegistry {
 		// Custom/config providers bypass the model-manager merge point —
 		// collapse effort-tier variants here so X/X-thinking twins fold.
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyRuntimeProviderOverrides(withModelOverrides);
+		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
 		this.#lastStaticLoadMtime = this.#modelsConfigFile.getMtimeMs();
 	}
 
@@ -1145,19 +1145,14 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
-			// Rows cached before the Qwen-thinking fix rebuild with the old
-			// `openai-responses` / `reasoning: false` spec, so re-run the upgrade on
-			// load instead of waiting for the (async) re-discovery to correct them.
-			const rebuiltModels = cache.models.map(model => buildModel(model));
-			const migratedModels =
-				providerConfig.discovery.type === "llama.cpp"
-					? rebuiltModels.map(applyLlamaCppQwenThinking)
-					: rebuiltModels;
 			const models = this.#applyProviderModelOverrides(
 				providerConfig.provider,
 				this.#normalizeDiscoverableModels(
 					providerConfig,
-					this.#applyProviderCompat(providerConfig.compat, migratedModels),
+					this.#applyProviderCompat(
+						providerConfig.compat,
+						cache.models.map(model => buildModel(model)),
+					),
 				),
 			);
 			cachedModels.push(...models);
@@ -1423,7 +1418,7 @@ export class ModelRegistry {
 		// Merge runtime extension models so they survive online discovery completion
 		const combined = this.#mergeCustomModels(withConfigModels, this.#runtimeModelOverlays);
 		const withModelOverrides = this.#applyModelOverrides(collapseBuiltModelVariants(combined), this.#modelOverrides);
-		this.#models = this.#applyRuntimeProviderOverrides(withModelOverrides);
+		this.#models = this.#applyLlamaCppQwenThinkingToModels(this.#applyRuntimeProviderOverrides(withModelOverrides));
 	}
 
 	#configuredDiscoveryCacheProviderId(providerConfig: DiscoveryProviderConfig): string {
@@ -1783,6 +1778,22 @@ export class ModelRegistry {
 			if (!override) return model;
 			return applyModelOverride(model, override);
 		});
+	}
+
+	// #applyLlamaCppQwenThinkingToModels re-runs applyLlamaCppQwenThinking as the
+	// outermost transform for llama.cpp-provider models, after discovery merges,
+	// cache fallbacks, and provider/transport overrides have run. It is
+	// idempotent, so it restores the routed Qwen model's chat-completions api,
+	// `/v1` runtime base URL, and disable dialect even when a configured `baseUrl`
+	// override (which wins in mergeDiscoveredModel) or a fallback to a pre-fix
+	// cached row would otherwise leave the old spec in place.
+	#applyLlamaCppQwenThinkingToModels(models: Model<Api>[]): Model<Api>[] {
+		const llamaCppProviders = new Set<string>();
+		for (const provider of this.#discoverableProviders) {
+			if (provider.discovery.type === "llama.cpp") llamaCppProviders.add(provider.provider);
+		}
+		if (llamaCppProviders.size === 0) return models;
+		return models.map(model => (llamaCppProviders.has(model.provider) ? applyLlamaCppQwenThinking(model) : model));
 	}
 
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
@@ -2312,10 +2323,12 @@ export class ModelRegistry {
 				transportOverride,
 			);
 			this.#runtimeProviderOverrides.set(providerName, nextRuntimeOverride);
-			this.#models = this.#models.map(m => {
-				if (m.provider !== providerName) return m;
-				return this.#applyProviderTransportOverride(m, transportOverride);
-			});
+			this.#models = this.#applyLlamaCppQwenThinkingToModels(
+				this.#models.map(m => {
+					if (m.provider !== providerName) return m;
+					return this.#applyProviderTransportOverride(m, transportOverride);
+				}),
+			);
 		}
 	}
 

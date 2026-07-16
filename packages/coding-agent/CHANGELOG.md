@@ -13,6 +13,9 @@
 - Limited scratch-closeout artifact elision to the first closeout request so ordinary tool continuations retain their results.
 
 - Fixed bare `/compact` skipping the scratch-handoff closeout turn and immediately clearing the transcript; manual compaction now updates the scratch file through the normal visible handoff sequence before rebuilding context.
+
+- Local llama.cpp Qwen-family models (including the Qwen3.6-based PrismLM Ternary Bonsai GGUFs) now honor `--thinking off`. Discovery routes them through the chat-completions API with the `qwen-template-false` disable dialect, `qwenPreserveThinking`, and a `/v1` base URL (models kept on a custom transport such as `pi-native` retain their gateway URL so the suffix is not doubled). The upgrade is re-applied as the outermost step after discovery merges, provider `baseUrl` overrides, and cache fallbacks, so a configured native-root base URL or a pre-fix cached row cannot leave the model on the old `openai-responses` / `reasoning: false` spec.
+
 ## [17.0.1] - 2026-07-16
 
 ### Changed

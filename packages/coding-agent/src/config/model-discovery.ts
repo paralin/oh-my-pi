@@ -532,16 +532,18 @@ function isBonsaiQwenGguf(id: string): boolean {
  * `chat_template_kwargs` for Qwen, so the toggle rides there too and history
  * `<think>` blocks survive (`qwenPreserveThinking`). The runtime base URL gets a
  * `/v1` suffix because the chat-completions request would otherwise POST to the
- * native root, which does not serve it. Non-Qwen models pass through unchanged.
- * Applied on both fresh discovery and cache load, so an upgraded cache is
- * corrected without waiting for re-discovery.
+ * native root, which does not serve it. A model with a custom transport (e.g.
+ * `pi-native`, whose client appends `/v1/pi/stream`) keeps its base URL so the
+ * suffix is not doubled. Non-Qwen models pass through unchanged. Applied on both
+ * fresh discovery and cache load, so an upgraded cache is corrected without
+ * waiting for re-discovery.
  */
 export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
 	if (!isQwenModelId(model.id) && !isBonsaiQwenGguf(model.id)) return model;
 	return buildModel({
 		...model,
 		api: "openai-completions",
-		baseUrl: ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(model.baseUrl)),
+		baseUrl: model.transport ? model.baseUrl : ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(model.baseUrl)),
 		reasoning: true,
 		compat: {
 			...model.compatConfig,
@@ -629,7 +631,12 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 	ctx: DiscoveryContext,
 ): Promise<LlamaCppDiscoveredModelRuntimeMetadata | undefined> {
 	const baseUrl = normalizeLlamaCppBaseUrl(model.baseUrl);
-	const modelsUrl = `${baseUrl}/models`;
+	// Probe the native `/models` endpoint (not the OpenAI-compatible `/v1/models`)
+	// so the runtime `meta`, `status.args`, and `architecture.input_modalities`
+	// fields survive; a Qwen model routed to chat-completions carries a `/v1`
+	// base URL, which would otherwise send this to `/v1/models`.
+	const nativeBaseUrl = toLlamaCppNativeBaseUrl(baseUrl);
+	const modelsUrl = `${nativeBaseUrl}/models`;
 	const baseHeaders: Record<string, string> = { ...(model.headers ?? {}) };
 	const attempt = async (headers: Record<string, string>) => {
 		const [entries, serverMetadata] = await Promise.all([
@@ -643,7 +650,7 @@ export async function discoverLlamaCppModelRuntimeMetadata(
 				}
 				return parseLlamaCppModelList(await response.json());
 			}),
-			discoverLlamaCppServerMetadata(ctx, baseUrl, headers),
+			discoverLlamaCppServerMetadata(ctx, nativeBaseUrl, headers),
 		]);
 		if (!entries) {
 			return undefined;
