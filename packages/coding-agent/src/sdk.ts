@@ -83,6 +83,7 @@ import {
 	setActiveSkills,
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
+import { createGladosBossExtension, GLADOS_BOSS_EXTENSION_ID } from "./glados/boss-extension";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -113,6 +114,7 @@ import {
 import { AgentSession, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import { appendSessionBossInboxMessage } from "./session/boss-inbox";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
 	type CustomMessage,
@@ -524,6 +526,8 @@ export interface CreateAgentSessionOptions {
 	parentScratchHandoffDisplayPath?: string;
 	/** Explicit scratch handoff file for this session. Overrides scratchHandoff.rootDir naming. */
 	scratchHandoffFile?: string;
+	/** Enable the file-backed worker-to-boss inbox for this session. */
+	bossInbox?: boolean;
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
 
@@ -664,6 +668,22 @@ export async function discoverExtensions(cwd?: string): Promise<LoadExtensionsRe
 	return discoverAndLoadExtensions([], resolvedCwd);
 }
 
+const BUILTIN_SESSION_EXTENSIONS: Array<{ name: string; factory: ExtensionFactory }> = [
+	{ name: GLADOS_BOSS_EXTENSION_ID, factory: createGladosBossExtension },
+];
+
+async function loadBuiltinSessionExtensions(
+	result: LoadExtensionsResult,
+	cwd: string,
+	eventBus: EventBus,
+): Promise<void> {
+	for (const extension of BUILTIN_SESSION_EXTENSIONS) {
+		result.extensions.push(
+			await loadExtensionFromFactory(extension.factory, cwd, eventBus, result.runtime, extension.name),
+		);
+	}
+}
+
 /**
  * Path-only counterpart of {@link loadSessionExtensions}: the FS-heavy scan
  * without the per-session module load. Subagents reuse the parent's path list
@@ -701,6 +721,9 @@ export async function loadSessionExtensions(
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
 	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus);
+	if (!options.disableExtensionDiscovery) {
+		await loadBuiltinSessionExtensions(result, cwd, eventBus);
+	}
 	for (const { path, error } of result.errors) {
 		logger.error("Failed to load extension", { path, error });
 	}
@@ -1624,6 +1647,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			bossInboxEnabled: options.bossInbox === true,
+			appendBossInboxMessage: async ({ kind, message }) => {
+				const sessionFile = sessionManager.getSessionFile();
+				if (!sessionFile) throw new Error("boss inbox requires a persisted session");
+				return appendSessionBossInboxMessage(sessionFile, {
+					sessionId: sessionManager.getSessionId(),
+					from: resolvedAgentId,
+					kind,
+					message,
+				});
+			},
 			getScratchHandoffDisplayPath: () => session?.getScratchHandoffDisplayPath(),
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
@@ -1905,6 +1939,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				logger.error("Failed to load extension", { path, error });
 			}
 		}
+		if (!options.preloadedExtensions && !options.disableExtensionDiscovery) {
+			await loadBuiltinSessionExtensions(extensionsResult, cwd, eventBus);
+		}
+
 		// Forward the source-path list (NOT the loaded instances) so subagents
 		// rebuild their own session-scoped extensions.
 		toolSession.extensionPaths = extensionPaths;

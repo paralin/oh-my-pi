@@ -17,6 +17,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { type BossInboxMessageKind, type BossInboxRecord, normalizeBossInboxKind } from "../../session/boss-inbox";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import {
@@ -121,16 +122,25 @@ export function executeList(registry: AgentRegistry, senderId: string): AgentToo
 	};
 }
 
+export interface HubMessagingDeps {
+	registry?: AgentRegistry;
+	senderId: string;
+	settings: Settings;
+	bossInboxEnabled?: boolean;
+	appendBossInboxMessage?: (message: { kind: BossInboxMessageKind; message: string }) => Promise<BossInboxRecord>;
+}
+
 export interface HubSendParams {
 	to?: string;
 	message?: string;
 	replyTo?: string;
 	await?: boolean;
 	timeoutMs?: number;
+	kind?: BossInboxMessageKind;
 }
 
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: HubMessagingDeps,
 	params: HubSendParams,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
@@ -145,6 +155,34 @@ export async function executeSend(
 	}
 	if (to === senderId) {
 		return hubErrorResult("Cannot send a message to yourself.", { op: "send", from: senderId, to });
+	}
+	if (to === "boss") {
+		if (deps.bossInboxEnabled !== true || !deps.appendBossInboxMessage) {
+			return hubErrorResult(
+				"Boss inbox is disabled for this session. Start the worker with --boss-inbox to enable it.",
+				{ op: "send", from: senderId, to },
+			);
+		}
+		const kind = normalizeBossInboxKind(params.kind);
+		const record = await deps.appendBossInboxMessage({ kind, message });
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Queued ${kind} for boss inbox (${record.id}). Keep working; replies arrive through normal steering.`,
+				},
+			],
+			details: {
+				op: "send",
+				from: senderId,
+				to,
+				receipts: [{ to, outcome: "injected" }],
+				bossInbox: record,
+			},
+		};
+	}
+	if (!registry) {
+		return hubErrorResult("Peer messaging is unavailable in this session.", { op: "send", from: senderId, to });
 	}
 	const isBroadcast = to === "all";
 	if (isBroadcast && params.await) {

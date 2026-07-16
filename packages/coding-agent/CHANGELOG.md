@@ -4,6 +4,8 @@
 
 ### Added
 
+- Restored `--boss-inbox`, Hub delivery to the file-backed cross-process boss inbox, and the built-in GLaDOS Boss extension.
+
 - Added the `ttsr.action` setting (`"steer"` by default, `"kill"` for interrupt/retry compatibility); steering keeps the session alive and injects the matched rule as a hidden correction message.
 
 ### Fixed

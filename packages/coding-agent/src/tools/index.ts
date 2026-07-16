@@ -22,6 +22,7 @@ import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
+import type { BossInboxMessageKind, BossInboxRecord } from "../session/boss-inbox";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
@@ -211,6 +212,10 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Whether this session can write worker-to-boss messages to its persisted sidecar. */
+	bossInboxEnabled?: boolean;
+	/** Persist a worker-to-boss message. */
+	appendBossInboxMessage?: (message: { kind: BossInboxMessageKind; message: string }) => Promise<BossInboxRecord>;
 	/** Current session scratch handoff file, if scratch handoff is enabled. */
 	getScratchHandoffDisplayPath?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

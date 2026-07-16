@@ -6,6 +6,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
+import type { BossInboxRecord } from "../../session/boss-inbox";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
 /**
@@ -80,6 +81,7 @@ export interface CoordinationDetails {
 	from?: string;
 	to?: string;
 	receipts?: IrcDeliveryReceipt[];
+	bossInbox?: BossInboxRecord;
 	/** Message consumed by `wait` / `send await:true`; null when the wait timed out. */
 	waited?: IrcMessage | null;
 	inbox?: IrcMessage[];
@@ -99,6 +101,7 @@ export type HubRenderArgs = {
 	to?: string;
 	message?: string;
 	replyTo?: string;
+	kind?: "question" | "status" | "finding";
 	await?: boolean;
 	from?: string;
 	timeoutMs?: number;

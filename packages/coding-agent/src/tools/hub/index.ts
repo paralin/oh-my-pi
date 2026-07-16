@@ -78,6 +78,7 @@ const hubSchema = type({
 	"message?": type("string").describe("send: message body"),
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
+	"kind?": type("'question' | 'status' | 'finding'").describe('boss inbox message kind for to:"boss"'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
@@ -121,6 +122,8 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	bossInboxEnabled?: boolean;
+	appendBossInboxMessage: ToolSession["appendBossInboxMessage"];
 }
 
 const PROGRESS_INTERVAL_MS = 500;
@@ -237,7 +240,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
 		if (!registry || !senderId) return null;
-		return { registry, senderId, settings: this.session.settings };
+		return {
+			registry,
+			senderId,
+			settings: this.session.settings,
+			bossInboxEnabled: this.session.bossInboxEnabled,
+			appendBossInboxMessage: this.session.appendBossInboxMessage,
+		};
 	}
 
 	async execute(
