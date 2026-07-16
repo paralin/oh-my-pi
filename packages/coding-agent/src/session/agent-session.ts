@@ -2021,7 +2021,7 @@ export class AgentSession {
 				scratchPath: string;
 				baselineWriteCount: number;
 				/** One-shot: later tool continuations in the closeout MUST keep their results. */
-				elideToolResultsBeforeNextRequest: boolean;
+				toolResultElisionPending: boolean;
 				triggerContextTokens?: number;
 				reason: AutoCompactionReason;
 		  }
@@ -3746,7 +3746,7 @@ export class AgentSession {
 		this.#scratchHandoffCloseout = {
 			scratchPath,
 			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
-			elideToolResultsBeforeNextRequest: true,
+			toolResultElisionPending: true,
 			triggerContextTokens,
 			reason,
 		};
@@ -11632,8 +11632,8 @@ export class AgentSession {
 		const promptBudget = Math.max(0, contextWindow - reserveTokens);
 		if (promptBudget <= 0) return;
 		const closeout = this.#scratchHandoffCloseout;
-		const elideToolResults = closeout?.elideToolResultsBeforeNextRequest === true;
-		if (elideToolResults) closeout.elideToolResultsBeforeNextRequest = false;
+		const elideToolResults = closeout?.toolResultElisionPending === true;
+		if (elideToolResults) closeout.toolResultElisionPending = false;
 
 		const initialContextTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);

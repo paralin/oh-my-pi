@@ -244,6 +244,30 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts[1].join("\n")).toContain("HANDOFF-MID-RUN-COMPACTED-IN-PLACE");
 	});
 
+	it("does not artifact-elide an ordinary tool continuation", async () => {
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.thresholdTokens": 190_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{ modelContextWindow: 200_000, scratchHandoffDisplayPath: "agent/current.org" },
+		);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(2);
+		expect(observedContexts[1].join("\n")).toContain("tool output");
+		expect(
+			events.filter(
+				event => event.type === "notice" && event.message.includes("preserve the scratch closeout turn"),
+			),
+		).toHaveLength(0);
+	});
+
 	it("artifact-elides a final tool result so the queued scratch closeout still runs", async () => {
 		const readTool: AgentTool = {
 			name: "read",
@@ -296,6 +320,54 @@ describe("AgentSession mid-run threshold compaction", () => {
 				message: expect.stringContaining("preserve the scratch closeout turn"),
 			}),
 		);
+	});
+
+	it("artifact-elides at most once for one scratch closeout", async () => {
+		const readTool: AgentTool = {
+			name: "read",
+			label: "Read",
+			description: "Mock repeatedly oversized read tool",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text" as const, text: "oversized-read\n".repeat(8_000) }] }),
+		};
+		const { session, observedContexts } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 40_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{
+				modelContextWindow: 68_000,
+				responseForCall: index => ({
+					role: "assistant",
+					content:
+						index < 2
+							? [{ type: "toolCall", id: `read-oversized-${index}`, name: "read", arguments: {} }]
+							: [{ type: "text", text: "Scratch closeout complete." }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: highUsage(index < 2 ? 50_000 : 200),
+					stopReason: index < 2 ? "toolUse" : "stop",
+					timestamp: Date.now() + index,
+				}),
+				scratchHandoffDisplayPath: "agent/current.org",
+				tools: [readTool],
+			},
+		);
+		const events: AgentSessionEvent[] = [];
+		session.subscribe(event => events.push(event));
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts[1].join("\n")).toContain("artifact://");
+		expect(
+			events.filter(
+				event => event.type === "notice" && event.message.includes("preserve the scratch closeout turn"),
+			),
+		).toHaveLength(1);
 	});
 
 	it("stops before an oversized scratch-handoff continuation request", async () => {
