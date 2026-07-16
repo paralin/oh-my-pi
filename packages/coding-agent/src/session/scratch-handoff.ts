@@ -107,9 +107,10 @@ export function resolveScratchHandoffPathSelection(input: {
 	parentScratchDisplayPath?: string;
 }): ScratchHandoffPathSelection {
 	const persisted = latestPersistedScratchHandoffPathSelection(input.entries);
+	const explicitParent = nonEmptyString(input.parentScratchDisplayPath);
 	return {
-		scratchFile: nonEmptyString(input.scratchFile) ?? persisted?.scratchFile,
-		parentScratchDisplayPath: nonEmptyString(input.parentScratchDisplayPath) ?? persisted?.parentScratchDisplayPath,
+		scratchFile: nonEmptyString(input.scratchFile) ?? (explicitParent ? undefined : persisted?.scratchFile),
+		parentScratchDisplayPath: explicitParent ?? persisted?.parentScratchDisplayPath,
 	};
 }
 
@@ -129,10 +130,12 @@ function sessionEntryMessage(entry: SessionEntry): AgentMessage | undefined {
 	);
 }
 
-function latestScratchHandoffWriteEntryIndex(entries: readonly SessionEntry[]): number {
+function latestScratchHandoffWriteEntryIndex(entries: readonly SessionEntry[], scratchPath?: string): number {
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
-		if (entry.type === "custom" && entry.customType === SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE) return index;
+		if (entry.type !== "custom" || entry.customType !== SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE) continue;
+		if (scratchPath && (!isRecord(entry.data) || entry.data.path !== scratchPath)) continue;
+		return index;
 	}
 	return -1;
 }
@@ -140,10 +143,11 @@ function latestScratchHandoffWriteEntryIndex(entries: readonly SessionEntry[]): 
 export function buildScratchHandoffRecentContext(input: {
 	entries: readonly SessionEntry[];
 	pendingMessages?: readonly AgentMessage[];
+	scratchPath?: string;
 	convertToLlm: ScratchHandoffMessageConverter;
 }): string | undefined {
 	const pendingMessages = input.pendingMessages ?? [];
-	const latestWriteIndex = latestScratchHandoffWriteEntryIndex(input.entries);
+	const latestWriteIndex = latestScratchHandoffWriteEntryIndex(input.entries, input.scratchPath);
 	const messages = [
 		...input.entries
 			.slice(Math.max(latestWriteIndex + 1, 0))

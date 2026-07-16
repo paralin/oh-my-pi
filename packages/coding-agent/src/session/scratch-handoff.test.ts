@@ -35,11 +35,11 @@ function scratchReadEntry(id: string, path: string, parentPath?: string): Sessio
 	};
 }
 
-function scratchWriteEntry(id: string): SessionEntry {
+function scratchWriteEntry(id: string, scratchPath = "agent/current.org"): SessionEntry {
 	return {
 		type: "custom",
 		customType: SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
-		data: { path: "agent/current.org" },
+		data: { path: scratchPath },
 		id,
 		parentId: null,
 		timestamp: "2026-06-29T00:00:00.000Z",
@@ -176,7 +176,7 @@ describe("scratch handoff path selection", () => {
 				parentScratchDisplayPath: "agent/20260629/Main-current-session.org",
 			}),
 		).toEqual({
-			scratchFile: "agent/20260629/Sub-original-session.org",
+			scratchFile: undefined,
 			parentScratchDisplayPath: "agent/20260629/Main-current-session.org",
 		});
 	});
@@ -284,6 +284,21 @@ describe("scratch handoff recent context", () => {
 
 		expect(context).not.toContain("old user request");
 		expect(context).toContain("after scratch write");
+	});
+
+	it("ignores write markers for a different scratch target", () => {
+		const context = buildScratchHandoffRecentContext({
+			entries: [
+				userEntry("user-old", "old user request"),
+				scratchWriteEntry("write", "agent/old.org"),
+				assistantEntry("after", "after old scratch write"),
+			],
+			scratchPath: "agent/new.org",
+			convertToLlm,
+		});
+
+		expect(context).toContain("old user request");
+		expect(context).toContain("after old scratch write");
 	});
 
 	it("keeps the complete delta after the most recent scratch write", () => {

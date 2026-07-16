@@ -128,6 +128,7 @@ export class TanCommandController {
 							enableLsp,
 							agentId: cloneId,
 							agentDisplayName: "tan",
+							parentScratchHandoffDisplayPath: session.getScratchHandoffDisplayPath(),
 							parentTaskPrefix: cloneId,
 							parentAgentId: ownerId,
 							agentRegistry,

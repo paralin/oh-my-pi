@@ -2767,7 +2767,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 		if (scratchHandoffContext) {
-			agent.replaceMessages([...agent.state.messages, buildScratchContextMessage(scratchHandoffContext)]);
+			const messages = agent.state.messages.filter(
+				message => message.role !== "custom" || message.customType !== SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+			);
+			agent.replaceMessages([...messages, buildScratchContextMessage(scratchHandoffContext)]);
 		}
 
 		// Full toolset for the advisor, built unconditionally so it can be toggled at
@@ -2880,6 +2883,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentId: resolvedAgentId,
 			agentKind,
 			scratchHandoffDisplayPath: scratchHandoffContext?.displayPath,
+			parentScratchHandoffDisplayPath: scratchHandoffContext?.parentDisplayPath,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,

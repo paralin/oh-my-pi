@@ -1108,6 +1108,8 @@ export interface AgentSessionConfig {
 	agentKind?: "main" | "sub";
 	/** Current session scratch handoff file, if scratch handoff is enabled. */
 	scratchHandoffDisplayPath?: string;
+	/** Parent scratch handoff file linked from this session's scratch file. */
+	parentScratchHandoffDisplayPath?: string;
 	/**
 	 * Override the provider-facing session ID for all API requests from this session.
 	 * When absent, `sessionManager.getSessionId()` is used. Needed when benchmark or
@@ -2028,6 +2030,7 @@ export class AgentSession {
 		| {
 				scratchPath: string;
 				baselineWriteCount: number;
+				writeCompleted: boolean;
 				/** One-shot: later tool continuations in the closeout MUST keep their results. */
 				toolResultElisionPending: boolean;
 				triggerContextTokens?: number;
@@ -2108,6 +2111,7 @@ export class AgentSession {
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scratchHandoffDisplayPath: string | undefined;
+	#parentScratchHandoffDisplayPath: string | undefined;
 	#scratchHandoffToolArgsById = new Map<string, unknown>();
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
@@ -2874,6 +2878,7 @@ export class AgentSession {
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
 		this.#scratchHandoffDisplayPath = config.scratchHandoffDisplayPath;
+		this.#parentScratchHandoffDisplayPath = config.parentScratchHandoffDisplayPath;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -3744,6 +3749,7 @@ export class AgentSession {
 	#scratchHandoffRecentContextText(pendingMessages: readonly AgentMessage[] = []): string | undefined {
 		return buildScratchHandoffRecentContext({
 			entries: this.sessionManager.getBranch(),
+			scratchPath: this.#scratchHandoffDisplayPath,
 			pendingMessages,
 			convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 		});
@@ -3767,6 +3773,7 @@ export class AgentSession {
 		this.#scratchHandoffCloseout = {
 			scratchPath,
 			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
+			writeCompleted: false,
 			toolResultElisionPending: true,
 			triggerContextTokens,
 			reason,
@@ -3813,14 +3820,15 @@ export class AgentSession {
 		const closeout = this.#scratchHandoffCloseout;
 		if (!closeout) return undefined;
 		if (assistantMessage.stopReason === "toolUse") return COMPACTION_CHECK_NONE;
-		if (this.#scratchHandoffWriteCount(closeout.scratchPath) <= closeout.baselineWriteCount) {
+		if (this.#scratchHandoffWriteCount(closeout.scratchPath) > closeout.baselineWriteCount) {
+			closeout.writeCompleted = true;
+		} else {
 			this.emitNotice(
 				"warning",
 				`scratch handoff closeout did not update ${closeout.scratchPath}; handing off anyway with recent session context after the last scratch write.`,
 				"compaction",
 			);
 		}
-		this.#scratchHandoffCloseout = undefined;
 		return await this.#runAutoCompaction(closeout.reason, false, false, allowDefer, {
 			autoContinue: closeout.reason === "manual" ? false : autoContinue,
 			triggerContextTokens: closeout.triggerContextTokens,
@@ -5103,11 +5111,6 @@ export class AgentSession {
 					scratchPath: preProviderScratchStop.scratchPath,
 					toolUseCanScratchHandoff,
 				});
-				this.#stageScratchHandoffCloseout(
-					preProviderScratchStop.scratchPath,
-					preProviderScratchStop.contextTokens,
-					"threshold",
-				);
 				const compactionTask = this.#runAutoCompaction("threshold", false, false, true, {
 					suppressHandoff: !toolUseCanScratchHandoff,
 					triggerContextTokens: preProviderScratchStop.contextTokens,
@@ -11260,6 +11263,7 @@ export class AgentSession {
 									type: "text",
 									text: renderScratchHandoffResumeMessage({
 										displayPath: this.#scratchHandoffDisplayPath,
+										parentDisplayPath: this.#parentScratchHandoffDisplayPath,
 										scratchText,
 										recentContextSnapcompactFrames: archive.frames.length,
 									}),
@@ -11282,6 +11286,7 @@ export class AgentSession {
 						type: "text",
 						text: renderScratchHandoffResumeMessage({
 							displayPath: this.#scratchHandoffDisplayPath,
+							parentDisplayPath: this.#parentScratchHandoffDisplayPath,
 							scratchText,
 							recentContextText,
 						}),
@@ -11320,7 +11325,7 @@ export class AgentSession {
 			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 			scratchContent,
 			false,
-			{ path: this.#scratchHandoffDisplayPath },
+			{ path: this.#scratchHandoffDisplayPath, parentPath: this.#parentScratchHandoffDisplayPath },
 			"agent",
 		);
 		this.sessionManager.appendCompaction(
@@ -11330,7 +11335,7 @@ export class AgentSession {
 			tokensBefore,
 		);
 		const closeout = this.#scratchHandoffCloseout;
-		if (closeout) {
+		if (closeout && !closeout.writeCompleted) {
 			this.sessionManager.appendCustomMessageEntry(
 				SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
 				renderScratchHandoffCloseoutMessage(closeout.scratchPath),
@@ -14237,6 +14242,9 @@ export class AgentSession {
 			suppressHandoff,
 			hasScratchHandoff: this.#scratchHandoffDisplayPath !== undefined,
 		});
+		if (action === "scratch-handoff" && this.#scratchHandoffDisplayPath !== undefined) {
+			this.#stageScratchHandoffCloseout(this.#scratchHandoffDisplayPath, options.triggerContextTokens, reason);
+		}
 		let fallbackCause: MaintenanceTraceFallbackCause | undefined;
 		if (action === "snapcompact" && this.model && !this.model.input.includes("image")) {
 			this.emitNotice(
@@ -14276,6 +14284,7 @@ export class AgentSession {
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (action === "scratch-handoff") {
 				await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages);
+				this.#scratchHandoffCloseout = undefined;
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,

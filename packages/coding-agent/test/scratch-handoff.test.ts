@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -170,6 +171,32 @@ describe("scratch handoff", () => {
 		}
 	});
 
+	it("preserves the parent scratch link through in-place compaction", async () => {
+		const parentScratch = "agent/20260629/Main-parent.org";
+		const { session, sessionManager, authStorage } = await createTestSession({
+			taskDepth: 1,
+			agentId: "WorkerOne",
+			parentScratch,
+		});
+		try {
+			session.settings.set("compaction.strategy", "handoff");
+			await session.runIdleCompaction();
+
+			const scratchRead = sessionManager
+				.getEntries()
+				.findLast(entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read");
+			expect(scratchRead).toMatchObject({
+				type: "custom_message",
+				details: { parentPath: parentScratch },
+			});
+			if (scratchRead?.type !== "custom_message") throw new Error("missing compacted scratch handoff context");
+			expect(JSON.stringify(scratchRead.content)).toContain(`Parent scratch: ${parentScratch}`);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
 	it("uses an explicit scratch handoff file when one is provided", async () => {
 		const scratchFile = "handoffs/current.org";
 		const { session, authStorage, cwd } = await createTestSession({ scratchFile });
@@ -185,6 +212,51 @@ describe("scratch handoff", () => {
 			expect(session.getScratchHandoffDisplayPath()).toBe(scratchFile);
 			expect(session.systemPrompt.join("\n\n")).toContain(`Existing scratch org file: ${scratchFile}.`);
 		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("injects one current scratch read when reopening a compacted session", async () => {
+		const { session, sessionManager, authStorage, cwd } = await createTestSession();
+		let reopened: AgentSession | undefined;
+		try {
+			session.settings.set("compaction.strategy", "handoff");
+			await session.runIdleCompaction();
+			await session.dispose();
+
+			const result = await createAgentSession({
+				cwd,
+				agentDir: path.dirname(cwd),
+				sessionManager,
+				authStorage,
+				modelRegistry: session.modelRegistry,
+				settings: session.settings,
+				model: session.model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				workspaceTree: {
+					rootPath: cwd,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			reopened = result.session;
+
+			expect(
+				reopened.messages.filter(
+					message => message.role === "custom" && message.customType === "scratch-handoff-read",
+				),
+			).toHaveLength(1);
+		} finally {
+			await reopened?.dispose();
 			await session.dispose();
 			authStorage.close();
 		}
@@ -241,7 +313,7 @@ describe("scratch handoff", () => {
 		const beforeSessionId = session.sessionId;
 
 		try {
-			const compactResult = await session.compact();
+			await session.runIdleCompaction();
 			const statusAfterHandoff = manager.getJob(jobId)?.status;
 			const afterSessionId = session.sessionId;
 
@@ -250,7 +322,6 @@ describe("scratch handoff", () => {
 			await manager.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Main" } });
 			await session.waitForIdle();
 
-			expect(compactResult.summary).toContain("Scratch handoff");
 			expect(afterSessionId).toBe(beforeSessionId);
 			expect(statusAfterHandoff).toBe("running");
 			expect(abortedByHandoff).toBe(false);
@@ -310,7 +381,7 @@ describe("scratch handoff", () => {
 		);
 
 		try {
-			await session.compact();
+			await session.runIdleCompaction();
 			expect(jobIds.map(id => manager.getJob(id)?.status)).toEqual(Array(10).fill("running"));
 
 			gates.forEach((gate, index) => {

@@ -86,6 +86,7 @@ function createContext(overrides?: {
 	model?: Model;
 	agentId?: string;
 	parentPromptCacheKey?: string;
+	scratchPath?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
@@ -114,6 +115,7 @@ function createContext(overrides?: {
 		getActiveToolNames: vi.fn(() => ["read", "bash"]),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		getAgentId: vi.fn(() => overrides?.agentId),
+		getScratchHandoffDisplayPath: vi.fn(() => overrides?.scratchPath),
 		sendCustomMessage: vi.fn(async () => {
 			sequence.push("sendCustomMessage");
 		}),
@@ -225,8 +227,8 @@ describe("TanCommandController", () => {
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith("Dispatched background tan job-123");
 	});
 
-	it("aborts the cloned agent when the background job signal aborts", async () => {
-		const harness = createContext({ agentId: MAIN_AGENT_ID });
+	it("aborts the cloned agent and forwards the parent scratch identity", async () => {
+		const harness = createContext({ agentId: MAIN_AGENT_ID, scratchPath: "agent/parent.org" });
 		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
 		const promptStarted = Promise.withResolvers<void>();
 		const abortObserved = Promise.withResolvers<void>();
@@ -267,6 +269,7 @@ describe("TanCommandController", () => {
 				providerPromptCacheKey: "parent-session",
 				parentTaskPrefix: expect.stringMatching(/^Tan-/) as unknown as string,
 				agentDisplayName: "tan",
+				parentScratchHandoffDisplayPath: "agent/parent.org",
 			}),
 		);
 	});

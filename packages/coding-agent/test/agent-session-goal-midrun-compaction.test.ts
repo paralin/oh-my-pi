@@ -18,7 +18,7 @@ import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 
-type StreamedAssistantMessage = AssistantMessage & { stopReason: "length" | "stop" | "toolUse" };
+type StreamedAssistantMessage = AssistantMessage & { stopReason: "error" | "length" | "stop" | "toolUse" };
 
 function activeGoalState(): GoalModeState {
 	const now = Date.now();
@@ -150,7 +150,11 @@ describe("AgentSession mid-run threshold compaction", () => {
 							});
 				queueMicrotask(() => {
 					stream.push({ type: "start", partial: message });
-					stream.push({ type: "done", reason: message.stopReason, message });
+					if (message.stopReason === "error") {
+						stream.push({ type: "error", reason: "error", error: message });
+					} else {
+						stream.push({ type: "done", reason: message.stopReason, message });
+					}
 				});
 				return stream;
 			},
@@ -440,6 +444,78 @@ describe("AgentSession mid-run threshold compaction", () => {
 		).toHaveLength(1);
 	});
 
+	it("stages one successor closeout for direct idle scratch maintenance", async () => {
+		const { session } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+			},
+			{ scratchHandoffDisplayPath: "agent/current.org" },
+		);
+
+		await session.runIdleCompaction();
+
+		const rebuiltContext = session.messages.map(message => JSON.stringify(message)).join("\n");
+		expect(rebuiltContext.match(/PENCILS DOWN/g)).toHaveLength(1);
+	});
+
+	it("stages one successor closeout after a context-overflow scratch rebuild", async () => {
+		const { session } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+			},
+			{
+				scratchHandoffDisplayPath: "agent/current.org",
+				responseForCall: () => ({
+					role: "assistant",
+					content: [{ type: "text", text: "request exceeded the context window" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: highUsage(68_000),
+					stopReason: "error",
+					errorMessage: "maximum context length is 68000 tokens, however you requested 68100 tokens",
+					timestamp: Date.now(),
+				}),
+			},
+		);
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		const rebuiltContext = session.messages.map(message => JSON.stringify(message)).join("\n");
+		expect(rebuiltContext.match(/PENCILS DOWN/g)).toHaveLength(1);
+	});
+
+	it("stages one successor closeout after an incomplete-response scratch rebuild", async () => {
+		const { session } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+			},
+			{
+				scratchHandoffDisplayPath: "agent/current.org",
+				responseForCall: () => ({
+					role: "assistant",
+					content: [{ type: "text", text: "unfinished response" }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					usage: highUsage(1_000),
+					stopReason: "length",
+					timestamp: Date.now(),
+				}),
+			},
+		);
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		const rebuiltContext = session.messages.map(message => JSON.stringify(message)).join("\n");
+		expect(rebuiltContext.match(/PENCILS DOWN/g)).toHaveLength(1);
+	});
+
 	it("queues scratch closeout before threshold when only closeout headroom remains", async () => {
 		const { session, observedContexts } = await createHarness(
 			{
@@ -455,6 +531,8 @@ describe("AgentSession mid-run threshold compaction", () => {
 
 		await session.prompt("work on the release");
 		await session.waitForIdle();
+		const rebuiltContext = session.messages.map(message => JSON.stringify(message)).join("\n");
+		expect(rebuiltContext.match(/PENCILS DOWN/g)).toHaveLength(1);
 
 		expect(observedContexts).toHaveLength(2);
 		expect(observedContexts[1].join("\n")).toContain("Context maintenance threshold reached");
@@ -565,6 +643,75 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(observedContexts[1].filter(serialized => serialized.includes(closeoutPrompt))).toHaveLength(1);
 		expect(observedContexts[2].join("\n")).toContain('"toolCallId":"read-scratch"');
 		expect(observedContexts[2].filter(serialized => serialized.includes(closeoutPrompt))).toHaveLength(1);
+	});
+
+	it("does not stage a successor closeout after a successful scratch write", async () => {
+		const scratchPath = "agent/current.org";
+		const writeTool: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "Mock write tool",
+			parameters: type({ path: "string" }),
+			execute: async () => ({ content: [{ type: "text" as const, text: "Wrote scratch handoff" }] }),
+		};
+		const makeMessage = (
+			index: number,
+			content: AssistantMessage["content"],
+			stopReason: StreamedAssistantMessage["stopReason"],
+		) => ({
+			role: "assistant" as const,
+			content,
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			usage: highUsage(index < 2 ? 50_000 : 200),
+			stopReason,
+			timestamp: Date.now() + index,
+		});
+		const { session, observedContexts, sessionManager } = await createHarness(
+			{
+				"compaction.strategy": "handoff",
+				"compaction.autoContinue": false,
+				"compaction.thresholdTokens": 40_000,
+				"compaction.thresholdPercent": -1,
+			},
+			{
+				modelContextWindow: 372_000,
+				responseForCall: index => {
+					if (index === 0) {
+						return makeMessage(index, [{ type: "text" as const, text: "Ready to close out." }], "stop");
+					}
+					if (index === 1) {
+						return makeMessage(
+							index,
+							[
+								{
+									type: "toolCall" as const,
+									id: "write-scratch",
+									name: "write",
+									arguments: { path: scratchPath },
+								},
+							],
+							"toolUse",
+						);
+					}
+					return makeMessage(index, [{ type: "text" as const, text: "Scratch updated." }], "stop");
+				},
+				scratchHandoffDisplayPath: scratchPath,
+				tools: [writeTool],
+			},
+		);
+
+		await session.prompt("work on the release");
+		await session.waitForIdle();
+
+		expect(observedContexts).toHaveLength(3);
+		expect(
+			sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom" && entry.customType === "scratch-handoff-write"),
+		).toHaveLength(1);
+		expect(session.messages.map(message => JSON.stringify(message)).join("\n")).not.toContain("PENCILS DOWN");
 	});
 
 	it("preserves the just-finished tool turn when message_end hooks are still pending", async () => {

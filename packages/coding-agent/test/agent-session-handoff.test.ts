@@ -1180,6 +1180,7 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 				"compaction.strategy": "handoff",
 				"compaction.thresholdPercent": 1,
+				"compaction.thresholdTokens": -1,
 				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,
@@ -1236,7 +1237,7 @@ describe("AgentSession handoff", () => {
 				}),
 				expect.objectContaining({
 					text: expect.stringContaining(
-						"Reload and continue the skill/command stack recorded in the scratch file",
+						"Use the scratch file's current open TODO and next action to choose skills for immediate work",
 					),
 				}),
 			]),
@@ -1332,6 +1333,7 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 				"compaction.strategy": "handoff",
 				"compaction.thresholdPercent": 1,
+				"compaction.thresholdTokens": -1,
 				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,
@@ -2130,7 +2132,7 @@ describe("AgentSession handoff", () => {
 
 		expect(session.autoCompactionEnabled).toBe(false);
 		session.setAutoCompactionEnabled(true);
-		expect(session.settings.get("compaction.strategy")).toBe("snapcompact");
+		expect(session.settings.get("compaction.strategy")).toBe("handoff");
 		expect(session.autoCompactionEnabled).toBe(true);
 	});
 
@@ -2180,6 +2182,7 @@ describe("AgentSession handoff", () => {
 
 	it("uses handoff strategy for threshold-triggered auto maintenance", async () => {
 		session.settings.set("compaction.strategy", "handoff");
+		session.settings.set("compaction.thresholdTokens", -1);
 		session.settings.set("compaction.thresholdPercent", 1);
 		session.settings.set("contextPromotion.enabled", false);
 
@@ -2297,6 +2300,7 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 				"compaction.strategy": "handoff",
 				"compaction.thresholdPercent": 1,
+				"compaction.thresholdTokens": -1,
 				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,
@@ -2326,6 +2330,7 @@ describe("AgentSession handoff", () => {
 		// rendering as "Auto-handoff" loader + an assistant message still streaming.
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
+		session.settings.set("compaction.thresholdTokens", -1);
 		session.settings.set("contextPromotion.enabled", false);
 		session.settings.set("todo.enabled", true);
 		session.settings.set("todo.reminders", true);
@@ -2378,6 +2383,7 @@ describe("AgentSession handoff", () => {
 		// tasks, so Promise.allSettled() in #cancelPostPromptTasks can resolve.
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
+		session.settings.set("compaction.thresholdTokens", -1);
 		session.settings.set("contextPromotion.enabled", false);
 
 		const model = session.model;
@@ -2439,6 +2445,7 @@ describe("AgentSession handoff", () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
 		session.settings.set("contextPromotion.enabled", false);
+		session.settings.set("compaction.thresholdTokens", -1);
 
 		const model = session.model;
 		if (!model) {
@@ -2487,6 +2494,7 @@ describe("AgentSession handoff", () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
 		session.settings.set("contextPromotion.enabled", false);
+		session.settings.set("compaction.thresholdTokens", -1);
 
 		const model = session.model;
 		if (!model) {
