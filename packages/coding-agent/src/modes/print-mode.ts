@@ -125,6 +125,7 @@ async function writeFinalAssistantText(
 	if ((assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") && !isSilentAbort(assistantMsg)) {
 		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 		await flushTelemetryExport();
+		await session.dispose();
 		const flushed = process.stderr.write(`${errorLine}\n`);
 		if (flushed) {
 			process.exit(1);

@@ -172,6 +172,7 @@ import {
 } from "../advisor";
 import { type AsyncJob, type AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import { classifyDifficulty } from "../auto-thinking/classifier";
+import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
@@ -251,7 +252,7 @@ import type {
 	MaintenanceTraceTerminalResult,
 	RecoveredRetryError,
 } from "../extensibility/shared-events";
-import type { Skill, SkillWarning } from "../extensibility/skills";
+import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
@@ -329,7 +330,7 @@ import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { outputMeta, wrapToolWithMetaNotice } from "../tools/output-meta";
-import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
+import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import {
 	buildResolveReminderMessage,
 	isPreviewResolutionToolCall,
@@ -1007,6 +1008,8 @@ export interface AgentSessionConfig {
 	skills?: Skill[];
 	/** Skill loading warnings (already captured by SDK) */
 	skillWarnings?: SkillWarning[];
+	/** Whether runtime reloads may rediscover disk-backed skills for this session. */
+	skillsReloadable?: boolean;
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
@@ -1718,15 +1721,20 @@ function queuedTextContent(message: AgentMessage): string | undefined {
 	if (!("content" in message)) return undefined;
 	const content = message.content;
 	if (typeof content === "string") return content;
-	return content.find((part): part is TextContent => part.type === "text")?.text;
+	for (const part of content) {
+		if (part.type === "text") return part.text;
+	}
+	return undefined;
 }
 
 function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
 	if (!("content" in message) || typeof message.content === "string") return undefined;
-	const images = message.content.filter(
-		(part): part is ImageContent =>
-			part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string",
-	);
+	const images: ImageContent[] = [];
+	for (const part of message.content) {
+		if (part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string") {
+			images.push(part);
+		}
+	}
 	return images.length > 0 ? images : undefined;
 }
 
@@ -2122,6 +2130,7 @@ export class AgentSession {
 	#mcpPromptCommands: LoadedCustomCommand[] = [];
 
 	#skillsSettings: SkillsSettings | undefined;
+	#skillsReloadable: boolean;
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
@@ -2732,6 +2741,7 @@ export class AgentSession {
 		this.#skills = config.skills ?? [];
 		this.#skillWarnings = config.skillWarnings ?? [];
 		this.#customCommands = config.customCommands ?? [];
+		this.#skillsReloadable = config.skillsReloadable ?? true;
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
 		// Resolve the wire service-tier per request so the Fireworks Priority
@@ -3342,11 +3352,11 @@ export class AgentSession {
 	/**
 	 * Route one accepted advice note from `advisor` to the primary. Concern and
 	 * blocker interrupt the running agent through the steering channel; once the
-	 * loop has yielded, `triggerTurn` resumes it. If the loop already ended with a
-	 * terminal text answer and no queued work remains, the note is preserved as an
-	 * advisor card instead of waking a duplicate completion turn. After a deliberate
-	 * user interrupt auto-resume is suppressed while idle/unwinding (the note
-	 * becomes a preserved card re-entering on resume); a live-streaming turn is
+	 * loop has yielded, `triggerTurn` resumes it. After a terminal text answer with
+	 * no queued work, a concern is preserved as a visible advisor card, while a
+	 * blocker wakes the primary to acknowledge work it handed off incorrectly.
+	 * After a deliberate user interrupt auto-resume is suppressed while idle/unwinding
+	 * (the note becomes a preserved card re-entering on resume); a live-streaming turn is
 	 * steered in directly. A plain nit always rides the non-interrupting YieldQueue
 	 * aside. Suppression by the per-advisor emission guard drops the note silently —
 	 * the model still saw `Recorded.`, so it isn't tempted to rephrase the same note
@@ -3403,10 +3413,19 @@ export class AgentSession {
 			});
 			return;
 		}
-		this.#recordAdvisorInterruptDelivered();
-		if (this.#planModeState?.enabled) {
-			// Plan mode: record advice visibly in context but never wake an
-			// autonomous turn — only user-driven turns converge on ask/resolve.
+		// A steered interrupting note only continues the run when the session can
+		// actually start (or is already running) a turn. Two idle cases cannot, so
+		// `sendCustomMessage({ triggerTurn: true })` would silently bury the card in
+		// `#pendingNextTurnMessages` until the next user prompt — strictly worse than
+		// the visible preserved card. Preserve instead:
+		//  - Plan mode: only user-driven turns converge on ask/resolve.
+		//  - ACP bridges with `deferAgentInitiatedTurns`: the client cannot show an
+		//    agent-initiated turn as busy, so idle triggers are refused (#5628 review).
+		const cannotAutoTrigger =
+			!this.agent.state.isStreaming &&
+			this.#clientBridge?.deferAgentInitiatedTurns === true &&
+			!this.#allowAcpAgentInitiatedTurns;
+		if (this.#planModeState?.enabled || cannotAutoTrigger) {
 			this.#preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",
@@ -3418,6 +3437,11 @@ export class AgentSession {
 			});
 			return;
 		}
+		// Arm the post-interrupt immune window only now that a turn is actually
+		// being steered/triggered. A merely preserved card never interrupts, so
+		// arming earlier would downgrade the next `advisor.immuneTurns` worth of
+		// real concerns/blockers to skip-idle-flush asides (#5628 review).
+		this.#recordAdvisorInterruptDelivered();
 		void this.sendCustomMessage(
 			{ customType: "advisor", content, display: true, attribution: "agent", details },
 			{ deliverAs: "steer", triggerTurn: true },
@@ -6255,10 +6279,9 @@ export class AgentSession {
 
 		// `local://` URLs (e.g. local://PLAN.md for plan-mode) resolve to a real
 		// on-disk artifacts path; pre-caching works as long as we ask the
-		// local-protocol handler. Other internal-scheme URLs (agent://, skill://,
-		// rule://, mcp://, artifact://) have no stable filesystem representation;
-		// skip pre-cache entirely for those — the edit tool itself will reject
-		// them through its normal dispatch path.
+		// local-protocol handler. Other internal-scheme URLs have no local
+		// filesystem representation; skip pre-cache entirely for those — the
+		// edit tool itself will reject them through its normal dispatch path.
 		const resolvedPath = this.#resolveSessionFsPath(path);
 		if (resolvedPath === undefined) return undefined;
 
@@ -6358,9 +6381,8 @@ export class AgentSession {
 	 * - `local://` URLs route through the local-protocol handler so they map
 	 *   onto the session's on-disk artifacts directory; pre-caching, ENOENT
 	 *   handling, and post-edit invalidation all work normally.
-	 * - Other internal-scheme URLs (agent://, skill://, rule://, mcp://,
-	 *   artifact://) have no stable filesystem path; this returns `undefined`
-	 *   so callers skip filesystem-only operations.
+	 * - Other internal-scheme URLs have no local filesystem path; this returns
+	 *   `undefined` so callers skip filesystem-only operations.
 	 * - Cwd-relative and absolute paths resolve via `resolveToCwd`.
 	 */
 	#resolveSessionFsPath(filePath: string): string | undefined {
@@ -6368,15 +6390,7 @@ export class AgentSession {
 		if (normalized.startsWith("local:")) {
 			return resolveLocalUrlToPath(normalized, this.#localProtocolOptions());
 		}
-		if (
-			normalized.startsWith("agent://") ||
-			normalized.startsWith("skill://") ||
-			normalized.startsWith("rule://") ||
-			normalized.startsWith("mcp://") ||
-			normalized.startsWith("artifact://")
-		) {
-			return undefined;
-		}
+		if (isInternalUrlPath(normalized)) return undefined;
 		return resolveToCwd(normalized, this.sessionManager.getCwd());
 	}
 
@@ -7491,6 +7505,34 @@ export class AgentSession {
 		if (added.length > 0) parts.push(`mounted ${added.map(entry => entry.name).join(", ")}`);
 		if (removed.length > 0) parts.push(`unmounted ${removed.map(entry => entry.name).join(", ")}`);
 		this.emitNotice("info", `xd://: ${parts.join("; ")}`, "xdev");
+	}
+
+	/**
+	 * Rediscover disk-backed skills and rebuild prompt-facing state without
+	 * recreating the session. Explicit skill snapshots (`--no-skills`,
+	 * SDK-provided `skills`) remain fixed for the lifetime of the session.
+	 */
+	async refreshSkills(): Promise<void> {
+		if (!this.#skillsReloadable) {
+			return;
+		}
+
+		resetCapabilities();
+		const skillsSettings = this.settings.getGroup("skills");
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.sessionManager.getCwd(),
+			disabledExtensions: this.settings.get("disabledExtensions") ?? [],
+		});
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+
+		if (this.#agentKind === "main") {
+			setActiveSkills(this.#skills);
+		}
+		await this.refreshBaseSystemPrompt();
+		this.#notifyCommandMetadataChanged();
 	}
 
 	/**
@@ -8940,8 +8982,11 @@ export class AgentSession {
 			},
 			hasPendingMessages: () => this.queuedMessageCount > 0,
 			shutdown: () => {
-				void this.dispose();
-				process.exit(0);
+				// Await the idempotent dispose() before exiting so the browser
+				// reaper and other bounded teardown complete — a fire-and-forget
+				// `void this.dispose()` raced process.exit() and could leave an
+				// OMP-owned Chromium alive (#5643).
+				void this.dispose().finally(() => process.exit(0));
 			},
 			getContextUsage: () => this.getContextUsage(),
 			waitForIdle: () => this.waitForIdle(),

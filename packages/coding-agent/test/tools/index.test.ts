@@ -215,8 +215,8 @@ describe("createTools", () => {
 		const tools = await createTools(session);
 		expect(tools.map(t => t.name)).not.toContain("ask");
 
-			const requested = await createTools(session, ["ask", "read"]);
-			expect(requested.map(t => t.name)).toEqual(["read", "goal", "write"]);
+		const requested = await createTools(session, ["ask", "read"]);
+		expect(requested.map(t => t.name)).toEqual(["read", "goal", "write"]);
 	});
 
 	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {

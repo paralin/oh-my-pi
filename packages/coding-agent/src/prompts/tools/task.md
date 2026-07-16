@@ -8,6 +8,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - **Prefer one substantial task:** Give one capable subagent a large, complete assignment. Batch related files, functions, and items together; NEVER spawn per-file, per-function, or per-item agents.
 - **Pay startup cost once:** Every spawn pays fixed cache/context cost. N small agents cost roughly N times one large agent doing the same total work.
 - **Parallelize selectively:** Spawn multiple subagents only when workstreams are truly independent AND each is substantial. Different files alone do not justify separate agents.
+- **Diverse verify, not retry:** a second agent on the same work is justified only as an engineered-diversity check — different lens, evidence set, or model on a high-regret result — never the same assignment sampled twice.
 {{#when MAX_CONCURRENCY ">" 0}}
 - **Concurrency cap:** At most {{pluralize MAX_CONCURRENCY "subagent" "subagents"}} run at once in this session — anything beyond that just queues. After right-sizing the work, keep any justified fan-out at or under the cap.
 {{/when}}
@@ -16,6 +17,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - **Role matching:** Assign each subagent a specific `role` (e.g. "Security Reviewer", "DB Migrator"). Do not spawn generic workers.
 - **No overhead:** Each assignment MUST instruct its agent to skip formatters, linters, and project-wide test suites. You will run those once at the end.
 - **One-pass agents:** Prefer agents that investigate **and** edit in a single pass; only spin a read-only discovery step (e.g. `agent: "scout"`) when the affected files are genuinely unknown.
+- **Parent owns closure:** subagents return evidence; you read it, resolve contradictions, run the shared proof once, and decide. Size fan-out to your review budget.
 
 # Inputs
 {{#if batchEnabled}}

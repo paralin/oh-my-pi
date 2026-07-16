@@ -470,7 +470,7 @@ export interface BuildSystemPromptOptions {
 	/** Pre-loaded context files (skips discovery if provided). */
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Skills provided directly to system prompt construction. */
-	skills?: Skill[];
+	skills?: readonly Skill[];
 	/** Pre-loaded rulebook rules (descriptions, excluding TTSR and always-apply). */
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
@@ -637,7 +637,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 						totalLines: 0,
 						agentsMdFiles: [],
 					});
-	const skillsPromise: Promise<Skill[]> =
+	const skillsPromise: Promise<readonly Skill[]> =
 		providedSkills !== undefined
 			? Promise.resolve(providedSkills)
 			: skillsSettings?.enabled !== false
@@ -783,6 +783,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		environment,
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
+		hasProjectContract: agentsMdFiles.length > 0 || contextFiles.length > 0,
 		workspaceTree,
 		skills: filteredSkills,
 		rules: rules ?? [],
