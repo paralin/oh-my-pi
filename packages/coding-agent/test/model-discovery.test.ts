@@ -971,13 +971,17 @@ describe("ModelRegistry runtime discovery", () => {
 			const url = String(input);
 			if (url === "http://127.0.0.1:8080/models") {
 				return new Response(
-					JSON.stringify({ data: [{ id: "qwen3-8b" }, { id: "ternary-bonsai-27b-q2_0" }, { id: "llama-3.1-8b" }] }),
+					JSON.stringify({
+						data: [{ id: "qwen3-8b" }, { id: "ternary-bonsai-27b-q2_0" }, { id: "llama-3.1-8b" }],
+					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
 			}
 			if (url === "http://127.0.0.1:8080/props") {
 				return new Response(
-					JSON.stringify({ default_generation_settings: { n_ctx: 32768, params: { max_tokens: -1, n_predict: -1 } } }),
+					JSON.stringify({
+						default_generation_settings: { n_ctx: 32768, params: { max_tokens: -1, n_predict: -1 } },
+					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
 			}
