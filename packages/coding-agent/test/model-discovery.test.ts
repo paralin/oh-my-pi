@@ -990,18 +990,20 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 
+		type DialectFields = { thinkingFormat?: string; reasoningDisableMode?: string };
 		for (const id of ["qwen3-8b", "ternary-bonsai-27b-q2_0"]) {
 			const qwen = registry.find("llama.cpp", id);
 			expect(qwen?.reasoning).toBe(true);
 			expect(qwen?.api).toBe("openai-completions");
-			expect(qwen?.compat?.thinkingFormat).toBe("qwen-chat-template");
-			expect(qwen?.compat?.reasoningDisableMode).toBe("qwen-template-false");
+			const compat = qwen?.compat as DialectFields | undefined;
+			expect(compat?.thinkingFormat).toBe("qwen-chat-template");
+			expect(compat?.reasoningDisableMode).toBe("qwen-template-false");
 		}
 
 		const plain = registry.find("llama.cpp", "llama-3.1-8b");
 		expect(plain?.reasoning).toBe(false);
 		expect(plain?.api).toBe("openai-responses");
-		expect(plain?.compat?.reasoningDisableMode).not.toBe("qwen-template-false");
+		expect((plain?.compat as DialectFields | undefined)?.reasoningDisableMode).not.toBe("qwen-template-false");
 	});
 
 	test("llama.cpp discovery marks per-model architecture image modalities as vision-capable", async () => {
