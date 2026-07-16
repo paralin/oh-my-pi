@@ -10,6 +10,7 @@ import type { Api, Model, RemoteCompactionConfig } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	getBundledModelReferenceIndex,
+	isQwenModelId,
 	resolveModelReference,
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
@@ -553,6 +554,13 @@ export async function discoverLlamaCppModels(
 			serverMetadata?.contextWindow ??
 			item.trainingContextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
+		// Local llama.cpp Qwen-family builds (including the Qwen3.6-based Ternary
+		// Bonsai) ship a jinja chat template that defaults `enable_thinking: true`.
+		// Discovery would otherwise stamp `reasoning: false` and an empty compat,
+		// so `--thinking off` never reaches the wire and the model keeps thinking.
+		// Mark them as reasoning models with the Qwen disable dialect so the
+		// caller-disabled path emits `enable_thinking: false`.
+		const isQwenThinker = isQwenModelId(id);
 		discovered.push(
 			buildModel({
 				id,
@@ -560,18 +568,30 @@ export async function discoverLlamaCppModels(
 				api: providerConfig.api,
 				provider: providerConfig.provider,
 				baseUrl,
-				reasoning: false,
+				reasoning: isQwenThinker,
 				input: item.input ?? serverMetadata?.input ?? ["text"],
 				imageInputDecoder: "stb",
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
 				maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
 				headers,
-				compat: {
-					supportsStore: false,
-					supportsDeveloperRole: false,
-					supportsReasoningEffort: false,
-				},
+				compat: isQwenThinker
+					? {
+							supportsStore: false,
+							supportsDeveloperRole: false,
+							supportsReasoningEffort: false,
+							supportsReasoningParams: true,
+							// llama.cpp's server honors `enable_thinking` only inside
+							// `chat_template_kwargs` (the vLLM/SGLang convention), not the
+							// top-level field, so use the chat-template dialect.
+							thinkingFormat: "qwen-chat-template",
+							reasoningDisableMode: "qwen-template-false",
+						}
+					: {
+							supportsStore: false,
+							supportsDeveloperRole: false,
+							supportsReasoningEffort: false,
+						},
 			} as ModelSpec<Api>),
 		);
 	}
