@@ -990,19 +990,22 @@ describe("ModelRegistry runtime discovery", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
 		await registry.refresh();
 
-		type DialectFields = { thinkingFormat?: string; reasoningDisableMode?: string };
+		type DialectFields = { thinkingFormat?: string; reasoningDisableMode?: string; qwenPreserveThinking?: boolean };
 		for (const id of ["qwen3-8b", "ternary-bonsai-27b-q2_0"]) {
 			const qwen = registry.find("llama.cpp", id);
 			expect(qwen?.reasoning).toBe(true);
 			expect(qwen?.api).toBe("openai-completions");
+			expect(qwen?.baseUrl).toBe("http://127.0.0.1:8080/v1");
 			const compat = qwen?.compat as DialectFields | undefined;
 			expect(compat?.thinkingFormat).toBe("qwen-chat-template");
 			expect(compat?.reasoningDisableMode).toBe("qwen-template-false");
+			expect(compat?.qwenPreserveThinking).toBe(true);
 		}
 
 		const plain = registry.find("llama.cpp", "llama-3.1-8b");
 		expect(plain?.reasoning).toBe(false);
 		expect(plain?.api).toBe("openai-responses");
+		expect(plain?.baseUrl).toBe("http://127.0.0.1:8080");
 		expect((plain?.compat as DialectFields | undefined)?.reasoningDisableMode).not.toBe("qwen-template-false");
 	});
 

@@ -71,6 +71,7 @@ import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
+	applyLlamaCppQwenThinking,
 	DISCOVERY_DEFAULT_MAX_TOKENS,
 	type DiscoveryContext,
 	type DiscoveryProviderConfig,
@@ -1144,14 +1145,19 @@ export class ModelRegistry {
 				continue;
 			}
 			const configStale = this.#isDiscoveryCacheOlderThanModelsConfig(cache.updatedAt);
+			// Rows cached before the Qwen-thinking fix rebuild with the old
+			// `openai-responses` / `reasoning: false` spec, so re-run the upgrade on
+			// load instead of waiting for the (async) re-discovery to correct them.
+			const rebuiltModels = cache.models.map(model => buildModel(model));
+			const migratedModels =
+				providerConfig.discovery.type === "llama.cpp"
+					? rebuiltModels.map(applyLlamaCppQwenThinking)
+					: rebuiltModels;
 			const models = this.#applyProviderModelOverrides(
 				providerConfig.provider,
 				this.#normalizeDiscoverableModels(
 					providerConfig,
-					this.#applyProviderCompat(
-						providerConfig.compat,
-						cache.models.map(model => buildModel(model)),
-					),
+					this.#applyProviderCompat(providerConfig.compat, migratedModels),
 				),
 			);
 			cachedModels.push(...models);

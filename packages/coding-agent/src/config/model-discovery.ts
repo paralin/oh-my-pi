@@ -522,6 +522,37 @@ function isBonsaiQwenGguf(id: string): boolean {
 	return /(?:ternary-)?bonsai-27b/i.test(id);
 }
 
+/**
+ * applyLlamaCppQwenThinking rewrites a discovered or cached llama.cpp model so a
+ * Qwen-family chat template (which defaults `enable_thinking: true`) can be
+ * turned off. Qwen ids and the Qwen3.6-based PrismLM Ternary Bonsai GGUFs are
+ * routed through chat-completions (the implicit llama.cpp provider defaults to
+ * `openai-responses`, whose disable path has no Qwen encoding) with the
+ * `qwen-template-false` dialect; omp emits `preserve_thinking` inside
+ * `chat_template_kwargs` for Qwen, so the toggle rides there too and history
+ * `<think>` blocks survive (`qwenPreserveThinking`). The runtime base URL gets a
+ * `/v1` suffix because the chat-completions request would otherwise POST to the
+ * native root, which does not serve it. Non-Qwen models pass through unchanged.
+ * Applied on both fresh discovery and cache load, so an upgraded cache is
+ * corrected without waiting for re-discovery.
+ */
+export function applyLlamaCppQwenThinking(model: Model<Api>): Model<Api> {
+	if (!isQwenModelId(model.id) && !isBonsaiQwenGguf(model.id)) return model;
+	return buildModel({
+		...model,
+		api: "openai-completions",
+		baseUrl: ensureLlamaCppV1BaseUrl(normalizeLlamaCppBaseUrl(model.baseUrl)),
+		reasoning: true,
+		compat: {
+			...model.compatConfig,
+			supportsReasoningParams: true,
+			thinkingFormat: "qwen-chat-template",
+			reasoningDisableMode: "qwen-template-false",
+			qwenPreserveThinking: true,
+		},
+	} as unknown as ModelSpec<Api>);
+}
+
 export async function discoverLlamaCppModels(
 	providerConfig: DiscoveryProviderConfig,
 	ctx: DiscoveryContext,
@@ -563,42 +594,31 @@ export async function discoverLlamaCppModels(
 			serverMetadata?.contextWindow ??
 			item.trainingContextWindow ??
 			DISCOVERY_DEFAULT_CONTEXT_WINDOW;
-		// Qwen-family local llama.cpp builds (and the Qwen3.6-based PrismLM
-		// Ternary Bonsai) ship a jinja chat template that defaults
-		// `enable_thinking: true`. omp emits `preserve_thinking` inside
-		// `chat_template_kwargs` for Qwen, so the thinking toggle has to ride in
-		// `chat_template_kwargs` too (`qwen-template-false`). Discovery would
-		// otherwise stamp `reasoning: false` with an empty compat, so
-		// `--thinking off` never reaches the wire and the model keeps thinking.
-		// Route them through chat-completions, since the Responses path (the
-		// implicit provider's default) has no equivalent disable encoding.
-		// Non-Qwen local models keep the configured api.
-		const isQwenThinker = isQwenModelId(id) || isBonsaiQwenGguf(id);
+		// Local llama.cpp models stamp `reasoning: false` with a minimal compat;
+		// applyLlamaCppQwenThinking upgrades Qwen-family ids (which cannot disable
+		// their default-on thinking otherwise) after the base model is built.
 		discovered.push(
-			buildModel({
-				id,
-				name: id,
-				api: isQwenThinker ? "openai-completions" : providerConfig.api,
-				provider: providerConfig.provider,
-				baseUrl,
-				reasoning: isQwenThinker,
-				input: item.input ?? serverMetadata?.input ?? ["text"],
-				imageInputDecoder: "stb",
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow,
-				maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
-				headers,
-				compat: {
-					supportsStore: false,
-					supportsDeveloperRole: false,
-					supportsReasoningEffort: false,
-					...(isQwenThinker && {
-						supportsReasoningParams: true,
-						thinkingFormat: "qwen-chat-template",
-						reasoningDisableMode: "qwen-template-false",
-					}),
-				},
-			} as ModelSpec<Api>),
+			applyLlamaCppQwenThinking(
+				buildModel({
+					id,
+					name: id,
+					api: providerConfig.api,
+					provider: providerConfig.provider,
+					baseUrl,
+					reasoning: false,
+					input: item.input ?? serverMetadata?.input ?? ["text"],
+					imageInputDecoder: "stb",
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow,
+					maxTokens: resolveLlamaCppMaxTokens(contextWindow, serverMetadata?.maxTokens),
+					headers,
+					compat: {
+						supportsStore: false,
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: false,
+					},
+				} as ModelSpec<Api>),
+			),
 		);
 	}
 	return discovered;
@@ -922,6 +942,13 @@ function normalizeLlamaCppBaseUrl(baseUrl?: string): string {
 	} catch {
 		return raw;
 	}
+}
+
+// ensureLlamaCppV1BaseUrl appends the OpenAI-compatible `/v1` prefix a
+// chat-completions request needs; native discovery keeps the bare root, which
+// serves `/models` and `/props` but not `/chat/completions`.
+function ensureLlamaCppV1BaseUrl(baseUrl: string): string {
+	return baseUrl.endsWith("/v1") ? baseUrl : `${baseUrl}/v1`;
 }
 
 function toLlamaCppNativeBaseUrl(baseUrl: string): string {
