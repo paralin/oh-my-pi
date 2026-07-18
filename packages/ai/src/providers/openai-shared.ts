@@ -1,6 +1,6 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
-import { isGlm52ReasoningEffortModelId } from "@oh-my-pi/pi-catalog/identity";
+import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type {
@@ -654,7 +654,7 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	top_k?: number;
 	min_p?: number;
 	repetition_penalty?: number;
-	thinking?: { type: "enabled" | "disabled"; keep?: "all" };
+	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
 	preserve_thinking?: boolean;
 	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
@@ -944,6 +944,11 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 					encodeChatCompletionsDisabledReasoning(params, reasoning.disableMode);
 					return;
 				}
+				if (reasoning.dialect === "kimi" && reasoning.wireEffort !== undefined) {
+					params.thinking = { type: "enabled", effort: reasoning.wireEffort };
+					if (policy.compat.thinkingKeep) params.thinking.keep = policy.compat.thinkingKeep;
+					break;
+				}
 				params.thinking = { type: "enabled" };
 				if (policy.compat.thinkingKeep) params.thinking.keep = policy.compat.thinkingKeep;
 				if (policy.compat.supportsReasoningEffort && reasoning.wireEffort !== undefined) {
@@ -1025,16 +1030,24 @@ function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat:
 }
 
 /**
- * Output-token clamp for the Z.AI/GLM-5.2 reasoning dialect: these hosts accept
- * the full model window on reasoning turns, so clamp to the model cap. Returns
- * `undefined` for every other model, leaving {@link resolveOpenAIOutputTokenParam}
- * on its default `OPENAI_MAX_OUTPUT_TOKENS` clamp.
+ * Provider-specific Chat Completions output clamp.
+ *
+ * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
+ * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning and native
+ * Moonshot K3 explicitly accept their full advertised model caps, so those
+ * routes clamp to `model.maxTokens` instead.
  */
-export function resolveZaiReasoningOutputClamp(
+export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
 	compat: ResolvedOpenAICompat,
 ): number | undefined {
-	return isZaiReasoningEffortDialect(model, compat) ? (model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS) : undefined;
+	if (isZaiReasoningEffortDialect(model, compat)) {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	return undefined;
 }
 
 /**
@@ -1726,6 +1739,21 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	return outputItems;
 }
 
+const syntheticToolImageMessages = new WeakSet<object>();
+
+function insertResponsesToolOutput(messages: ResponseInput, output: ResponseInput[number]): void {
+	let index = messages.length;
+	while (index > 0) {
+		const previous = messages[index - 1];
+		if (typeof previous !== "object" || previous === null || !syntheticToolImageMessages.has(previous)) {
+			break;
+		}
+		index -= 1;
+	}
+	messages.splice(index, 0, output);
+}
+
+/** Appends one tool result while keeping consecutive outputs ahead of its synthetic image messages. */
 export function appendResponsesToolResultMessages<TApi extends Api>(
 	messages: ResponseInput,
 	toolResult: ToolResultMessage,
@@ -1772,13 +1800,13 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		return;
 	}
 	if (supportsCustomToolCalls && customCallIds?.has(normalized.callId)) {
-		messages.push({
+		insertResponsesToolOutput(messages, {
 			type: "custom_tool_call_output",
 			call_id: normalized.callId,
 			output,
 		} as ResponseInput[number]);
 	} else {
-		messages.push({
+		insertResponsesToolOutput(messages, {
 			type: "function_call_output",
 			call_id: normalized.callId,
 			output,
@@ -1801,7 +1829,9 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 			} satisfies ResponseInputImage);
 		}
 	}
-	messages.push({ role: "user", content: contentParts });
+	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
+	syntheticToolImageMessages.add(imageMessage);
+	messages.push(imageMessage);
 }
 
 /**

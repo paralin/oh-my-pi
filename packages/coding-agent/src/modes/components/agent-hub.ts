@@ -21,7 +21,7 @@ import type { MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
-import { registerPersistedSubagents } from "../../registry/persisted-subagents";
+import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
@@ -97,6 +97,7 @@ function modelBadge(ref: AgentRef, observed: ObservableSession | undefined): str
 	const selector = level !== undefined ? resolved.slice(0, colon) : resolved;
 	return formatModelBadge(selector.slice(selector.indexOf("/") + 1), level);
 }
+
 /** Result of one host-backed transcript read for the Agent Hub viewer. */
 export interface AgentHubRemoteTranscript {
 	text: string;
@@ -221,7 +222,7 @@ export class AgentHubOverlayComponent extends Container {
 			? Promise.resolve()
 			: Promise.resolve()
 					.then(() => {
-						registerPersistedSubagents(deps.sessionFile, { registry: this.#registry });
+						registerPersistedSubagents(this.#registry, deps.sessionFile);
 						this.#refreshRows();
 					})
 					.catch((error: unknown) => {

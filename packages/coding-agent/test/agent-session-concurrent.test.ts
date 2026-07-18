@@ -17,11 +17,14 @@ import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -1151,7 +1154,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1205,14 +1207,15 @@ describe("AgentSession TTSR resume gate", () => {
 		expect(session.isStreaming).toBe(false);
 	});
 
-	it("steer action injects a correction and continues without aborting", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		let streamCallCount = 0;
-		let continuationCompleted = false;
+	it("marks extension agent_end willContinue for TTSR abort and not ordinary abort", async () => {
+		collapseSchedulerSettleDelays();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "steer",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1220,63 +1223,147 @@ describe("AgentSession TTSR resume gate", () => {
 		});
 		ttsrManager.addRule(testRule);
 
+		const extensionEmits: Array<{ type: string; willContinue?: boolean }> = [];
+		const continuationStarted = Promise.withResolvers<void>();
+
+		let streamCallCount = 0;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [] },
-			streamFn: (_model, _context, _options) => {
+			streamFn: (_model, _context, options) => {
 				streamCallCount++;
 				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
 				if (streamCallCount === 1) {
-					queueMicrotask(() => {
-						const partial = makeMsg("");
-						stream.push({ type: "start", partial });
-						stream.push({
-							type: "text_delta",
-							contentIndex: 0,
-							delta: "let val = result.unwrap(",
-							partial: makeMsg("let val = result.unwrap("),
-						});
-						stream.push({
-							type: "done",
-							reason: "stop",
-							message: makeMsg("let val = result.unwrap()"),
-						});
-					});
+					pushAbortableTtsrStream(stream, signal);
 				} else {
-					pushContinuationStream(stream, () => {
-						continuationCompleted = true;
-					});
+					pushContinuationStream(stream, () => continuationStarted.resolve());
 				}
 				return stream;
 			},
 		});
 
 		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-steer.db"));
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.enabled": false,
+			"todo.enabled": false,
+			"todo.reminders": false,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-will-continue.db"));
 		authStorages.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const extensionRuntime = new ExtensionRuntime();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("agent_end", event => {
+					extensionEmits.push({ type: event.type, willContinue: event.willContinue });
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"capture-agent-end",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			sessionManager,
+			modelRegistry,
+		);
 
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, ttsrManager });
-		const triggered: string[][] = [];
-		session.subscribe(event => {
-			if (event.type === "ttsr_triggered") triggered.push(event.rules.map(rule => rule.name));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			ttsrManager,
+			extensionRunner,
 		});
 
-		await session.prompt("Write some Rust code");
+		const firstGoalEndStarted = Promise.withResolvers<void>();
+		const releaseFirstGoalEnd = Promise.withResolvers<void>();
+		let goalEndCalls = 0;
+		vi.spyOn(GoalRuntime.prototype, "onAgentEnd").mockImplementation(async () => {
+			goalEndCalls++;
+			if (goalEndCalls !== 1) return;
+			firstGoalEndStarted.resolve();
+			await releaseFirstGoalEnd.promise;
+		});
 
-		expect(continuationCompleted).toBe(true);
+		const ttsrPrompt = session.prompt("Write some Rust code");
+		await firstGoalEndStarted.promise;
+		await continuationStarted.promise;
+		const pendingClearedWhileMaintenanceBlocked = !session.isTtsrAbortPending;
+		releaseFirstGoalEnd.resolve();
+		await ttsrPrompt;
+		await session.waitForIdle();
+		expect(pendingClearedWhileMaintenanceBlocked).toBe(true);
+
+		const ttsrEnds = extensionEmits.filter(event => event.type === "agent_end");
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
-		expect(session.isStreaming).toBe(false);
-		expect(triggered).toEqual([["no-unwrap"]]);
-		const injection = sessionManager
-			.getEntries()
-			.find(entry => entry.type === "custom_message" && entry.customType === "ttsr-injection");
-		expect(injection?.type).toBe("custom_message");
-		expect(injection?.type === "custom_message" ? injection.content : "").toContain(
-			'<system-steering reason="rule_violation"',
-		);
+		// Intermediate TTSR-abort settle continues; terminal settle after retry does not.
+		expect(ttsrEnds.length).toBeGreaterThanOrEqual(2);
+		expect(ttsrEnds[0]?.willContinue).toBe(true);
+		expect(ttsrEnds.slice(1, -1).every(event => !event.willContinue)).toBe(true);
+		expect(ttsrEnds.at(-1)?.willContinue).toBeFalsy();
+
+		extensionEmits.length = 0;
+		const ordinaryAgent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: (_model, _context, options) => {
+				const stream = new AssistantMessageEventStream();
+				const signal = options?.signal;
+				queueMicrotask(() => {
+					const partial = makeMsg("partial");
+					stream.push({ type: "start", partial });
+					stream.push({
+						type: "text_delta",
+						contentIndex: 0,
+						delta: "partial",
+						partial: makeMsg("partial"),
+					});
+					queueMicrotask(() => {
+						session?.agent.abort("user cancelled");
+					});
+					if (signal) {
+						signal.addEventListener(
+							"abort",
+							() => {
+								stream.push({
+									type: "error",
+									reason: "aborted",
+									error: makeMsg("partial", "aborted"),
+								});
+							},
+							{ once: true },
+						);
+					}
+				});
+				return stream;
+			},
+		});
+		await session.dispose();
+		session = new AgentSession({
+			agent: ordinaryAgent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			extensionRunner,
+		});
+
+		const promptPromise = session.prompt("user will cancel");
+		await session.waitForIdle();
+		await promptPromise.catch(() => undefined);
+
+		const ordinaryEnds = extensionEmits.filter(event => event.type === "agent_end");
+		expect(ordinaryEnds.length).toBeGreaterThanOrEqual(1);
+		for (const event of ordinaryEnds) {
+			expect(event.willContinue).toBeFalsy();
+		}
 	});
 
 	it("labels aborted tool placeholders with the TTSR rule reason", async () => {
@@ -1286,7 +1373,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1398,7 +1484,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1531,7 +1616,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1586,7 +1670,6 @@ describe("AgentSession TTSR resume gate", () => {
 		// interruptMode: "never" -> TTSR match queues deferred injection instead of aborting
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "never",
 			repeatMode: "once",
@@ -1659,7 +1742,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1737,7 +1819,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1848,7 +1929,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "never",
 			repeatMode: "once",
@@ -1971,7 +2051,6 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
-			action: "kill",
 			contextMode: "discard",
 			interruptMode: "never",
 			repeatMode: "once",

@@ -9,7 +9,7 @@ import { readFile } from "node:fs/promises";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
+import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE } from "../session/scratch-handoff";
 import { flushTelemetryExport } from "../telemetry-export";
@@ -125,7 +125,7 @@ async function writeFinalAssistantText(
 	if ((assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") && !isSilentAbort(assistantMsg)) {
 		const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
 		await flushTelemetryExport();
-		await session.dispose();
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 		const flushed = process.stderr.write(`${errorLine}\n`);
 		if (flushed) {
 			process.exit(1);
@@ -448,5 +448,5 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	});
 	await outputAbort;
 
-	await session.dispose();
+	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 }

@@ -154,6 +154,15 @@ describe("createTools", () => {
 		expect(names).toEqual(["read", "write", "goal"]);
 	});
 
+	it("creates an xd:// registry without remounting explicitly requested built-ins", async () => {
+		const session = createTestSession();
+		const tools = await createTools(session, ["read", "lsp"]);
+
+		expect(session.xdevRegistry).toBeDefined();
+		expect(session.xdevRegistry?.entries()).toEqual([]);
+		expect(tools.map(tool => tool.name)).toEqual(["read", "lsp", "goal"]);
+	});
+
 	it("lowercases requested tool subset", async () => {
 		const session = createTestSession();
 		const tools = await createTools(session, ["Read", "Write"]);
@@ -216,7 +225,7 @@ describe("createTools", () => {
 		expect(tools.map(t => t.name)).not.toContain("ask");
 
 		const requested = await createTools(session, ["ask", "read"]);
-		expect(requested.map(t => t.name)).toEqual(["read", "goal", "write"]);
+		expect(requested.map(t => t.name)).toEqual(["read", "goal"]);
 	});
 
 	it("includes ask tool when ask.enabled is true and hasUI is true", async () => {
@@ -256,7 +265,7 @@ describe("createTools", () => {
 		expect(names).not.toContain("inspect_image");
 
 		const requestedTools = await createTools(session, ["bash", "read"]);
-		expect(requestedTools.map(t => t.name)).toEqual(["read", "goal", "write"]);
+		expect(requestedTools.map(t => t.name)).toEqual(["read", "goal"]);
 	});
 	it("auto-includes goal when goal mode is active", async () => {
 		const session = createTestSession({
@@ -269,6 +278,20 @@ describe("createTools", () => {
 		const names = tools.map(t => t.name);
 
 		expect(names).toEqual(["read", "goal"]);
+	});
+
+	it("does not widen a restricted explicit tool list for an active goal", async () => {
+		const session = createTestSession({
+			restrictToolNames: true,
+			settings: createSettingsWithOverrides({
+				"goal.enabled": true,
+			}),
+			getGoalModeState: () => createActiveGoalState(),
+		});
+
+		const tools = await createTools(session, ["read", "write"]);
+
+		expect(tools.map(tool => tool.name)).toEqual(["read", "write"]);
 	});
 
 	it("records active tools on the original session object", async () => {

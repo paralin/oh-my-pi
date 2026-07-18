@@ -15,7 +15,12 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getDefault } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { getPrintModeExitCode, runPrintMode } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
-import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	type AgentSession,
+	type AgentSessionDisposeOptions,
+	type AgentSessionEvent,
+	SHUTDOWN_CONSOLIDATE_BUDGET_MS,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
@@ -42,14 +47,18 @@ function makeAssistantMessage(overrides: Partial<AssistantMessage> = {}): Assist
 /** Minimal mock of AgentSession for print-mode text output path */
 function createMockSession(
 	messages: AssistantMessage[],
-	options: {
-		maintenanceTrace?: "loader" | "assistant" | "debug";
-		onPrompt?: (emit: (event: AgentSessionEvent) => void) => void | Promise<void>;
-		cwd?: string;
-		contextUsage?: { tokens: number; contextWindow: number; percent?: number };
-		onBudgetStopCloseout?: () => Promise<boolean>;
-	} = {},
+	optionsOrDispose:
+		| {
+				maintenanceTrace?: "loader" | "assistant" | "debug";
+				onPrompt?: (emit: (event: AgentSessionEvent) => void) => void | Promise<void>;
+				cwd?: string;
+				contextUsage?: { tokens: number; contextWindow: number; percent?: number };
+				onBudgetStopCloseout?: () => Promise<boolean>;
+		  }
+		| ((options?: AgentSessionDisposeOptions) => Promise<void>) = {},
 ): AgentSession {
+	const options = typeof optionsOrDispose === "function" ? {} : optionsOrDispose;
+	const dispose = typeof optionsOrDispose === "function" ? optionsOrDispose : async () => {};
 	const subscription: { callback?: (event: AgentSessionEvent) => void } = {};
 	return {
 		state: { messages },
@@ -72,7 +81,8 @@ function createMockSession(
 			await options.onPrompt?.(event => subscription.callback?.(event));
 		},
 		waitForIdle: async () => {},
-		dispose: async () => {},
+		extensionRunner: undefined,
+		dispose,
 	} as unknown as AgentSession;
 }
 
@@ -129,6 +139,17 @@ describe("Print-mode silent-abort regression", () => {
 		expect(exitSpy).not.toHaveBeenCalled();
 	});
 
+	it("bounds final memory consolidation so print mode can exit", async () => {
+		let disposeOptions: AgentSessionDisposeOptions | undefined;
+		const session = createMockSession([makeAssistantMessage()], async options => {
+			disposeOptions = options;
+		});
+
+		await runPrintMode(session, { mode: "text" });
+
+		expect(disposeOptions?.mnemopiConsolidateTimeoutMs).toBe(SHUTDOWN_CONSOLIDATE_BUDGET_MS);
+	});
+
 	it("does not write bit-classified silent aborts to stderr or exit non-zero", async () => {
 		const silentAbortMsg = makeAssistantMessage({
 			stopReason: "aborted",
@@ -151,7 +172,10 @@ describe("Print-mode silent-abort regression", () => {
 			content: [],
 		});
 
-		const session = createMockSession([errorMsg]);
+		let disposeOptions: AgentSessionDisposeOptions | undefined;
+		const session = createMockSession([errorMsg], async options => {
+			disposeOptions = options;
+		});
 		await runPrintMode(session, { mode: "text" });
 
 		// A real error SHOULD be written to stderr
@@ -159,6 +183,7 @@ describe("Print-mode silent-abort regression", () => {
 		expect(stderrText).toContain("Rate limit exceeded");
 		// process.exit(1) SHOULD have been called
 		expect(exitSpy).toHaveBeenCalledWith(1);
+		expect(disposeOptions?.mnemopiConsolidateTimeoutMs).toBe(SHUTDOWN_CONSOLIDATE_BUDGET_MS);
 	});
 
 	it("maps a JSON-mode provider error to a non-zero process status", () => {

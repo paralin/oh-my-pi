@@ -15,6 +15,7 @@ import {
 	isDeepseekModelIdOrName,
 	isGlm52ReasoningEffortModelId,
 	isGrokReasoningEffortCapable,
+	isKimiK3ModelId,
 	isKimiK26ModelId,
 	isKimiModelId,
 	isMimoModelIdOrName,
@@ -85,6 +86,7 @@ function resolveReasoningDisableMode(
 		case "openrouter":
 			return "openrouter-enabled-false";
 		case "zai":
+		case "kimi":
 			return "zai-thinking-disabled";
 		case "qwen":
 			return "qwen-enable-thinking-false";
@@ -247,6 +249,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isKimiModel = isKimiModelId(spec.id);
 	const isMoonshotNative = modelMatchesHost(hostModel, "moonshotNative");
 	const isMoonshotKimi = isKimiModel && isMoonshotNative;
+	// Kimi K3 (native) always reasons via OpenAI-style `reasoning_effort: "max"`
+	// and does NOT accept the K2.x binary `thinking: { type }` block, so it must
+	// stay on the "openai" thinking dialect even though it is a Moonshot-native
+	// Kimi model (#5756).
+	const isMoonshotKimiK3 = isMoonshotKimi && isKimiK3ModelId(spec.id);
 	const requiresEnabledThinking = isMoonshotKimi && matchesKimiK27CodeFamily(spec);
 	const usesMoonshotKimiPreservedThinking = isMoonshotKimi && isKimiK26ModelId(spec.id);
 	const isAnthropicModel =
@@ -364,7 +371,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				? ALIBABA_CODING_PLAN_STREAM_IDLE_TIMEOUT_MS
 				: isXiaomiMimo
 					? XIAOMI_MIMO_STREAM_IDLE_TIMEOUT_MS
-					: spec.reasoning && (isKimiK26ModelId(spec.id) || (isMoonshotKimi && matchesKimiK27CodeFamily(spec)))
+					: spec.reasoning &&
+							(isKimiK26ModelId(spec.id) ||
+								isMoonshotKimiK3 ||
+								(isMoonshotKimi && matchesKimiK27CodeFamily(spec)))
 						? KIMI_REASONING_STREAM_IDLE_TIMEOUT_MS
 						: spec.reasoning && isDirectDeepseekApi
 							? DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS
@@ -385,7 +395,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 					? "openrouter"
 					: "raw";
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
-		isZai || isZhipu || isMoonshotKimi || isXiaomiMimo
+		(isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo
 			? "zai"
 			: isOpenRouter
 				? "openrouter"
@@ -426,7 +436,12 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// every call since the family can otherwise emit very long reasoning traces
 		// before the final answer.
 		alwaysSendMaxTokens: isKimiModel,
-		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
+		// Native Kimi K3 always reasons via `reasoning_effort: "max"` (never the
+		// K2.x binary `thinking` block that #827's forced-tool-choice conflict is
+		// about), so suppressing its effort would strip the mandatory `max` from
+		// normal forced-tool turns (e.g. plan-mode `toolChoice: "required"`) and
+		// leave K3 in an unsupported mode (#5758 review).
+		disableReasoningOnForcedToolChoice: (isKimiModel && !isMoonshotKimiK3) || isAnthropicModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(spec.reasoning) && !isOpenRouter,
 		supportsToolChoice: !isDirectDeepseekReasoning,
 		supportsForcedToolChoice: !requiresEnabledThinking,
@@ -446,6 +461,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// is rejected by NIM's `additionalProperties: false` request schema
 		// (issue #2299).
 		thinkingFormat,
+		kimiApiFormat: undefined,
 		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
@@ -516,7 +532,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
 		extraBody: isDirectDeepseekReasoning ? { thinking: { type: "enabled" } } : undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
-		toolSchemaFlavor: isMoonshotNative ? "moonshot-mfjs" : undefined,
+		// Kimi-family ids trigger MFJS on any host, not just native base URLs:
+		// proxies (OpenRouter, custom gateways) forward `tools.function.parameters`
+		// to Moonshot verbatim, which 400s on non-MFJS constructs.
+		toolSchemaFlavor: isMoonshotNative || isKimiModel ? "moonshot-mfjs" : undefined,
 		streamIdleTimeoutMs,
 		stripDeepseekSpecialTokens:
 			isDeepseekModelIdOrName(spec.id) && (provider === "nvidia" || provider === "deepseek"),
@@ -642,6 +661,9 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		openRouterRouting: undefined,
 		isOpenRouterHost: isOpenRouter,
 		wireModelIdMode: isOpenRouter ? "openrouter" : "raw",
+		// Mirrors buildOpenAICompat: Kimi behind a Responses-capable proxy still
+		// lands on Moonshot's MFJS validator.
+		toolSchemaFlavor: isKimiModel ? "moonshot-mfjs" : undefined,
 		alwaysSendMaxTokens: spec.id ? isKimiModelId(spec.id) : false,
 		enableGeminiThinkingLoopGuard: modelFamilyToken(spec.id ?? "") === "gemini",
 		supportsObfuscationOptOut: isOpenAIUrl || spec.provider === "openai",
