@@ -55,6 +55,7 @@ export class RpcHarnessSessionOwner {
 	#events: RpcHarnessEvent[] = [];
 	#runs = new Map<string, string>();
 	#steering = new Map<string, RpcSteeringAck>();
+	#steeringInjected = new Set<string>();
 	#result: RpcHarnessResult | undefined;
 	#resultWaiters: Array<(result: RpcHarnessResult) => void> = [];
 	#eventTail: Promise<void> = Promise.resolve();
@@ -96,6 +97,13 @@ export class RpcHarnessSessionOwner {
 				return { runId, sessionId: this.sessionId, existing: true };
 			}
 
+			const claim = await this.#claimRun(runId);
+			if (!claim.claimed) {
+				if (claim.sessionId !== this.sessionId) throw new Error(`run_id is bound to session ${claim.sessionId}`);
+				this.#runs.set(runId, this.sessionId);
+				return { runId, sessionId: this.sessionId, existing: true };
+			}
+
 			const record: RunRecord = { kind: "run", runId, sessionId: this.sessionId };
 			await this.#appendTo(this.#runIndexFile, record);
 			this.#runs.set(runId, this.sessionId);
@@ -108,6 +116,7 @@ export class RpcHarnessSessionOwner {
 	appendEvent(event: RpcAgentEventPayload): Promise<RpcHarnessEvent> {
 		const task = this.#eventTail.then(async () => {
 			if (this.#failure) throw this.#failure;
+			if (this.#result) throw new Error("cannot append an event after the terminal result");
 			const sequenced: RpcHarnessEvent = { ...event, sequence: this.#nextEventSequence++ };
 			await this.#append({ kind: "event", event: sequenced });
 			this.#events.push(sequenced);
@@ -207,6 +216,7 @@ export class RpcHarnessSessionOwner {
 			if (record.kind === "event") {
 				this.#events.push(record.event);
 				this.#nextEventSequence = Math.max(this.#nextEventSequence, record.event.sequence + 1);
+				if (record.event.type === "steering_injected") this.#steeringInjected.add(record.event.steeringId);
 			} else if (record.kind === "steering") {
 				this.#nextSteeringSequence = Math.max(this.#nextSteeringSequence, record.steeringSequence + 1);
 				this.#steering.set(record.steeringId, {
@@ -221,8 +231,9 @@ export class RpcHarnessSessionOwner {
 
 	async #steer(steeringId: string, message: string, deliver: () => Promise<void>): Promise<RpcSteeringAck> {
 		const prior = this.#steering.get(steeringId);
-		if (prior) return { ...prior, status: "DUPLICATE" };
-		const steeringSequence = this.#nextSteeringSequence++;
+		if (prior && prior.status === "ACCEPTED" && this.#steeringInjected.has(steeringId))
+			return { ...prior, status: "DUPLICATE" };
+		const steeringSequence = prior?.steeringSequence ?? this.#nextSteeringSequence++;
 		const accepted: RpcSteeringAck = { status: "ACCEPTED", steeringSequence };
 		await this.#append({ kind: "steering", steeringId, steeringSequence, status: "ACCEPTED" });
 		this.#steering.set(steeringId, accepted);
@@ -230,6 +241,7 @@ export class RpcHarnessSessionOwner {
 		try {
 			await deliver();
 			await this.appendEvent({ type: "steering_injected", steeringId, steeringSequence });
+			this.#steeringInjected.add(steeringId);
 			return accepted;
 		} catch {
 			const rejected: RpcSteeringAck = { status: "REJECTED", steeringSequence };
@@ -255,6 +267,20 @@ export class RpcHarnessSessionOwner {
 			release();
 			if (RpcHarnessSessionOwner.#runLocks.get(this.#runIndexFile) === chain)
 				RpcHarnessSessionOwner.#runLocks.delete(this.#runIndexFile);
+		}
+	}
+
+	async #claimRun(runId: string): Promise<{ claimed: boolean; sessionId: string }> {
+		const claimFile = path.join(`${this.#runIndexFile}.locks`, Buffer.from(runId).toString("base64url"));
+		await fs.mkdir(path.dirname(claimFile), { recursive: true, mode: 0o700 });
+		try {
+			await fs.writeFile(claimFile, this.sessionId, { encoding: "utf8", flag: "wx", mode: 0o600 });
+			return { claimed: true, sessionId: this.sessionId };
+		} catch (error) {
+			if (!isRecord(error) || error.code !== "EEXIST") throw error;
+			const sessionId = (await fs.readFile(claimFile, "utf8")).trim();
+			if (!sessionId) throw new Error(`run_id claim is incomplete: ${runId}`);
+			return { claimed: false, sessionId };
 		}
 	}
 

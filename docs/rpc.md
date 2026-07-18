@@ -95,13 +95,16 @@ operating mode. `src/modes/rpc/rpc-types.ts` is the canonical schema source.
 
 ### Repeatable terminal result
 
-`{ id?, type: "session.result" }` blocks until terminal and returns one immutable
-record:
+`{ id?, type: "session.result" }` blocks until the agent reaches a terminal
+completion or the RPC transport shuts down, then returns one immutable record.
+Natural agent completion uses the assistant's stop reason (normally `"stop"`);
+`"stdin_closed"` and `"shutdown_requested"` identify transport and shutdown
+terminal paths:
 
 ```json
 {
   "outcome": "completed",
-  "stopReason": "stdin_closed",
+  "stopReason": "stop",
   "finalMessage": "…",
   "usage": {
     "input": 10,

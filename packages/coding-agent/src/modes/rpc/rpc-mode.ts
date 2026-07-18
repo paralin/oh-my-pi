@@ -656,10 +656,10 @@ export async function runRpcMode(
 		rpcRunIndexFile,
 	);
 
-	const completeRpcResult = async (stopReason: string) => {
+	const completeRpcResult = async (stopReason: string, outcome: "completed" | "failed" | "aborted" = "completed") => {
 		const stats = session.getSessionStats();
 		await harnessOwner.completeResult({
-			outcome: "completed",
+			outcome,
 			stopReason,
 			finalMessage: session.getLastAssistantText() ?? "",
 			usage: stats.tokens,
@@ -932,12 +932,29 @@ export async function runRpcMode(
 	let requestFatalWatchShutdown: (() => Promise<void>) | undefined;
 	let watchFailureReported = false;
 	session.subscribe(event => {
-		void harnessOwner.appendEvent(event).catch(errorValue => {
+		const append = harnessOwner.appendEvent(event);
+		void append.catch(errorValue => {
+			if (harnessOwner.hasResult) return;
 			if (watchFailureReported) return;
 			watchFailureReported = true;
 			shutdownState.requested = true;
 			output(
 				error(undefined, "session.watch", errorValue instanceof Error ? errorValue.message : String(errorValue)),
+			);
+			void requestFatalWatchShutdown?.();
+		});
+		if (event.type !== "agent_end") return;
+		const assistantMessage = [...event.messages].reverse().find(message => message.role === "assistant") as
+			| { stopReason?: string }
+			| undefined;
+		const stopReason = assistantMessage?.stopReason ?? "completed";
+		const outcome = stopReason === "aborted" ? "aborted" : stopReason === "error" ? "failed" : "completed";
+		void completeRpcResult(stopReason, outcome).catch(errorValue => {
+			if (watchFailureReported) return;
+			watchFailureReported = true;
+			shutdownState.requested = true;
+			output(
+				error(undefined, "session.result", errorValue instanceof Error ? errorValue.message : String(errorValue)),
 			);
 			void requestFatalWatchShutdown?.();
 		});

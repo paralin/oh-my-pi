@@ -73,6 +73,46 @@ describe("RPC harness session owner", () => {
 		await expect(otherSession.bindRun("run-1")).rejects.toThrow("bound to session session-1");
 	});
 
+	it("retries rejected steering after reopening and redelivers it", async () => {
+		const file = recordFile();
+		const owner = await RpcHarnessSessionOwner.open("session-1", file);
+		let deliveries = 0;
+		await expect(
+			owner.steer("steer-1", "hello", async () => {
+				deliveries++;
+				throw new Error("unsafe boundary");
+			}),
+		).resolves.toEqual({ status: "REJECTED", steeringSequence: 1 });
+		const reopened = await RpcHarnessSessionOwner.open("session-1", file);
+		await expect(
+			reopened.steer("steer-1", "hello", async () => {
+				deliveries++;
+			}),
+		).resolves.toEqual({ status: "ACCEPTED", steeringSequence: 1 });
+		expect(deliveries).toBe(2);
+	});
+
+	it("seals the event sequence after the terminal result", async () => {
+		const owner = await RpcHarnessSessionOwner.open("session-1", recordFile());
+		await owner.completeResult({
+			outcome: "completed",
+			stopReason: "stop",
+			finalMessage: "done",
+			usage: usage(),
+		});
+		await expect(owner.appendEvent({ type: "notice", level: "info", message: "late" })).rejects.toThrow(
+			"after the terminal result",
+		);
+	});
+
+	it("claims a run ID across independently opened owners", async () => {
+		const first = await RpcHarnessSessionOwner.open("session-1", recordFile("session-1"), undefined, runIndexFile());
+		const second = await RpcHarnessSessionOwner.open("session-2", recordFile("session-2"), undefined, runIndexFile());
+		const results = await Promise.allSettled([first.bindRun("run-1"), second.bindRun("run-1")]);
+		expect(results.filter(result => result.status === "fulfilled")).toHaveLength(1);
+		expect(results.filter(result => result.status === "rejected")).toHaveLength(1);
+	});
+
 	it("acknowledges steering once and reports duplicate retries", async () => {
 		const owner = await RpcHarnessSessionOwner.open("session-1", recordFile());
 		let deliveries = 0;
