@@ -876,6 +876,10 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Called after the active turn has fully settled. */
+	onIdle?: () => void;
+	/** Called when disposal starts so session-owned schedulers can stop timers. */
+	onDispose?: () => void;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
@@ -2028,6 +2032,8 @@ export class AgentSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	#onIdle?: () => void;
+	#onDispose?: () => void;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	/**
@@ -2242,6 +2248,7 @@ export class AgentSession {
 			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
+			this.#onIdle?.();
 		}
 	}
 
@@ -2664,6 +2671,8 @@ export class AgentSession {
 			destination: { kind: "current", manager: this.sessionManager },
 		};
 		this.settings = config.settings;
+		this.#onIdle = config.onIdle;
+		this.#onDispose = config.onDispose;
 		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -6755,6 +6764,7 @@ export class AgentSession {
 	 */
 	beginDispose(): void {
 		this.#isDisposed = true;
+		this.#onDispose?.();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#flushPendingIrcAsides();
