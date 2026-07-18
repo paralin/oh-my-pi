@@ -1154,6 +1154,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1216,6 +1217,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1373,6 +1375,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1484,6 +1487,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1616,6 +1620,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1670,6 +1675,7 @@ describe("AgentSession TTSR resume gate", () => {
 		// interruptMode: "never" -> TTSR match queues deferred injection instead of aborting
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "never",
 			repeatMode: "once",
@@ -1742,6 +1748,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1819,6 +1826,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "always",
 			repeatMode: "once",
@@ -1929,6 +1937,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "never",
 			repeatMode: "once",
@@ -2051,6 +2060,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const ttsrManager = new TtsrManager({
 			enabled: true,
+			action: "kill",
 			contextMode: "discard",
 			interruptMode: "never",
 			repeatMode: "once",
