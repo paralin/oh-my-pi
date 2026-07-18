@@ -56,6 +56,7 @@ import {
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { CronManager } from "./cron";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
@@ -1698,6 +1699,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agentRegistry.unregister(resolvedAgentId);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+	const cronManager = new CronManager({
+		sessionFile: sessionManager.getSessionFile(),
+		isIdle: () => Boolean(session) && !session.isStreaming,
+		enqueuePrompt: promptText => session.sendUserMessage(promptText),
+	});
+	await cronManager.load();
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -1718,6 +1725,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		};
 		const toolSession: ToolSession = {
+			cronManager,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -2957,6 +2965,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return id ? `${id}-advisor` : null;
 			},
 			getAgentId: () => "advisor",
+			cronManager: undefined,
 		};
 		const advisorToolBuilds: Array<Tool | null | Promise<Tool | null>> = [];
 		for (const name in BUILTIN_TOOLS) {
@@ -2978,6 +2987,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// parent's manager via `options.mcpManager` and MUST NOT disconnect it.
 		const ownedMcpManager = options.mcpManager ? undefined : mcpManager;
 		session = new AgentSession({
+			onIdle: () => cronManager.notifyIdle(),
+			onDispose: () => cronManager.dispose(),
 			advisorWatchdogPrompt,
 			advisorContextPrompt,
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
