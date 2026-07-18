@@ -27,12 +27,6 @@ interface PollEscalationState {
 	lastPollEndAt: number;
 }
 
-export interface AsyncJobRefresh {
-	status?: AsyncJob["status"];
-	resultText?: string;
-	errorText?: string;
-}
-
 export interface AsyncJob {
 	id: string;
 	type: "bash" | "task";
@@ -40,14 +34,11 @@ export interface AsyncJob {
 	startTime: number;
 	label: string;
 	abortController: AbortController;
-	lifecycleAbortController: AbortController;
 	promise: Promise<void>;
 	resultText?: string;
 	errorText?: string;
-	/** Persistent jobs continue outside the owning OMP process. */
-	persistent?: boolean;
-	/** Refresh file-backed progress before a job snapshot is rendered. */
-	refresh?: () => Promise<string | AsyncJobRefresh>;
+	/** Latest tool-render details reported by the running job. */
+	latestDetails?: Record<string, unknown>;
 	/**
 	 * Registry id of the agent that registered the job (e.g. "Main",
 	 * "AuthLoader"). Used by scoped cancel/list APIs so a subagent's teardown
@@ -96,12 +87,6 @@ export interface AsyncJobRegisterOptions {
 	id?: string;
 	/** Registry id of the agent that owns this job; used to scope cancelAll. */
 	ownerId?: string;
-	/** Original start time when restoring a persistent job. */
-	startTime?: number;
-	/** Keep the job alive when its owning session process disposes. */
-	persistent?: boolean;
-	/** Reload current progress and terminal state from the durable owner. */
-	refresh?: () => Promise<string | AsyncJobRefresh>;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
@@ -182,8 +167,6 @@ export class AsyncJobManager {
 		run: (ctx: {
 			jobId: string;
 			signal: AbortSignal;
-			/** Cancel only the in-process monitor when its host disposes. */
-			lifecycleSignal: AbortSignal;
 			reportProgress: (text: string, details?: Record<string, unknown>) => Promise<void>;
 			/** Clear the queued flag once the job actually starts executing. */
 			markRunning: () => void;
@@ -208,8 +191,7 @@ export class AsyncJobManager {
 		const id = this.#resolveJobId(options?.id);
 		this.#suppressedDeliveries.delete(id);
 		const abortController = new AbortController();
-		const lifecycleAbortController = new AbortController();
-		const startTime = options?.startTime ?? Date.now();
+		const startTime = Date.now();
 
 		const job: AsyncJob = {
 			id,
@@ -219,15 +201,13 @@ export class AsyncJobManager {
 			label,
 			abortController,
 			promise: Promise.resolve(),
-			lifecycleAbortController,
 			ownerId: options?.ownerId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
-			persistent: options?.persistent === true,
-			refresh: options?.refresh,
 		};
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
+			if (details) job.latestDetails = details;
 			if (!options?.onProgress) return;
 			try {
 				await options.onProgress(text, details);
@@ -242,14 +222,12 @@ export class AsyncJobManager {
 			try {
 				const text = await run({
 					jobId: id,
-					lifecycleSignal: lifecycleAbortController.signal,
 					signal: abortController.signal,
 					reportProgress,
 					markRunning: () => {
 						job.queued = false;
 					},
 				});
-				if (this.#disposed && job.persistent) return;
 				if (job.status === "cancelled") {
 					job.resultText = text;
 					this.#scheduleEviction(id);
@@ -260,7 +238,6 @@ export class AsyncJobManager {
 				this.#enqueueDelivery(id, text);
 				this.#scheduleEviction(id);
 			} catch (error) {
-				if (this.#disposed && job.persistent) return;
 				if (job.status === "cancelled") {
 					job.errorText = error instanceof Error ? error.message : String(error);
 					this.#scheduleEviction(id);
@@ -416,50 +393,24 @@ export class AsyncJobManager {
 	}
 
 	/**
-	 * Cancel running jobs. Session transitions include persistent jobs by
-	 * default; process disposal passes `includePersistent: false` so detached
-	 * work survives the host.
+	 * Cancel running jobs. With `filter.ownerId` set, cancels only jobs the
+	 * matching agent registered; with no filter, cancels every running job
+	 * (used by `dispose()` to nuke the manager's state).
 	 */
-	cancelAll(filter?: AsyncJobFilter, options?: { includePersistent?: boolean }): void {
-		const includePersistent = options?.includePersistent ?? true;
+	cancelAll(filter?: AsyncJobFilter): void {
 		for (const job of this.getRunningJobs(filter)) {
-			if (!includePersistent && job.persistent) continue;
 			job.status = "cancelled";
 			job.abortController.abort();
 			this.#scheduleEviction(job.id);
 		}
 	}
 
-	/** Refresh durable progress for jobs visible to the caller. */
-	refreshJobs(filter?: AsyncJobFilter): Promise<void> | undefined {
-		const jobs = this.#filterJobs(this.#jobs.values(), filter).filter(
-			(job): job is AsyncJob & { refresh: NonNullable<AsyncJob["refresh"]> } =>
-				job.refresh !== undefined && job.status === "running",
-		);
-		if (jobs.length === 0) return undefined;
-		return Promise.all(
-			jobs.map(async job => {
-				const refreshed = await job.refresh();
-				if (typeof refreshed === "string") {
-					job.resultText = refreshed;
-					return;
-				}
-				if (refreshed.status) job.status = refreshed.status;
-				if (refreshed.resultText !== undefined) job.resultText = refreshed.resultText;
-				if (refreshed.errorText !== undefined) job.errorText = refreshed.errorText;
-			}),
-		).then(() => undefined);
-	}
-
 	async waitForAll(): Promise<void> {
 		await Promise.all(Array.from(this.#jobs.values()).map(job => job.promise));
 	}
 
-	async #waitForAllUntil(deadline: number, options?: { includePersistent?: boolean }): Promise<boolean> {
-		const includePersistent = options?.includePersistent ?? true;
-		const promises = Array.from(this.#jobs.values())
-			.filter(job => includePersistent || !job.persistent)
-			.map(job => job.promise);
+	async #waitForAllUntil(deadline: number): Promise<boolean> {
+		const promises = Array.from(this.#jobs.values()).map(job => job.promise);
 		if (promises.length === 0) return true;
 		if (deadline === Number.POSITIVE_INFINITY) {
 			await Promise.all(promises);
@@ -526,13 +477,10 @@ export class AsyncJobManager {
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
-		for (const job of this.#jobs.values()) {
-			if (job.persistent) job.lifecycleAbortController.abort();
-		}
-		this.cancelAll(undefined, { includePersistent: false });
+		this.cancelAll();
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
 		const deadline = Date.now() + timeoutMs;
-		const jobsSettled = await this.#waitForAllUntil(deadline, { includePersistent: false });
+		const jobsSettled = await this.#waitForAllUntil(deadline);
 		const drained = await this.drainDeliveries({ timeoutMs: Math.max(deadline - Date.now(), 0) });
 		this.#clearEvictionTimers();
 		this.#jobs.clear();
@@ -571,7 +519,6 @@ export class AsyncJobManager {
 
 	#scheduleEviction(jobId: string): void {
 		if (this.#disposed) return;
-		if (this.#jobs.get(jobId)?.persistent) return;
 		if (this.#retentionMs <= 0) {
 			this.#jobs.delete(jobId);
 			this.#suppressedDeliveries.delete(jobId);
