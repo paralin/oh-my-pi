@@ -10,6 +10,8 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+import * as path from "node:path";
+
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { isZodSchema, zodToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, readLines, Snowflake } from "@oh-my-pi/pi-utils";
@@ -34,6 +36,7 @@ import type { EventBus } from "../../utils/event-bus";
 import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
+import { RpcHarnessSessionOwner, rpcHarnessRecordFileForSessionFile } from "./rpc-harness";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -642,7 +645,26 @@ export async function runRpcMode(
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	const rpcRecordFile = session.sessionFile
+		? rpcHarnessRecordFileForSessionFile(session.sessionFile)
+		: path.join(session.sessionManager.getCwd(), ".omp", `${session.sessionId}.rpc.jsonl`);
+	const rpcRunIndexFile = path.join(session.sessionManager.getCwd(), ".omp", "rpc-runs.jsonl");
+	const harnessOwner = await RpcHarnessSessionOwner.open(
+		session.sessionId,
+		rpcRecordFile,
+		event => output(event),
+		rpcRunIndexFile,
+	);
 
+	const completeRpcResult = async (stopReason: string) => {
+		const stats = session.getSessionStats();
+		await harnessOwner.completeResult({
+			outcome: "completed",
+			stopReason,
+			finalMessage: session.getLastAssistantText() ?? "",
+			usage: stats.tokens,
+		});
+	};
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
 
@@ -904,9 +926,21 @@ export async function runRpcMode(
 		uiContext: rpcUiContext,
 	});
 
-	// Output all agent events as JSON
+	// Every agent event is durably sequenced before it reaches stdout. A failed
+	// append terminates the run; continuation is unsafe without an explicit
+	// replay from a durable sequence.
+	let requestFatalWatchShutdown: (() => Promise<void>) | undefined;
+	let watchFailureReported = false;
 	session.subscribe(event => {
-		output(event);
+		void harnessOwner.appendEvent(event).catch(errorValue => {
+			if (watchFailureReported) return;
+			watchFailureReported = true;
+			shutdownState.requested = true;
+			output(
+				error(undefined, "session.watch", errorValue instanceof Error ? errorValue.message : String(errorValue)),
+			);
+			void requestFatalWatchShutdown?.();
+		});
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
@@ -985,6 +1019,47 @@ export async function runRpcMode(
 					extensionUserMessageTracker,
 				});
 				return success(id, "prompt");
+			}
+			case "session.start": {
+				const binding = await harnessOwner.bindRun(command.run_id);
+				return success(id, "session.start", {
+					run_id: binding.runId,
+					session_id: binding.sessionId,
+					existing: binding.existing,
+				});
+			}
+
+			case "session.resume": {
+				if (command.session_id !== undefined && command.session_id !== session.sessionId) {
+					return error(id, "session.resume", `Unknown session_id: ${command.session_id}`);
+				}
+				const binding = await harnessOwner.bindRun(command.run_id);
+				const events = await harnessOwner.replay(command.after_sequence);
+				for (const event of events) output(event);
+				return success(id, "session.resume", {
+					run_id: binding.runId,
+					session_id: binding.sessionId,
+					existing: binding.existing,
+				});
+			}
+
+			case "session.replay":
+			case "session.watch": {
+				const events = await harnessOwner.replay(command.after_sequence);
+				for (const event of events) output(event);
+				return success(id, command.type, { events });
+			}
+
+			case "session.result": {
+				const result = await harnessOwner.waitResult();
+				return success(id, "session.result", result);
+			}
+
+			case "session.steer": {
+				const ack = await harnessOwner.steer(command.steering_id, command.message, () =>
+					session.steer(command.message, command.images),
+				);
+				return success(id, "session.steer", ack);
 			}
 
 			case "steer": {
@@ -1353,10 +1428,13 @@ export async function runRpcMode(
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
+			if (!watchFailureReported) await completeRpcResult("shutdown_requested");
 			await session.dispose();
 			process.exit(0);
 		},
 	});
+	requestFatalWatchShutdown = () => shutdownCoordinator.checkShutdownRequested();
+	if (shutdownState.requested) void requestFatalWatchShutdown();
 
 	const dispatchFrameDeps: RpcInputFrameDeps = {
 		handleCommand,
@@ -1400,6 +1478,7 @@ export async function runRpcMode(
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	await completeRpcResult("stdin_closed");
 	await inputDispatcher.drain();
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();

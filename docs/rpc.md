@@ -71,6 +71,62 @@ Important edge behavior from runtime:
 - `prompt` success responses may include `data.agentInvoked`. `false` means the prompt completed locally without an agent turn; `true` means the prompt produced agent lifecycle events; omitted means the host must rely on session events for completion.
 - `abort_and_prompt` does not currently emit `data.agentInvoked` or `prompt_result`; hosts should treat it as the legacy abort-then-schedule path and rely on session events or same-id scheduling errors.
 
+## Harness session contract in RPC mode
+
+The following frames are part of `--mode rpc`; they do not introduce a second
+operating mode. `src/modes/rpc/rpc-types.ts` is the canonical schema source.
+
+### Session identity and replay
+
+- `{ id?, type: "session.start", run_id }` durably binds `run_id` to the
+  current `session_id` before returning success. Repeating the same request
+  returns the existing binding. Reusing the ID for another session fails.
+- `{ id?, type: "session.resume", run_id, session_id?, after_sequence? }`
+  performs the same idempotent binding and re-emits durable events strictly
+  after `after_sequence`.
+- `{ id?, type: "session.replay", after_sequence? }` and
+  `{ id?, type: "session.watch", after_sequence? }` re-emit durable events
+  strictly after the supplied sequence.
+- Every `AgentSessionEvent` emitted by RPC mode has a monotonically increasing
+  per-session `sequence`. The owner persists an event before publishing it.
+  This implementation treats a watch/subscription failure as fatal; a
+  replacement may resume from a durable `after_sequence`, but silent
+  continuation is not valid.
+
+### Repeatable terminal result
+
+`{ id?, type: "session.result" }` blocks until terminal and returns one immutable
+record:
+
+```json
+{
+  "outcome": "completed",
+  "stopReason": "stdin_closed",
+  "finalMessage": "…",
+  "usage": {
+    "input": 10,
+    "output": 4,
+    "reasoning": 0,
+    "cacheRead": 0,
+    "cacheWrite": 0,
+    "total": 14
+  },
+  "resultId": "session-id:result",
+  "terminalSequence": 7
+}
+```
+
+Every later `session.result` call returns the same record and identity. The
+terminal event is persisted before the result becomes visible.
+
+### Steering acknowledgements
+
+`{ id?, type: "session.steer", steering_id, message, images? }` returns
+`{ status, steeringSequence }`, where `status` is `ACCEPTED`, `DUPLICATE`, or
+`REJECTED`. Repeating a `steering_id` is idempotent. The event stream emits
+distinct `steering_queued` and `steering_injected` events, each carrying the
+same monotonic `steeringSequence`.
+
 ## Command Schema (canonical)
 
 `RpcCommand` is defined in `src/modes/rpc/rpc-types.ts`:
