@@ -62,6 +62,7 @@ function createDelayedSession(finalMessage: AssistantMessage): DelayedSession {
 		waitForAdvisorCatchup: async () => {
 			if (!advisorDrainPrepared) throw new Error("advisor catch-up started before headless delivery was armed");
 		},
+		waitForIdle: async () => {},
 		dispose: async () => {},
 	} as unknown as AgentSession;
 
@@ -165,6 +166,7 @@ describe("print mode working indicator", () => {
 				messages.push(message);
 				return true;
 			},
+			waitForIdle: async () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async (timeoutMs: number) => {
 				catchupTimeoutMs = timeoutMs;
@@ -223,6 +225,7 @@ describe("print mode working indicator", () => {
 				messages.push(message);
 				return true;
 			},
+			waitForIdle: async () => {},
 			prepareForHeadlessAdvisorDrain: () => {},
 			waitForAdvisorCatchup: async (timeoutMs: number) => {
 				catchupTimeoutMs = timeoutMs;

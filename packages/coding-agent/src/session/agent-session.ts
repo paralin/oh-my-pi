@@ -26,8 +26,10 @@ import {
 	type AfterToolCallResult,
 	Agent,
 	AgentBusyError,
+	type AgentContext,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentPreModelCallResult,
 	type AgentState,
 	type AgentTool,
 	type AgentToolResult,
@@ -243,7 +245,19 @@ import { createExtensionModelQuery } from "../extensibility/extensions/model-api
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
-import type { RecoveredRetryError } from "../extensibility/shared-events";
+import type {
+	AutoCompactionAction,
+	AutoCompactionReason,
+	MaintenanceTraceDeltaContent,
+	MaintenanceTraceDeltaEvent,
+	MaintenanceTraceEndEvent,
+	MaintenanceTraceFallbackCause,
+	MaintenanceTracePhase,
+	MaintenanceTracePhaseEvent,
+	MaintenanceTraceStartEvent,
+	MaintenanceTraceTerminalResult,
+	RecoveredRetryError,
+} from "../extensibility/shared-events";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { GoalRuntime } from "../goals/runtime";
@@ -294,6 +308,7 @@ import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import toolCallLoopRedirectTemplate from "../prompts/system/tool-call-loop-redirect.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import ttsrSteerTemplate from "../prompts/system/ttsr-steer.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
@@ -387,6 +402,14 @@ import {
 	stripImagesFromMessage,
 	USER_INTERRUPT_LABEL,
 } from "./messages";
+import {
+	buildScratchHandoffRecentContext,
+	renderScratchHandoffCloseoutMessage,
+	renderScratchHandoffResumeMessage,
+	SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
+	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
+} from "./scratch-handoff";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
@@ -394,7 +417,16 @@ import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionEnt
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import {
+	type DrainedSteeringRecord,
+	drainSessionSteeringFile,
+	readSessionSteeringOffset,
+	type SessionSteeringDrainResult,
+	SessionSteeringWatcher,
+	sessionSteeringOffsetFileForSessionFile,
+	writeSessionSteeringOffset,
+} from "./session-steering";
+import { formatShakeSummary, type ShakeMode, type ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
@@ -653,17 +685,146 @@ function sanitizeAssistantForReparentedHistory(message: AssistantMessage): Assis
 	return { ...message, content, providerPayload: undefined };
 }
 
+export function resolveAutoCompactionAction(input: {
+	strategy: CompactionSettings["strategy"];
+	reason: AutoCompactionReason;
+	suppressHandoff: boolean;
+	hasScratchHandoff: boolean;
+}): AutoCompactionAction {
+	if (input.strategy === "snapcompact") return "snapcompact";
+	if (input.strategy === "handoff" && input.hasScratchHandoff) return "scratch-handoff";
+	if (input.strategy === "handoff" && input.reason !== "overflow" && !input.suppressHandoff) return "handoff";
+	return "context-full";
+}
+
+interface MaintenanceTraceState {
+	traceId: string;
+	reason: AutoCompactionReason;
+	action: AutoCompactionAction;
+	fallbackCause?: MaintenanceTraceFallbackCause;
+	targetPath?: string;
+}
+
+type MaintenanceSideStream = AsyncIterable<AssistantMessageEvent> & {
+	result(): Promise<AssistantMessage>;
+};
+
+function resolveMaintenanceTraceFallbackCause(input: {
+	strategy: CompactionSettings["strategy"];
+	reason: AutoCompactionReason;
+	suppressHandoff: boolean;
+	action: AutoCompactionAction;
+}): MaintenanceTraceFallbackCause | undefined {
+	if (input.action !== "context-full") return undefined;
+	if (input.strategy === "snapcompact") return "snapcompact-fallback";
+	if (input.reason === "overflow") return "overflow";
+	if (input.reason === "idle") return "idle";
+	if (input.reason === "incomplete") return "incomplete-response";
+	if (input.strategy === "handoff" && input.suppressHandoff) return "mid-turn-handoff-suppressed";
+	return undefined;
+}
+
+function isScratchSafeReadToolCall(toolCall: ToolCall): boolean {
+	return isScratchSafeReadTool(toolCall.name, toolCall.arguments);
+}
+
+function isScratchSafeReadTool(toolName: string, args: Record<string, unknown> | undefined): boolean {
+	switch (toolName) {
+		case "read":
+		case "grep":
+		case "glob":
+		case "ast_grep":
+		case "web_search":
+			return true;
+		case "lsp": {
+			const action = args?.action;
+			return (
+				action === "capabilities" ||
+				action === "definition" ||
+				action === "diagnostics" ||
+				action === "hover" ||
+				action === "implementation" ||
+				action === "references" ||
+				action === "status" ||
+				action === "symbols" ||
+				action === "type_definition"
+			);
+		}
+		default:
+			return false;
+	}
+}
+
+function assistantMessageToolCallsAreScratchSafeReads(assistantMessage: AssistantMessage): boolean {
+	const toolCalls = assistantMessage.content.filter((content): content is ToolCall => content.type === "toolCall");
+	return toolCalls.length > 0 && toolCalls.every(isScratchSafeReadToolCall);
+}
+
+export function assistantToolUseCanScratchHandoff(
+	assistantMessage: AssistantMessage,
+	messages: readonly AgentMessage[],
+	hasRecentMutation: boolean,
+): boolean {
+	if (!assistantMessage.content.some(content => content.type === "toolCall")) return true;
+	if (!assistantMessageToolCallsAreScratchSafeReads(assistantMessage)) return false;
+	if (hasRecentMutation) return false;
+
+	const assistantIndex = messages.lastIndexOf(assistantMessage);
+	if (assistantIndex === -1) return false;
+	for (let index = assistantIndex - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role === "assistant") break;
+		if (message?.role === "toolResult" && !isScratchSafeReadTool(message.toolName, undefined)) return false;
+	}
+	return true;
+}
+
+function toolWriteTargetPaths(toolName: string, args: unknown): string[] {
+	if (!isRecord(args)) return [];
+	const record = args;
+	if (toolName === "write") {
+		const pathArg = getStringProperty(record, "path");
+		return pathArg ? [pathArg] : [];
+	}
+	if (toolName !== "edit") return [];
+
+	const paths: string[] = [];
+	const directPath = getStringProperty(record, "path");
+	if (directPath) paths.push(directPath);
+	const input = getStringProperty(record, "input");
+	if (!input) return paths;
+	try {
+		const patch = Patch.parse(input);
+		for (const section of patch.sections) {
+			paths.push(section.path);
+			if (section.fileOp?.kind === "move") paths.push(section.fileOp.dest);
+		}
+		return paths;
+	} catch {
+		// Not a hashline patch — fall through to apply_patch parsing.
+	}
+	try {
+		for (const entry of expandApplyPatchToEntries({ input })) {
+			paths.push(entry.path);
+			if (entry.rename) paths.push(entry.rename);
+		}
+	} catch {
+		// If the edit input is not an apply_patch envelope, there are no parseable target paths.
+	}
+	return paths;
+}
+
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| AgentEvent
 	| {
 			type: "auto_compaction_start";
-			reason: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			reason: AutoCompactionReason;
+			action: AutoCompactionAction;
 	  }
 	| {
 			type: "auto_compaction_end";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			action: AutoCompactionAction;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -671,6 +832,10 @@ export type AgentSessionEvent =
 			/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
 			skipped?: boolean;
 	  }
+	| MaintenanceTraceStartEvent
+	| MaintenanceTracePhaseEvent
+	| MaintenanceTraceDeltaEvent
+	| MaintenanceTraceEndEvent
 	| {
 			type: "auto_retry_start";
 			attempt: number;
@@ -678,6 +843,12 @@ export type AgentSessionEvent =
 			delayMs: number;
 			errorMessage: string;
 			errorId?: number;
+			/**
+			 * Epoch ms the retry is sleeping until because every configured account
+			 * is rate-limited and the provider reported a concrete reset. Set only
+			 * for usage-reset waits; the UI renders a live countdown to this time.
+			 */
+			usageResetAtMs?: number;
 	  }
 	| {
 			type: "auto_retry_end";
@@ -701,7 +872,14 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| {
+			type: "steering_received";
+			sessionId: string;
+			steeringFile: string;
+			count: number;
+			entries: Array<{ offset: number; bytes: number }>;
+	  };
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
@@ -754,6 +932,8 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	continuationScheduled: false,
 	automaticContinuationBlocked: true,
 };
+
+const SCRATCH_HANDOFF_CLOSEOUT_MIN_HEADROOM_TOKENS = 4_096;
 
 /**
  * User-facing notice for a compaction dead end: maintenance freed too little
@@ -1005,6 +1185,10 @@ export interface AgentSessionConfig {
 	 *  prelude gating so a top-level session created with a custom `agentId` still
 	 *  receives the always-mode reminder. Defaults to "main". */
 	agentKind?: "main" | "sub";
+	/** Current session scratch handoff file, if scratch handoff is enabled. */
+	scratchHandoffDisplayPath?: string;
+	/** Parent scratch handoff file linked from this session's scratch file. */
+	parentScratchHandoffDisplayPath?: string;
 	/**
 	 * Override the provider-facing session ID for all API requests from this session.
 	 * When absent, `sessionManager.getSessionId()` is used. Needed when benchmark or
@@ -1932,6 +2116,15 @@ export class AgentSession {
 	 *  used as the open barrier for the next build so two writers never share a file. */
 	#advisorRecorderClosed: Promise<void> = Promise.resolve();
 	#goalTurnCounter = 0;
+	// Lifecycle of the goal budget-limit steer relative to the model's turns:
+	// "armed" when the steer is queued on the flip, "delivered" once a later turn
+	// has started and the model has seen it. The runtime budget closeout fires
+	// only after delivery, so it takes over the model's wrap-up final rather than
+	// the flip turn that queued the steer.
+	#budgetLimitSteer: "idle" | "armed" | "delivered" = "idle";
+	// Goal id whose budget-limited terminal the runtime has already owned, so a
+	// parked notice or scratch reset fires once per budget-limited episode.
+	#budgetCloseoutHandledForGoalId: string | undefined;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
 	#clientBridge: ClientBridge | undefined;
@@ -1944,6 +2137,8 @@ export class AgentSession {
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
 	#autoCompactionAbortController: AbortController | undefined = undefined;
+	#maintenanceTraceSequence = 0;
+	#handoffMaintenanceTrace: MaintenanceTraceState | undefined = undefined;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1951,6 +2146,26 @@ export class AgentSession {
 	// Handoff state
 	#handoffAbortController: AbortController | undefined = undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined = undefined;
+	#preProviderScratchHandoffStop:
+		| {
+				contextTokens: number;
+				contextWindow: number;
+				promptBudget: number;
+				scratchPath: string;
+				thresholdTokens: number;
+		  }
+		| undefined;
+	#scratchHandoffCloseout:
+		| {
+				scratchPath: string;
+				baselineWriteCount: number;
+				writeCompleted: boolean;
+				/** One-shot: later tool continuations in the closeout MUST keep their results. */
+				toolResultElisionPending: boolean;
+				triggerContextTokens?: number;
+				reason: AutoCompactionReason;
+		  }
+		| undefined;
 
 	// Retry state
 	#retryAbortController: AbortController | undefined = undefined;
@@ -2026,6 +2241,9 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
+	#scratchHandoffDisplayPath: string | undefined;
+	#parentScratchHandoffDisplayPath: string | undefined;
+	#scratchHandoffToolArgsById = new Map<string, unknown>();
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -2049,6 +2267,7 @@ export class AgentSession {
 	#pendingAdvisorCardEvents = new Set<Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
+	#sessionSteeringWatcher: SessionSteeringWatcher | undefined;
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 
@@ -2138,6 +2357,7 @@ export class AgentSession {
 	#postPromptTasksAbortController = new AbortController();
 
 	#streamingEditAbortTriggered = false;
+	#mutatingToolUseNeedsContinuation = false;
 	#streamingEditCheckedLineCounts = new Map<string, number>();
 
 	#streamingEditPrecheckedToolCallIds = new Set<string>();
@@ -2755,8 +2975,11 @@ export class AgentSession {
 			: (event, model) => {
 					this.rawSseDebugBuffer.recordEvent(event, model);
 				};
+		this.agent.setOnBeforeYield(() => this.#drainSessionSteering());
 		this.agent.setProviderResponseInterceptor(this.#onResponse);
 		this.agent.setRawSseEventInterceptor(this.#onSseEvent);
+		this.agent.setBeforeModelCall(context => this.#stopBeforeOversizedScratchHandoffRequest(context));
+		this.agent.setBeforeSteeringPoll(() => this.#drainSessionSteering());
 		this.agent.setOnTurnEnd(async (messages, signal, context) => {
 			if (signal?.aborted) return;
 			const rewindReport = this.#extractRewindReport(messages);
@@ -2844,6 +3067,8 @@ export class AgentSession {
 		this.#obfuscator = config.obfuscator;
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
+		this.#scratchHandoffDisplayPath = config.scratchHandoffDisplayPath;
+		this.#parentScratchHandoffDisplayPath = config.parentScratchHandoffDisplayPath;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -2861,7 +3086,11 @@ export class AgentSession {
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
-		this.#syncTodoPhasesFromBranch();
+		// Scratch org TODO headings are the durable work tracker; carrying tool
+		// todos into a scratch successor resurrects stale parallel state.
+		if (!this.#scratchHandoffDisplayPath) {
+			this.#syncTodoPhasesFromBranch();
+		}
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
@@ -2889,6 +3118,13 @@ export class AgentSession {
 				}
 			},
 			sendHiddenMessage: async message => {
+				// Arm the runtime budget closeout. The steer injects on the next turn;
+				// turn_start promotes "armed" to "delivered" once the model has seen it,
+				// and the assistant final from that delivered turn is the wrap-up the
+				// runtime budget closeout takes over from.
+				if (message.customType === "goal-budget-limit") {
+					this.#budgetLimitSteer = "armed";
+				}
 				await this.sendCustomMessage(
 					{
 						customType: message.customType,
@@ -2912,6 +3148,7 @@ export class AgentSession {
 		// Always subscribe to agent events for internal handling
 		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
+		this.#startSessionSteeringWatcher();
 		// Re-evaluate append-only context mode when the setting changes at runtime.
 		this.#unsubscribeAppendOnly = onAppendOnlyModeChanged(_value => this.#syncAppendOnlyContext(this.model));
 		this.#unsubscribeModelRoles = onModelRolesChanged(() => {
@@ -3853,6 +4090,155 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	getScratchHandoffDisplayPath(): string | undefined {
+		return this.#scratchHandoffDisplayPath;
+	}
+	/**
+	 * requestScratchHandoffCloseoutForBudgetStop runs one bounded pencils-down
+	 * turn when the current context still leaves room for the handoff prompt.
+	 */
+	async requestScratchHandoffCloseoutForBudgetStop(triggerContextTokens?: number): Promise<boolean> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return false;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		const compactionSettings = this.settings.getGroup("compaction");
+		const closeoutTriggerTokens = this.#scratchHandoffCloseoutTriggerTokens(
+			contextWindow,
+			compactionSettings,
+			scratchPath,
+		);
+		if (closeoutTriggerTokens <= 0) return false;
+		const contextTokens = compactionContextTokens(
+			this.getContextUsage({ contextWindow })?.tokens ?? 0,
+			this.#estimateStoredContextTokens(),
+		);
+		if (contextTokens > closeoutTriggerTokens) return false;
+		return this.#requestScratchHandoffCloseout(triggerContextTokens ?? contextTokens, true);
+	}
+
+	#scratchHandoffWriteCount(scratchPath: string): number {
+		let count = 0;
+		for (const entry of this.sessionManager.getBranch()) {
+			if (entry.type !== "custom" || entry.customType !== SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE) continue;
+			if (!isRecord(entry.data) || entry.data.path !== scratchPath) continue;
+			count++;
+		}
+		return count;
+	}
+
+	#recordScratchHandoffWrite(toolName: string, args: unknown, isError: boolean): void {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (isError || scratchPath === undefined) return;
+		const cwd = this.sessionManager.getCwd();
+		let scratchAbsolutePath: string;
+		try {
+			scratchAbsolutePath = path.resolve(resolveToCwd(scratchPath, cwd));
+		} catch {
+			return;
+		}
+		for (const targetPath of toolWriteTargetPaths(toolName, args)) {
+			let targetAbsolutePath: string;
+			try {
+				targetAbsolutePath = path.resolve(resolveToCwd(targetPath, cwd));
+			} catch {
+				continue;
+			}
+			if (targetAbsolutePath !== scratchAbsolutePath) continue;
+			this.sessionManager.appendCustomEntry(SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE, { path: scratchPath });
+			return;
+		}
+	}
+
+	#scratchHandoffRecentContextText(pendingMessages: readonly AgentMessage[] = []): string | undefined {
+		return buildScratchHandoffRecentContext({
+			entries: this.sessionManager.getBranch(),
+			scratchPath: this.#scratchHandoffDisplayPath,
+			pendingMessages,
+			convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+		});
+	}
+
+	#stageScratchHandoffCloseout(
+		scratchPath: string,
+		triggerContextTokens: number | undefined,
+		reason: AutoCompactionReason,
+	): boolean {
+		const existing = this.#scratchHandoffCloseout;
+		if (existing?.scratchPath === scratchPath) {
+			if (
+				triggerContextTokens !== undefined &&
+				(existing.triggerContextTokens === undefined || triggerContextTokens > existing.triggerContextTokens)
+			) {
+				existing.triggerContextTokens = triggerContextTokens;
+			}
+			return false;
+		}
+		this.#scratchHandoffCloseout = {
+			scratchPath,
+			baselineWriteCount: this.#scratchHandoffWriteCount(scratchPath),
+			writeCompleted: false,
+			toolResultElisionPending: true,
+			triggerContextTokens,
+			reason,
+		};
+		return true;
+	}
+
+	async #requestScratchHandoffCloseout(
+		triggerContextTokens?: number,
+		runImmediately = false,
+		reason: AutoCompactionReason = "threshold",
+	): Promise<boolean> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return false;
+		const created = this.#stageScratchHandoffCloseout(scratchPath, triggerContextTokens, reason);
+		if (!created) {
+			if (runImmediately) await this.waitForIdle();
+			return true;
+		}
+		const message = {
+			customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
+			content: renderScratchHandoffCloseoutMessage(scratchPath),
+			display: true,
+			attribution: "agent" as const,
+			details: { path: scratchPath, triggerContextTokens },
+		};
+		if (runImmediately) {
+			this.#toolChoiceQueue.pushOnce(
+				{ type: "tool", name: "write" },
+				{ label: "scratch-handoff-closeout", now: true },
+			);
+			await this.promptCustomMessage(message);
+		} else {
+			await this.#queueCustomMessage(message, "steer", `scratch handoff: update ${scratchPath}`);
+		}
+		return true;
+	}
+
+	async #finishScratchHandoffCloseoutIfReady(
+		assistantMessage: AssistantMessage,
+		allowDefer: boolean,
+		autoContinue: boolean,
+	): Promise<CompactionCheckResult | undefined> {
+		const closeout = this.#scratchHandoffCloseout;
+		if (!closeout) return undefined;
+		if (assistantMessage.stopReason === "toolUse") return COMPACTION_CHECK_NONE;
+		if (this.#scratchHandoffWriteCount(closeout.scratchPath) > closeout.baselineWriteCount) {
+			closeout.writeCompleted = true;
+		} else {
+			this.emitNotice(
+				"warning",
+				`scratch handoff closeout did not update ${closeout.scratchPath}; handing off anyway with recent session context after the last scratch write.`,
+				"compaction",
+			);
+		}
+		return await this.#runAutoCompaction(closeout.reason, false, false, allowDefer, {
+			autoContinue: closeout.reason === "manual" ? false : autoContinue,
+			triggerContextTokens: closeout.triggerContextTokens,
+		});
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -4034,9 +4420,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel async jobs registered by *this* agent only. Used by lifecycle
-	 * transitions (newSession, switchSession, handoff, dispose) so a subagent
-	 * cleans up its own background work without touching its parent's jobs.
+	 * Cancel async jobs registered by *this* agent only. Owner-changing
+	 * transitions cancel every job; process disposal preserves detached jobs so
+	 * the same persisted session can recover them.
 	 *
 	 * Cancellation runs against this session's scoped manager. Subagents have
 	 * unique agent ids and inherit the parent's manager to clean up their own
@@ -4047,10 +4433,10 @@ export class AgentSession {
 	 *
 	 * No-op when no manager is reachable or this session has no agent id.
 	 */
-	#cancelOwnAsyncJobs(): void {
+	#cancelOwnAsyncJobs(includePersistent = true): void {
 		if (!this.#agentId) return;
 		const manager = this.#asyncJobManager;
-		manager?.cancelAll({ ownerId: this.#agentId });
+		manager?.cancelAll({ ownerId: this.#agentId }, { includePersistent });
 	}
 
 	/**
@@ -4071,6 +4457,70 @@ export class AgentSession {
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter)
 		);
+	}
+
+	#startSessionSteeringWatcher(): void {
+		this.#stopSessionSteeringWatcher();
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile || this.#isDisposed) return;
+		const watcher = new SessionSteeringWatcher({
+			sessionFile,
+			onRecords: (records, result) => this.#injectSessionSteering(records, result),
+			onError: error => {
+				logger.warn("Session steering drain failed", {
+					sessionFile,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			},
+		});
+		this.#sessionSteeringWatcher = watcher;
+		try {
+			watcher.start();
+		} catch (error) {
+			this.#sessionSteeringWatcher = undefined;
+			logger.warn("Session steering watcher failed to start", {
+				sessionFile,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	#stopSessionSteeringWatcher(): void {
+		this.#sessionSteeringWatcher?.dispose();
+		this.#sessionSteeringWatcher = undefined;
+	}
+
+	async #drainSessionSteering(): Promise<void> {
+		const watcher = this.#sessionSteeringWatcher;
+		if (watcher) {
+			await watcher.drain();
+			return;
+		}
+
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile || this.#isDisposed) return;
+		const result = drainSessionSteeringFile(sessionFile);
+		if (result.records.length === 0) return;
+		await this.#injectSessionSteering(result.records, result);
+		if (!this.#isDisposed) {
+			const offsetFile = sessionSteeringOffsetFileForSessionFile(sessionFile);
+			if (readSessionSteeringOffset(offsetFile) < result.offset)
+				writeSessionSteeringOffset(offsetFile, result.offset);
+		}
+	}
+
+	async #injectSessionSteering(records: DrainedSteeringRecord[], result: SessionSteeringDrainResult): Promise<void> {
+		if (this.#isDisposed || records.length === 0) return;
+		for (const record of records) {
+			await this.sendUserMessage(record.message, { deliverAs: "steer" });
+		}
+		this.#emit({
+			type: "steering_received",
+			sessionId: this.sessionManager.getSessionId(),
+			steeringFile: result.file,
+			count: records.length,
+			entries: records.map(record => ({ offset: record.offset, bytes: record.bytes })),
+		});
 	}
 
 	// =========================================================================
@@ -4112,6 +4562,76 @@ export class AgentSession {
 	 */
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void {
 		this.#emit({ type: "notice", level, message, source });
+	}
+
+	#createMaintenanceTrace(
+		action: AutoCompactionAction,
+		reason: AutoCompactionReason,
+		fallbackCause: MaintenanceTraceFallbackCause | undefined,
+		targetPath?: string,
+	): MaintenanceTraceState {
+		const trace: MaintenanceTraceState = {
+			traceId: `${this.sessionId}:maintenance:${++this.#maintenanceTraceSequence}`,
+			reason,
+			action,
+		};
+		if (fallbackCause !== undefined) trace.fallbackCause = fallbackCause;
+		if (targetPath !== undefined) trace.targetPath = targetPath;
+		return trace;
+	}
+
+	#maintenanceTraceBase(trace: MaintenanceTraceState): Omit<MaintenanceTraceStartEvent, "type" | "phase"> {
+		const event: Omit<MaintenanceTraceStartEvent, "type" | "phase"> = {
+			traceId: trace.traceId,
+			reason: trace.reason,
+			action: trace.action,
+			visibility: "ui-only",
+		};
+		if (trace.fallbackCause !== undefined) event.fallbackCause = trace.fallbackCause;
+		if (trace.targetPath !== undefined) event.targetPath = trace.targetPath;
+		return event;
+	}
+
+	async #emitMaintenanceTraceStart(trace: MaintenanceTraceState): Promise<void> {
+		await this.#emitSessionEvent({
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_start",
+			phase: "start",
+		});
+	}
+
+	async #emitMaintenanceTracePhase(
+		trace: MaintenanceTraceState,
+		phase: Exclude<MaintenanceTracePhase, "start" | "stream" | "terminal">,
+	): Promise<void> {
+		await this.#emitSessionEvent({
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_phase",
+			phase,
+		});
+	}
+
+	async #emitMaintenanceTraceDelta(
+		trace: MaintenanceTraceState,
+		content: MaintenanceTraceDeltaContent,
+		delta: string,
+	): Promise<void> {
+		if (delta.length === 0) return;
+		const event: MaintenanceTraceDeltaEvent = {
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_delta",
+			phase: "stream",
+			content,
+			delta,
+		};
+		this.#emit(event);
+		try {
+			await this.#emitExtensionEvent(event);
+		} catch (error) {
+			logger.warn("Maintenance trace delta observer failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	#recordToolExecutionStart(event: Extract<AgentEvent, { type: "tool_execution_start" }>): void {
@@ -4175,6 +4695,73 @@ export class AgentSession {
 		}
 	}
 
+	async #observeMaintenanceTraceStream(
+		stream: AsyncIterable<AssistantMessageEvent>,
+		trace: MaintenanceTraceState,
+	): Promise<void> {
+		for await (const event of stream) {
+			if (event.type === "text_delta") {
+				await this.#emitMaintenanceTraceDelta(trace, "assistant_text", event.delta);
+			}
+		}
+	}
+
+	async #consumeSideStreamResult(
+		stream: MaintenanceSideStream,
+		trace: MaintenanceTraceState | undefined,
+	): Promise<AssistantMessage> {
+		if (!trace) return stream.result();
+		const resultPromise = stream.result();
+		const observePromise = this.#observeMaintenanceTraceStream(stream, trace);
+		try {
+			const result = await resultPromise;
+			await observePromise.catch(error => {
+				logger.warn("Maintenance trace stream observer failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+			return result;
+		} catch (error) {
+			await observePromise.catch(() => {});
+			throw error;
+		}
+	}
+
+	async #emitMaintenanceTraceEnd(
+		trace: MaintenanceTraceState,
+		terminalResult: MaintenanceTraceTerminalResult,
+		options: { errorMessage?: string; willRetry?: boolean } = {},
+	): Promise<void> {
+		const debugArtifactId = await this.#saveMaintenanceDebugArtifact(trace);
+		const event: MaintenanceTraceEndEvent = {
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_end",
+			phase: "terminal",
+			terminalResult,
+			willRetry: options.willRetry ?? false,
+		};
+		if (options.errorMessage !== undefined) event.errorMessage = options.errorMessage;
+		if (debugArtifactId !== undefined) {
+			event.debugArtifactId = debugArtifactId;
+			event.debugLogRef = `artifact://${debugArtifactId}`;
+		}
+		await this.#emitSessionEvent(event);
+	}
+
+	async #saveMaintenanceDebugArtifact(trace: MaintenanceTraceState): Promise<string | undefined> {
+		if (this.settings.get("compaction.maintenanceTrace") !== "debug") return undefined;
+		if (trace.action !== "context-full" && trace.action !== "handoff") return undefined;
+		const rawSseText = this.rawSseDebugBuffer.toRawText();
+		if (rawSseText.trim().length === 0) return undefined;
+		try {
+			return await this.sessionManager.saveArtifact(rawSseText, "maintenance-raw-sse");
+		} catch (error) {
+			logger.warn("Failed to save maintenance debug artifact", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return undefined;
+		}
+	}
 	#queuedExtensionEvents: Promise<void> = Promise.resolve();
 
 	#queueExtensionEvent(event: AgentSessionEvent): Promise<void> {
@@ -4578,6 +5165,13 @@ export class AgentSession {
 
 		const messageEndPersistence =
 			event.type === "message_end" ? this.#createMessageEndPersistenceSlot(event.message) : undefined;
+		if (
+			event.type === "message_end" &&
+			event.message.role === "toolResult" &&
+			!isScratchSafeReadTool(event.message.toolName, undefined)
+		) {
+			this.#mutatingToolUseNeedsContinuation = true;
+		}
 
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
 		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
@@ -4595,6 +5189,10 @@ export class AgentSession {
 		}
 
 		if (event.type === "turn_start") {
+			// A turn starting after the budget-limit steer was queued is the turn that
+			// delivers it to the model. Mark it delivered so the budget closeout fires
+			// from this turn's wrap-up final, not the flip turn that queued the steer.
+			if (this.#budgetLimitSteer === "armed") this.#budgetLimitSteer = "delivered";
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
 				input: usage.input,
@@ -4602,6 +5200,9 @@ export class AgentSession {
 				cacheRead: usage.cacheRead,
 				cacheWrite: usage.cacheWrite,
 			});
+		}
+		if (event.type === "tool_execution_start" && this.#scratchHandoffDisplayPath !== undefined) {
+			this.#scratchHandoffToolArgsById.set(event.toolCallId, event.args);
 		}
 
 		if (event.type === "tool_execution_start") {
@@ -4637,10 +5238,16 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "tool_execution_end") {
+			const args = this.#scratchHandoffToolArgsById.get(event.toolCallId);
+			this.#scratchHandoffToolArgsById.delete(event.toolCallId);
+			this.#recordScratchHandoffWrite(event.toolName, args, event.isError === true);
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
 				await this.#goalRuntime.onToolCompleted(event.toolName);
+			}
+			if (!isScratchSafeReadTool(event.toolName, undefined)) {
+				this.#mutatingToolUseNeedsContinuation = true;
 			}
 			this.#planModeReminderAwaitingProgress = false;
 			if (
@@ -4648,7 +5255,6 @@ export class AgentSession {
 				writeDeviceDispatch(event.toolName, event.result)?.tool === PROPOSE_DEVICE_NAME
 			) {
 				this.#planModeReminderCount = 0;
-				this.#planModeReminderAwaitingProgress = false;
 			}
 		}
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
@@ -4891,6 +5497,7 @@ export class AgentSession {
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
+				this.#preProviderScratchHandoffStop = undefined;
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				logger.debug("agent_end maintenance routing", {
 					reason: "no-assistant-message",
@@ -4940,6 +5547,35 @@ export class AgentSession {
 			}
 
 			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
+			const toolUseCanScratchHandoff = hasToolCalls
+				? assistantToolUseCanScratchHandoff(msg, settledMessages, this.#mutatingToolUseNeedsContinuation)
+				: true;
+			const toolUseIsScratchSafeReadOnly = hasToolCalls ? assistantMessageToolCallsAreScratchSafeReads(msg) : false;
+			const preProviderScratchStop = this.#preProviderScratchHandoffStop;
+			this.#preProviderScratchHandoffStop = undefined;
+			if (preProviderScratchStop) {
+				maintenanceRoute("pre-provider-scratch-handoff-stop", {
+					contextTokens: preProviderScratchStop.contextTokens,
+					contextWindow: preProviderScratchStop.contextWindow,
+					promptBudget: preProviderScratchStop.promptBudget,
+					thresholdTokens: preProviderScratchStop.thresholdTokens,
+					scratchPath: preProviderScratchStop.scratchPath,
+					toolUseCanScratchHandoff,
+				});
+				const compactionTask = this.#runAutoCompaction("threshold", false, false, true, {
+					suppressHandoff: !toolUseCanScratchHandoff,
+					triggerContextTokens: preProviderScratchStop.contextTokens,
+				});
+				this.#trackPostPromptTask(compactionTask);
+				await compactionTask;
+				this.#resolveRetry();
+				await emitAgentEndNotification();
+				if (toolUseIsScratchSafeReadOnly) {
+					this.#mutatingToolUseNeedsContinuation = false;
+				}
+				return;
+			}
 			// A successful `yield` in this run is terminal for execution purposes.
 			// Suppress empty-stop retry, unexpected-stop retry, queued-message drain,
 			// and compaction-driven continuations for the rest of this prompt cycle:
@@ -4954,7 +5590,9 @@ export class AgentSession {
 							? "successful-yield-active-goal-checkCompaction"
 							: "post-yield-trailing-stop-active-goal-checkCompaction",
 					);
-					const compactionTask = this.#checkCompaction(successfulYieldMessage);
+					const compactionTask = this.#checkCompaction(successfulYieldMessage, true, true, true, {
+						suppressHandoff: !toolUseCanScratchHandoff,
+					});
 					this.#trackPostPromptTask(compactionTask);
 					await compactionTask;
 				} else if (successfulYieldMessage) {
@@ -5076,8 +5714,10 @@ export class AgentSession {
 			this.#resolveRetry();
 
 			if (!checkedCompaction) {
-				maintenanceRoute("bottom-checkCompaction");
-				const compactionTask = this.#checkCompaction(msg);
+				maintenanceRoute("bottom-checkCompaction", { toolUseCanScratchHandoff });
+				const compactionTask = this.#checkCompaction(msg, true, true, true, {
+					suppressHandoff: !toolUseCanScratchHandoff,
+				});
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 			}
@@ -5086,9 +5726,11 @@ export class AgentSession {
 			// reminder so we don't pile a follow-up onto an already in-flight turn.
 			// Mid-run sync is handled separately via #takeMidRunTodoNudge so a long
 			// tool-use loop still gets prodded to keep the live HUD honest (issue #3651).
-			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
 				await emitAgentEndNotification();
+				if (toolUseIsScratchSafeReadOnly) {
+					this.#mutatingToolUseNeedsContinuation = false;
+				}
 				return;
 			}
 			// When compaction queued recovery or hit a deliberate dead-end, skip the
@@ -5104,19 +5746,30 @@ export class AgentSession {
 				return;
 			}
 			if (msg.stopReason !== "error") {
-				if (this.#enforceRewindBeforeYield()) {
-					await emitAgentEndNotification({ willContinue: true });
+				const budgetCloseout = await this.#runBudgetLimitedScratchCloseout();
+				if (budgetCloseout === "reset") {
+					maintenanceRoute("budget-limited-scratch-reset");
+					await emitAgentEndNotification();
 					return;
 				}
-				const planModeContinuationScheduled = await this.#enforcePlanModeDecisionAtSettle();
-				if (planModeContinuationScheduled) {
-					await emitAgentEndNotification({ willContinue: true });
-					return;
-				}
-				const todoContinuationScheduled = await this.#checkTodoCompletion(msg);
-				if (todoContinuationScheduled) {
-					await emitAgentEndNotification({ willContinue: true });
-					return;
+				// A parked budget terminal skips the rewind/plan/todo reminder passes (which
+				// previously pressured the model into dropping todos) but still runs
+				// session-stop hooks below so the parked state notifies normally.
+				if (budgetCloseout === "none") {
+					if (this.#enforceRewindBeforeYield()) {
+						await emitAgentEndNotification({ willContinue: true });
+						return;
+					}
+					const planModeContinuationScheduled = await this.#enforcePlanModeDecisionAtSettle();
+					if (planModeContinuationScheduled) {
+						await emitAgentEndNotification({ willContinue: true });
+						return;
+					}
+					const todoContinuationScheduled = await this.#checkTodoCompletion(msg);
+					if (todoContinuationScheduled) {
+						await emitAgentEndNotification({ willContinue: true });
+						return;
+					}
 				}
 			}
 			// A pending async wake means this settle is a scheduling pause, not
@@ -5752,9 +6405,41 @@ export class AgentSession {
 		return manager.checkAstSnapshot(digest, matchContext);
 	}
 
+	#hasQueuedTtsrSteering(ruleName: string): boolean {
+		for (const message of this.agent.peekSteeringQueue()) {
+			if (message.role !== "custom" || message.customType !== "ttsr-injection") continue;
+			if (this.#extractTtsrRuleNames(message.details).includes(ruleName)) return true;
+		}
+		return false;
+	}
+
+	#queueTtsrSteering(rules: Rule[]): void {
+		const queuedRules = rules.filter(rule => !this.#hasQueuedTtsrSteering(rule.name));
+		if (queuedRules.length === 0) return;
+		const content = queuedRules
+			.map(rule =>
+				prompt.render(ttsrSteerTemplate, {
+					name: rule.name,
+					path: this.#displayRulePath(rule.path),
+					content: rule.content,
+				}),
+			)
+			.join("\n\n");
+		const details = { rules: queuedRules.map(rule => rule.name) };
+		this.agent.steer({
+			role: "custom",
+			customType: "ttsr-injection",
+			content,
+			display: false,
+			details,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+	}
+
 	/**
-	 * Route TTSR matches to either a per-tool injection or a stream-interrupting
-	 * retry. Returns true when the stream was aborted and the caller should stop
+	 * Route TTSR matches through the configured steering or interrupt path.
+	 * Returns true when the stream was aborted and the caller should stop
 	 * processing this event.
 	 */
 	#handleTtsrMatches(
@@ -5762,6 +6447,11 @@ export class AgentSession {
 		matchContext: TtsrMatchContext,
 		targetMessageTimestamp: number | undefined,
 	): boolean {
+		if (this.#ttsrManager?.getSettings().action === "steer") {
+			this.#queueTtsrSteering(matches);
+			this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
+			return false;
+		}
 		// Decide first: a non-interrupting tool-source match attaches to the
 		// specific tool call's result instead of driving a loop-wide follow-up.
 		const shouldInterrupt = this.#shouldInterruptForTtsrMatch(matches, matchContext);
@@ -6527,6 +7217,14 @@ export class AgentSession {
 				errorMessage: event.errorMessage,
 				skipped: event.skipped,
 			});
+		} else if (event.type === "maintenance_trace_start") {
+			await this.#extensionRunner.emit(event);
+		} else if (event.type === "maintenance_trace_phase") {
+			await this.#extensionRunner.emit(event);
+		} else if (event.type === "maintenance_trace_delta") {
+			await this.#extensionRunner.emit(event);
+		} else if (event.type === "maintenance_trace_end") {
+			await this.#extensionRunner.emit(event);
 		} else if (event.type === "auto_retry_start") {
 			await this.#extensionRunner.emit({
 				type: "auto_retry_start",
@@ -6569,7 +7267,6 @@ export class AgentSession {
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this.#eventListeners.push(listener);
-
 		// Return unsubscribe function for this specific listener
 		return () => {
 			const index = this.#eventListeners.indexOf(listener);
@@ -6772,6 +7469,7 @@ export class AgentSession {
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
 		this.#stopAdvisorRuntime();
+		this.#stopSessionSteeringWatcher();
 		this.#evalExecutionDisposing = true;
 	}
 
@@ -10391,13 +11089,13 @@ export class AgentSession {
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
+		if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
+			this.settings.set("defaultThinkingLevel", effectiveLevel);
+		}
 
 		if (isChanging) {
 			this.#clearInheritedProviderPromptCacheKey();
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
-			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
-				this.settings.set("defaultThinkingLevel", effectiveLevel);
-			}
 			this.#emit({ type: "thinking_level_changed", thinkingLevel: effectiveLevel });
 		}
 	}
@@ -10791,11 +11489,22 @@ export class AgentSession {
 			keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
 		});
 		const regions = collectShakeRegions(branchEntries, config);
+		return await this.#applyShakeRegions(mode, regions);
+	}
+
+	async #applyShakeRegions(
+		mode: Exclude<ShakeMode, "images">,
+		regions: ShakeRegion[],
+		requireArtifact = false,
+	): Promise<ShakeResult> {
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
 		const artifactId = await this.#saveShakeArtifact(regions);
+		if (requireArtifact && artifactId === undefined) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		}
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
 		let toolResultsDropped = 0;
@@ -10876,6 +11585,18 @@ export class AgentSession {
 		// fallback (issue #4359).
 		if (compactMode?.rejectsFocus && (customInstructions || options?.internalGuidance)) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
+		}
+		// Bare `/compact` (no explicit native mode) on a session with scratch handoff
+		// active is the clean-break path: compact the current session around its
+		// durable scratch state instead of running an LLM summary. Explicit modes
+		// (soft/remote/snapcompact) still drive the native engine, and `strategy:
+		// off` disables auto-maintenance so manual stays native.
+		if (
+			!compactMode &&
+			this.#scratchHandoffDisplayPath !== undefined &&
+			this.settings.getGroup("compaction").strategy !== "off"
+		) {
+			return this.#runManualScratchHandoffCompaction();
 		}
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
@@ -11216,6 +11937,32 @@ export class AgentSession {
 	}
 
 	/**
+	 * Manual `/compact` clean-break path: run the ordinary scratch closeout turn,
+	 * then compact the current session around the updated handoff under a `manual`
+	 * maintenance reason. Waiting for tracked post-turn work keeps the command
+	 * active through the context rebuild. No auto-continue: the operator issued
+	 * `/compact` and drives the next task turn.
+	 */
+	async #runManualScratchHandoffCompaction(): Promise<CompactionResult> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) {
+			throw new Error("Scratch handoff is not active for this session.");
+		}
+		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
+		await this.#requestScratchHandoffCloseout(tokensBefore, true, "manual");
+		await this.waitForIdle();
+		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		if (!compactionEntry) {
+			throw new Error("Scratch handoff compaction did not complete.");
+		}
+		return {
+			summary: `Scratch handoff: compacted the current session around ${scratchPath}.`,
+			firstKeptEntryId: compactionEntry.firstKeptEntryId,
+			tokensBefore,
+		};
+	}
+
+	/**
 	 * Ask the active memory backend for an extra-context block to splice into
 	 * the compaction summary prompt. Both the manual and auto compaction paths
 	 * funnel through this helper so the behaviour stays identical.
@@ -11275,6 +12022,141 @@ export class AgentSession {
 	 */
 	get isGeneratingHandoff(): boolean {
 		return this.#handoffAbortController !== undefined;
+	}
+
+	async #scratchHandoffMessageContent(
+		pendingMessages: readonly AgentMessage[] = [],
+	): Promise<CustomMessage["content"]> {
+		if (this.#scratchHandoffDisplayPath) {
+			try {
+				const scratchPath = resolveToCwd(this.#scratchHandoffDisplayPath, this.sessionManager.getCwd());
+				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
+				const recentContextText = this.#scratchHandoffRecentContextText(pendingMessages);
+				if (recentContextText && this.model?.input.includes("image")) {
+					try {
+						const shape = snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape"));
+						const maxFrames = Math.min(
+							snapcompact.providerImageBudget(this.model.provider),
+							snapcompact.maxFramesForDataBudget(),
+						);
+						const result = await snapcompact.compact<Message>(
+							{
+								firstKeptEntryId: "scratch-handoff-context",
+								messagesToSummarize: [
+									{
+										role: "user",
+										content: [{ type: "text", text: recentContextText }],
+										timestamp: Date.now(),
+									},
+								],
+								turnPrefixMessages: [],
+								tokensBefore: countTokens(recentContextText),
+								fileOps: snapcompact.createFileOps(),
+							},
+							{ model: this.model, shape, maxFrames, dimToolResults: false },
+						);
+						const archive = snapcompact.getPreservedArchive(result.preserveData);
+						if (archive) {
+							return [
+								{
+									type: "text",
+									text: renderScratchHandoffResumeMessage({
+										displayPath: this.#scratchHandoffDisplayPath,
+										parentDisplayPath: this.#parentScratchHandoffDisplayPath,
+										scratchText,
+										recentContextSnapcompactFrames: archive.frames.length,
+									}),
+								},
+								{ type: "text", text: result.summary },
+								...snapcompact.historyBlocks(archive, {
+									maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
+								}),
+							];
+						}
+					} catch (error) {
+						logger.warn("Failed to compact scratch handoff delta with SnapCompact; preserving text", {
+							error: String(error),
+							scratchPath: this.#scratchHandoffDisplayPath,
+						});
+					}
+				}
+				return [
+					{
+						type: "text",
+						text: renderScratchHandoffResumeMessage({
+							displayPath: this.#scratchHandoffDisplayPath,
+							parentDisplayPath: this.#parentScratchHandoffDisplayPath,
+							scratchText,
+							recentContextText,
+						}),
+					},
+				];
+			} catch (error) {
+				logger.warn("Failed to build current scratch handoff payload; using launch snapshot", {
+					error: String(error),
+					scratchPath: this.#scratchHandoffDisplayPath,
+				});
+			}
+		}
+		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
+			const message = this.agent.state.messages[index];
+			if (message?.role === "custom" && message.customType === SCRATCH_HANDOFF_READ_CUSTOM_TYPE) {
+				return message.content;
+			}
+		}
+		return [
+			{
+				type: "text",
+				text: `Current scratch continuity state is in ${this.#scratchHandoffDisplayPath ?? "(unknown)"}. Continue from that scratch file and the live launch prompt.`,
+			},
+		];
+	}
+
+	async #compactScratchHandoffSession(
+		trace: MaintenanceTraceState,
+		pendingMessages: readonly AgentMessage[] = [],
+	): Promise<void> {
+		const scratchContent = await this.#scratchHandoffMessageContent(pendingMessages);
+		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
+		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
+		await this.sessionManager.flush();
+		const scratchEntryId = this.sessionManager.appendCustomMessageEntry(
+			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+			scratchContent,
+			false,
+			{ path: this.#scratchHandoffDisplayPath, parentPath: this.#parentScratchHandoffDisplayPath },
+			"agent",
+		);
+		this.sessionManager.appendCompaction(
+			"Continue from the scratch handoff state preserved after this compaction.",
+			"Scratch handoff",
+			scratchEntryId,
+			tokensBefore,
+		);
+		const closeout = this.#scratchHandoffCloseout;
+		if (closeout && !closeout.writeCompleted) {
+			this.sessionManager.appendCustomMessageEntry(
+				SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
+				renderScratchHandoffCloseoutMessage(closeout.scratchPath),
+				true,
+				{ path: closeout.scratchPath, triggerContextTokens: closeout.triggerContextTokens },
+				"agent",
+			);
+		}
+		await this.sessionManager.ensureOnDisk();
+		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#todoReminderCount = 0;
+		this.#todoReminderAwaitingProgress = false;
+		this.setTodoPhases([]);
+		await this.#emitMaintenanceTracePhase(trace, "scratch-session-compacted");
+		await this.#emitMaintenanceTracePhase(trace, "scratch-read-injected");
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#planReferenceSent = false;
+		this.#resetAllAdvisorRuntimes();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		await this.#emitMaintenanceTracePhase(trace, "scratch-session-rebuilt");
 	}
 
 	/**
@@ -11348,6 +12230,13 @@ export class AgentSession {
 					timestamp: Date.now(),
 				},
 			];
+			if (this.#handoffMaintenanceTrace) {
+				await this.#emitMaintenanceTraceDelta(
+					this.#handoffMaintenanceTrace,
+					"activity",
+					"Building auto-handoff request from live context.",
+				);
+			}
 			const handoffLlmMessages = await this.convertMessagesToLlm(handoffSnapshot, handoffSignal);
 			// Base system prompt, not a per-turn `before_agent_start` hook override —
 			// the handoff seeds a fresh session and must not carry prompt-specific
@@ -11372,8 +12261,15 @@ export class AgentSession {
 				{
 					streamOptions: handoffStreamOptions,
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
+						if (this.#handoffMaintenanceTrace) {
+							await this.#emitMaintenanceTraceDelta(
+								this.#handoffMaintenanceTrace,
+								"activity",
+								`LLM request: ${formatModelStringWithRouting(requestModel)}.`,
+							);
+						}
 						const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
-						return stream.result();
+						return this.#consumeSideStreamResult(stream, this.#handoffMaintenanceTrace);
 					},
 					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 					// Honor the user's /model thinking selection on the handoff path.
@@ -11408,7 +12304,6 @@ export class AgentSession {
 			await this.#flushPendingBashMessages();
 			await this.sessionManager.flush();
 			const bashTransition = this.#beginBashSessionTransition();
-			this.#cancelOwnAsyncJobs();
 			let sessionTransitioned = false;
 			try {
 				await this.sessionManager.newSession(
@@ -11525,6 +12420,160 @@ export class AgentSession {
 		return compactionContextTokens(breakdown?.usedTokens ?? 0, localEstimate);
 	}
 
+	#estimateLiveRequestContextTokens(context: AgentContext, contextWindow: number): number {
+		const opts = { excludeEncryptedReasoning: true } as const;
+		const liveEstimate =
+			computeNonMessageTokens(this) + context.messages.reduce((sum, msg) => sum + estimateTokens(msg, opts), 0);
+		return compactionContextTokens(this.getContextUsage({ contextWindow })?.tokens ?? 0, liveEstimate);
+	}
+
+	#scratchHandoffCloseoutTriggerTokens(
+		contextWindow: number,
+		compactionSettings: CompactionSettings,
+		scratchPath: string,
+	): number {
+		const promptBudget = Math.max(0, contextWindow - effectiveReserveTokens(contextWindow, compactionSettings));
+		if (promptBudget <= 0) return 0;
+		const closeoutTokens = Math.max(
+			countTokens(renderScratchHandoffCloseoutMessage(scratchPath)),
+			SCRATCH_HANDOFF_CLOSEOUT_MIN_HEADROOM_TOKENS,
+		);
+		return Math.max(0, promptBudget - closeoutTokens);
+	}
+
+	#shouldRequestScratchHandoffCloseout(
+		contextTokens: number,
+		contextWindow: number,
+		compactionSettings: CompactionSettings,
+		scratchPath: string,
+	): boolean {
+		const triggerTokens = this.#scratchHandoffCloseoutTriggerTokens(contextWindow, compactionSettings, scratchPath);
+		return triggerTokens > 0 && contextTokens >= triggerTokens;
+	}
+
+	async #elideRecentToolResultsForScratchCloseout(
+		context: AgentContext,
+		contextWindow: number,
+		promptBudget: number,
+		contextTokens: number,
+	): Promise<number | undefined> {
+		const lastAssistant = context.messages.findLast(
+			(message): message is AssistantMessage => message.role === "assistant",
+		);
+		const providerTokens = lastAssistant ? calculateContextTokens(lastAssistant.usage) : 0;
+		if (providerTokens > promptBudget) return undefined;
+
+		await this.#messageEndPersistenceTail;
+		const branchEntries = this.sessionManager.getBranch();
+		const regions = collectShakeRegions(
+			branchEntries,
+			this.#withPlanProtection({
+				...AGGRESSIVE_SHAKE_CONFIG,
+				fenceMinTokens: Number.MAX_SAFE_INTEGER,
+				keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
+			}),
+		).filter((region): region is Extract<ShakeRegion, { kind: "toolResult" }> => region.kind === "toolResult");
+		if (regions.length === 0) return undefined;
+
+		// Rewrite from the tail backward so the changed boundary lands as late as
+		// possible and the provider can reuse the longest byte-identical cached prefix.
+		const targetSavings = contextTokens - promptBudget;
+		const selected: ShakeRegion[] = [];
+		let estimatedSavings = 0;
+		for (let index = regions.length - 1; index >= 0 && estimatedSavings < targetSavings; index--) {
+			const region = regions[index];
+			selected.push(region);
+			estimatedSavings += Math.max(
+				0,
+				region.tokens - countTokens(this.#shakeElidePlaceholder(region, selected.length - 1, "artifact")),
+			);
+		}
+		selected.reverse();
+
+		const result = await this.#applyShakeRegions("elide", selected, true);
+		if (result.toolResultsDropped === 0 || result.artifactId === undefined) return undefined;
+
+		context.messages.splice(0, context.messages.length, ...this.agent.state.messages);
+		const reducedTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
+		const outcome =
+			reducedTokens <= promptBudget
+				? "to preserve the scratch closeout turn"
+				: "but the scratch closeout turn still exceeds the prompt budget";
+		this.emitNotice(
+			"info",
+			`Elided ${result.toolResultsDropped} recent tool result${result.toolResultsDropped === 1 ? "" : "s"} (~${result.tokensFreed.toLocaleString()} tokens) to artifact://${result.artifactId} ${outcome}.`,
+			"compaction",
+		);
+		return reducedTokens;
+	}
+
+	async #stopBeforeOversizedScratchHandoffRequest(context: AgentContext): Promise<AgentPreModelCallResult> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (!scratchPath) return;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		if (contextWindow <= 0) return;
+
+		const compactionSettings = this.settings.getGroup("compaction");
+		if (!compactionSettings.enabled || compactionSettings.strategy !== "handoff") return;
+		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
+		const promptBudget = Math.max(0, contextWindow - reserveTokens);
+		if (promptBudget <= 0) return;
+		const closeout = this.#scratchHandoffCloseout;
+		const elideToolResults = closeout?.toolResultElisionPending === true;
+		if (elideToolResults) closeout.toolResultElisionPending = false;
+
+		const initialContextTokens = this.#estimateLiveRequestContextTokens(context, contextWindow);
+		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
+		if (
+			!shouldCompact(initialContextTokens, contextWindow, compactionSettings) &&
+			initialContextTokens <= promptBudget
+		)
+			return;
+		const contextTokens =
+			elideToolResults && initialContextTokens > promptBudget
+				? ((await this.#elideRecentToolResultsForScratchCloseout(
+						context,
+						contextWindow,
+						promptBudget,
+						initialContextTokens,
+					)) ?? initialContextTokens)
+				: initialContextTokens;
+		if (this.#scratchHandoffCloseout && contextTokens <= promptBudget) {
+			logger.debug("Allowing scratch-handoff closeout request before reset", {
+				contextTokens,
+				contextWindow,
+				promptBudget,
+				scratchPath,
+			});
+			return;
+		}
+
+		this.#preProviderScratchHandoffStop = {
+			contextTokens,
+			contextWindow,
+			promptBudget,
+			scratchPath,
+			thresholdTokens,
+		};
+		logger.info("Starting direct scratch handoff before oversized closeout request", {
+			contextTokens,
+			contextWindow,
+			promptBudget,
+			reserveTokens,
+			thresholdTokens,
+			scratchPath,
+		});
+		this.emitNotice(
+			"info",
+			`Context reached ${contextTokens.toLocaleString()} tokens; one more scratch-closeout model turn would exceed the prompt budget, so starting scratch handoff directly from ${scratchPath}.`,
+			"compaction",
+		);
+		return {
+			stop: true,
+			reason: "scratch-handoff-context-threshold",
+		};
+	}
+
 	async #runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.model;
 		if (!model) return;
@@ -11555,6 +12604,7 @@ export class AgentSession {
 		await this.#runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
+			scratchRecentMessages: messages,
 			phase: "pre_turn",
 		});
 	}
@@ -11607,7 +12657,13 @@ export class AgentSession {
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
 		const storedContextTokens = this.#estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const shouldScratchHandoffCloseout =
+			compactionSettings.strategy === "handoff" &&
+			scratchPath !== undefined &&
+			this.#shouldRequestScratchHandoffCloseout(contextTokens, contextWindow, compactionSettings, scratchPath);
+		if (!shouldThresholdCompact && !shouldScratchHandoffCloseout) return;
 
 		// Promote to a larger-context sibling before compacting, mirroring the
 		// pre-prompt (#runPrePromptCompactionIfNeeded) and post-turn threshold
@@ -11621,6 +12677,17 @@ export class AgentSession {
 				contextWindow,
 				from: `${model?.provider}/${model?.id}`,
 			});
+			return;
+		}
+		if (compactionSettings.strategy === "handoff" && scratchPath) {
+			logger.debug("Mid-run scratch-handoff queued closeout steer", {
+				contextTokens,
+				contextWindow,
+				scratchPath,
+				shouldThresholdCompact,
+				shouldScratchHandoffCloseout,
+			});
+			await this.#requestScratchHandoffCloseout(contextTokens);
 			return;
 		}
 
@@ -11678,6 +12745,7 @@ export class AgentSession {
 		skipAbortedCheck = true,
 		allowDefer = true,
 		autoContinue = true,
+		options: { suppressHandoff?: boolean } = {},
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
@@ -11814,6 +12882,12 @@ export class AgentSession {
 
 		const compactionSettings = this.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		const scratchCloseoutResult = await this.#finishScratchHandoffCloseoutIfReady(
+			assistantMessage,
+			allowDefer,
+			autoContinue,
+		);
+		if (scratchCloseoutResult !== undefined) return scratchCloseoutResult;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
@@ -11853,6 +12927,17 @@ export class AgentSession {
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		const shouldScratchHandoffCloseout =
+			compactionSettings.strategy === "handoff" &&
+			scratchPath !== undefined &&
+			!options.suppressHandoff &&
+			this.#shouldRequestScratchHandoffCloseout(
+				postMaintenanceContextTokens,
+				contextWindow,
+				compactionSettings,
+				scratchPath,
+			);
 		logger.debug("Auto-compaction threshold decision", {
 			phase: "post-agent-end",
 			goalModeEnabled: this.#goalModeState?.enabled === true,
@@ -11868,14 +12953,20 @@ export class AgentSession {
 			postMaintenanceContextTokens,
 			maintenanceTokensFreed,
 			shouldCompact: shouldThresholdCompact,
+			shouldScratchHandoffCloseout,
 			contextPromotionEnabled: this.settings.get("contextPromotion.enabled") === true,
 		});
-		if (shouldThresholdCompact) {
+		if (shouldThresholdCompact || shouldScratchHandoffCloseout) {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
+				if (compactionSettings.strategy === "handoff" && scratchPath !== undefined && !options.suppressHandoff) {
+					await this.#requestScratchHandoffCloseout(postMaintenanceContextTokens);
+					return COMPACTION_CHECK_CONTINUATION;
+				}
 				return await this.#runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
+					suppressHandoff: options.suppressHandoff,
 					triggerContextTokens: postMaintenanceContextTokens,
 					phase: "pre_turn",
 					terminalTextAnswer: isTerminalTextAssistantAnswer(assistantMessage),
@@ -12656,6 +13747,184 @@ export class AgentSession {
 		if (task) nudges.push(task);
 		return nudges;
 	}
+
+	/**
+	 * Own the terminal transition for a goal that crossed its token budget.
+	 *
+	 * When the active provider's usage report proves the selected account is
+	 * exhausted, budget-limited closeout follows the same credential/reset wait
+	 * path as a live `usage_limit_reached` provider error: mark the exhausted
+	 * account, switch to a usable sibling immediately when one exists, or wait
+	 * until the first account becomes usable again before resuming the goal.
+	 *
+	 * Without usage evidence this stays a typed budget terminal. Under the
+	 * handoff compaction strategy it compacts the current session around the
+	 * scratch state; otherwise it parks in place, keeping todos and pointing at
+	 * the scratch file.
+	 *
+	 * Fires once per budget-limited episode and only after the model has had its
+	 * wrap-up turn (the steer is "delivered", set at the turn_start that injected
+	 * it), never on the flip turn that queued the steer.
+	 *
+	 * Returns "retry" when a usage-reset continuation was scheduled, "reset" when
+	 * it compacted the active context (the caller short-circuits the closeout
+	 * tail), "parked" when it parked in place (the caller skips the todo reminder
+	 * but still runs session-stop hooks), or "none" when not engaged.
+	 */
+	async #runBudgetLimitedScratchCloseout(): Promise<"retry" | "reset" | "parked" | "none"> {
+		const scratchPath = this.#scratchHandoffDisplayPath;
+		if (scratchPath === undefined) return "none";
+		const goalState = this.#goalModeState;
+		if (!goalState?.enabled || goalState.goal.status !== "budget-limited") {
+			this.#budgetCloseoutHandledForGoalId = undefined;
+			return "none";
+		}
+		if (this.#budgetLimitSteer !== "delivered") return "none";
+		if (this.#budgetCloseoutHandledForGoalId === goalState.goal.id) return "none";
+		this.#budgetCloseoutHandledForGoalId = goalState.goal.id;
+		this.#budgetLimitSteer = "idle";
+
+		if (await this.#scheduleBudgetLimitedUsageContinuation()) {
+			return "retry";
+		}
+
+		const compaction = this.settings.getGroup("compaction");
+		if (compaction.strategy === "handoff" && compaction.enabled) {
+			// Reuse the scratch-handoff maintenance path with no auto-continue: it
+			// compacts the current session and emits the maintenance trace under the
+			// budget reason.
+			await this.#runAutoCompaction("budget", false, true, false, { autoContinue: false });
+			return "reset";
+		}
+
+		// Typed parked state: keep the budget-limited status and todos, and surface
+		// the durable continuity location instead of relying on assistant prose.
+		this.#syncTodoPhasesFromBranch();
+		const incompleteTodos = this.getTodoPhases()
+			.flatMap(phase => phase.tasks)
+			.filter(task => task.status === "pending" || task.status === "in_progress").length;
+		const todoNote =
+			incompleteTodos > 0 ? `${incompleteTodos} unfinished todo item(s) preserved; ` : "todos preserved; ";
+		this.emitNotice(
+			"info",
+			`Goal token budget reached. Work parked. ${todoNote}continuity state is in ${scratchPath}.`,
+			"goal",
+		);
+		return "parked";
+	}
+
+	async #scheduleBudgetLimitedUsageContinuation(): Promise<boolean> {
+		const model = this.model;
+		if (!model) return false;
+		const retrySettings = this.settings.getGroup("retry");
+		if (!retrySettings.enabled) return false;
+
+		const retryAfterMs = calculateRateLimitBackoffMs("QUOTA_EXHAUSTED");
+		const outcome = await this.#modelRegistry.authStorage.markUsageLimitReached(model.provider, this.sessionId, {
+			retryAfterMs,
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+			requireUsageEvidence: true,
+		});
+		if (outcome.usageLimited !== true) return false;
+
+		this.#retryAttempt++;
+		if (!this.#retryPromise) {
+			const { promise, resolve } = Promise.withResolvers<void>();
+			this.#retryPromise = promise;
+			this.#retryResolve = resolve;
+		}
+		if (this.#retryAttempt > retrySettings.maxRetries) {
+			const attempt = this.#retryAttempt - 1;
+			this.#retryAttempt = 0;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: "Goal budget-limited usage wait exceeded retry.maxRetries.",
+			});
+			this.#resolveRetry();
+			return false;
+		}
+
+		let delayMs = retryAfterMs;
+		let usageResetAtMs: number | undefined;
+		if (outcome.switched) {
+			delayMs = 0;
+		} else {
+			if (outcome.retryAtMs !== undefined) {
+				const siblingWaitMs = Math.max(0, outcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+				if (siblingWaitMs < delayMs) {
+					delayMs = siblingWaitMs;
+				}
+			}
+			if (retrySettings.waitForUsageReset && outcome.resumeAtMs !== undefined) {
+				const resumeWaitMs = Math.max(0, outcome.resumeAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+				if (resumeWaitMs <= retrySettings.maxUsageResetWaitMs) {
+					delayMs = resumeWaitMs;
+					usageResetAtMs = Date.now() + resumeWaitMs;
+				}
+			}
+		}
+
+		const maxDelayMs = retrySettings.maxDelayMs;
+		if (maxDelayMs > 0 && delayMs > maxDelayMs && !outcome.switched && usageResetAtMs === undefined) {
+			const attempt = this.#retryAttempt;
+			this.#retryAttempt = 0;
+			await this.#emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: `Provider usage remains blocked for ${delayMs}ms, exceeding retry.maxDelayMs (${maxDelayMs}ms).`,
+			});
+			this.#resolveRetry();
+			return false;
+		}
+
+		await this.#emitSessionEvent({
+			type: "auto_retry_start",
+			attempt: this.#retryAttempt,
+			maxAttempts: retrySettings.maxRetries,
+			delayMs,
+			errorMessage: "Goal token budget reached while provider usage is exhausted; waiting for account capacity.",
+			errorId: AIError.create(AIError.Flag.UsageLimit),
+			usageResetAtMs,
+		});
+
+		const generation = this.#promptGeneration;
+		this.#schedulePostPromptTask(
+			async signal => {
+				if (signal.aborted || this.#isDisposed || this.isCompacting || this.isGeneratingHandoff) {
+					return;
+				}
+				this.#beginInFlight();
+				try {
+					await this.#goalRuntime.resumeGoal();
+					await this.#maybeRestoreRetryFallbackPrimary();
+					if (signal.aborted || this.#isDisposed) return;
+					await this.agent.continue();
+				} catch (error) {
+					const attempt = this.#retryAttempt;
+					this.#retryAttempt = 0;
+					await this.#emitSessionEvent({
+						type: "auto_retry_end",
+						success: false,
+						attempt,
+						finalError: error instanceof Error ? error.message : String(error),
+					});
+					this.#resolveRetry();
+					logger.warn("agent.continue failed after budget-limited usage wait", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				} finally {
+					this.#endInFlight();
+				}
+			},
+			{ delayMs: delayMs > 0 ? delayMs : 1, generation },
+		);
+		return true;
+	}
+
 	/**
 	 * Check if agent stopped with incomplete todos and prompt to continue.
 	 */
@@ -13370,7 +14639,7 @@ export class AgentSession {
 						// #3751).
 						completeImpl: async (requestModel, requestContext, requestOptions) => {
 							const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
-							return stream.result();
+							return this.#consumeSideStreamResult(stream, undefined);
 						},
 					},
 				);
@@ -13725,7 +14994,7 @@ export class AgentSession {
 	 * @returns whether auto-compaction scheduled a follow-up turn.
 	 */
 	async #runAutoCompaction(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		deferred = false,
 		allowDefer = true,
@@ -13734,6 +15003,7 @@ export class AgentSession {
 			triggerContextTokens?: number;
 			suppressContinuation?: boolean;
 			suppressHandoff?: boolean;
+			scratchRecentMessages?: readonly AgentMessage[];
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
 		} = {},
@@ -13794,15 +15064,19 @@ export class AgentSession {
 			};
 		}
 
-		// "overflow" forces context-full because the input itself is broken — a handoff
-		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
-		// so a handoff request on the existing context is still viable.
-		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
-				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
-					? "handoff"
-					: "context-full";
+		// Scratch handoff is the configured clean-break path: the agent has already
+		// been instructed to keep a durable scratch file current, so auto maintenance
+		// can reset into that file without a second LLM summarization call.
+		let action = resolveAutoCompactionAction({
+			strategy: compactionSettings.strategy,
+			reason,
+			suppressHandoff,
+			hasScratchHandoff: this.#scratchHandoffDisplayPath !== undefined,
+		});
+		if (action === "scratch-handoff" && this.#scratchHandoffDisplayPath !== undefined) {
+			this.#stageScratchHandoffCloseout(this.#scratchHandoffDisplayPath, options.triggerContextTokens, reason);
+		}
+		let fallbackCause: MaintenanceTraceFallbackCause | undefined;
 		if (action === "snapcompact" && this.model && !this.model.input.includes("image")) {
 			this.emitNotice(
 				"warning",
@@ -13810,6 +15084,7 @@ export class AgentSession {
 				"compaction",
 			);
 			action = "context-full";
+			fallbackCause = "snapcompact-fallback";
 		}
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
@@ -13817,22 +15092,62 @@ export class AgentSession {
 		this.#autoCompactionAbortController = autoCompactionAbortController;
 		const autoCompactionSignal = autoCompactionAbortController.signal;
 
+		fallbackCause ??= resolveMaintenanceTraceFallbackCause({
+			strategy: compactionSettings.strategy,
+			reason,
+			suppressHandoff,
+			action,
+		});
+		const trace = this.#createMaintenanceTrace(
+			action,
+			reason,
+			fallbackCause,
+			action === "scratch-handoff" ? this.#scratchHandoffDisplayPath : undefined,
+		);
+
 		try {
-			// Emit start AFTER the controller is installed so isCompacting is already true
-			// for any listener — and for input routed during this emit's event-loop yield:
-			// a message typed as the compaction loader appears must land in the compaction
-			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
+			// Emit start after installing the controller so listeners already see
+			// isCompacting. Input arriving during this emit's event-loop yield must
+			// enter the compaction queue, not the core steering queue that the LLM
+			// handoff path resets.
+			await this.#emitMaintenanceTraceStart(trace);
+			await this.#emitMaintenanceTraceDelta(trace, "activity", `Started ${action} maintenance for ${reason}.`);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
+			if (action === "scratch-handoff") {
+				await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages);
+				this.#scratchHandoffCloseout = undefined;
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
+				await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
+				const continuationScheduled = !autoCompactionSignal.aborted && reason !== "idle" && shouldAutoContinue;
+				if (continuationScheduled) {
+					this.#scheduleAutoContinuePrompt(generation);
+				}
+				return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+			}
+
 			if (action === "handoff") {
 				let handoffSwitchCancelled = false;
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
-				const handoffResult = await this.handoff(handoffFocus, {
-					autoTriggered: true,
-					signal: autoCompactionSignal,
-					onSwitchCancelled: () => {
-						handoffSwitchCancelled = true;
-					},
-				});
+				const previousHandoffTrace = this.#handoffMaintenanceTrace;
+				let handoffResult: HandoffResult | undefined;
+				this.#handoffMaintenanceTrace = trace;
+				try {
+					handoffResult = await this.handoff(handoffFocus, {
+						autoTriggered: true,
+						signal: autoCompactionSignal,
+						onSwitchCancelled: () => {
+							handoffSwitchCancelled = true;
+						},
+					});
+				} finally {
+					this.#handoffMaintenanceTrace = previousHandoffTrace;
+				}
 				if (!handoffResult) {
 					const aborted = autoCompactionSignal.aborted || handoffSwitchCancelled;
 					if (aborted) {
@@ -13843,12 +15158,16 @@ export class AgentSession {
 							aborted: true,
 							willRetry: false,
 						});
+						await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 						return COMPACTION_CHECK_NONE;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
 						reason,
 					});
 					action = "context-full";
+					trace.action = action;
+					trace.fallbackCause = "no-document-handoff-fallback";
+					await this.#emitMaintenanceTracePhase(trace, "action-fallback");
 				}
 				if (handoffResult) {
 					await this.#emitSessionEvent({
@@ -13858,6 +15177,7 @@ export class AgentSession {
 						aborted: false,
 						willRetry: false,
 					});
+					await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
 					const continuationScheduled =
 						!autoCompactionSignal.aborted &&
 						this.#scheduleCompactionContinuation({
@@ -13874,6 +15194,7 @@ export class AgentSession {
 			}
 
 			if (!this.model) {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Skipped: no active model is available.");
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -13882,11 +15203,17 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "skipped", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 
 			const availableModels = this.#modelRegistry.getAvailable();
 			if (availableModels.length === 0) {
+				await this.#emitMaintenanceTraceDelta(
+					trace,
+					"activity",
+					"Skipped: no configured compaction models are available.",
+				);
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -13895,6 +15222,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "skipped", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 
@@ -13942,6 +15270,7 @@ export class AgentSession {
 					});
 				}
 				if (!preparation) {
+					await this.#emitMaintenanceTraceDelta(trace, "activity", "Skipped: nothing eligible for maintenance.");
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -13950,6 +15279,7 @@ export class AgentSession {
 						willRetry: false,
 						skipped: true,
 					});
+					await this.#emitMaintenanceTraceEnd(trace, "skipped", { willRetry: false });
 					const noProgressDeadEnd = reason !== "idle";
 					let continuationScheduled = false;
 					if (!suppressContinuation && this.agent.hasQueuedMessages()) {
@@ -13979,6 +15309,11 @@ export class AgentSession {
 					return rescueRewroteHistory ? { ...base, historyRewritten: true } : base;
 				}
 			}
+			await this.#emitMaintenanceTraceDelta(
+				trace,
+				"activity",
+				`Prepared ${preparation.messagesToSummarize.length + preparation.turnPrefixMessages.length} message(s) for maintenance; keeping ${preparation.recentMessages.length} recent message(s).`,
+			);
 
 			let hookCompaction: CompactionResult | undefined;
 			let fromExtension = false;
@@ -13986,6 +15321,7 @@ export class AgentSession {
 			let codexCompaction: CodexCompactionContext | undefined;
 
 			if (this.#extensionRunner?.hasHandlers("session_before_compact")) {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Running session_before_compact extension hook.");
 				const hookResult = (await this.#extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -14002,12 +15338,14 @@ export class AgentSession {
 						aborted: true,
 						willRetry: false,
 					});
+					await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 					return COMPACTION_CHECK_NONE;
 				}
 
 				if (hookResult?.compaction) {
 					hookCompaction = hookResult.compaction;
 					fromExtension = true;
+					await this.#emitMaintenanceTraceDelta(trace, "activity", "Extension supplied the compaction result.");
 				}
 			}
 
@@ -14032,6 +15370,7 @@ export class AgentSession {
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			let snapcompactBlocker: string | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Snapcompact: scanning transcript renderability.");
 				const text = snapcompact.serializeConversation(
 					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
 				);
@@ -14059,6 +15398,11 @@ export class AgentSession {
 						snapcompactBlocker =
 							"snapcompact: kept history alone exceeds the context budget; using context-full auto-compaction instead.";
 					} else {
+						await this.#emitMaintenanceTraceDelta(
+							trace,
+							"activity",
+							`Snapcompact: rendering archive with at most ${maxFrames} frame(s).`,
+						);
 						snapcompactResult = await snapcompact.compact(preparation, {
 							convertToLlm,
 							model: this.model,
@@ -14075,6 +15419,13 @@ export class AgentSession {
 							snapcompactBlocker =
 								"snapcompact produced too much standing image payload; using context-full auto-compaction instead.";
 							snapcompactResult = undefined;
+						}
+						if (snapcompactResult) {
+							await this.#emitMaintenanceTraceDelta(
+								trace,
+								"activity",
+								`Snapcompact: ${snapcompactResult.shortSummary ?? "archive rendered"}.`,
+							);
 						}
 						if (snapcompactResult) {
 							const ctxWindow = this.model?.contextWindow ?? 0;
@@ -14098,11 +15449,16 @@ export class AgentSession {
 				}
 				if (snapcompactBlocker) {
 					this.emitNotice("warning", snapcompactBlocker, "compaction");
+					await this.#emitMaintenanceTraceDelta(trace, "activity", snapcompactBlocker);
 					action = "context-full";
+					trace.action = action;
+					trace.fallbackCause = "snapcompact-fallback";
+					await this.#emitMaintenanceTracePhase(trace, "action-fallback");
 				}
 			}
 
 			if (compactionPrep.kind === "fromHook") {
+				await this.#emitMaintenanceTraceDelta(trace, "activity", "Using extension-provided compaction output.");
 				summary = compactionPrep.summary;
 				shortSummary = compactionPrep.shortSummary;
 				firstKeptEntryId = compactionPrep.firstKeptEntryId;
@@ -14139,6 +15495,11 @@ export class AgentSession {
 					let attempt = 0;
 					while (true) {
 						try {
+							await this.#emitMaintenanceTraceDelta(
+								trace,
+								"activity",
+								`${attempt === 0 ? "Starting" : "Retrying"} compaction with ${formatModelStringWithRouting(candidate)}.`,
+							);
 							compactResult = await compact(
 								this.#obfuscatePreparationForProvider(preparation),
 								candidate,
@@ -14161,6 +15522,15 @@ export class AgentSession {
 									tools: this.agent.state.tools,
 									sessionId: this.sessionId,
 									promptCacheKey: this.sessionId,
+									completeImpl: async (requestModel, requestContext, requestOptions) => {
+										await this.#emitMaintenanceTraceDelta(
+											trace,
+											"activity",
+											`LLM request: ${formatModelStringWithRouting(requestModel)}.`,
+										);
+										const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
+										return this.#consumeSideStreamResult(stream, trace);
+									},
 									providerSessionState: this.#providerSessionState,
 									codexCompaction,
 								},
@@ -14228,6 +15598,11 @@ export class AgentSession {
 								error: message,
 								model: `${candidate.provider}/${candidate.id}`,
 							});
+							await this.#emitMaintenanceTraceDelta(
+								trace,
+								"activity",
+								`Retrying compaction after ${formatDuration(delayMs)}.`,
+							);
 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
 						}
 					}
@@ -14260,9 +15635,11 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 
+			await this.#emitMaintenanceTraceDelta(trace, "activity", "Writing compacted context into session history.");
 			this.sessionManager.appendCompaction(
 				summary,
 				shortSummary,
@@ -14276,6 +15653,7 @@ export class AgentSession {
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#rebasePendingContextSnapshotAfterCompaction();
+			await this.#emitMaintenanceTraceDelta(trace, "activity", "Rebuilt live model context from compacted history.");
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
@@ -14324,6 +15702,12 @@ export class AgentSession {
 			// tests (a recoverable overflow only has to fit; the auto-continue
 			// thrash needs the stricter recovery band), so each branch evaluates
 			// its own below.
+			// The compaction rewrite is complete. Clear the active marker before
+			// publishing completion so queued-message continuations scheduled by the
+			// completion path cannot discard themselves as a compaction race.
+			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
+				this.#autoCompactionAbortController = undefined;
+			}
 			let continuationScheduled = false;
 			// A non-idle pass that wanted to continue (retry or auto-continue) but freed
 			// too little for that path to proceed is a dead-end: warn once so the user
@@ -14411,6 +15795,7 @@ export class AgentSession {
 			if (deadEndWarning) {
 				this.emitNotice("warning", deadEndWarning, "compaction");
 			}
+			await this.#emitMaintenanceTraceEnd(trace, noProgressDeadEnd ? "no-progress" : "done", { willRetry });
 			if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
 			return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 		} catch (error) {
@@ -14422,22 +15807,25 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			const emittedErrorMessage =
+				reason === "overflow"
+					? `Context overflow recovery failed: ${errorMessage}`
+					: reason === "incomplete"
+						? `Incomplete response recovery failed: ${errorMessage}`
+						: `Auto-compaction failed: ${errorMessage}`;
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
 				action,
 				result: undefined,
 				aborted: false,
 				willRetry: false,
-				errorMessage:
-					reason === "overflow"
-						? `Context overflow recovery failed: ${errorMessage}`
-						: reason === "incomplete"
-							? `Incomplete response recovery failed: ${errorMessage}`
-							: `Auto-compaction failed: ${errorMessage}`,
+				errorMessage: emittedErrorMessage,
 			});
+			await this.#emitMaintenanceTraceEnd(trace, "failed", { errorMessage: emittedErrorMessage, willRetry: false });
 		} finally {
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
@@ -14457,7 +15845,7 @@ export class AgentSession {
 	 * the oversized input still gets resolved. Returns `"handled"` otherwise.
 	 */
 	async #runAutoShake(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		generation: number,
 		autoContinue: boolean,
@@ -14470,7 +15858,14 @@ export class AgentSession {
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
+		const trace = this.#createMaintenanceTrace(action, reason, undefined);
 		try {
+			await this.#emitMaintenanceTraceStart(trace);
+			await this.#emitMaintenanceTraceDelta(
+				trace,
+				"activity",
+				"Scanning for shakeable tool results and large blocks.",
+			);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			if (signal.aborted) {
@@ -14481,9 +15876,11 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			await this.#emitMaintenanceTraceDelta(trace, "activity", formatShakeSummary(result));
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
 			// fires, shake runs, but residual context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing
@@ -14532,6 +15929,10 @@ export class AgentSession {
 					skipped: !reclaimed,
 					errorMessage,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, reclaimed ? "no-progress" : "skipped", {
+					errorMessage,
+					willRetry: false,
+				});
 				return "fallback";
 			}
 			await this.#emitSessionEvent({
@@ -14542,6 +15943,7 @@ export class AgentSession {
 				willRetry,
 				skipped: !reclaimed,
 			});
+			await this.#emitMaintenanceTraceEnd(trace, reclaimed ? "done" : "skipped", { willRetry });
 
 			let continuationScheduled = false;
 			if (willRetry) {
@@ -14587,6 +15989,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
@@ -14599,6 +16002,7 @@ export class AgentSession {
 				errorMessage: message,
 				skipped: false,
 			});
+			await this.#emitMaintenanceTraceEnd(trace, "failed", { errorMessage: message, willRetry: false });
 			// Overflow still needs recovery even if shake threw.
 			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
 		} finally {
@@ -15369,6 +16773,10 @@ export class AgentSession {
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
+		// Set when the wait is sleeping until a known usage-window reset (every
+		// account rate-limited, concrete reset time): bypasses the fail-fast cap
+		// and drives the countdown UI. Carries the absolute resume target.
+		let usageResetAtMs: number | undefined;
 
 		if (staleOpenAIResponsesReplayError) {
 			this.#resetCurrentResponsesProviderSession("stale replay error");
@@ -15414,6 +16822,18 @@ export class AgentSession {
 					const siblingWaitMs = Math.max(0, outcome.retryAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
 					if (siblingWaitMs < usageLimitWaitMs) {
 						usageLimitWaitMs = siblingWaitMs;
+					}
+				}
+				// Every account is rate-limited. When the provider's usage report
+				// gives a concrete reset time and the user opted in, sleep until the
+				// account actually regains capacity and auto-resume, instead of the
+				// blunt provider retry-after or the fail-fast surface below. Bounded
+				// by retry.maxUsageResetWaitMs so a stale/absurd reset can't hang.
+				if (retrySettings.waitForUsageReset && outcome.resumeAtMs !== undefined) {
+					const resumeWaitMs = Math.max(0, outcome.resumeAtMs - Date.now()) + SIBLING_UNBLOCK_BUFFER_MS;
+					if (resumeWaitMs <= retrySettings.maxUsageResetWaitMs) {
+						usageLimitWaitMs = resumeWaitMs;
+						usageResetAtMs = Date.now() + resumeWaitMs;
 					}
 				}
 				if (usageLimitWaitMs > delayMs) {
@@ -15493,8 +16913,17 @@ export class AgentSession {
 		// subagent (or interactive session) silently hung. The original
 		// assistant error message is preserved in agent state so the caller
 		// can act on it.
+		// A usage-reset wait (usageResetAtMs set) has a known, bounded resume time
+		// the user opted into, so it bypasses the cap; the cap still guards blunt
+		// provider retry-after windows with nowhere to switch.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+		if (
+			maxDelayMs > 0 &&
+			delayMs > maxDelayMs &&
+			!switchedCredential &&
+			!switchedModel &&
+			usageResetAtMs === undefined
+		) {
 			await this.#persistRetryLifecycleErrorMessage(message);
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
@@ -15518,6 +16947,7 @@ export class AgentSession {
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,
+			usageResetAtMs,
 		});
 
 		// Cursor exec-channel tools have already run and emitted results. Keep that
@@ -16720,6 +18150,7 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				await this.#resetMemoryContextForNewTranscript();
 			}
+			this.#startSessionSteeringWatcher();
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
