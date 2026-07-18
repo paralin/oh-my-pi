@@ -123,4 +123,35 @@ describe("print mode working indicator", () => {
 
 		expect(stderrOutput.join("")).toBe("Working...\n");
 	});
+
+	it("waits for advisor catch-up before disposing a headless session", async () => {
+		const message = makeAssistantMessage("advisor-aware answer");
+		const messages: AssistantMessage[] = [];
+		const { promise: catchup, resolve: resolveCatchup } = Promise.withResolvers<void>();
+		const { promise: catchupStarted, resolve: markCatchupStarted } = Promise.withResolvers<void>();
+		const session = {
+			state: { messages },
+			sessionManager: { getHeader: () => undefined },
+			extensionRunner: undefined,
+			subscribe: () => () => {},
+			prompt: async () => {
+				messages.push(message);
+				return true;
+			},
+			waitForIdle: async () => {},
+			waitForAdvisorCatchup: async () => {
+				markCatchupStarted();
+				await catchup;
+			},
+			dispose: async () => {},
+		} as unknown as AgentSession;
+
+		const run = runPrintMode(session, { mode: "text", initialMessage: "hello" });
+		await catchupStarted;
+		expect(stdoutOutput.join("")).toBe("");
+		resolveCatchup();
+		await run;
+
+		expect(stdoutOutput.join("")).toBe("advisor-aware answer\n");
+	});
 });

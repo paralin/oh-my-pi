@@ -7170,6 +7170,11 @@ export class AgentSession {
 		await this.#waitForPostPromptRecovery();
 	}
 
+	/** waitForAdvisorCatchup waits for headless callers to observe a completed advisor review. */
+	async waitForAdvisorCatchup(): Promise<void> {
+		await Promise.all(this.#advisors.map(advisor => advisor.runtime.waitForCatchup(30_000, 1)));
+	}
+
 	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;

@@ -38,6 +38,20 @@ advisor:
 
 The advisor role uses normal model-role resolution, including provider-prefixed ids, canonical ids, and optional thinking suffixes.
 
+### Headless runs
+
+Use `--advisor` to enable the advisor for one print-mode process without
+persisting `advisor.enabled`:
+
+```sh
+omp --print --mode json --advisor "Review this task."
+```
+
+The flag also applies to RPC startup. RPC mode still resets other advisor
+settings to its built-in defaults. Print mode waits for the advisor's pending
+review before disposing the session, so its transcript and token/cost usage
+are recorded.
+
 Slash commands:
 
 | Command | Effect |

@@ -374,6 +374,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 			session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" }),
 		);
 		await session.waitForIdle();
+		await session.waitForAdvisorCatchup?.();
 		if (await stopIfOutputClosed()) return;
 		if (await stopIfBudgetReached()) {
 			if (await stopIfOutputClosed()) return;
@@ -387,6 +388,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		writeTextWorkingIndicator();
 		await logger.time("print:prompt:next", () => session.prompt(message, { streamingBehavior: "steer" }));
 		await session.waitForIdle();
+		await session.waitForAdvisorCatchup?.();
 		if (await stopIfOutputClosed()) return;
 		if (await stopIfBudgetReached()) {
 			if (await stopIfOutputClosed()) return;
