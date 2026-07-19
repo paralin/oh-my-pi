@@ -371,6 +371,7 @@ function buildExecutorOptions(
 	const enableMCP = !policy.planMode && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
+		scratchHandoffRootCwd: session.scratchHandoffRootCwd,
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),

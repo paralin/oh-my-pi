@@ -1086,7 +1086,7 @@ export async function runRootCommand(
 	await logger.time("initTheme:initial", initTheme);
 
 	const parsedArgs = parsed;
-	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
+	const scratchHandoffRootCwd = await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 	const startupCodexHomeAuth = applyCodexHomeAuthChain({
 		codexHomeFlag: parsedArgs.codexHome,
 		codexHomeChainFlag: parsedArgs.codexHomeChain,
@@ -1389,6 +1389,7 @@ export async function runRootCommand(
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
 	sessionOptions.scratchHandoffFile = parsedArgs.scratchHandoffFile;
+	sessionOptions.scratchHandoffRootCwd = scratchHandoffRootCwd;
 
 	// OTEL: register global OTLP exporters when an endpoint is configured via
 	// env, then switch on the agent loop's telemetry hooks so traces, run-level

@@ -44,7 +44,8 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 	}
 }
 
-export async function applyStartupCwd(parsed: Args): Promise<void> {
+export async function applyStartupCwd(parsed: Args): Promise<string> {
+	const dispatchCwd = getProjectDir();
 	if (parsed.cwd) {
 		setProjectDir(parsed.cwd);
 		// setProjectDir resolves the (possibly relative) target against the launch
@@ -52,7 +53,8 @@ export async function applyStartupCwd(parsed: Args): Promise<void> {
 		// so downstream consumers (buildSessionOptions, settings/discovery, session
 		// persistence) don't re-resolve a relative string against the new cwd.
 		parsed.cwd = getProjectDir();
-		return;
+		return dispatchCwd;
 	}
 	await maybeAutoChdir(parsed);
+	return dispatchCwd;
 }

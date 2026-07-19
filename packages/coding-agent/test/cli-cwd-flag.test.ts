@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { parseArgs } from "@oh-my-pi/pi-coding-agent/cli/args";
 import { applyStartupCwd } from "@oh-my-pi/pi-coding-agent/cli/startup-cwd";
+import { buildScratchHandoffContext } from "@oh-my-pi/pi-coding-agent/session/scratch-handoff";
 import { getProjectDir, normalizePathForComparison, setProjectDir } from "@oh-my-pi/pi-utils";
 
 const originalProjectDir = getProjectDir();
@@ -43,6 +44,39 @@ describe("parseArgs — --cwd flag", () => {
 		expect(parsed.continue).toBe(true);
 		expect(getProjectDir()).toBe(targetDir);
 		expect(normalizePathForComparison(process.cwd())).toBe(normalizePathForComparison(targetDir));
+	});
+
+	it("creates scratch handoff files at the dispatch origin instead of the --cwd target", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "omp-scratch-origin-"));
+		const dispatchDir = path.join(root, "dispatch");
+		const workingDir = path.join(root, "worktree");
+		fs.mkdirSync(dispatchDir);
+		fs.mkdirSync(workingDir);
+		setProjectDir(dispatchDir);
+
+		const parsed = parseArgs(["--cwd", workingDir]);
+		const scratchHandoffRootCwd = await applyStartupCwd(parsed);
+		const context = await buildScratchHandoffContext({
+			cwd: workingDir,
+			rootCwd: scratchHandoffRootCwd,
+			sessionId: "Main-regression",
+			settings: { enabled: true, rootDir: "agent" },
+			date: new Date(2026, 6, 19),
+		});
+
+		expect(context?.absolutePath).toBe(path.join(dispatchDir, "agent", "20260719", "Main-regression.org"));
+		expect(fs.existsSync(context?.absolutePath ?? "")).toBe(true);
+		expect(fs.existsSync(path.join(workingDir, "agent"))).toBe(false);
+
+		const overrideDir = path.join(root, "configured-scratch");
+		const overridden = await buildScratchHandoffContext({
+			cwd: workingDir,
+			rootCwd: scratchHandoffRootCwd,
+			sessionId: "Main-override",
+			settings: { enabled: true, rootDir: overrideDir },
+			date: new Date(2026, 6, 19),
+		});
+		expect(overridden?.absolutePath).toBe(path.join(overrideDir, "20260719", "Main-override.org"));
 	});
 
 	it("normalizes a relative --cwd target to the resolved absolute path", async () => {

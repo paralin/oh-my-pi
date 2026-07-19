@@ -382,6 +382,8 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
 	cwd?: string;
+	/** Base directory for scratch handoff paths. Defaults to cwd; CLI sessions use the dispatch origin. */
+	scratchHandoffRootCwd?: string;
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
@@ -1675,6 +1677,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const scratchHandoffContext = await logger.time("scratchHandoff", () =>
 		buildScratchHandoffContext({
 			cwd,
+			rootCwd: options.scratchHandoffRootCwd,
 			sessionId: sessionManager.getSessionId(),
 			agentId: resolvedAgentId,
 			scratchFile: scratchHandoffPathSelection.scratchFile,
@@ -1732,6 +1735,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			scratchHandoffRootCwd: options.scratchHandoffRootCwd ?? cwd,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			hasUI: options.hasUI ?? false,
@@ -3092,6 +3096,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentId: resolvedAgentId,
 			agentKind,
 			scratchHandoffDisplayPath: scratchHandoffContext?.displayPath,
+			scratchHandoffRootCwd: options.scratchHandoffRootCwd ?? cwd,
 			parentScratchHandoffDisplayPath: scratchHandoffContext?.parentDisplayPath,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,

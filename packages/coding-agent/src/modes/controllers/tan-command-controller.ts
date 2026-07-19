@@ -129,6 +129,7 @@ export class TanCommandController {
 							agentId: cloneId,
 							agentDisplayName: "tan",
 							parentScratchHandoffDisplayPath: session.getScratchHandoffDisplayPath(),
+							scratchHandoffRootCwd: session.scratchHandoffRootCwd,
 							parentTaskPrefix: cloneId,
 							parentAgentId: ownerId,
 							agentRegistry,

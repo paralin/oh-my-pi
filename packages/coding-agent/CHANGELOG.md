@@ -10,6 +10,8 @@
 
 ### Fixed
 
+- Fixed `--cwd` launches creating per-session `agent/<date>/` scratch handoffs inside the target worktree; relative scratch paths now stay rooted at the CLI dispatch origin and inherit that root across child sessions, while absolute configured paths still override it.
+
 - Fixed automatic scratch handoff rebuilding directly from a stale scratch snapshot when the closeout request exceeded the prompt budget; OMP now rebuilds first, then delivers the pending `PENCILS DOWN` closeout in the smaller context before continuing.
 
 - Limited scratch-closeout artifact elision to the first closeout request so ordinary tool continuations retain their results.

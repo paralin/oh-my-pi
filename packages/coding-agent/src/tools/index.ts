@@ -238,6 +238,8 @@ export interface ToolSession {
 	appendBossInboxMessage?: (message: { kind: BossInboxMessageKind; message: string }) => Promise<BossInboxRecord>;
 	/** Current session scratch handoff file, if scratch handoff is enabled. */
 	getScratchHandoffDisplayPath?: () => string | undefined;
+	/** Base directory for relative scratch handoff paths, inherited by child sessions. */
+	scratchHandoffRootCwd?: string;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */

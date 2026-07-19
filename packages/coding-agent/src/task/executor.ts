@@ -288,6 +288,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface ExecutorOptions {
 	cwd: string;
 	worktree?: string;
+	/** Dispatch origin used to keep scratch handoff files outside a child working directory. */
+	scratchHandoffRootCwd?: string;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -2496,6 +2498,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// artifacts dir) — only the SessionManager differs.
 			const buildSubagentSessionOptions = (sessionManagerForRun: SessionManager): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				scratchHandoffRootCwd: options.scratchHandoffRootCwd,
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,

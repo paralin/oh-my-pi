@@ -162,6 +162,7 @@ export function buildScratchHandoffRecentContext(input: {
 
 export async function buildScratchHandoffContext(input: {
 	cwd: string;
+	rootCwd?: string;
 	sessionId: string;
 	agentId?: string;
 	scratchFile?: string;
@@ -172,7 +173,7 @@ export async function buildScratchHandoffContext(input: {
 	if (!input.settings.enabled && !input.scratchFile?.trim() && !input.parentScratchDisplayPath?.trim())
 		return undefined;
 	const { displayPath, absolutePath } = resolveScratchHandoffPath({
-		cwd: input.cwd,
+		cwd: input.rootCwd ?? input.cwd,
 		rootDir: input.settings.rootDir,
 		sessionId: input.sessionId,
 		agentId: input.agentId,

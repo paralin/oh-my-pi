@@ -1187,6 +1187,8 @@ export interface AgentSessionConfig {
 	agentKind?: "main" | "sub";
 	/** Current session scratch handoff file, if scratch handoff is enabled. */
 	scratchHandoffDisplayPath?: string;
+	/** Base directory for relative scratch handoff paths inherited by child sessions. */
+	scratchHandoffRootCwd?: string;
 	/** Parent scratch handoff file linked from this session's scratch file. */
 	parentScratchHandoffDisplayPath?: string;
 	/**
@@ -2242,6 +2244,7 @@ export class AgentSession {
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scratchHandoffDisplayPath: string | undefined;
+	readonly scratchHandoffRootCwd: string | undefined;
 	#parentScratchHandoffDisplayPath: string | undefined;
 	#scratchHandoffToolArgsById = new Map<string, unknown>();
 	#providerSessionId: string | undefined;
@@ -3068,6 +3071,7 @@ export class AgentSession {
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
 		this.#scratchHandoffDisplayPath = config.scratchHandoffDisplayPath;
+		this.scratchHandoffRootCwd = config.scratchHandoffRootCwd;
 		this.#parentScratchHandoffDisplayPath = config.parentScratchHandoffDisplayPath;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
