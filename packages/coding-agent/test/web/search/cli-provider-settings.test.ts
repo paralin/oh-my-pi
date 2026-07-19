@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -24,6 +26,7 @@ const WEB_SEARCH_ENV_KEYS = [
 	"SYNTHETIC_API_KEY",
 	"TAVILY_API_KEY",
 	"TINYFISH_API_KEY",
+	"OPENAI_CODEX_OAUTH_TOKEN",
 	"XAI_API_KEY",
 ] as const;
 
@@ -163,5 +166,72 @@ describe("runSearchCommand provider settings", () => {
 		const plain = stripVTControlCharacters(stdout);
 		expect(plain).toContain("Provider: Jina");
 		expect(plain).not.toContain("Provider: Tavily (API)");
+	});
+
+	it("uses configured Codex homes for Codex web search", async () => {
+		const currentTempDir = tempAgentDir;
+		if (!currentTempDir) throw new Error("tempAgentDir missing");
+		const codexHome = path.join(currentTempDir.path(), "codex-home");
+		await fs.mkdir(codexHome, { recursive: true });
+		await fs.writeFile(
+			path.join(codexHome, "auth.json"),
+			JSON.stringify({
+				tokens: {
+					access_token: "codex-home-access",
+					account_id: "codex-home-account",
+				},
+			}),
+		);
+
+		resetSettingsForTest();
+		setPreferredSearchProvider("codex");
+		setExcludedSearchProviders([]);
+		await Settings.init({
+			inMemory: true,
+			cwd: currentTempDir.path(),
+			overrides: {
+				"providers.webSearch": "codex",
+				"providers.webSearchExclude": [],
+				"providers.codexHomes": [{ name: "default", path: codexHome }],
+			},
+		});
+
+		let requestHeaders: Headers | undefined;
+		vi.spyOn(globalThis, "fetch").mockImplementation(
+			Object.assign(
+				async (_input: string | Request | URL, init?: RequestInit) => {
+					requestHeaders = new Headers(init?.headers);
+					const sse = [
+						`data: ${JSON.stringify({
+							type: "response.output_item.done",
+							item: {
+								type: "message",
+								content: [{ type: "output_text", text: "Codex home answer", annotations: [] }],
+							},
+						})}`,
+						"",
+						`data: ${JSON.stringify({
+							type: "response.completed",
+							response: { id: "resp_codex_home", model: "gpt-5.6-luna" },
+						})}`,
+						"",
+					].join("\n");
+					return new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } });
+				},
+				{ preconnect: fetch.preconnect },
+			),
+		);
+
+		let stdout = "";
+		vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
+			stdout += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		});
+
+		await runSearchCommand({ query: "codex home smoke test", provider: "codex", limit: 1, expanded: false });
+
+		expect(requestHeaders?.get("authorization")).toBe("Bearer codex-home-access");
+		expect(requestHeaders?.get("chatgpt-account-id")).toBe("codex-home-account");
+		expect(stripVTControlCharacters(stdout)).toContain("Codex home answer");
 	});
 });

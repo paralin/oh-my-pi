@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { RuntimeApiKeyChainCredential } from "@oh-my-pi/pi-ai";
 
 export const CODEX_HOME_ENV = "CODEX_HOME";
 export const OPENAI_CODEX_OAUTH_TOKEN_ENV = "OPENAI_CODEX_OAUTH_TOKEN";
@@ -31,6 +32,16 @@ export interface ApplyCodexHomeAuthChainOptions {
 	codexHomeFlag?: string;
 	codexHomeChainFlag?: string;
 	configuredHomes?: unknown;
+}
+
+export function toRuntimeCodexHomeChain(credentials: CodexHomeCredential[]): RuntimeApiKeyChainCredential[] {
+	return credentials.map(credential => ({
+		key: credential.accessToken,
+		label: credential.name ?? credential.path,
+		accountId: credential.accountId,
+		email: credential.email,
+		usageType: "oauth",
+	}));
 }
 
 function expandHome(input: string): string {

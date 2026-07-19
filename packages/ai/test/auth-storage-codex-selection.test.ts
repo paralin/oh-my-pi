@@ -1626,6 +1626,28 @@ describe("AuthStorage codex oauth ranking", () => {
 		expect(await authStorage.getApiKey("openai-codex", "chain-config-order")).toBe("home-default");
 	});
 
+	test("getOAuthAccess resolves OAuth metadata from a runtime Codex home chain", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		authStorage.setRuntimeApiKeyChain("openai-codex", [
+			{
+				key: "home-access-token",
+				accountId: "acct-home",
+				email: "home@example.com",
+				projectId: "project-home",
+				label: "default",
+				usageType: "oauth",
+			},
+		]);
+
+		expect(await authStorage.getOAuthAccess("openai-codex", "codex-home-search")).toEqual({
+			accessToken: "home-access-token",
+			accountId: "acct-home",
+			email: "home@example.com",
+			projectId: "project-home",
+		});
+	});
+
 	test("runtime Codex chain fails over to the next home when the first is exhausted", async () => {
 		if (!authStorage) throw new Error("test setup failed");
 

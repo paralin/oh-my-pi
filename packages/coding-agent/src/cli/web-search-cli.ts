@@ -6,13 +6,16 @@
 
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { ModelRegistry } from "../config/model-registry";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
+import { discoverAuthStorage } from "../session/auth-broker-config";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
 import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
 import { renderSearchResult } from "../web/search/render";
 import type { SearchProviderId } from "../web/search/types";
+import { applyCodexHomeAuthChain, toRuntimeCodexHomeChain } from "./codex-home";
 
 export interface SearchCommandArgs {
 	query: string;
@@ -99,17 +102,28 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 		limit: cmd.limit,
 	};
 
-	const result = await runSearchQuery(params);
-	const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
-		query: cmd.query,
-		maxAnswerLines: cmd.expanded ? undefined : 6,
+	const authStorage = await discoverAuthStorage();
+	const codexHomeAuth = applyCodexHomeAuthChain({
+		configuredHomes: settings.get("providers.codexHomes"),
 	});
+	if (codexHomeAuth.credentials.length > 0) {
+		authStorage.setRuntimeApiKeyChain("openai-codex", toRuntimeCodexHomeChain(codexHomeAuth.credentials));
+	}
+	try {
+		const result = await runSearchQuery(params, { authStorage, modelRegistry: new ModelRegistry(authStorage) });
+		const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
+			query: cmd.query,
+			maxAnswerLines: cmd.expanded ? undefined : 6,
+		});
 
-	const width = Math.max(60, process.stdout.columns ?? 100);
-	process.stdout.write(`${component.render(width).join("\n")}\n`);
+		const width = Math.max(60, process.stdout.columns ?? 100);
+		process.stdout.write(`${component.render(width).join("\n")}\n`);
 
-	if (result.details?.error) {
-		process.exitCode = 1;
+		if (result.details?.error) {
+			process.exitCode = 1;
+		}
+	} finally {
+		authStorage.close();
 	}
 }
 

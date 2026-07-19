@@ -24,7 +24,7 @@ import {
 import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
-import { applyCodexHomeAuthChain, type CodexHomeCredential } from "./cli/codex-home";
+import { applyCodexHomeAuthChain, toRuntimeCodexHomeChain } from "./cli/codex-home";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -73,7 +73,7 @@ import {
 	loadSessionExtensions,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
-import type { AuthStorage, RuntimeApiKeyChainCredential } from "./session/auth-storage";
+import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
@@ -1072,16 +1072,6 @@ interface RunRootCommandDependencies {
 	forceSetupWizard?: boolean;
 }
 const DEFAULT_RUN_ROOT_DEPENDENCIES: RunRootCommandDependencies = {};
-
-function toRuntimeCodexHomeChain(credentials: CodexHomeCredential[]): RuntimeApiKeyChainCredential[] {
-	return credentials.map(credential => ({
-		key: credential.accessToken,
-		label: credential.name ?? credential.path,
-		accountId: credential.accountId,
-		email: credential.email,
-		usageType: "oauth",
-	}));
-}
 
 export async function runRootCommand(
 	parsed: Args,

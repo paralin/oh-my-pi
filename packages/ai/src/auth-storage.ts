@@ -5373,8 +5373,8 @@ export class AuthStorage {
 	 * scenarios, prefer {@link AuthStorage.getApiKey}.
 	 *
 	 * Returns `undefined` when no OAuth credential is available, the
-	 * credential fails to refresh, or runtime/config overrides have replaced
-	 * OAuth with an explicit API key.
+	 * credential fails to refresh, or a runtime/config API-key override has
+	 * replaced OAuth.
 	 */
 	async getOAuthAccess(
 		provider: string,
@@ -5386,6 +5386,20 @@ export class AuthStorage {
 		// suppressed (same contract as `getOAuthAccountId`).
 		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
 			return undefined;
+		}
+		const runtimeChain = this.#runtimeApiKeyChains.get(provider);
+		if (runtimeChain && runtimeChain.length > 0) {
+			const accessToken = await this.#resolveRuntimeApiKeyChain(provider as Provider, sessionId, options);
+			if (!accessToken) return undefined;
+			const runtimeIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+			const credential = runtimeChain[runtimeIndex] ?? runtimeChain[0];
+			if (credential?.usageType !== "oauth") return undefined;
+			return {
+				accessToken,
+				accountId: credential.accountId,
+				email: credential.email,
+				projectId: credential.projectId,
+			};
 		}
 		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);
 		if (!resolved) return undefined;
