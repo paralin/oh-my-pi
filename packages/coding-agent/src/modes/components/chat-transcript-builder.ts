@@ -85,6 +85,7 @@ export class ChatTranscriptBuilder {
 	#pendingUsage: Usage | undefined;
 	#pendingUsageDuration: number | undefined;
 	#pendingUsageTtft: number | undefined;
+	#pendingUsageTimestamp: number | undefined;
 	#lastAssistantUsage: Usage | undefined;
 	#waitingPoll: ToolExecutionComponent | null = null;
 	#todoSnapshot: ToolExecutionComponent | null = null;
@@ -133,6 +134,7 @@ export class ChatTranscriptBuilder {
 		this.#pendingUsage = undefined;
 		this.#pendingUsageDuration = undefined;
 		this.#pendingUsageTtft = undefined;
+		this.#pendingUsageTimestamp = undefined;
 		this.#lastAssistantUsage = undefined;
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
@@ -201,11 +203,17 @@ export class ChatTranscriptBuilder {
 		this.#readGroup?.seal();
 		this.#readGroup = null;
 		this.container.addChild(
-			createUsageRowBlock(this.#pendingUsage, this.#pendingUsageDuration, this.#pendingUsageTtft),
+			createUsageRowBlock(
+				this.#pendingUsage,
+				this.#pendingUsageDuration,
+				this.#pendingUsageTtft,
+				this.#pendingUsageTimestamp,
+			),
 		);
 		this.#pendingUsage = undefined;
 		this.#pendingUsageDuration = undefined;
 		this.#pendingUsageTtft = undefined;
+		this.#pendingUsageTimestamp = undefined;
 	}
 
 	#appendChatMessage(message: AgentMessage): void {
@@ -381,6 +389,7 @@ export class ChatTranscriptBuilder {
 			settings.get("display.showTokenUsage") && assistantUsageIsBilled(message.usage) ? message.usage : undefined;
 		this.#pendingUsageDuration = message.duration;
 		this.#pendingUsageTtft = message.ttft;
+		this.#pendingUsageTimestamp = message.timestamp;
 	}
 
 	#appendToolResult(message: Extract<AgentMessage, { role: "toolResult" }>): void {

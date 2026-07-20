@@ -532,6 +532,39 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			},
 			[Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
 		),
+		// GLM-5.2 200K — only the base wire UID `glm-5-2` is free on Devin's
+		// Coding Plan (verified via streamDevin: `glm-5-2-none` and `glm-5-2-max`
+		// both return "weekly usage quota exhausted" while `glm-5-2` streams
+		// successfully).  Route every effort to `glm-5-2` so the collapsed entry
+		// is always free; include the paid 200K variants as members so they are
+		// hidden from the model list.  The 1M-context variants stay as separate
+		// paid entries (collapsed below).
+		{
+			id: "glm-5-2",
+			name: "GLM-5.2",
+			members: ["glm-5-2", "glm-5-2-none", "glm-5-2-max"],
+			routing: {
+				[Effort.High]: "glm-5-2",
+				[Effort.XHigh]: "glm-5-2",
+			},
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.High, Effort.XHigh],
+				requiresEffort: true,
+			},
+		},
+		// GLM-5.2 1M — paid variants that consume weekly quota.  Collapse the
+		// three 1M-context variants into one entry with proper effort routing.
+		devinTierFamily(
+			"glm-5-2-1m",
+			"GLM-5.2 1M",
+			{
+				off: "glm-5-2-none-1m",
+				high: "glm-5-2-1m",
+				xhigh: "glm-5-2-max-1m",
+			},
+			[Effort.High, Effort.XHigh],
+		),
 	],
 };
 

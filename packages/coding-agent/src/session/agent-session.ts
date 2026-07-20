@@ -278,7 +278,7 @@ import {
 	estimateToolSchemaTokens,
 } from "../modes/utils/context-usage";
 import { containsWorkflow, renderWorkflowNotice } from "../modes/workflow";
-import { resolveApprovedPlan } from "../plan-mode/approved-plan";
+import { type PlanApprovalDetails, resolveApprovedPlan } from "../plan-mode/approved-plan";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import advisorSystemPrompt from "../prompts/advisor/system.md" with { type: "text" };
@@ -2797,6 +2797,24 @@ export class AgentSession {
 		this.setPlanProposalHandler(title => this.#approvePlanYoloProposal(title));
 	}
 
+	/** Validate the active plan artifact and shape an `xd://propose` result for review-mode hosts. */
+	async preparePlanForReview(title: string): Promise<AgentToolResult<PlanApprovalDetails>> {
+		const state = this.getPlanModeState();
+		if (!state?.enabled) {
+			throw new ToolError("Plan mode is not active.");
+		}
+		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
+			suppliedTitle: title,
+			statePlanFilePath: state.planFilePath,
+			readPlan: url => this.#readPlanFile(url),
+			listPlanFiles: () => this.#listPlanFiles(),
+		});
+		return {
+			content: [{ type: "text", text: "Plan ready for review." }],
+			details: { planFilePath, title: resolvedTitle, planExists: true },
+		};
+	}
+
 	/**
 	 * Plan-proposal handler while PlanYolo's plan phase is active. Auto-approves
 	 * the instant the model writes the plan slug/title to `xd://propose` — no
@@ -2817,8 +2835,8 @@ export class AgentSession {
 		const { planFilePath, title: resolvedTitle } = await resolveApprovedPlan({
 			suppliedTitle: title,
 			statePlanFilePath: state.planFilePath,
-			readPlan: url => this.#readPlanYoloFile(url),
-			listPlanFiles: () => this.#listPlanYoloFiles(),
+			readPlan: url => this.#readPlanFile(url),
+			listPlanFiles: () => this.#listPlanFiles(),
 		});
 		this.setPlanModeState(undefined);
 		const previousTools = this.#planYoloPreviousTools;
@@ -2853,7 +2871,7 @@ export class AgentSession {
 		};
 	}
 
-	async #readPlanYoloFile(planFilePath: string): Promise<string | null> {
+	async #readPlanFile(planFilePath: string): Promise<string | null> {
 		const resolvedPath = planFilePath.startsWith("local:")
 			? resolveLocalUrlToPath(normalizeLocalScheme(planFilePath), this.#localProtocolOptions())
 			: resolveToCwd(planFilePath, this.sessionManager.getCwd());
@@ -2867,7 +2885,7 @@ export class AgentSession {
 
 	/** `local://` URLs of plan files in the session-local root, newest first —
 	 *  a fallback for `resolveApprovedPlan` when the agent dropped `extra.title`. */
-	async #listPlanYoloFiles(): Promise<string[]> {
+	async #listPlanFiles(): Promise<string[]> {
 		const localRoot = resolveLocalUrlToPath("local://", this.#localProtocolOptions());
 		try {
 			const entries = await fs.promises.readdir(localRoot, { withFileTypes: true });
@@ -8248,11 +8266,54 @@ export class AgentSession {
 	 * Changes take effect before the next model call.
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
-		const mounted = this.#mountedXdevToolNames;
 		const normalized = normalizeToolNames(toolNames);
+		// Transport-write eligibility keys off the *current* active set: an ordinary
+		// selection change should not demote `write` unless it is already active.
+		await this.#applyToolPresentation(
+			normalized,
+			this.#mountedXdevToolNames,
+			this.getActiveToolNames().includes("write"),
+		);
+	}
+
+	/**
+	 * Restore an enabled tool set with its exact top-level versus `xd://` partition.
+	 *
+	 * Both inputs are required because {@link setActiveToolsByName} only receives the
+	 * enabled name list and classifies mounts from the *current* `#mountedXdevToolNames`.
+	 * Rollback/restore callers must pass the snapshotted mounted subset so names that
+	 * were top-level stay pinned (`#runtimeSelectedToolNames`) and names that were under
+	 * `xd://` remain mount-eligible, even when the live mount set has drifted.
+	 *
+	 * Names outside `mountedToolNames` are pinned top-level for this application;
+	 * names in the mounted subset remain eligible for xdev mounting. Delegates the
+	 * actual apply through `#applyActiveToolsByName` and restores the prior runtime
+	 * selection if that apply throws.
+	 */
+	async setActiveToolPresentation(toolNames: string[], mountedToolNames: string[]): Promise<void> {
+		const normalized = normalizeToolNames(toolNames);
+		// Restoration targets a snapshot, so write eligibility comes from the
+		// *target* set rather than whatever happens to be active mid-rollback.
+		await this.#applyToolPresentation(
+			normalized,
+			new Set(normalizeToolNames(mountedToolNames)),
+			normalized.includes("write"),
+		);
+	}
+
+	/**
+	 * Shared body for {@link setActiveToolsByName} and {@link setActiveToolPresentation}:
+	 * pins non-mounted names as the runtime selection (holding `write` back when it is
+	 * transport-only) and applies the set, rolling the selection back if apply throws.
+	 */
+	async #applyToolPresentation(
+		normalized: string[],
+		mounted: ReadonlySet<string>,
+		writeSelected: boolean,
+	): Promise<void> {
 		const transportWriteActive =
+			writeSelected &&
 			this.#builtInToolNames.has("write") &&
-			this.getActiveToolNames().includes("write") &&
 			this.#presentationPinnedToolNames?.has("write") !== true &&
 			this.#runtimeSelectedToolNames?.has("write") !== true &&
 			(mounted.size > 0 || this.#planModeState?.enabled === true);
@@ -9281,19 +9342,18 @@ export class AgentSession {
 				timestamp,
 			});
 		}
-		if (
-			this.#magicKeywordEnabled("workflow") &&
-			containsWorkflow(text) &&
-			this.getActiveToolNames().includes("task")
-		) {
-			keywordNotices.push({
-				role: "custom",
-				customType: "workflow-notice",
-				content: renderWorkflowNotice({ taskBatch: this.settings.get("task.batch") }),
-				display: false,
-				attribution: "user",
-				timestamp,
-			});
+		if (this.#magicKeywordEnabled("workflow") && containsWorkflow(text)) {
+			const activeToolNames = this.getActiveToolNames();
+			if (activeToolNames.includes("task") && activeToolNames.includes("eval")) {
+				keywordNotices.push({
+					role: "custom",
+					customType: "workflow-notice",
+					content: renderWorkflowNotice({ taskBatch: this.settings.get("task.batch") }),
+					display: false,
+					attribution: "user",
+					timestamp,
+				});
+			}
 		}
 		return keywordNotices;
 	}
@@ -11057,15 +11117,16 @@ export class AgentSession {
 	}
 
 	/**
-	 * Set the thinking level. `auto` enables per-turn classification; the selector
-	 * itself is never written to the session log, but resolved concrete levels are
-	 * persisted when real user turns are classified so resumed sessions keep the
-	 * last resolved effort instead of reverting to pending auto.
+	 * Set the thinking level. `auto` enables per-turn classification. Entering
+	 * auto writes its provisional level plus `configured: "auto"` immediately,
+	 * giving external readers an authoritative selection receipt before the next
+	 * user turn. Later classifications persist only changed concrete resolutions.
 	 */
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		if (level === AUTO_THINKING) {
 			const provisional = resolveProvisionalAutoLevel(this.model);
 			const wasAuto = this.#autoThinking;
+			const previousLevel = this.#thinkingLevel;
 			this.#autoThinking = true;
 			this.#autoResolvedLevel = undefined;
 			this.#thinkingLevel = provisional;
@@ -11076,7 +11137,9 @@ export class AgentSession {
 			if (persist) {
 				this.settings.set("defaultThinkingLevel", AUTO_THINKING);
 			}
-			if (!wasAuto || this.#thinkingLevel !== provisional) {
+			const isChanging = !wasAuto || previousLevel !== provisional;
+			if (isChanging) {
+				this.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
 				this.#emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
@@ -11185,7 +11248,7 @@ export class AgentSession {
 
 		const effort = resolved ?? resolveProvisionalAutoLevel(model);
 		if (effort === undefined) return;
-		const shouldPersistResolution = this.#autoResolvedLevel !== effort;
+		const shouldPersistResolution = this.#thinkingLevel !== effort;
 		this.#autoResolvedLevel = effort;
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);

@@ -86,7 +86,12 @@ FAKE_SERVER = textwrap.dedent(
             "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}] + registered_host_tools,
         }
 
-    def emit_prompt_turn(text: str, delay: float = 0.0, include_extra_events: bool = False):
+    def emit_prompt_turn(
+        text: str,
+        delay: float = 0.0,
+        include_extra_events: bool = False,
+        compact_terminal: bool = False,
+    ):
         global last_assistant_text, messages
         print(json.dumps({"type": "agent_start"}), flush=True)
         print(json.dumps({"type": "turn_start"}), flush=True)
@@ -198,9 +203,24 @@ FAKE_SERVER = textwrap.dedent(
         assistant = assistant_message(text)
         print(json.dumps({"type": "message_end", "message": assistant}), flush=True)
         print(json.dumps({"type": "turn_end", "message": assistant, "toolResults": []}), flush=True)
-        print(json.dumps({"type": "agent_end", "messages": [assistant]}), flush=True)
-        last_assistant_text = text
-        messages = [assistant]
+        if compact_terminal:
+            terminal = assistant_message("terminal")
+            print(
+                json.dumps(
+                    {
+                        "type": "agent_end",
+                        "messages": [terminal],
+                        "messageCount": 2,
+                    }
+                ),
+                flush=True,
+            )
+            last_assistant_text = "terminal"
+            messages = [assistant, terminal]
+        else:
+            print(json.dumps({"type": "agent_end", "messages": [assistant]}), flush=True)
+            last_assistant_text = text
+            messages = [assistant]
 
     def respond(request_id, command, data=None, success=True, error=None):
         payload = {"id": request_id, "type": "response", "command": command, "success": success}
@@ -384,7 +404,12 @@ FAKE_SERVER = textwrap.dedent(
             if message == "notifications":
                 print(json.dumps({"type": "extension_error", "extensionPath": "/tmp/ext.py", "event": "run", "error": "boom"}), flush=True)
                 print(json.dumps({"type": "unknown_future_event", "value": 1}), flush=True)
-            emit_prompt_turn("pong", delay=0.3 if message == "slow" else 0.0, include_extra_events=message == "all events")
+            emit_prompt_turn(
+                "pong",
+                delay=0.3 if message == "slow" else 0.0,
+                include_extra_events=message == "all events",
+                compact_terminal=message == "compacted turn",
+            )
         elif command_type == "host_tool_update":
             print(
                 json.dumps(
@@ -644,6 +669,16 @@ class RpcClientTests(unittest.TestCase):
             turn = client.prompt_and_wait("say hello", timeout=2.0)
             self.assertEqual(turn.require_assistant_text(), "pong")
             self.assertGreaterEqual(len(turn.events), 3)
+
+    def test_prompt_and_wait_reconstructs_compacted_terminal_messages(self) -> None:
+        with self.make_client() as client:
+            turn = client.prompt_and_wait("compacted turn", timeout=2.0)
+
+        self.assertEqual(
+            [message["content"][0]["text"] for message in turn.messages],
+            ["pong", "terminal"],
+        )
+        self.assertEqual(turn.require_assistant_text(), "terminal")
 
     def test_custom_tools_are_registered_and_executed_via_rpc(self) -> None:
         def echo_host(args: dict[str, str], context) -> str:

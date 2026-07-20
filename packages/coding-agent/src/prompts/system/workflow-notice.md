@@ -14,7 +14,12 @@ Worth it when one substantial subagent benefits from isolated context/tool work,
 {{#if taskBatch}}
 Call `task` once for the smallest sufficient batch of substantial workstreams. Put shared background in `context`, and put each independent workstream in `tasks[]`. Do not emulate batching with shell loops or eval helper APIs.
 
-`context` must carry the shared contract:
+- `agent(prompt, *, agent="task", model=None, label=None, schema=None, isolated=None, apply=None, merge=None, handle=False)` — run ONE subagent; returns its final text, or the validated object when `schema` (a JSON Schema dict) is given. With `schema` the subagent is forced to emit structured output that is validated for you — branch on the object, not on parsed prose. `agent` picks a discovered agent ("explore", "reviewer", …); `label` names the artifact. Shared background goes in a `local://` file referenced from each prompt, not a parameter. Subagents are told their final text IS the return value, so they hand back raw data. `agent()` blocks until the subagent finishes. Recursion follows `task.maxRecursionDepth` (default 2; a negative value disables the cap): main agent depth = 0, each `agent()` child increments depth by 1, and, when the cap is non-negative, a spawner may call `agent()` only while its current `taskDepth < cap`. Pass `isolated=True` to run the spawn in a copy-on-write worktree so parallel `agent()` calls can edit overlapping files safely — strict opt-in, mirrors the `task` tool, defaults off regardless of `task.isolation.mode`; `isolated=True` while the setting is `"none"` errors out instead of silently downgrading. With isolation, `apply=False` keeps changes in the worktree, and `merge=False` forces patch mode even when the setting is `"branch"`. Captured root patch path, branch name, nested repo patches, and apply summary reach the workflow through `handle=True` — combine it with `apply=False` (or `apply=False, schema=…`) and read `node["patch_path"]`, `node["branch_name"]`, `node["nested_patches"]`, `node["changes_applied"]`, `node["isolation_summary"]` (JS: same keys camelCased) to recover artifacts.
+- `parallel(thunks)` — run zero-arg callables concurrently through a bounded pool, preserving input order; returns once all finish. The pool is bounded by the session's `task` concurrency — don't hand-tune it; fan out as wide as the work divides. A thunk that raises propagates — wrap risky work in `try/except` inside the thunk to keep partial results. In a loop, bind each closure's value with a default arg (`lambda d=d: …`) or every thunk captures the last one.
+- `pipeline(items, *stages)` — map items through `stages` left-to-right. There is a BARRIER between stages: ALL items clear stage N before stage N+1 begins. Each stage is a one-arg callable; stage 1 gets the original item, later stages get the previous result. Same pool width as `parallel()`.
+- `completion(prompt, *, model="default", system=None, schema=None)` — oneshot, stateless model call (no tools, no history). Tiers: "smol", "default", "slow". Cheap classification/scoring inside a fan-out.
+- `log(message)` — emit a progress line above the status tree. `phase(title)` — start a phase; the status lines that follow group under it.
+- `budget` — `budget.total` (output-token ceiling, or `None` when none is set), `budget.spent()` (tokens spent this turn — main loop + eval subagents), `budget.remaining()` (`math.inf` when total is `None`), `budget.hard` (whether it's enforced). A ceiling is set by the user: `+Nk` in their message is advisory (you self-limit via `budget.remaining()`), `+Nk!` (or Goal Mode) is hard — `agent()` refuses to spawn once spent reaches it. Gate loops on `budget.total` first, since it's `None` when the user set no budget.
 
     # Goal
     What the batch accomplishes.
@@ -49,24 +54,7 @@ Each assignment must be complete and substantial:
 <structure>
 Decompose into the smallest number of large, complete workstreams, then {{#if taskBatch}}batch the independent workstreams{{else}}issue one task call per independent workstream in the same turn{{/if}}:
 
-{{#if taskBatch}}
-    task(
-      context: "# Goal\nReview the auth diff…\n# Constraints\nRead-only…\n# Contract\nReturn findings as severity/file/line/fix…",
-      tasks: [
-        { id: "AuthOwner", role: "Auth Storage Reviewer", assignment: "# Target\npackages/ai/src/auth-storage.ts\n# Change\nTrace credential selection…\n# Acceptance\nReturn confirmed findings only…" },
-        { id: "PromptOwner", role: "Prompt Contract Reviewer", assignment: "# Target\npackages/coding-agent/src/prompts/**\n# Change\nCheck active-tool guidance…\n# Acceptance\nReturn mismatches and exact prompt lines…" },
-      ]
-    )
-{{else}}
-    task(
-      role: "Auth Storage Reviewer",
-      assignment: "# Target\npackages/ai/src/auth-storage.ts\n# Change\nReview the auth diff. Shared contract: read-only; return findings as severity/file/line/fix.\n# Acceptance\nReturn confirmed findings only…"
-    )
-    task(
-      role: "Prompt Contract Reviewer",
-      assignment: "# Target\npackages/coding-agent/src/prompts/**\n# Change\nCheck active-tool guidance. Shared contract: read-only; return mismatches and exact prompt lines.\n# Acceptance\nReturn confirmed findings only…"
-    )
-{{/if}}
+**Python (`eval`, Python backend):**
 
 {{#if taskBatch}}Prefer one task. Multiple truly independent, substantial workstreams SHOULD use the smallest sufficient batch. If assignments overlap, merge them or name the overlap and coordinate through IRC.{{else}}Prefer one task. Dispatch multiple calls in the same turn only for truly independent, substantial workstreams. If assignments overlap, merge them or name the overlap and coordinate through IRC.{{/if}}
 </structure>

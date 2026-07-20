@@ -1967,7 +1967,7 @@ export class TUI extends Container {
 		if (
 			this.#renderRequested ||
 			this.#postFullPaintSettleTimer !== undefined ||
-			this.#postFullPaintSettleUntilMs > 0
+			this.#postFullPaintSettleDelay() > 0
 		) {
 			this.requestComponentRender(component);
 			return;
@@ -2106,6 +2106,15 @@ export class TUI extends Container {
 		this.#commit(this.#composedFrame, previousWindow, width, height, cursorControl);
 	}
 
+	#postFullPaintSettleDelay(): number {
+		const until = this.#postFullPaintSettleUntilMs;
+		if (until <= 0) return 0;
+		const remaining = until - this.#renderScheduler.now();
+		if (remaining > 0) return remaining;
+		this.#postFullPaintSettleUntilMs = 0;
+		return 0;
+	}
+
 	/** Ordinary (non-forced) scheduling shared by full and component-scoped requests. */
 	#requestOrdinaryRender(): void {
 		// Coalesce non-forced renders inside the post-full-paint ConPTY settle
@@ -2114,20 +2123,17 @@ export class TUI extends Container {
 		// catching up with the previous big paint, and each follow-up viewport
 		// repaint nudges Windows Terminal's viewport tracker further off the
 		// last row (see #2095).
-		if (this.#postFullPaintSettleUntilMs > 0) {
-			const now = this.#renderScheduler.now();
-			if (now < this.#postFullPaintSettleUntilMs) {
-				if (this.#postFullPaintSettleTimer === undefined) {
-					this.#postFullPaintSettleTimer = this.#renderScheduler.scheduleRender(() => {
-						this.#postFullPaintSettleTimer = undefined;
-						this.#postFullPaintSettleUntilMs = 0;
-						if (this.#stopped) return;
-						this.#requestOrdinaryRender();
-					}, this.#postFullPaintSettleUntilMs - now);
-				}
-				return;
+		const settleDelayMs = this.#postFullPaintSettleDelay();
+		if (settleDelayMs > 0) {
+			if (this.#postFullPaintSettleTimer === undefined) {
+				this.#postFullPaintSettleTimer = this.#renderScheduler.scheduleRender(() => {
+					this.#postFullPaintSettleTimer = undefined;
+					this.#postFullPaintSettleUntilMs = 0;
+					if (this.#stopped) return;
+					this.#requestOrdinaryRender();
+				}, settleDelayMs);
 			}
-			this.#postFullPaintSettleUntilMs = 0;
+			return;
 		}
 		if (this.#renderRequested) return;
 		this.#renderRequested = true;

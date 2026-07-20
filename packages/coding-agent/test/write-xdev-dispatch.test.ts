@@ -206,3 +206,22 @@ describe("read and write route xd:// device URLs", () => {
 		}
 	});
 });
+
+describe("web_search stays top-level under xdev", () => {
+	it("keeps web_search a direct tool and off the xd:// registry with default config", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-websearch-"));
+		try {
+			const session = xdevSession(tempDir);
+			// Default config: tools.xdev is on.
+			expect(session.settings.get("tools.xdev")).toBe(true);
+			const tools = await createTools(session);
+			// Regression for #5973: models call web_search directly, so it must
+			// remain a top-level function and never mount behind the xd:// device.
+			expect(tools.some(entry => entry.name === "web_search")).toBe(true);
+			const mounted = session.xdevRegistry ? [...session.xdevRegistry.list()].map(t => t.name) : [];
+			expect(mounted).not.toContain("web_search");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+});

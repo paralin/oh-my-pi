@@ -1180,7 +1180,7 @@ describe("YieldTool", () => {
 	it("rejects submissions without a result object", async () => {
 		const tool = new YieldTool(createSession());
 		await expect(tool.execute("call-3", {} as never)).rejects.toThrow(
-			"result must be an object containing either data or error",
+			'Submit success as {"result":{"data":<your output>}} or failure as {"result":{"error":"message"}}.',
 		);
 	});
 	it("sets lenientArgValidation so agent-loop bypasses validation errors", () => {

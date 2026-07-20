@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
+import type { Model } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
@@ -107,6 +109,89 @@ describe("setup wizard scene selection", () => {
 			{ isTTY: true },
 		);
 		expect(selected.map(scene => scene.id)).toEqual(["allowed"]);
+	});
+});
+
+describe("setup wizard model selection", () => {
+	const CUSTOM_MODEL: Model = buildModel({
+		id: "minimax-m3",
+		name: "MiniMax M3",
+		api: "openai-completions",
+		provider: "spark",
+		baseUrl: "http://127.0.0.1:8000/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 100_000,
+		maxTokens: 32_000,
+	});
+
+	async function pickModelDuringSetup(settings: Settings): Promise<string> {
+		await initTheme(false, "unicode", false, "titanium", "dark");
+		let available: Model[] = [];
+		const finished = Promise.withResolvers<string>();
+		const setModel = mock(
+			async (
+				selected: Model,
+				role: string,
+				options?: { selector?: string; persist?: boolean },
+			): Promise<{ switched: boolean }> => {
+				if (options?.persist) {
+					settings.setModelRole(role, options.selector ?? `${selected.provider}/${selected.id}`);
+				}
+				return { switched: true };
+			},
+		);
+		const host = {
+			ctx: {
+				settings,
+				session: {
+					model: undefined,
+					modelRegistry: {
+						getAvailable: () => available,
+						getAll: () => available,
+						refresh: async (strategy: string) => {
+							if (strategy === "online-if-uncached") available = [CUSTOM_MODEL];
+						},
+					},
+					setModel,
+				},
+				ui: { terminal: { rows: 30 } },
+			},
+			requestRender: () => {},
+			finish: (next: string) => finished.resolve(next),
+			setFocus: () => {},
+			restoreFocus: () => {},
+		} as unknown as SetupSceneHost;
+		const scene = ALL_SCENES.find(candidate => candidate.id === "model");
+		expect(scene).toBeDefined();
+
+		const controller = scene!.mount(host);
+		expect(controller.render?.(120).join("\n")).not.toContain("minimax-m3");
+		await controller.onMount?.();
+		expect(controller.render?.(120).join("\n")).toContain("minimax-m3");
+		controller.handleInput?.("\r");
+		return finished.promise;
+	}
+
+	it("discovers and saves an uncached custom model as the global default", async () => {
+		const settings = Settings.isolated();
+
+		const result = await pickModelDuringSetup(settings);
+
+		expect(result).toBe("done");
+		expect(settings.getGlobalModelRole("default")).toBe("spark/minimax-m3");
+		expect(settings.getProjectModelRole("default")).toBeUndefined();
+	});
+
+	it("saves to the project layer under project role storage", async () => {
+		const settings = Settings.isolated({ modelRoleStorage: "project" });
+
+		const result = await pickModelDuringSetup(settings);
+
+		expect(result).toBe("done");
+		expect(settings.getProjectModelRole("default")).toBe("spark/minimax-m3");
+		expect(settings.getGlobalModelRole("default")).toBeUndefined();
 	});
 });
 

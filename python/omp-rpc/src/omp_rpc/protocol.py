@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import base64
 import mimetypes
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final, Literal, NotRequired, TypedDict, TypeAlias, cast
 
@@ -905,6 +905,7 @@ class AgentStartEvent:
 class AgentEndEvent:
     messages: tuple[AgentMessage, ...]
     type: Literal["agent_end"] = "agent_end"
+    message_count: int | None = field(default=None, kw_only=True)
 
 
 @dataclass(slots=True, frozen=True)
@@ -1500,7 +1501,8 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
         return AgentEndEvent(
             messages=parse_agent_messages(
                 cast(JsonValue | None, payload.get("messages"))
-            )
+            ),
+            message_count=_optional_int(payload, "messageCount"),
         )
     if event_type == "turn_start":
         return TurnStartEvent()

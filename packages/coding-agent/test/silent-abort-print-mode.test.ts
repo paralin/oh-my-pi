@@ -66,6 +66,8 @@ function createMockSession(
 		sessionManager: {
 			getHeader: () => undefined,
 			getCwd: () => options.cwd ?? process.cwd(),
+			buildSessionContext: () => ({ messages: [] }),
+			getEntries: () => [],
 		},
 		settings: Settings.isolated({
 			"compaction.maintenanceTrace": options.maintenanceTrace ?? "assistant",

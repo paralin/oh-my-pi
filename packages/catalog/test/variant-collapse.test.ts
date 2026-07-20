@@ -791,3 +791,75 @@ describe("antigravity discovery collapsing", () => {
 		expect(models?.[0]?.baseUrl).toBe(ANTIGRAVITY_PRIMARY_ENDPOINT);
 	});
 });
+
+describe("Devin GLM-5.2 collapse", () => {
+	function devinMemberSpec(id: string, overrides: Partial<ModelSpec<"devin-agent">> = {}): ModelSpec<"devin-agent"> {
+		return {
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		};
+	}
+
+	it("collapses the three 200K GLM-5.2 variants into one logical entry routing all efforts to the free glm-5-2 wire UID", () => {
+		const out = collapseEffortVariants(
+			[
+				devinMemberSpec("glm-5-2"),
+				devinMemberSpec("glm-5-2-max"),
+				devinMemberSpec("glm-5-2-none", { reasoning: false }),
+			],
+			DEVIN_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const spec = out[0];
+		expect(spec?.id).toBe("glm-5-2");
+		expect(spec?.thinking?.effortRouting).toEqual({
+			high: "glm-5-2",
+			xhigh: "glm-5-2",
+		});
+	});
+
+	it("routes every effort to glm-5-2 (never to the quota-gated glm-5-2-max or glm-5-2-none)", () => {
+		const out = collapseEffortVariants(
+			[devinMemberSpec("glm-5-2"), devinMemberSpec("glm-5-2-max")],
+			DEVIN_VARIANT_COLLAPSE_TABLE,
+		);
+
+		const spec = out[0];
+		const routing = spec?.thinking?.effortRouting ?? {};
+		for (const wire of Object.values(routing)) {
+			expect(wire).toBe("glm-5-2");
+		}
+	});
+
+	it("collapses the three 1M GLM-5.2 variants into one paid entry with proper effort routing", () => {
+		const out = collapseEffortVariants(
+			[
+				devinMemberSpec("glm-5-2-1m", { contextWindow: 1_000_000 }),
+				devinMemberSpec("glm-5-2-max-1m", { contextWindow: 1_000_000 }),
+				devinMemberSpec("glm-5-2-none-1m", { contextWindow: 1_000_000, reasoning: false }),
+			],
+			DEVIN_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const spec = out[0];
+		expect(spec?.id).toBe("glm-5-2-1m");
+		expect(spec?.contextWindow).toBe(1_000_000);
+		expect(spec?.thinking?.effortRouting).toEqual({
+			off: "glm-5-2-none-1m",
+			high: "glm-5-2-1m",
+			xhigh: "glm-5-2-max-1m",
+		});
+	});
+});

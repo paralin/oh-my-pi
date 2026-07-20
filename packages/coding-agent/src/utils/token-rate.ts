@@ -1,3 +1,9 @@
+/**
+ * Token-throughput calculator shared by the status line (main session tok/s
+ * badge) and the vibe worker aggregation ({@link aggregateVibeWorkerTokensPerSecond}).
+ * Lives in `utils/` so neither the render layer nor the vibe runtime has to
+ * depend on the other for a pure arithmetic helper.
+ */
 const MIN_DURATION_MS = 100;
 
 type AssistantUsage = {

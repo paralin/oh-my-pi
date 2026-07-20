@@ -1065,9 +1065,12 @@ class RpcClient:
 
     def _build_prompt_turn(self, events: tuple[RpcAgentEvent, ...]) -> PromptTurn:
         final_messages: tuple[AgentMessage, ...] = ()
-        for event in reversed(events):
+        for event_index in range(len(events) - 1, -1, -1):
+            event = events[event_index]
             if isinstance(event, AgentEndEvent):
-                final_messages = event.messages
+                final_messages = self._complete_agent_end_messages(
+                    events[:event_index], event
+                )
                 break
 
         assistant_message: AssistantMessage | None = None
@@ -1092,6 +1095,36 @@ class RpcClient:
             if assistant_message is not None
             else None,
         )
+
+    @staticmethod
+    def _complete_agent_end_messages(
+        events: tuple[RpcAgentEvent, ...], terminal: AgentEndEvent
+    ) -> tuple[AgentMessage, ...]:
+        if (
+            terminal.message_count is None
+            or terminal.message_count <= len(terminal.messages)
+        ):
+            return terminal.messages
+
+        run_start = 0
+        for event_index in range(len(events) - 1, -1, -1):
+            if isinstance(events[event_index], AgentStartEvent):
+                run_start = event_index + 1
+                break
+
+        streamed_messages = tuple(
+            event.message
+            for event in events[run_start:]
+            if isinstance(event, MessageEndEvent)
+        )
+        streamed_prefix_count = terminal.message_count - len(terminal.messages)
+        if streamed_prefix_count > len(streamed_messages):
+            raise RpcError(
+                "Compacted agent_end references "
+                f"{streamed_prefix_count} streamed messages, but only "
+                f"{len(streamed_messages)} were retained"
+            )
+        return streamed_messages[:streamed_prefix_count] + terminal.messages
 
     def _wait_for_agent_end(
         self,

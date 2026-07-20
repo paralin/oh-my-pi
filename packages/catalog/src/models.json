@@ -16868,7 +16868,7 @@
 		},
 		"glm-5-2": {
 			"id": "glm-5-2",
-			"name": "GLM-5.2 High",
+			"name": "GLM-5.2",
 			"api": "devin-agent",
 			"provider": "devin",
 			"baseUrl": "https://server.codeium.com",
@@ -16884,11 +16884,23 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
-			"maxTokens": 64000
+			"maxTokens": 64000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"xhigh"
+				],
+				"requiresEffort": true,
+				"effortRouting": {
+					"high": "glm-5-2",
+					"xhigh": "glm-5-2"
+				}
+			}
 		},
 		"glm-5-2-1m": {
 			"id": "glm-5-2-1m",
-			"name": "GLM-5.2 High 1M",
+			"name": "GLM-5.2 1M",
 			"api": "devin-agent",
 			"provider": "devin",
 			"baseUrl": "https://server.codeium.com",
@@ -16904,87 +16916,20 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
-			"maxTokens": 64000
-		},
-		"glm-5-2-max": {
-			"id": "glm-5-2-max",
-			"name": "GLM-5.2 Max",
-			"api": "devin-agent",
-			"provider": "devin",
-			"baseUrl": "https://server.codeium.com",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"supportsTools": true,
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+			"maxTokens": 64000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"xhigh"
+				],
+				"effortRouting": {
+					"off": "glm-5-2-none-1m",
+					"high": "glm-5-2-1m",
+					"xhigh": "glm-5-2-max-1m"
+				}
 			},
-			"contextWindow": 200000,
-			"maxTokens": 64000
-		},
-		"glm-5-2-max-1m": {
-			"id": "glm-5-2-max-1m",
-			"name": "GLM-5.2 Max 1M",
-			"api": "devin-agent",
-			"provider": "devin",
-			"baseUrl": "https://server.codeium.com",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"supportsTools": true,
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1000000,
-			"maxTokens": 64000
-		},
-		"glm-5-2-none": {
-			"id": "glm-5-2-none",
-			"name": "GLM-5.2 No Thinking",
-			"api": "devin-agent",
-			"provider": "devin",
-			"baseUrl": "https://server.codeium.com",
-			"reasoning": false,
-			"input": [
-				"text"
-			],
-			"supportsTools": true,
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 200000,
-			"maxTokens": 64000
-		},
-		"glm-5-2-none-1m": {
-			"id": "glm-5-2-none-1m",
-			"name": "GLM-5.2 No Thinking 1M",
-			"api": "devin-agent",
-			"provider": "devin",
-			"baseUrl": "https://server.codeium.com",
-			"reasoning": false,
-			"input": [
-				"text"
-			],
-			"supportsTools": true,
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1000000,
-			"maxTokens": 64000
+			"requestModelId": "glm-5-2-none-1m"
 		},
 		"gpt-5-2": {
 			"id": "gpt-5-2",
@@ -17798,7 +17743,7 @@
 		},
 		"swe-1-7": {
 			"id": "swe-1-7",
-			"name": "SWE-1.7",
+			"name": "SWE-1.7 Max",
 			"api": "devin-agent",
 			"provider": "devin",
 			"baseUrl": "https://server.codeium.com",

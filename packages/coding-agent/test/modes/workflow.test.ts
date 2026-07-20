@@ -73,7 +73,7 @@ describe("workflow notice", () => {
 		expect(WORKFLOW_NOTICE).toContain("tasks[]");
 	});
 
-	it("renders flat task-call guidance when task.batch is disabled", () => {
+	it("renders the same eval notice when task.batch is disabled", () => {
 		const notice = renderWorkflowNotice({ taskBatch: false });
 		expect(notice).toContain("once per substantial workstream");
 		expect(notice).toContain("Do not pass `context` or `tasks[]`");
