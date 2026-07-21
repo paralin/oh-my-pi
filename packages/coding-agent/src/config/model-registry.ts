@@ -64,7 +64,11 @@ const BUILT_IN_DISCOVERY_NON_AUTHORITATIVE_RETRY_MS = 5 * 60 * 1000;
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
-import { getBundledModelReferenceIndex, resolveModelReference } from "@oh-my-pi/pi-catalog/identity";
+import {
+	getBundledModelReferenceIndex,
+	inheritReferenceThinking,
+	resolveModelReference,
+} from "@oh-my-pi/pi-catalog/identity";
 import { isBunTestRuntime, isRecord, logger, wrapFetchForExtraCa } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
@@ -667,7 +671,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		provider: resolvedModel.provider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
-		thinking: resolvedModel.thinking ?? reference?.thinking,
+		thinking: inheritReferenceThinking(resolvedModel.thinking, reference, resolvedModel.provider),
 		input: input as ("text" | "image")[],
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		cost,
