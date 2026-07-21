@@ -325,6 +325,7 @@ export class CronManager {
 					.sort((a, b) => a.nextFireAt - b.nextFireAt)
 					.find(candidate => candidate.nextFireAt <= now);
 				if (!job) break;
+				const previousNextFireAt = job.nextFireAt;
 				if (job.recurring) {
 					const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now - MINUTE_MS)));
 					if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) jobs.delete(job.id);
@@ -335,6 +336,9 @@ export class CronManager {
 				await this.#persist(sessionFile, jobs);
 				this.#refreshSession();
 				if (this.#sessionFile !== sessionFile || this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
+					if (job.recurring) job.nextFireAt = previousNextFireAt;
+					jobs.set(job.id, job);
+					await this.#persist(sessionFile, jobs);
 					break;
 				}
 				await this.#enqueuePrompt(job.prompt);
