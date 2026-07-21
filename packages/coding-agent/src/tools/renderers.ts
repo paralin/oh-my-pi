@@ -16,6 +16,7 @@ import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
+import { cronCreateToolRenderer, cronDeleteToolRenderer, cronListToolRenderer } from "./cron";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
 import { githubToolRenderer } from "./gh-renderer";
@@ -83,6 +84,9 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	bash: bashToolRenderer as ToolRenderer,
 	browser: browserToolRenderer as ToolRenderer,
 	debug: debugToolRenderer as ToolRenderer,
+	cron_create: cronCreateToolRenderer as ToolRenderer,
+	cron_list: cronListToolRenderer as ToolRenderer,
+	cron_delete: cronDeleteToolRenderer as ToolRenderer,
 	eval: evalToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
 	apply_patch: editToolRenderer as ToolRenderer,

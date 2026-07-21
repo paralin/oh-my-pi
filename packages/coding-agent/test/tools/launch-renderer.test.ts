@@ -142,6 +142,37 @@ describe("hub launch rendering", () => {
 		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);
 	});
 
+	it("routes prune success and failure through the launch renderer", async () => {
+		const uiTheme = await theme();
+		const success = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "Pruned 47 completed process records." }],
+					details: { op: "prune", removedCount: 47 } satisfies LaunchToolDetails,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "prune" },
+			),
+		);
+		const failure = lines(
+			hubToolRenderer.renderResult(
+				{
+					content: [{ type: "text", text: "Daemon prune request timed out" }],
+					isError: true,
+				},
+				{ expanded: false, isPartial: false },
+				uiTheme,
+				{ op: "prune" },
+			),
+		);
+		expect(success[0]).toContain("Launch prune");
+		expect(success[0]).toContain("47 removed");
+		expect(failure[0]).toContain("Launch prune");
+		expect(failure.some(line => line.includes("Daemon prune request timed out"))).toBe(true);
+		expect(failure.join("\n")).not.toContain("Hub");
+	});
+
 	it("marks a failed start with the daemon's exit reason even though the result is not an error", async () => {
 		const uiTheme = await theme();
 		const rendered = lines(

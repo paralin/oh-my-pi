@@ -146,6 +146,83 @@ export const miscFixtures: Record<string, GalleryFixture> = {
 		},
 	},
 
+	cron_create: {
+		label: "Cron Create",
+		streamingArgs: { expression: "15 9 * * 1-5" },
+		args: {
+			expression: "15 9 * * 1-5",
+			prompt: "Review the launch queue and report anything blocked.",
+			recurring: true,
+			durable: false,
+		},
+		result: {
+			content: [{ type: "text", text: "Scheduled cron-7f3a." }],
+			details: {
+				id: "cron-7f3a",
+				expression: "15 9 * * 1-5",
+				prompt: "Review the launch queue and report anything blocked.",
+				recurring: true,
+				durable: false,
+				createdAt: Date.now(),
+				nextFireAt: Date.now() + 60 * 60_000,
+				expiresAt: Date.now() + 7 * 24 * 60 * 60_000,
+			},
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Cron expression must have exactly 5 fields." }],
+			isError: true,
+		},
+	},
+
+	cron_list: {
+		label: "Cron List",
+		args: {},
+		result: {
+			content: [{ type: "text", text: "2 scheduled jobs." }],
+			details: {
+				jobs: [
+					{
+						id: "cron-7f3a",
+						expression: "15 9 * * 1-5",
+						prompt: "Review the launch queue.",
+						recurring: true,
+						durable: false,
+						createdAt: Date.now(),
+						nextFireAt: Date.now() + 60 * 60_000,
+						expiresAt: Date.now() + 7 * 24 * 60 * 60_000,
+					},
+					{
+						id: "cron-a21c",
+						expression: "45 16 21 7 *",
+						prompt: "Publish the release reminder.",
+						recurring: false,
+						durable: true,
+						createdAt: Date.now(),
+						nextFireAt: Date.now() + 4 * 60 * 60_000,
+					},
+				],
+			},
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Cron scheduling is not available in this session." }],
+			isError: true,
+		},
+	},
+
+	cron_delete: {
+		label: "Cron Delete",
+		streamingArgs: { id: "cron-" },
+		args: { id: "cron-7f3a" },
+		result: {
+			content: [{ type: "text", text: "Deleted cron-7f3a." }],
+			details: { deleted: true },
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Cron storage is unavailable." }],
+			isError: true,
+		},
+	},
+
 	// Built-in tool with no dedicated renderer — exercises the generic fallback
 	// (`#formatToolExecution`) path so its padded, state-tinted block is QA'd.
 	report_tool_issue: {

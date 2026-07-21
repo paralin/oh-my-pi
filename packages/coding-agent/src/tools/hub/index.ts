@@ -503,6 +503,8 @@ const LAUNCH_OPS: Record<string, true> = {
 	stop: true,
 	restart: true,
 	describe: true,
+	remove: true,
+	prune: true,
 };
 
 /** Launch-style call: an explicit process op, or `send`/`wait` targeting a process `name`. */
@@ -527,15 +529,16 @@ function isJobStyleArgs(args: HubRenderArgs | undefined): boolean {
 
 /** Launch details carry process/broker state; coordination details never define these keys. */
 function isLaunchDetails(details: HubDetails): details is LaunchToolDetails {
-	// `state`/`cursor` cover logs results, which may carry neither a daemon
-	// snapshot nor terminal rows; coordination details never define these keys.
+	// `state`/`cursor` cover logs results and `removedCount` covers prune; these
+	// may carry neither a daemon snapshot nor terminal rows.
 	return (
 		"daemon" in details ||
 		"daemons" in details ||
 		"terminalRows" in details ||
 		"spec" in details ||
 		"state" in details ||
-		"cursor" in details
+		"cursor" in details ||
+		"removedCount" in details
 	);
 }
 

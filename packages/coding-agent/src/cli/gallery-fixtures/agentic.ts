@@ -1,7 +1,7 @@
 // Gallery fixtures for the agentic orchestration tools (task, hub, goal).
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { TaskToolDetails } from "../../task/types";
-import type { HubDetails } from "../../tools/hub";
+import type { HubDetails, LaunchToolDetails } from "../../tools/hub";
 import type { GalleryFixture } from "./types";
 
 /** Message/activity timestamps are offsets from load time so gallery ages stay plausible. */
@@ -319,6 +319,20 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 			isError: true,
 			content: [{ type: "text", text: "IRC list failed: agent hub is unavailable." }],
 			details: { op: "list" } satisfies HubDetails,
+		},
+	},
+
+	hub_prune: {
+		label: "Hub prune",
+		renderer: "hub",
+		args: { op: "prune" },
+		result: {
+			content: [{ type: "text", text: "Pruned 47 completed process records." }],
+			details: { op: "prune", removedCount: 47 } satisfies LaunchToolDetails,
+		},
+		errorResult: {
+			content: [{ type: "text", text: "Daemon prune request timed out" }],
+			isError: true,
 		},
 	},
 
