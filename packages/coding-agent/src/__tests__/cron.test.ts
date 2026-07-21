@@ -68,6 +68,32 @@ describe("cron scheduling", () => {
 		manager.dispose();
 	});
 
+	it("enqueues an overdue recurring job once at an idle boundary", async () => {
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			isIdle: clock.isIdle,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		const job = await manager.create({ expression: "* * * * *", prompt: "pulse" });
+		clock.setNow(new Date(2026, 0, 1, 12, 0).getTime());
+
+		manager.notifyIdle();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+
+		expect(prompts).toEqual(["pulse"]);
+		expect(manager.list()[0]?.id).toBe(job.id);
+		expect(manager.list()[0]?.nextFireAt).toBe(new Date(2026, 0, 1, 12, 1).getTime());
+		manager.dispose();
+	});
+
 	it("round-trips durable jobs and exposes missed one-shots for catch-up", async () => {
 		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-cron-"));
 		try {

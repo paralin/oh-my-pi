@@ -4,7 +4,6 @@ import path from "node:path";
 
 import { sessionSteeringDirForSessionFile } from "./session/session-steering";
 
-const MINUTE_MS = 60_000;
 const MAX_SEARCH_MINUTES = 366 * 24 * 60;
 const RECURRING_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 
@@ -327,7 +326,7 @@ export class CronManager {
 				if (!job) break;
 				const previousNextFireAt = job.nextFireAt;
 				if (job.recurring) {
-					const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now - MINUTE_MS)));
+					const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now)));
 					if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) jobs.delete(job.id);
 					else job.nextFireAt = next.getTime();
 				} else {
