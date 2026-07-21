@@ -24,7 +24,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `op` | `"send" \| "wait" \| "inbox" \| "list" \| "jobs" \| "cancel" \| "start" \| "ps" \| "logs" \| "stop" \| "restart" \| "describe"` | Yes | Operation. |
+| `op` | `"send" \| "wait" \| "inbox" \| "list" \| "jobs" \| "cancel" \| "start" \| "ps" \| "logs" \| "stop" \| "restart" \| "describe" \| "remove" \| "prune"` | Yes | Operation. |
 | `to` | `string` | `send` (peer) | Recipient agent id, or `"all"` for broadcast. Mutually exclusive with `name`. |
 | `message` | `string` | `send` (peer) | Message body. Empty-after-trim is rejected. |
 | `replyTo` | `string` | No | `send`: message id being answered. |
@@ -35,6 +35,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `peek` | `boolean` | No | `inbox`: list messages without consuming them. |
 | `name` | `string` | process ops | Stable project-scoped launch name (1-48 chars). On `send`/`wait` it routes the op to the process broker. |
 | `application`, `args`, `env`, `cwd`, `pty`, `ready`, `restart`, `persist`, `detached` | — | `start` | Launch spec, unchanged from the former `launch` tool. |
+| `all` | `boolean` | No | `ps`: include retained completed processes; default `false`. |
 | `lines`, `head`, `grep`, `follow`, `cursor` | — | `logs` | Log window controls, unchanged. |
 | `for`, `pattern` | — | `wait` (name) | Process lifecycle condition / output regex. |
 | `text`, `enter`, `keys`, `signal` | — | `send` (name) | Process stdin / terminal keys / signal. |
@@ -43,7 +44,7 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 ## Op families and dispatch
 - **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Exact behavior of the former `irc` tool: fire-and-forget sends with delivery receipts (`injected`/`woken`/`revived`/`failed`), broadcast to live peers, parked-agent revival on direct send, `await: true` round-trip sugar, busy-recipient auto-reply when async execution is disabled.
 - **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Exact behavior of the former `job` tool: owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the `async.pollWaitDuration` fixed/smart wait window. `jobs` is the former `list: true` snapshot (plus the roster of running subagents with no job entry).
-- **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus `send`/`wait` when they carry `name`. Exact behavior of the former `launch` tool; `ps` is the broker's `list`. See the launch sections below.
+- **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, `remove`, and `prune`, plus `send`/`wait` when they carry `name`. `ps` is the broker's `list`. See the launch sections below.
 
 `send` with both `to` and `name` is rejected as ambiguous. `wait` routes by target: `name` → process wait; otherwise the unified coordination wait.
 
@@ -75,7 +76,7 @@ Smart-ladder bookkeeping (`recordPollWaitEnd`) runs only when the smart window w
 - Process ops require `launch.enabled`; otherwise `Process supervision is disabled (launch.enabled=false).`
 
 ## Approval
-`hubApproval` (per-call): `start`, `stop`, `restart`, and `send`-to-process are `exec`; everything else — messaging, job control, `ps`/`logs`/`describe`/`wait` — is `read`.
+`hubApproval` (per-call): `start`, `stop`, `restart`, `remove`, `prune`, and `send`-to-process are `exec`; everything else — messaging, job control, `ps`/`logs`/`describe`/`wait` — is `read`.
 
 ## Starting and readiness (processes)
 `application` and `args` are separate fields, so callers do not need shell quoting:
@@ -94,6 +95,10 @@ Defaults: `cwd` = session directory, `args: []`, `env: {}`, `pty: true`, `restar
 
 Names are stable and unique within one project directory. A live name must be stopped or restarted; starting a completed name creates a new launch and rotates its prior output log.
 
+`ps` returns active processes by default and reports how many retained completed
+records are hidden. `all: true` includes retained completed records, with active
+records first and completed records newest-first.
+
 ## Logs, input, signals (processes)
 ```json
 {"op":"logs","name":"web","grep":"error|warn","lines":50}
@@ -103,15 +108,25 @@ Names are stable and unique within one project directory. A live name must be st
 ```
 Each logs result returns a byte cursor; `follow: true` waits until output advances beyond it, the process exits, or the timeout elapses. The broker keeps a 25 MiB current log plus one rotated log. Keys: `ENTER`, `TAB`, `ESCAPE`, `CTRL_C`, `CTRL_D`, arrows. Signals: `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT`, `SIGKILL`. Input is one shared stream across all project clients.
 
+`remove` deletes one completed record and its current and rotated logs. Active,
+starting, stopping, and restarting records must be stopped first. `prune`
+deletes every completed record. Both operations affect all OMP clients in the
+project.
+
 ## Cross-instance lifecycle (processes)
 Unchanged from the former `launch` tool: the first process op starts a detached broker over a private socket under `~/.omp/run/daemons/<project-hash>/`; every omp instance in the project shares names, logs, and state. After the last omp process exits, the broker stops non-persistent processes and exits. `persist: true` opts out of last-client teardown; restart policies (`no`/`on-failure`/`always`) use bounded exponential backoff up to 30 s.
+
+Completed records are retained for diagnostics, then reconciled by the broker.
+The broker keeps no more than 50 completed records and no completed record older
+than seven days. Reconciliation runs after terminal transitions, during broker
+recovery, and before list results; active records are never eligible.
 
 ## Limits & Caps
 - Mailboxes: 100 messages per agent (`MAILBOX_CAP`); oldest dropped beyond the cap.
 - `irc.timeoutMs` default `120_000`; `0` disables; negative/non-finite fall back to the default.
 - Poll window: `async.pollWaitDuration` — `5s`/`10s`/`30s`/`1m`/`5m`/`smart` (default); smart ladder `[5s..5m]` climbing per back-to-back wait, resetting after 60 s without waiting.
 - Job retention 5 min; manager max-running fallback 15; `async.maxJobs` clamped 1..100.
-- Launch names 1-48 chars; `ready.port` 1..65535; `logs`/`wait`/`stop` timeouts capped at one hour.
+- Launch names 1-48 chars; retained completed processes: at most 50 and at most 7 days old; `ready.port` 1..65535; `logs`/`wait`/`stop` timeouts capped at one hour.
 
 ## Errors
 - Text error results (`isError: true`), not throws: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, async disabled, launch disabled.

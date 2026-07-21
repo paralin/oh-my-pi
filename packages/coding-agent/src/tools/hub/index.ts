@@ -72,7 +72,7 @@ export * from "./types";
 
 const hubSchema = type({
 	op: type(
-		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
+		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe' | 'remove' | 'prune'",
 	).describe("hub operation"),
 	"to?": type("string").describe('send: recipient agent id or "all"'),
 	"message?": type("string").describe("send: message body"),
@@ -100,6 +100,7 @@ const hubSchema = type({
 	"detached?": type("boolean").describe(
 		"start: survive every omp and broker exit; implies persist and disables PTY input",
 	),
+	"all?": type("boolean").describe("ps: include retained completed processes; default false"),
 	"lines?": type("number > 0").describe("logs: output lines; default 100, max 1000"),
 	"head?": type("boolean").describe("logs: read from the beginning instead of the tail"),
 	"grep?": type("string > 0").describe("logs: regex filter"),
@@ -149,7 +150,7 @@ function hubApproval(params: unknown): ToolApprovalDecision {
 			return typeof name === "string" && name.length > 0 && !to ? "exec" : "read";
 		}
 		default:
-			// start / stop / restart and anything unrecognized.
+			// start / stop / restart / remove / prune and anything unrecognized.
 			return "exec";
 	}
 }
@@ -305,6 +306,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "stop":
 			case "restart":
 			case "describe":
+			case "remove":
+			case "prune":
 				return this.#launch(params, params.op === "ps" ? "list" : params.op, signal);
 			default:
 				return hubErrorResult("Unknown hub op.", { op: params.op });

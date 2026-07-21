@@ -74,7 +74,7 @@ export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKIL
 export type DaemonOperation =
 	| { op: "ping" }
 	| { op: "start"; spec: DaemonSpec; owner?: string }
-	| { op: "list" }
+	| { op: "list"; all?: boolean }
 	| {
 			op: "logs";
 			name: string;
@@ -90,13 +90,15 @@ export type DaemonOperation =
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
 	| { op: "describe"; name: string }
+	| { op: "remove"; name: string }
+	| { op: "prune" }
 	| { op: "shutdown" };
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
 	| { op: "ping"; projectDir: string }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
-	| { op: "list"; daemons: DaemonSnapshot[] }
+	| { op: "list"; daemons: DaemonSnapshot[]; terminalCount: number }
 	| {
 			op: "logs";
 			name: string;
@@ -112,6 +114,8 @@ export type DaemonRpcResult =
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "remove"; daemon: DaemonSnapshot }
+	| { op: "prune"; removed: string[] }
 	| { op: "shutdown" };
 
 /** Authenticated request envelope used by socket clients. */
@@ -282,9 +286,11 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 	const op = stringValue(source.op, "operation.op");
 	switch (op) {
 		case "ping":
-		case "list":
 		case "shutdown":
+		case "prune":
 			return { op };
+		case "list":
+			return { op, all: source.all === undefined ? false : booleanValue(source.all, "operation.all") };
 		case "start":
 			return {
 				op,
@@ -328,6 +334,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 			};
 		case "restart":
 		case "describe":
+		case "remove":
 			return { op, name: stringValue(source.name, "operation.name") };
 		default:
 			throw new Error(`Unknown daemon operation: ${op}`);
@@ -348,7 +355,11 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "list": {
 			if (!Array.isArray(source.daemons)) throw new Error("result.daemons must be an array");
-			return { op: "list", daemons: source.daemons.map(parseDaemonSnapshot) };
+			const daemons = source.daemons.map(parseDaemonSnapshot);
+			const terminalCount =
+				optionalNumber(source.terminalCount, "result.terminalCount") ??
+				daemons.filter(daemon => daemon.state === "exited" || daemon.state === "failed").length;
+			return { op: "list", daemons, terminalCount };
 		}
 		case "logs":
 			return {
@@ -380,6 +391,10 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 				daemon: parseDaemonSnapshot(source.daemon),
 				spec: parseDaemonSpec(source.spec),
 			};
+		case "remove":
+			return { op: "remove", daemon: parseDaemonSnapshot(source.daemon) };
+		case "prune":
+			return { op: "prune", removed: stringArray(source.removed, "result.removed") };
 		case "shutdown":
 			return { op: "shutdown" };
 	}

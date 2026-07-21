@@ -128,7 +128,7 @@ describe("hub launch rendering", () => {
 			hubToolRenderer.renderResult(
 				{
 					content: [{ type: "text", text: "" }],
-					details: { op: "list", daemons } satisfies LaunchToolDetails,
+					details: { op: "list", daemons, terminalCount: 295 } satisfies LaunchToolDetails,
 				},
 				{ expanded: false, isPartial: false },
 				uiTheme,
@@ -136,6 +136,7 @@ describe("hub launch rendering", () => {
 			),
 		);
 		expect(rendered[0]).toContain("11 processes");
+		expect(rendered[0]).toContain("295 completed hidden");
 		expect(rendered.some(line => line.includes("svc-0"))).toBe(true);
 		expect(rendered.some(line => line.includes("svc-10"))).toBe(false);
 		expect(rendered.some(line => line.includes("3 more processes"))).toBe(true);

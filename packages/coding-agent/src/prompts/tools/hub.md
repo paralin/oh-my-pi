@@ -28,8 +28,9 @@ Project-scoped long-running processes shared by every omp instance in the same d
   - Names are unique per project directory. A completed name MAY be started again; a live name MUST be stopped or restarted.
   - `restart` policy defaults `no`; `on-failure` and `always` use bounded backoff.
   - `persist: true` opts out of last-omp teardown; `detached: true` survives broker shutdown and all omp exits (implies persist, disables PTY input). Omit both unless their survival guarantees are required.
-- **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, and **`describe`** address the stable `name`.
+- **`ps`** lists active processes by default; `all: true` includes retained completed history. **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, **`describe`**, and **`remove`** address the stable `name`.
 - **`logs`** defaults to the last 100 lines. `head: true` reads the beginning. `grep` is a regex. `follow: true` waits for output after `cursor`; reuse the returned cursor on the next call.
 - **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds).
 - **`send`** with `name`: `text` writes stdin (`enter` defaults true); `keys` supports ENTER, TAB, ESCAPE, CTRL_C, CTRL_D, UP, DOWN, LEFT, RIGHT; `signal` supports SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGKILL. PTY input is serialized; writes share one input stream.
 - **`stop`** performs graceful process-tree termination before hard-kill; NEVER kill an unverified PID through bash. **`restart`** reuses the retained launch spec.
+- **`remove`** deletes one completed process record and its logs; stop active processes first. **`prune`** deletes every completed process record. Both affect every OMP instance in the project.

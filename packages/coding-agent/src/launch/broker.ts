@@ -31,6 +31,8 @@ const DEFAULT_IDLE_GRACE_MS = 3_000;
 const MAX_REQUEST_BYTES = 1024 * 1024;
 const MAX_LOG_BYTES = 25 * 1024 * 1024;
 const LOG_READ_BYTES = 2 * 1024 * 1024;
+const TERMINAL_RECORD_MAX = 50;
+const TERMINAL_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1_000;
 const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
 const TOKEN_FILE = "broker.token";
@@ -287,6 +289,8 @@ class DaemonBroker {
 	readonly #clients = new Set<net.Socket>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
+	readonly #mutations = new Map<string, Promise<void>>();
+	#retentionQueue: Promise<void> = Promise.resolve();
 	#server: net.Server | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
@@ -319,6 +323,7 @@ class DaemonBroker {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = undefined;
+		await this.#retentionQueue;
 		for (const record of this.#records.values()) {
 			const detached = record.spec.detached && !record.stopRequested && record.snapshot.pid !== undefined;
 			if (!detached && !terminalState(record.snapshot.state)) await this.#stopRecord(record, 2_000);
@@ -397,14 +402,21 @@ class DaemonBroker {
 			case "ping":
 				return { op: "ping", projectDir: this.#projectDir };
 			case "start":
-				return this.#start(operation.spec, operation.owner);
+				return this.#mutateRecord(operation.spec.name, () => this.#start(operation.spec, operation.owner));
 			case "list": {
 				await Promise.all([...this.#records.values()].map(record => this.#refreshDetached(record)));
+				await this.#reconcileTerminalRecords();
+				const active: DaemonSnapshot[] = [];
+				const terminal: DaemonSnapshot[] = [];
+				for (const record of this.#records.values()) {
+					(terminalState(record.snapshot.state) ? terminal : active).push(record.snapshot);
+				}
+				active.sort((left, right) => left.createdAt - right.createdAt);
+				terminal.sort((left, right) => (right.exitedAt ?? right.createdAt) - (left.exitedAt ?? left.createdAt));
 				return {
 					op: "list",
-					daemons: [...this.#records.values()]
-						.sort((left, right) => left.snapshot.createdAt - right.snapshot.createdAt)
-						.map(record => record.snapshot),
+					daemons: operation.all ? [...active, ...terminal] : active,
+					terminalCount: terminal.length,
 				};
 			}
 			case "logs":
@@ -413,18 +425,23 @@ class DaemonBroker {
 				return this.#wait(operation);
 			case "send":
 				return this.#send(operation);
-			case "stop": {
-				const record = this.#record(operation.name);
-				await this.#stopRecord(record, operation.timeoutMs);
-				return { op: "stop", daemon: record.snapshot };
-			}
+			case "stop":
+				return this.#mutateRecord(operation.name, async () => {
+					const record = this.#record(operation.name);
+					await this.#stopRecord(record, operation.timeoutMs);
+					return { op: "stop", daemon: record.snapshot };
+				});
 			case "restart":
-				return this.#restart(operation.name);
+				return this.#mutateRecord(operation.name, () => this.#restart(operation.name));
 			case "describe": {
 				const record = this.#record(operation.name);
 				await this.#refreshDetached(record);
 				return { op: "describe", daemon: record.snapshot, spec: record.spec };
 			}
+			case "remove":
+				return this.#mutateRecord(operation.name, () => this.#remove(operation.name));
+			case "prune":
+				return { op: "prune", removed: await this.#pruneTerminalRecords() };
 			case "shutdown":
 				return { op: "shutdown" };
 		}
@@ -764,6 +781,7 @@ class DaemonBroker {
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
+		if (!this.#shuttingDown) this.#scheduleRetentionReconcile();
 	}
 
 	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>): Promise<DaemonRpcResult> {
@@ -867,6 +885,7 @@ class DaemonBroker {
 			this.#persist(record);
 			await record.log?.close();
 			record.log = undefined;
+			if (!this.#shuttingDown) this.#scheduleRetentionReconcile();
 			return;
 		}
 		record.snapshot.state = "stopping";
@@ -899,6 +918,91 @@ class DaemonBroker {
 		}
 		await this.#refreshDetached(record);
 		return condition();
+	}
+
+	async #remove(name: string): Promise<DaemonRpcResult> {
+		const record = this.#record(name);
+		await this.#refreshDetached(record);
+		if (!terminalState(record.snapshot.state)) {
+			throw new Error(`Daemon ${name} is ${record.snapshot.state}; stop it before removal`);
+		}
+		const snapshot = record.snapshot;
+		await this.#removeRecord(record);
+		return { op: "remove", daemon: snapshot };
+	}
+
+	async #pruneTerminalRecords(): Promise<string[]> {
+		await Promise.all([...this.#records.values()].map(record => this.#refreshDetached(record)));
+		return this.#removeTerminalNames(
+			[...this.#records.values()]
+				.filter(record => terminalState(record.snapshot.state))
+				.map(record => record.snapshot.name),
+		);
+	}
+
+	async #reconcileTerminalRecords(): Promise<string[]> {
+		const cutoff = Date.now() - TERMINAL_RECORD_MAX_AGE_MS;
+		const terminal = [...this.#records.values()]
+			.filter(record => terminalState(record.snapshot.state))
+			.sort(
+				(left, right) =>
+					(right.snapshot.exitedAt ?? right.snapshot.createdAt) -
+					(left.snapshot.exitedAt ?? left.snapshot.createdAt),
+			);
+		const remove = terminal
+			.filter(
+				(record, index) =>
+					index >= TERMINAL_RECORD_MAX ||
+					(record.snapshot.exitedAt !== undefined && record.snapshot.exitedAt < cutoff),
+			)
+			.map(record => record.snapshot.name);
+		return this.#removeTerminalNames(remove);
+	}
+
+	async #removeTerminalNames(names: string[]): Promise<string[]> {
+		const removed = await Promise.all(
+			names.map(name =>
+				this.#mutateRecord(name, async () => {
+					const record = this.#records.get(name);
+					if (!record || !terminalState(record.snapshot.state)) return undefined;
+					await this.#removeRecord(record);
+					return name;
+				}),
+			),
+		);
+		return removed.filter((name): name is string => name !== undefined);
+	}
+
+	async #removeRecord(record: ManagedDaemon): Promise<void> {
+		await record.log?.close();
+		await record.persistQueue;
+		await fs.rm(record.dir, { recursive: true, force: true });
+		this.#records.delete(record.snapshot.name);
+	}
+
+	async #mutateRecord<T>(name: string, mutate: () => Promise<T>): Promise<T> {
+		const previous = this.#mutations.get(name) ?? Promise.resolve();
+		const { promise: current, resolve } = Promise.withResolvers<void>();
+		const tail = previous.catch(() => {}).then(() => current);
+		this.#mutations.set(name, tail);
+		await previous.catch(() => {});
+		try {
+			return await mutate();
+		} finally {
+			resolve();
+			if (this.#mutations.get(name) === tail) this.#mutations.delete(name);
+		}
+	}
+
+	#scheduleRetentionReconcile(): void {
+		this.#retentionQueue = this.#retentionQueue
+			.then(() => this.#reconcileTerminalRecords())
+			.then(() => undefined)
+			.catch(error => {
+				logger.warn("Failed to reconcile daemon retention", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 	}
 
 	#record(name: string): ManagedDaemon {
@@ -940,13 +1044,11 @@ class DaemonBroker {
 				}
 				const snapshot = parseDaemonSnapshot(decoded.daemon);
 				const spec = parseDaemonSpec(decoded.spec);
+				const wasTerminal = terminalState(snapshot.state);
 				const processRef = snapshot.pid === undefined ? null : Process.fromPid(snapshot.pid);
 				const detached =
-					spec.detached &&
-					!terminalState(snapshot.state) &&
-					snapshot.state !== "stopping" &&
-					processRef?.status() === "running";
-				if (!detached) {
+					spec.detached && !wasTerminal && snapshot.state !== "stopping" && processRef?.status() === "running";
+				if (!detached && !wasTerminal) {
 					if (processRef) await processRef.terminate({ group: true, gracefulMs: 500, timeoutMs: 2_000 });
 					snapshot.pid = undefined;
 					snapshot.state = "exited";
@@ -984,6 +1086,7 @@ class DaemonBroker {
 				});
 			}
 		}
+		await this.#reconcileTerminalRecords();
 	}
 
 	#scheduleIdleShutdown(): void {

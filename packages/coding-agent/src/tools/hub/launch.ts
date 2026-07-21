@@ -37,7 +37,7 @@ import { ToolError } from "../tool-errors";
 
 /** Broker-facing launch parameters; the hub adapts its `ps` op to `list` before calling in. */
 export interface LaunchParams {
-	op: "start" | "list" | "logs" | "wait" | "send" | "stop" | "restart" | "describe";
+	op: "start" | "list" | "logs" | "wait" | "send" | "stop" | "restart" | "describe" | "remove" | "prune";
 	name?: string;
 	application?: string;
 	args?: string[];
@@ -48,6 +48,7 @@ export interface LaunchParams {
 	restart?: "no" | "on-failure" | "always";
 	persist?: boolean;
 	detached?: boolean;
+	all?: boolean;
 	lines?: number;
 	head?: boolean;
 	grep?: string;
@@ -79,6 +80,8 @@ export interface LaunchToolDetails {
 	op: LaunchParams["op"];
 	daemon?: DaemonSnapshot;
 	daemons?: DaemonSnapshot[];
+	terminalCount?: number;
+	removedCount?: number;
 	cursor?: number;
 	timedOut?: boolean;
 	/** logs: daemon lifecycle state at read time. */
@@ -148,7 +151,7 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 		case "start":
 			return { op: "start", spec: commandSpec(params, session), owner: session.getSessionId?.() ?? undefined };
 		case "list":
-			return { op: "list" };
+			return { op: "list", all: params.all ?? false };
 		case "logs":
 			return {
 				op: "logs",
@@ -181,6 +184,10 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 			return { op: "restart", name: requiredName(params) };
 		case "describe":
 			return { op: "describe", name: requiredName(params) };
+		case "remove":
+			return { op: "remove", name: requiredName(params) };
+		case "prune":
+			return { op: "prune" };
 	}
 }
 
@@ -232,10 +239,16 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 			}
 			return lines.join("\n");
 		}
-		case "list":
-			return result.daemons.length
-				? result.daemons.map(daemon => `- ${daemonLabel(daemon)}`).join("\n")
-				: "No daemons.";
+		case "list": {
+			const lines = result.daemons.map(daemon => `- ${daemonLabel(daemon)}`);
+			if (result.terminalCount > 0 && !params.all) {
+				lines.push(
+					`${result.terminalCount} completed ${pluralize("process", result.terminalCount)} hidden; use all=true to include retained history.`,
+				);
+			}
+			if (lines.length === 0) return "No active processes.";
+			return lines.join("\n");
+		}
 		case "logs": {
 			const text = sanitizeText(result.text);
 			return `${text}${text && !text.endsWith("\n") ? "\n" : ""}[${result.name}: ${result.state}; cursor=${result.cursor}${result.timedOut ? "; follow timed out" : ""}]`;
@@ -262,6 +275,10 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 				`Cwd: ${shortenPath(result.spec.cwd)}`,
 				`PTY: ${result.spec.pty}; restart=${result.spec.restart}; persist=${result.spec.persist}; detached=${result.spec.detached}`,
 			].join("\n");
+		case "remove":
+			return `Removed ${daemonLabel(result.daemon)}`;
+		case "prune":
+			return `Pruned ${result.removed.length} completed ${pluralize("process", result.removed.length)}.`;
 	}
 }
 
@@ -270,7 +287,7 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 		case "start":
 			return { op: "start", daemon: result.daemon, timedOut: result.readyTimedOut };
 		case "list":
-			return { op: "list", daemons: result.daemons };
+			return { op: "list", daemons: result.daemons, terminalCount: result.terminalCount };
 		case "logs": {
 			const terminalRows =
 				result.terminalText === undefined
@@ -297,6 +314,10 @@ async function toolDetails(result: DaemonRpcResult, params: LaunchParams): Promi
 			return { op: "restart", daemon: result.daemon };
 		case "describe":
 			return { op: "describe", daemon: result.daemon, spec: result.spec };
+		case "remove":
+			return { op: "remove", daemon: result.daemon };
+		case "prune":
+			return { op: "prune", removedCount: result.removed.length };
 		case "ping":
 		case "shutdown":
 			throw new ToolError(`Internal daemon result ${result.op} is not tool-visible`);
@@ -446,6 +467,7 @@ export function launchRenderResult(
 				break;
 			case "stop":
 			case "restart":
+			case "remove":
 				if (daemon) meta.push(...daemonMeta(daemon, theme));
 				break;
 			case "wait": {
@@ -471,6 +493,14 @@ export function launchRenderResult(
 				for (const item of daemons) {
 					body.push(
 						`${theme.fg("accent", replaceTabs(item.name))} ${theme.fg("dim", daemonMeta(item, theme).join(theme.sep.dot))}`,
+					);
+				}
+				if (details?.terminalCount) {
+					meta.push(
+						theme.fg(
+							"dim",
+							params.all ? `${details.terminalCount} completed` : `${details.terminalCount} completed hidden`,
+						),
 					);
 				}
 				break;
@@ -502,6 +532,9 @@ export function launchRenderResult(
 				}
 				break;
 			}
+			case "prune":
+				description = `${details?.removedCount ?? 0} removed`;
+				break;
 			default:
 				if (text.trim()) {
 					for (const line of replaceTabs(text.trimEnd()).split("\n")) body.push(theme.fg("toolOutput", line));

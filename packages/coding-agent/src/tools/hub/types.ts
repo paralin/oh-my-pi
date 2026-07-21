@@ -12,7 +12,7 @@ import type { LaunchParams, LaunchToolDetails } from "./launch";
 /**
  * Hub operations: messaging (`send`/`wait`/`inbox`/`list`), jobs
  * (`wait`/`cancel`/`jobs`), and process supervision (`start`/`ps`/`logs`/
- * `stop`/`restart`/`describe`, plus `send`/`wait` when they carry `name`).
+ * `stop`/`restart`/`describe`/`remove`/`prune`, plus `send`/`wait` with `name`).
  */
 export type HubOp =
 	| "send"
@@ -26,7 +26,9 @@ export type HubOp =
 	| "logs"
 	| "stop"
 	| "restart"
-	| "describe";
+	| "describe"
+	| "remove"
+	| "prune";
 
 /** Peer row surfaced by `op:"list"`. */
 export interface HubPeerInfo {

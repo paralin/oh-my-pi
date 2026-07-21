@@ -41,6 +41,46 @@ async function shutdown(client: DaemonBrokerClient): Promise<void> {
 	}
 	client.close();
 }
+async function writeTerminalRecord(
+	runtimeDir: string,
+	projectDir: string,
+	name: string,
+	exitedAt: number,
+): Promise<void> {
+	const dir = path.join(runtimeDir, "daemons", name);
+	await fs.mkdir(dir, { recursive: true });
+	await Bun.write(
+		path.join(dir, "meta.json"),
+		JSON.stringify({
+			daemon: {
+				name,
+				id: crypto.randomUUID(),
+				state: "exited",
+				createdAt: exitedAt - 1_000,
+				startedAt: exitedAt - 1_000,
+				exitedAt,
+				exitCode: 0,
+				restartCount: 0,
+				outputBytes: 0,
+				persist: false,
+				detached: false,
+			},
+			spec: {
+				name,
+				application: process.execPath,
+				args: [],
+				env: {},
+				cwd: projectDir,
+				pty: false,
+				restart: "no",
+				persist: false,
+				detached: false,
+			},
+		}),
+	);
+	await Bun.write(path.join(dir, "output.log"), `${name} current`);
+	await Bun.write(path.join(dir, "output.previous.log"), `${name} previous`);
+}
 
 async function startPtyDaemonWithShell(shell: string, initialMarker: string, expectedMarker: string): Promise<void> {
 	const projectDir = await tempDir("omp-daemon-shell-project-");
@@ -210,6 +250,135 @@ setInterval(() => {}, 1000);
 		} finally {
 			await shutdown(first);
 			second.close();
+		}
+	}, 20_000);
+	it("projects active processes and removes shared completed records", async () => {
+		const projectDir = await tempDir("omp-daemon-cleanup-project-");
+		const runtimeDir = await tempDir("omp-daemon-cleanup-runtime-");
+		const first = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const second = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		try {
+			for (const name of ["done-a", "done-b", "done-c"]) {
+				await first.request({
+					op: "start",
+					spec: {
+						name,
+						application: process.execPath,
+						args: ["-e", ""],
+						env: {},
+						cwd: projectDir,
+						pty: false,
+						restart: "no",
+						persist: false,
+						detached: false,
+					},
+				});
+				const waited = await first.request({ op: "wait", name, for: "exit", timeoutMs: 2_000 });
+				expect(waited.op === "wait" && waited.timedOut).toBeFalse();
+				const dir = path.join(runtimeDir, "daemons", name);
+				await Bun.write(path.join(dir, "output.log"), `${name} current`);
+				await Bun.write(path.join(dir, "output.previous.log"), `${name} previous`);
+			}
+
+			await first.request({
+				op: "start",
+				spec: {
+					name: "live",
+					application: process.execPath,
+					args: ["-e", "process.stdin.resume()"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+
+			const active = await second.request({ op: "list" });
+			if (active.op !== "list") throw new Error("unexpected list result");
+			expect(active.daemons.map(daemon => daemon.name)).toEqual(["live"]);
+			expect(active.terminalCount).toBe(3);
+
+			const all = await second.request({ op: "list", all: true });
+			if (all.op !== "list") throw new Error("unexpected list result");
+			expect(all.daemons[0]?.name).toBe("live");
+			expect(new Set(all.daemons.slice(1).map(daemon => daemon.name))).toEqual(
+				new Set(["done-a", "done-b", "done-c"]),
+			);
+			expect(all.terminalCount).toBe(3);
+
+			await expect(second.request({ op: "remove", name: "live" })).rejects.toThrow("stop it before removal");
+			const removed = await second.request({ op: "remove", name: "done-a" });
+			expect(removed.op === "remove" && removed.daemon.name).toBe("done-a");
+			await expect(fs.stat(path.join(runtimeDir, "daemons", "done-a"))).rejects.toMatchObject({ code: "ENOENT" });
+
+			const removeDoneB = first.request({ op: "remove", name: "done-b" });
+			const startDoneB = first.request({
+				op: "start",
+				spec: {
+					name: "done-b",
+					application: process.execPath,
+					args: ["-e", "process.stdin.resume()"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			const [racedRemove, racedStart] = await Promise.all([removeDoneB, startDoneB]);
+			expect(racedRemove.op === "remove" && racedRemove.daemon.name).toBe("done-b");
+			expect(racedStart.op === "start" && racedStart.daemon.state).toBe("running");
+			expect(await Bun.file(path.join(runtimeDir, "daemons", "done-b", "meta.json")).exists()).toBeTrue();
+			expect(await Bun.file(path.join(runtimeDir, "daemons", "done-b", "output.log")).exists()).toBeTrue();
+
+			const pruned = await first.request({ op: "prune" });
+			if (pruned.op !== "prune") throw new Error("unexpected prune result");
+			expect(pruned.removed).toEqual(["done-c"]);
+			await expect(fs.stat(path.join(runtimeDir, "daemons", "done-c"))).rejects.toMatchObject({ code: "ENOENT" });
+			const remaining = await second.request({ op: "list", all: true });
+			if (remaining.op !== "list") throw new Error("unexpected list result");
+			expect(remaining.daemons.map(daemon => daemon.name)).toEqual(["live", "done-b"]);
+			expect(remaining.terminalCount).toBe(0);
+
+			await Promise.all([
+				first.request({ op: "stop", name: "live", timeoutMs: 2_000 }),
+				first.request({ op: "stop", name: "done-b", timeoutMs: 2_000 }),
+			]);
+		} finally {
+			await shutdown(first);
+			second.close();
+		}
+	}, 20_000);
+
+	it("bounds recovered completed records by age and count", async () => {
+		const projectDir = await tempDir("omp-daemon-retention-project-");
+		const runtimeDir = await tempDir("omp-daemon-retention-runtime-");
+		const now = Date.now();
+		await writeTerminalRecord(runtimeDir, projectDir, "expired", now - 8 * 24 * 60 * 60 * 1_000);
+		for (let index = 0; index < 51; index++) {
+			await writeTerminalRecord(runtimeDir, projectDir, `recent-${index}`, now - index);
+		}
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		try {
+			const all = await client.request({ op: "list", all: true });
+			if (all.op !== "list") throw new Error("unexpected list result");
+			expect(all.daemons).toHaveLength(50);
+			expect(all.terminalCount).toBe(50);
+			expect(all.daemons[0]?.name).toBe("recent-0");
+			expect(all.daemons.at(-1)?.name).toBe("recent-49");
+			await expect(fs.stat(path.join(runtimeDir, "daemons", "expired"))).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(fs.stat(path.join(runtimeDir, "daemons", "recent-50"))).rejects.toMatchObject({ code: "ENOENT" });
+
+			const active = await client.request({ op: "list" });
+			if (active.op !== "list") throw new Error("unexpected list result");
+			expect(active.daemons).toEqual([]);
+			expect(active.terminalCount).toBe(50);
+		} finally {
+			await shutdown(client);
 		}
 	}, 20_000);
 
