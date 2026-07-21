@@ -1,5 +1,8 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+
+import { sessionSteeringDirForSessionFile } from "./session/session-steering";
 
 const MINUTE_MS = 60_000;
 const MAX_SEARCH_MINUTES = 366 * 24 * 60;
@@ -117,11 +120,30 @@ export function nextCronFire(expression: string, after: Date): Date {
 	throw new Error("Cron expression has no match within one year.");
 }
 
+function parseStoredJobs(text: string, now: number): CronJob[] {
+	const parsed: unknown = JSON.parse(text);
+	if (!Array.isArray(parsed)) throw new Error("Scheduled task store must contain an array.");
+	const jobs: CronJob[] = [];
+	for (const value of parsed) {
+		if (!isCronJob(value)) continue;
+		const job = value;
+		parseCronExpression(job.expression);
+		if (job.recurring && job.expiresAt !== undefined && job.expiresAt <= now) continue;
+		if (!job.recurring && job.nextFireAt <= now) job.nextFireAt = now;
+		if (job.recurring && job.nextFireAt <= now) {
+			job.nextFireAt = nextCronFire(job.expression, new Date(now)).getTime();
+		}
+		jobs.push(job);
+	}
+	return jobs;
+}
+
 export type CronTimer = NodeJS.Timeout;
 export type CronTimerFactory = (callback: () => void, delay: number) => CronTimer;
-
 export interface CronManagerOptions {
 	sessionFile?: string | null;
+	getSessionFile?: () => string | null | undefined;
+	getSessionId?: () => string | undefined;
 	isIdle: () => boolean;
 	enqueuePrompt: (prompt: string) => Promise<void>;
 	now?: () => number;
@@ -130,19 +152,33 @@ export interface CronManagerOptions {
 }
 
 export class CronManager {
-	readonly #sessionFile: string | undefined;
+	readonly #getSessionFile: () => string | undefined;
+	readonly #getSessionId: (() => string | undefined) | undefined;
 	readonly #isIdle: () => boolean;
 	readonly #enqueuePrompt: (prompt: string) => Promise<void>;
 	readonly #now: () => number;
 	readonly #setTimer: CronTimerFactory;
 	readonly #clearTimer: (timer: CronTimer) => void;
+	#sessionFile: string | undefined;
+	#sessionKey: string | undefined;
+	#sessionLoaded = false;
+	#jobsBySession = new Map<string | undefined, Map<string, CronJob>>();
 	#jobs = new Map<string, CronJob>();
+	#loadedSessions = new Set<string | undefined>();
 	#timer: CronTimer | undefined;
 	#processing = false;
 	#sequence = 0;
 
 	constructor(options: CronManagerOptions) {
-		this.#sessionFile = options.sessionFile ?? undefined;
+		const fixedSessionFile = options.sessionFile ? path.resolve(options.sessionFile) : undefined;
+		const getSessionFile = options.getSessionFile;
+		this.#getSessionFile = getSessionFile
+			? () => {
+					const sessionFile = getSessionFile();
+					return sessionFile ? path.resolve(sessionFile) : undefined;
+				}
+			: () => fixedSessionFile;
+		this.#getSessionId = options.getSessionId;
 		this.#isIdle = options.isIdle;
 		this.#enqueuePrompt = options.enqueuePrompt;
 		this.#now = options.now ?? Date.now;
@@ -151,25 +187,7 @@ export class CronManager {
 	}
 
 	async load(): Promise<void> {
-		if (!this.#sessionFile) return;
-		try {
-			const text = await readFile(this.storePath(), "utf8");
-			const parsed: unknown = JSON.parse(text);
-			if (!Array.isArray(parsed)) throw new Error("Scheduled task store must contain an array.");
-			for (const value of parsed) {
-				if (!isCronJob(value)) continue;
-				const job = value;
-				parseCronExpression(job.expression);
-				if (job.recurring && job.expiresAt !== undefined && job.expiresAt <= this.#now()) continue;
-				if (!job.recurring && job.nextFireAt <= this.#now()) job.nextFireAt = this.#now();
-				if (job.recurring && job.nextFireAt <= this.#now()) {
-					job.nextFireAt = nextCronFire(job.expression, new Date(this.#now())).getTime();
-				}
-				this.#jobs.set(job.id, job);
-			}
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-		}
+		this.#refreshSession();
 		this.#armTimer();
 	}
 
@@ -179,6 +197,7 @@ export class CronManager {
 		recurring?: boolean;
 		durable?: boolean;
 	}): Promise<CronJob> {
+		this.#refreshSession();
 		if (!input.prompt.trim()) throw new Error("Cron prompt cannot be empty.");
 		if (input.durable && !this.#sessionFile) throw new Error("Durable cron jobs require a persisted session.");
 		parseCronExpression(input.expression);
@@ -200,10 +219,12 @@ export class CronManager {
 	}
 
 	list(): CronJob[] {
+		this.#refreshSession();
 		return [...this.#jobs.values()].sort((a, b) => a.nextFireAt - b.nextFireAt);
 	}
 
 	async delete(id: string): Promise<boolean> {
+		this.#refreshSession();
 		const deleted = this.#jobs.delete(id);
 		if (deleted) await this.#persist();
 		this.#armTimer();
@@ -211,6 +232,7 @@ export class CronManager {
 	}
 
 	notifyIdle(): void {
+		this.#refreshSession();
 		if (this.#isIdle()) void this.#processDue();
 	}
 
@@ -220,20 +242,59 @@ export class CronManager {
 	}
 
 	storePath(): string {
-		return path.join(path.dirname(this.#sessionFile!), ".omp", "scheduled_tasks.json");
+		this.#refreshSession();
+		if (!this.#sessionFile) throw new Error("Scheduled task storage requires a persisted session.");
+		return path.join(sessionSteeringDirForSessionFile(this.#sessionFile), "scheduled_tasks.json");
 	}
 
-	async #persist(): Promise<void> {
-		if (!this.#sessionFile) return;
-		const durable = this.list().filter(job => job.durable);
-		const store = this.storePath();
+	async #persist(
+		sessionFile: string | undefined = this.#sessionFile,
+		jobs: Map<string, CronJob> = this.#jobs,
+	): Promise<void> {
+		if (!sessionFile) return;
+		const durable = [...jobs.values()].filter(job => job.durable).sort((a, b) => a.nextFireAt - b.nextFireAt);
+		const store = path.join(sessionSteeringDirForSessionFile(sessionFile), "scheduled_tasks.json");
 		await mkdir(path.dirname(store), { recursive: true });
 		await writeFile(store, `${JSON.stringify(durable, null, 2)}\n`, "utf8");
 	}
 
+	#refreshSession(): void {
+		const sessionFileValue = this.#getSessionFile();
+		const sessionFile = sessionFileValue ? path.resolve(sessionFileValue) : undefined;
+		const sessionKey = sessionFile ?? this.#getSessionId?.();
+		if (this.#sessionLoaded && this.#sessionFile === sessionFile && this.#sessionKey === sessionKey) {
+			return;
+		}
+		if (this.#timer !== undefined) {
+			this.#clearTimer(this.#timer);
+			this.#timer = undefined;
+		}
+		if (this.#sessionLoaded) this.#jobsBySession.set(this.#sessionKey, this.#jobs);
+		this.#sessionFile = sessionFile;
+		this.#sessionKey = sessionKey;
+		this.#sessionLoaded = true;
+		this.#jobs = this.#jobsBySession.get(sessionKey) ?? new Map<string, CronJob>();
+		this.#jobsBySession.set(sessionKey, this.#jobs);
+		if (!this.#loadedSessions.has(sessionKey)) {
+			if (sessionFile) {
+				try {
+					const store = path.join(sessionSteeringDirForSessionFile(sessionFile), "scheduled_tasks.json");
+					for (const job of parseStoredJobs(readFileSync(store, "utf8"), this.#now())) {
+						this.#jobs.set(job.id, job);
+					}
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				}
+			}
+			this.#loadedSessions.add(sessionKey);
+		}
+		this.#armTimer();
+	}
+
 	#armTimer(): void {
+		this.#refreshSession();
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
-		const next = this.list()[0];
+		const next = [...this.#jobs.values()].sort((a, b) => a.nextFireAt - b.nextFireAt)[0];
 		if (!next) {
 			this.#timer = undefined;
 			return;
@@ -241,26 +302,41 @@ export class CronManager {
 		const delay = Math.max(0, Math.min(next.nextFireAt - this.#now(), 2_147_000_000));
 		this.#timer = this.#setTimer(() => {
 			this.#timer = undefined;
+			this.#refreshSession();
 			void this.#processDue();
 		}, delay);
 	}
 
 	async #processDue(): Promise<void> {
+		this.#refreshSession();
 		if (this.#processing || !this.#isIdle()) return;
 		this.#processing = true;
+		const sessionFile = this.#sessionFile;
+		const sessionKey = this.#sessionKey;
+		const jobs = this.#jobs;
 		try {
 			while (this.#isIdle()) {
+				this.#refreshSession();
+				if (this.#sessionFile !== sessionFile || this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
+					break;
+				}
 				const now = this.#now();
-				const job = this.list().find(candidate => candidate.nextFireAt <= now);
+				const job = [...jobs.values()]
+					.sort((a, b) => a.nextFireAt - b.nextFireAt)
+					.find(candidate => candidate.nextFireAt <= now);
 				if (!job) break;
 				if (job.recurring) {
 					const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now - MINUTE_MS)));
-					if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) this.#jobs.delete(job.id);
+					if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) jobs.delete(job.id);
 					else job.nextFireAt = next.getTime();
 				} else {
-					this.#jobs.delete(job.id);
+					jobs.delete(job.id);
 				}
-				await this.#persist();
+				await this.#persist(sessionFile, jobs);
+				this.#refreshSession();
+				if (this.#sessionFile !== sessionFile || this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
+					break;
+				}
 				await this.#enqueuePrompt(job.prompt);
 			}
 		} catch (error) {

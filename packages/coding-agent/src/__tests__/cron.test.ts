@@ -104,4 +104,123 @@ describe("cron scheduling", () => {
 			await rm(directory, { recursive: true, force: true });
 		}
 	});
+	it("isolates durable jobs by session file", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-cron-isolation-"));
+		try {
+			const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+			const first = new CronManager({
+				sessionFile: path.join(directory, "main.jsonl"),
+				isIdle: clock.isIdle,
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+				enqueuePrompt: async () => undefined,
+			});
+			const created = await first.create({
+				expression: "0 11 * * *",
+				prompt: "main only",
+				recurring: false,
+				durable: true,
+			});
+			const second = new CronManager({
+				sessionFile: path.join(directory, "worker.jsonl"),
+				isIdle: clock.isIdle,
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+				enqueuePrompt: async () => undefined,
+			});
+			await second.load();
+			expect(second.list()).toEqual([]);
+			expect(created.prompt).toBe("main only");
+			first.dispose();
+			second.dispose();
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+	it("refreshes durable and in-memory jobs when the session file changes", async () => {
+		const directory = await mkdtemp(path.join(os.tmpdir(), "omp-cron-switch-"));
+		try {
+			let activeSessionFile = path.join(directory, "main.jsonl");
+			const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+			const workerSessionFile = path.join(directory, "worker.jsonl");
+			const workerManager = new CronManager({
+				sessionFile: workerSessionFile,
+				isIdle: clock.isIdle,
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+				enqueuePrompt: async () => undefined,
+			});
+			const workerJob = await workerManager.create({
+				expression: "0 13 * * *",
+				prompt: "worker only",
+				recurring: false,
+				durable: true,
+			});
+			workerManager.dispose();
+			const manager = new CronManager({
+				getSessionFile: () => activeSessionFile,
+				isIdle: clock.isIdle,
+				now: clock.now,
+				setTimer: clock.setTimer,
+				clearTimer: clock.clearTimer,
+				enqueuePrompt: async () => undefined,
+			});
+			const mainJob = await manager.create({
+				expression: "0 11 * * *",
+				prompt: "main only",
+				recurring: false,
+				durable: true,
+			});
+			const mainSessionOnlyJob = await manager.create({
+				expression: "0 12 * * *",
+				prompt: "main memory only",
+				recurring: false,
+			});
+
+			activeSessionFile = workerSessionFile;
+			expect(manager.list()).toEqual([workerJob]);
+
+			activeSessionFile = path.join(directory, "main.jsonl");
+			expect(manager.list()).toEqual([mainJob, mainSessionOnlyJob]);
+
+			activeSessionFile = path.join(directory, "worker.jsonl");
+			expect(await manager.delete(workerJob.id)).toBe(true);
+			expect(manager.list()).toEqual([]);
+			manager.dispose();
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+	it("isolates in-memory jobs by session id without persisted files", async () => {
+		let activeSessionId = "main";
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const manager = new CronManager({
+			getSessionFile: () => undefined,
+			getSessionId: () => activeSessionId,
+			isIdle: clock.isIdle,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => undefined,
+		});
+		const mainJob = await manager.create({
+			expression: "0 11 * * *",
+			prompt: "main only",
+			recurring: false,
+		});
+		activeSessionId = "worker";
+		expect(manager.list()).toEqual([]);
+		const workerJob = await manager.create({
+			expression: "0 12 * * *",
+			prompt: "worker only",
+			recurring: false,
+		});
+		expect(manager.list()).toEqual([workerJob]);
+		activeSessionId = "main";
+		expect(manager.list()).toEqual([mainJob]);
+		manager.dispose();
+	});
 });

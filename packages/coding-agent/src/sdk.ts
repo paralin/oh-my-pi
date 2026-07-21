@@ -1706,7 +1706,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
 	const cronManager = new CronManager({
-		sessionFile: sessionManager.getSessionFile(),
+		getSessionFile: () => sessionManager.getSessionFile(),
+		getSessionId: () => sessionManager.getSessionId(),
 		isIdle: () => Boolean(session) && !session.isStreaming,
 		enqueuePrompt: promptText => session.sendUserMessage(promptText),
 	});

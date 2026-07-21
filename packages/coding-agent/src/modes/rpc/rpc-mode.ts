@@ -37,8 +37,8 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { RpcFrameEncoder } from "./rpc-frame";
-import { claimRpcInput } from "./rpc-input";
 import { RpcHarnessSessionOwner, rpcHarnessRecordFileForSessionFile } from "./rpc-harness";
+import { claimRpcInput } from "./rpc-input";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
