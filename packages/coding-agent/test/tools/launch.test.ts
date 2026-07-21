@@ -309,6 +309,29 @@ setInterval(() => {}, 1000);
 			expect(all.terminalCount).toBe(3);
 
 			await expect(second.request({ op: "remove", name: "live" })).rejects.toThrow("stop it before removal");
+			await first.request({
+				op: "start",
+				spec: {
+					name: "restarting",
+					application: process.execPath,
+					args: ["-e", "process.exit(1)"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "always",
+					persist: false,
+					detached: false,
+				},
+			});
+			expect(
+				await waitUntil(async () => {
+					const described = await second.request({ op: "describe", name: "restarting" });
+					return described.op === "describe" && described.daemon.state === "restarting";
+				}, 3_000),
+			).toBeTrue();
+			await expect(second.request({ op: "remove", name: "restarting" })).rejects.toThrow("stop it before removal");
+			await first.request({ op: "stop", name: "restarting", timeoutMs: 2_000 });
+			await first.request({ op: "remove", name: "restarting" });
 			const removed = await second.request({ op: "remove", name: "done-a" });
 			expect(removed.op === "remove" && removed.daemon.name).toBe("done-a");
 			await expect(fs.stat(path.join(runtimeDir, "daemons", "done-a"))).rejects.toMatchObject({ code: "ENOENT" });
