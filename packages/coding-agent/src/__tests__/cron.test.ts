@@ -40,7 +40,7 @@ describe("cron scheduling", () => {
 		expect(next.getMinutes()).toBe(0);
 	});
 
-	it("auto-deletes one-shots and waits for idle before enqueueing", async () => {
+	it("delivers a one-shot on fire during an active turn without waiting for idle", async () => {
 		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
 		const prompts: string[] = [];
 		const manager = new CronManager({
@@ -54,17 +54,20 @@ describe("cron scheduling", () => {
 		});
 		const job = await manager.create({ expression: "1 10 * * *", prompt: "check in", recurring: false });
 		clock.setNow(job.nextFireAt);
+		// Active turn: the scheduler must still hand the fired job to its delivery
+		// owner immediately. Waiting for idle (a turn end or Escape abort) is the bug.
 		clock.setIdle(false);
 		clock.timers.shift()?.();
-		await Promise.resolve();
-		expect(prompts).toEqual([]);
-		expect(manager.list()).toHaveLength(1);
-		clock.setIdle(true);
-		manager.notifyIdle();
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(prompts).toEqual(["check in"]);
 		expect(manager.list()).toHaveLength(0);
+		// No Escape / idle event is required for delivery, and re-firing notifyIdle
+		// never re-delivers the consumed one-shot.
+		clock.setIdle(true);
+		manager.notifyIdle();
+		await Promise.resolve();
+		expect(prompts).toEqual(["check in"]);
 		manager.dispose();
 	});
 

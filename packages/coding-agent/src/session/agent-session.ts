@@ -403,6 +403,11 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "./messages";
 import {
+	buildScheduledNotification,
+	SCHEDULED_NOTIFICATION_KIND,
+	type ScheduledNotificationEntry,
+} from "./scheduled-notification";
+import {
 	buildScratchHandoffRecentContext,
 	renderScratchHandoffCloseoutMessage,
 	renderScratchHandoffResumeMessage,
@@ -2471,6 +2476,7 @@ export class AgentSession {
 			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
+			this.yieldQueue.notifyIdle();
 			this.#onIdle?.();
 		}
 	}
@@ -2614,6 +2620,7 @@ export class AgentSession {
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		this.#drainStrandedQueuedMessages();
+		this.yieldQueue.notifyIdle();
 	}
 
 	#flushPendingAgentEnd(): void {
@@ -3056,6 +3063,14 @@ export class AgentSession {
 					{ delayMs: 1 },
 				);
 			},
+		});
+		// Fired scheduled-prompt (cron) jobs ride the same non-interrupting aside
+		// channel: a live turn folds them in at its next completed tool-call
+		// boundary, and an idle enqueue wakes a turn (no `skipIdleFlush`). They are
+		// system-authored, so delivery never synthesizes a user turn or waits for
+		// interactive input.
+		this.yieldQueue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, {
+			build: buildScheduledNotification,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -17688,6 +17703,19 @@ export class AgentSession {
 		this.#pendingIrcInterrupts = remainingInterrupts;
 		this.#pendingIrcAsides = remainingAsides;
 		return messages;
+	}
+
+	/**
+	 * Deliver a fired scheduled-prompt (cron) job into this session as a
+	 * system-authored notification. Mid-turn it rides the non-interrupting yield
+	 * aside and folds in at the next completed tool-call boundary; idle it wakes a
+	 * turn. Delivery never synthesizes a user-role message and never couples to
+	 * Escape or interactive input, so the scheduler hands every due job here
+	 * regardless of streaming state and the session owns the timing routing.
+	 */
+	deliverScheduledPrompt(promptText: string): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue(SCHEDULED_NOTIFICATION_KIND, { prompt: promptText });
 	}
 
 	/**

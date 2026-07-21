@@ -1709,7 +1709,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		getSessionFile: () => sessionManager.getSessionFile(),
 		getSessionId: () => sessionManager.getSessionId(),
 		isIdle: () => Boolean(session) && !session.isStreaming,
-		enqueuePrompt: promptText => session.sendUserMessage(promptText),
+		enqueuePrompt: async promptText => session.deliverScheduledPrompt(promptText),
 	});
 	await cronManager.load();
 

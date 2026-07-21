@@ -308,13 +308,17 @@ export class CronManager {
 
 	async #processDue(): Promise<void> {
 		this.#refreshSession();
-		if (this.#processing || !this.#isIdle()) return;
+		if (this.#processing) return;
 		this.#processing = true;
 		const sessionFile = this.#sessionFile;
 		const sessionKey = this.#sessionKey;
 		const jobs = this.#jobs;
 		try {
-			while (this.#isIdle()) {
+			// Deliver every due job as soon as it fires, whether the turn is active
+			// or idle. The delivery owner (the session) routes each notification to
+			// the next tool-call boundary when streaming and wakes a turn when idle,
+			// so the scheduler never waits for interactive input to hand a job off.
+			while (true) {
 				this.#refreshSession();
 				if (this.#sessionFile !== sessionFile || this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
 					break;

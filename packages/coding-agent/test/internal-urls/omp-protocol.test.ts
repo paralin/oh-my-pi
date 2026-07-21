@@ -13,7 +13,7 @@ describe("OmpProtocolHandler", () => {
 		const filenames = getDocFilenames();
 		const hiddenFilenames = filenames.filter(isMaintainerDocPath);
 
-		expect(filenames).toHaveLength(122);
+		expect(filenames).toHaveLength(121);
 		expect(hiddenFilenames).toHaveLength(53);
 		expect(hiddenFilenames).toContain("ERRATA-GPT5-HARMONY.md");
 		expect(hiddenFilenames).toContain("toolconv/harmony.md");
@@ -29,7 +29,7 @@ describe("OmpProtocolHandler", () => {
 		const root = await router.resolve("omp://", { settings: hidden });
 		const completions = await router.complete("omp", "", { settings: hidden });
 
-		expect(root.content).toContain("69 files available");
+		expect(root.content).toContain("68 files available");
 		expect(root.content).not.toContain("ERRATA-GPT5-HARMONY.md");
 		expect(completions?.map(item => item.value)).not.toContain("ERRATA-GPT5-HARMONY.md");
 		await expect(router.resolve("omp://ERRATA-GPT5-HARMONY.md", { settings: hidden })).rejects.toThrow(
@@ -52,7 +52,7 @@ describe("OmpProtocolHandler", () => {
 		const completions = await router.complete("omp", "", { settings: complete });
 		const direct = await router.resolve("omp://docs/ERRATA-GPT5-HARMONY.md", { settings: complete });
 
-		expect(root.content).toContain("122 files available");
+		expect(root.content).toContain("121 files available");
 		expect(root.content).toContain("ERRATA-GPT5-HARMONY.md");
 		expect(completions?.map(item => item.value)).toContain("ERRATA-GPT5-HARMONY.md");
 		expect(direct.content).toContain("GPT-5 Harmony-Header Leakage");
