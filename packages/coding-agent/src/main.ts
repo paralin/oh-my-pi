@@ -42,6 +42,7 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
+import { resolveScratchCompactionOverrides } from "./config/scratch-compaction-method";
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -1176,6 +1177,14 @@ export async function runRootCommand(
 		// Runtime override (not persisted); when omitted, the configured tier.openai
 		// value remains effective, including values loaded from --config overlays.
 		settingsInstance.override("tier.openai", parsedArgs.serviceTier);
+	}
+	const scratchCompactionOverrides =
+		parsedArgs.compactionMethod !== undefined
+			? resolveScratchCompactionOverrides(parsedArgs.compactionMethod)
+			: undefined;
+	if (scratchCompactionOverrides !== undefined) {
+		settingsInstance.override("compaction.remoteEnabled", scratchCompactionOverrides.remoteEnabled);
+		settingsInstance.override("scratchHandoff.standardCompactionEnabled", scratchCompactionOverrides.standardEnabled);
 	}
 	if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 		applyRpcDefaultSettingOverrides(settingsInstance);

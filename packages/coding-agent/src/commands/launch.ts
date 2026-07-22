@@ -5,6 +5,7 @@
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { type Args as ParsedArgs, parseArgs, reportCliUsageError } from "../cli/args";
+import { SCRATCH_COMPACTION_METHOD_VALUES } from "../config/scratch-compaction-method";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import { runRootCommand } from "../main";
 import { prepareAcpTerminalAuthArgs } from "../modes/acp/terminal-auth";
@@ -83,6 +84,11 @@ export default class Index extends Command {
 		config: Flags.string({
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,
+		}),
+		"compaction-method": Flags.string({
+			description:
+				"Scratch compaction for this process: configured keeps current settings (default); native, standard, both, or scratch-only override them",
+			options: [...SCRATCH_COMPACTION_METHOD_VALUES],
 		}),
 		print: Flags.boolean({
 			char: "p",

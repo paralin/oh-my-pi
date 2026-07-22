@@ -3,6 +3,7 @@
  */
 import { APP_NAME, CONFIG_DIR_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import type { ScratchCompactionMethod } from "../config/scratch-compaction-method";
 import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
@@ -42,6 +43,7 @@ export interface Args {
 	contextStopPercent?: number;
 	contextStopTokens?: number;
 	scratchHandoffFile?: string;
+	compactionMethod?: ScratchCompactionMethod;
 	bossInbox?: boolean;
 	apiKey?: string;
 	systemPrompt?: string;
