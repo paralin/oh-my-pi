@@ -23,10 +23,14 @@ export function formatScheduledNotificationContent(prompts: string[]): string {
 }
 
 /** buildScheduledNotification batches fired scheduled prompts into one
- *  system-authored (`attribution: "agent"`) custom message. It never synthesizes
- *  a user-role turn. Returns null when no entry carries a non-empty prompt. */
+ *  system-authored (`attribution: "agent"`) custom message. Identical prompts
+ *  coalesce to one occurrence: a recurring job that fires repeatedly while a
+ *  turn blocks delivery (a cadence pulse) reads as one pending pulse, not a
+ *  backlog to be worked through N times. Distinct prompts keep batching. It
+ *  never synthesizes a user-role turn. Returns null when no entry carries a
+ *  non-empty prompt. */
 export function buildScheduledNotification(entries: ScheduledNotificationEntry[]): CustomMessage | null {
-	const prompts = entries.map(entry => entry.prompt).filter(text => text.trim().length > 0);
+	const prompts = [...new Set(entries.map(entry => entry.prompt.trim()).filter(text => text.length > 0))];
 	if (prompts.length === 0) return null;
 	return {
 		role: "custom",
