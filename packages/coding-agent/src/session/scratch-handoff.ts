@@ -70,6 +70,22 @@ export function resolveScratchHandoffPath(input: {
 	return { displayPath, absolutePath };
 }
 
+/** True when a scratch document contains at least one populated continuity field. */
+export function scratchHandoffHasContent(text: string): boolean {
+	const fieldPattern =
+		/^-\s+(?:Objective|Skill stack|Work completed|Files changed|Verification|Blockers or risks|Next action|Source refs):[ \t]*(\S.*)$/gm;
+	return fieldPattern.test(text);
+}
+/** True when a scratch document has the minimum state needed for an autonomous resume. */
+export function scratchHandoffIsComplete(text: string): boolean {
+	const hasOpenTodo = /^\*+\s+TODO\s+\S/m.test(text);
+	const hasObjective = /^-\s+Objective:[ \t]*\S/m.test(text);
+	const hasNextAction =
+		/^-\s+Next action:[ \t]*\S/m.test(text) ||
+		/^-\s+Next action:[ \t]*\n(?:[ \t]+(?:[-+*]|\d+\.)[ \t]+\S.*\n?)+/m.test(text);
+	return hasOpenTodo && hasObjective && hasNextAction;
+}
+
 function nonEmptyString(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();

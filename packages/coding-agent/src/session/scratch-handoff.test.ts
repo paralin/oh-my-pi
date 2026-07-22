@@ -14,8 +14,21 @@ import {
 	resolveScratchHandoffPathSelection,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
+	scratchHandoffIsComplete,
 } from "./scratch-handoff";
 import type { SessionEntry } from "./session-entries";
+
+describe("scratchHandoffIsComplete", () => {
+	it("requires an open TODO, objective, and next action", () => {
+		expect(
+			scratchHandoffIsComplete(
+				"* TODO Resume implementation\n- Objective: Finish compaction\n- Next action:\n  1. Run focused tests\n",
+			),
+		).toBe(true);
+		expect(scratchHandoffIsComplete("- Objective: Missing TODO\n- Next action: Continue\n")).toBe(false);
+		expect(scratchHandoffIsComplete("* TODO Missing next action\n- Objective: Continue\n")).toBe(false);
+	});
+});
 
 afterEach(() => {
 	vi.restoreAllMocks();

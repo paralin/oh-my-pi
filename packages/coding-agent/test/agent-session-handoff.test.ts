@@ -3,8 +3,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model, ProviderPayload, ToolCall } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { getOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -1186,6 +1187,7 @@ describe("AgentSession handoff", () => {
 				"compaction.enabled": true,
 				"compaction.autoContinue": false,
 				"compaction.strategy": "handoff",
+				"compaction.remoteEnabled": false,
 				"compaction.thresholdPercent": 1,
 				"compaction.thresholdTokens": -1,
 				"contextPromotion.enabled": false,
@@ -1263,6 +1265,31 @@ describe("AgentSession handoff", () => {
 		expect(session.getTodoPhases()).toEqual([]);
 		expect(sessionManager.getSessionId()).toBe(sessionId);
 		expect(sessionManager.getSessionFile()).toBe(sessionFile);
+		expect(sessionManager.getEntries().find(entry => entry.type === "compaction")).toMatchObject({
+			type: "compaction",
+			scratchCompaction: { native: false, standard: false },
+		});
+		if (!sessionFile) throw new Error("Expected persisted scratch-only compaction");
+		await sessionManager.flush();
+		const persistedScratchOnly = fs
+			.readFileSync(sessionFile, "utf8")
+			.trimEnd()
+			.split("\n")
+			.map(line => JSON.parse(line) as Record<string, unknown>)
+			.findLast(entry => entry.type === "compaction");
+		expect(persistedScratchOnly).toMatchObject({
+			type: "compaction",
+			scratchCompaction: { native: false, standard: false },
+		});
+		const reloadedScratchOnly = await SessionManager.open(sessionFile, tempDir.path());
+		try {
+			expect(reloadedScratchOnly.getEntries().find(entry => entry.type === "compaction")).toMatchObject({
+				type: "compaction",
+				scratchCompaction: { native: false, standard: false },
+			});
+		} finally {
+			await reloadedScratchOnly.close();
+		}
 		const rebuiltContext = JSON.stringify(sessionManager.buildSessionContext().messages);
 		expect(rebuiltContext).toContain("Fresh scratch objective");
 		expect(rebuiltContext).not.toContain("Reuse existing todo list");
@@ -1321,6 +1348,338 @@ describe("AgentSession handoff", () => {
 			terminalResult: "done",
 			willRetry: false,
 		});
+	});
+	it("keeps existing native-first fallback behavior when scratch handoff is inactive", async () => {
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+				"compaction.keepRecentTokens": 1,
+				"compaction.remoteEnabled": true,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "Existing native-first result",
+			shortSummary: "Compacted",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		await session.runIdleCompaction();
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		expect(compactSpy.mock.calls[0]?.[5]?.localSummaryMode).toBeUndefined();
+		expect(
+			sessionManager
+				.getEntries()
+				.filter(entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read"),
+		).toHaveLength(0);
+		expect(sessionManager.getEntries().find(entry => entry.type === "compaction")?.scratchCompaction).toBeUndefined();
+	});
+
+	it("keeps scratch mode metadata absent when reloading a legacy compaction boundary", async () => {
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: "legacy boundary",
+			timestamp: Date.now(),
+		});
+		sessionManager.appendCompaction("Legacy summary", undefined, firstKeptEntryId, 100);
+		await sessionManager.flush();
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted legacy compaction");
+		const persisted = fs
+			.readFileSync(sessionFile, "utf8")
+			.trimEnd()
+			.split("\n")
+			.map(line => JSON.parse(line) as Record<string, unknown>)
+			.findLast(entry => entry.type === "compaction");
+		expect(persisted).toBeDefined();
+		expect(persisted).not.toHaveProperty("scratchCompaction");
+
+		const reloaded = await SessionManager.open(sessionFile, tempDir.path());
+		try {
+			expect(reloaded.getEntries().find(entry => entry.type === "compaction")?.scratchCompaction).toBeUndefined();
+		} finally {
+			await reloaded.close();
+		}
+	});
+
+	it.each([
+		{
+			name: "native plus scratch",
+			remoteEnabled: true,
+			standardEnabled: false,
+			localSummaryMode: "never",
+			nativeHistory: true,
+		},
+		{
+			name: "standard summary plus scratch",
+			remoteEnabled: false,
+			standardEnabled: true,
+			localSummaryMode: "always",
+			nativeHistory: false,
+		},
+		{
+			name: "native and standard summary plus scratch",
+			remoteEnabled: true,
+			standardEnabled: true,
+			localSummaryMode: "always",
+			nativeHistory: true,
+		},
+	])(
+		"persists one compaction boundary before current scratch for $name",
+		async ({ remoteEnabled, standardEnabled, localSummaryMode, nativeHistory }) => {
+			await session.dispose();
+			const scratchPath = "agent/current.org";
+			const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
+			fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
+			fs.writeFileSync(
+				scratchAbsolutePath,
+				"* TODO Continue composed work\n- Objective: Current composed scratch objective\n- Next action:\n  1. Verify composition\n",
+				"utf8",
+			);
+			sessionManager.appendCustomEntry("scratch-handoff-write", { path: scratchPath });
+			events = [];
+			session = new AgentSession({
+				agent: new Agent({
+					initialState: {
+						model,
+						systemPrompt: ["Test"],
+						tools: [],
+						messages: [],
+					},
+				}),
+				sessionManager,
+				settings: Settings.isolated({
+					"compaction.enabled": true,
+					"compaction.autoContinue": false,
+					"compaction.strategy": "handoff",
+					"compaction.keepRecentTokens": 1,
+					"compaction.remoteEnabled": remoteEnabled,
+					"scratchHandoff.standardCompactionEnabled": standardEnabled,
+					"contextPromotion.enabled": false,
+				}),
+				modelRegistry,
+				obfuscator,
+				scratchHandoffDisplayPath: scratchPath,
+			});
+			session.subscribe(event => events.push(event));
+			const nativePreserveData = {
+				openaiRemoteCompaction: {
+					provider: "openai",
+					replacementHistory: [{ type: "compaction", encrypted_content: "enc_composed" }],
+				},
+			};
+			const compactSpy = vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+				summary: standardEnabled ? "Portable standard summary" : "Native compaction marker",
+				shortSummary: standardEnabled ? "Standard summary" : "Remote compaction",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+				preserveData: nativeHistory ? nativePreserveData : undefined,
+			}));
+
+			await session.runIdleCompaction();
+
+			expect(compactSpy).toHaveBeenCalledTimes(1);
+			expect(compactSpy.mock.calls[0]?.[5]).toMatchObject({ localSummaryMode });
+			const entries = sessionManager.getEntries();
+			const compactions = entries.filter(entry => entry.type === "compaction");
+			const scratchEntries = entries.filter(
+				entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read",
+			);
+			expect(compactions).toHaveLength(1);
+			expect(scratchEntries).toHaveLength(1);
+			expect(entries.indexOf(compactions[0]!)).toBeLessThan(entries.indexOf(scratchEntries[0]!));
+			expect(compactions[0]).toMatchObject({
+				type: "compaction",
+				summary: standardEnabled ? "Portable standard summary" : "Native compaction marker",
+				preserveData: nativeHistory ? nativePreserveData : undefined,
+				scratchCompaction: { native: remoteEnabled, standard: standardEnabled },
+			});
+			expect(scratchEntries[0]).toMatchObject({ type: "custom_message", display: false });
+			const rebuiltMessages = sessionManager.buildSessionContext().messages;
+			expect(JSON.stringify(rebuiltMessages)).toContain("Current composed scratch objective");
+			expect(
+				rebuiltMessages.some(
+					message =>
+						message.role === "user" &&
+						JSON.stringify(message.content).includes("Current composed scratch objective"),
+				),
+			).toBe(false);
+			const compactionMessage = rebuiltMessages.find(message => message.role === "compactionSummary");
+			if (!compactionMessage) throw new Error("Expected rebuilt compaction summary");
+			const providerPayload = compactionMessage.providerPayload as ProviderPayload | undefined;
+			expect(getOpenAIResponsesHistoryPayload(providerPayload, "anthropic")).toBeUndefined();
+			if (nativeHistory) {
+				expect(getOpenAIResponsesHistoryPayload(providerPayload, "openai")?.items).toEqual(
+					nativePreserveData.openaiRemoteCompaction.replacementHistory,
+				);
+			}
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted composed session");
+			const reloaded = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				expect(JSON.stringify(reloaded.buildSessionContext().messages)).toContain(
+					"Current composed scratch objective",
+				);
+				const reloadedScratch = reloaded
+					.getEntries()
+					.find(entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read");
+				if (!reloadedScratch) throw new Error("Expected reloaded scratch entry");
+				expect(reloaded.getEntries().find(entry => entry.type === "compaction")).toMatchObject({
+					type: "compaction",
+					scratchCompaction: { native: remoteEnabled, standard: standardEnabled },
+				});
+				reloaded.branch(reloadedScratch.id);
+				expect(JSON.stringify(reloaded.buildSessionContext().messages)).toContain(
+					"Current composed scratch objective",
+				);
+				const forked = await reloaded.fork();
+				expect(forked).toBeDefined();
+				expect(JSON.stringify(reloaded.buildSessionContext().messages)).toContain(
+					"Current composed scratch objective",
+				);
+			} finally {
+				await reloaded.close();
+			}
+			expect(events).toContainEqual(
+				expect.objectContaining({ type: "auto_compaction_end", action: "scratch-handoff", aborted: false }),
+			);
+		},
+	);
+
+	it("falls back to one scratch-only boundary when required native compaction fails", async () => {
+		await session.dispose();
+		const scratchPath = "agent/current.org";
+		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
+		fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
+		fs.writeFileSync(
+			scratchAbsolutePath,
+			"* TODO Continue fallback work\n- Objective: Fallback scratch objective\n- Next action:\n  1. Resume safely\n",
+			"utf8",
+		);
+		sessionManager.appendCustomEntry("scratch-handoff-write", { path: scratchPath });
+		events = [];
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"compaction.keepRecentTokens": 1,
+				"compaction.remoteEnabled": true,
+				"scratchHandoff.standardCompactionEnabled": false,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			scratchHandoffDisplayPath: scratchPath,
+		});
+		session.subscribe(event => events.push(event));
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockRejectedValue(new Error("native unavailable"));
+
+		await session.runIdleCompaction();
+
+		expect(compactSpy).toHaveBeenCalled();
+		for (const call of compactSpy.mock.calls) {
+			expect(call[5]).toMatchObject({ localSummaryMode: "never" });
+		}
+		const entries = sessionManager.getEntries();
+		const compactions = entries.filter(entry => entry.type === "compaction");
+		const scratchEntries = entries.filter(
+			entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read",
+		);
+		expect(compactions).toHaveLength(1);
+		expect(scratchEntries).toHaveLength(1);
+		expect(entries.indexOf(scratchEntries[0]!)).toBeLessThan(entries.indexOf(compactions[0]!));
+		expect(compactions[0]).toMatchObject({
+			type: "compaction",
+			summary: "Continue from the scratch handoff state preserved after this compaction.",
+			scratchCompaction: { native: true, standard: false },
+		});
+		expect(JSON.stringify(sessionManager.buildSessionContext().messages)).toContain("Fallback scratch objective");
+		expect(events).toContainEqual(
+			expect.objectContaining({ type: "auto_compaction_end", action: "scratch-handoff", aborted: false }),
+		);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({ type: "auto_compaction_end", errorMessage: expect.anything() }),
+		);
+	});
+
+	it.each([
+		{ name: "incomplete", scratchText: "partial notes without an actionable TODO" },
+		{
+			name: "stale",
+			scratchText:
+				"* TODO Continue stale work\n- Objective: Stale scratch objective\n- Next action:\n  1. Resume from stale state\n",
+		},
+	])("does not treat $name scratch as authority for native compaction", async ({ scratchText }) => {
+		await session.dispose();
+		const scratchPath = "agent/current.org";
+		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
+		fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
+		fs.writeFileSync(scratchAbsolutePath, scratchText, "utf8");
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "handoff",
+				"compaction.keepRecentTokens": 1,
+				"compaction.remoteEnabled": true,
+				"scratchHandoff.standardCompactionEnabled": false,
+				"contextPromotion.enabled": false,
+			}),
+			modelRegistry,
+			obfuscator,
+			scratchHandoffDisplayPath: scratchPath,
+		});
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		await session.runIdleCompaction();
+
+		expect(compactSpy).not.toHaveBeenCalled();
+		const entries = sessionManager.getEntries();
+		expect(entries.filter(entry => entry.type === "compaction")).toHaveLength(1);
+		const scratchEntry = entries.find(
+			entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read",
+		);
+		expect(JSON.stringify(scratchEntry)).toContain("Scratch continuity is missing, stale, or incomplete");
+		expect(JSON.stringify(sessionManager.buildSessionContext().messages)).toContain(
+			"Repair the current scratch TODO before treating this resume state as verified",
+		);
 	});
 
 	it("uses scratch handoff for read-only threshold tool turns", async () => {
@@ -1421,6 +1780,7 @@ describe("AgentSession handoff", () => {
 				"compaction.enabled": true,
 				"compaction.autoContinue": false,
 				"compaction.strategy": "handoff",
+				"compaction.remoteEnabled": false,
 				"contextPromotion.enabled": false,
 			}),
 			modelRegistry,

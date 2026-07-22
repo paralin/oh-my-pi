@@ -541,14 +541,20 @@ contextPromotion:
 
 compaction:
   enabled: true
-  strategy: snapcompact     # context-full, handoff, shake, snapcompact, off
-  midTurnEnabled: true      # check thresholds between tool-loop provider requests
-  thresholdPercent: -1       # -1 = default reserve-based behavior
-  thresholdTokens: -1        # fixed token limit when > 0; capped at contextWindow - 50k
+  strategy: handoff        # context-full, handoff, shake, snapcompact, off
+  midTurnEnabled: true     # check thresholds between tool-loop provider requests
+  thresholdPercent: -1     # -1 = use thresholdTokens
+  thresholdTokens: 242000  # fixed token limit; capped at contextWindow - 50k
   remoteEnabled: true
 
+scratchHandoff:
+  enabled: true
+  standardCompactionEnabled: false
+  rootDir: agent
+
 memory:
-  backend: off               # off, local, hindsight, mnemopi
+  backend: off             # off, local, hindsight, mnemopi
+
 ```
 
 | Key | Type | Default | Notes |
@@ -556,13 +562,16 @@ memory:
 | `contextPromotion.enabled` | boolean | `false` | Promote to the active model's explicit `contextPromotionTarget` on context overflow. |
 | `compaction.enabled` | boolean | `true` | Automatic conversation compaction. |
 | `compaction.midTurnEnabled` | boolean | `true` | Check thresholds at safe mid-turn tool-loop boundaries before the next provider request. |
-| `compaction.strategy` | enum | `snapcompact` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
-| `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` = reserve-based default. |
-| `compaction.thresholdTokens` | number | `-1` | Fixed token trigger when `> 0`; capped at `contextWindow - 50000` for large context windows. |
+| `compaction.strategy` | enum | `handoff` | `context-full`, `handoff`, `shake`, `snapcompact`, `off`. |
+| `compaction.thresholdPercent` | number | `-1` | Percent-of-context trigger; `-1` uses a positive fixed-token trigger when configured. |
+| `compaction.thresholdTokens` | number | `242000` | Fixed token trigger when `> 0`; capped at `contextWindow - 50000` for large context windows. |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for the next turn. |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens always preserved. |
-| `compaction.remoteEnabled` | boolean | `true` | Allow remote compaction service. |
+| `compaction.remoteEnabled` | boolean | `true` | Use provider-native compaction when the selected model supports it. |
 | `compaction.autoContinue` | boolean | `true` | Continue automatically after compaction. |
+| `scratchHandoff.enabled` | boolean | `true` | Create and inject per-session scratch continuity for handoff-mode maintenance. |
+| `scratchHandoff.standardCompactionEnabled` | boolean | `false` | Also generate a portable plaintext summary during composed scratch compaction. |
+| `scratchHandoff.rootDir` | string | `agent` | Root for dated per-session scratch files. |
 | `memory.backend` | enum | `off` | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys. |
 | `autolearn.enabled` | boolean | `false` | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue` | boolean | `false` | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn. |

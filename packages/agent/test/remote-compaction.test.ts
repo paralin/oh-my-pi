@@ -1188,6 +1188,61 @@ describe("compact() remote compaction failure handling", () => {
 		expect(remote?.replacementHistory.at(-1)).toEqual(compactionItem);
 		expect(result.summary).toContain("Remote compaction preserved provider-native history");
 		expect(completeSpy).not.toHaveBeenCalled();
+
+		const withStandardSummary = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			localSummaryMode: "always",
+		});
+		expect(getCompactionV2PreserveData(withStandardSummary.preserveData)?.replacementHistory.at(-1)).toEqual(
+			compactionItem,
+		);
+		expect(withStandardSummary.summary).toContain("local summary");
+		expect(completeSpy).toHaveBeenCalled();
+	});
+
+	test("rejects before local summarization when native compaction is required but unavailable", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("local summary"));
+		const preparation = makePreparation();
+		preparation.settings = {
+			...preparation.settings,
+			remoteEnabled: false,
+		};
+		const model = makeOpenAiModel();
+
+		await expect(
+			compact(preparation, model, "test-key", undefined, undefined, {
+				localSummaryMode: "never",
+			}),
+		).rejects.toThrow("Provider-native compaction is unavailable.");
+		expect(completeSpy).not.toHaveBeenCalled();
+	});
+
+	test("uses the standard summary when native compaction fails in always mode", async () => {
+		const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(localSummaryMessage("portable summary"));
+		const preparation = makePreparation();
+		preparation.settings = {
+			...preparation.settings,
+			remoteStreamingV2Enabled: true,
+		};
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const fetchMock: FetchImpl = async () => {
+			throw new Error("native endpoint unavailable");
+		};
+
+		const result = await compact(preparation, model, "test-key", undefined, undefined, {
+			fetch: fetchMock,
+			localSummaryMode: "always",
+		});
+
+		expect(result.summary).toContain("portable summary");
+		expect(getCompactionV2PreserveData(result.preserveData)).toBeUndefined();
+		expect(completeSpy).toHaveBeenCalled();
 	});
 
 	test("re-expands a prior V2 compaction's originals when no candidate can reuse the replay", async () => {

@@ -7,10 +7,11 @@ Compaction and branch summaries are the two mechanisms that keep long sessions u
 
 Both are persisted as session entries and converted back into user-context messages when rebuilding LLM input.
 
-Scratch handoff is a companion continuity path, not a history rewrite. When
+Scratch handoff is the continuity owner for handoff-mode maintenance. When
 `scratchHandoff.enabled` is true, startup creates a per-session org file and
 adds instructions that tell the agent to keep that file current before context
-pressure can force maintenance.
+pressure can force maintenance. The runtime can compose provider-native history
+and an optional plaintext summary beneath that continuity boundary.
 
 ## Key implementation files
 
@@ -384,9 +385,8 @@ Result is stored as `BranchSummaryEntry` with optional details (`readFiles`, `mo
 
 ## Scratch handoff
 
-Scratch handoff is configured separately from `compaction.strategy` because it
-does not compact the transcript by itself. On startup, a main session with
-`scratchHandoff.enabled: true`:
+Scratch handoff coordinates handoff-mode compaction. On startup, a main session
+with `scratchHandoff.enabled: true`:
 
 1. Resolves `scratchHandoff.rootDir` relative to the session cwd when it is not
    absolute.
@@ -407,6 +407,30 @@ tool-result message together with pending in-flight messages. It renders that
 delta locally into provider-shaped SnapCompact frames when the model supports
 images. The scratch document remains the durable state owner; the attached
 delta preserves work too recent to have reached it.
+
+After refreshing scratch, handoff-mode maintenance selects its compression
+representations from two independent settings:
+
+| `compaction.remoteEnabled` | `scratchHandoff.standardCompactionEnabled` | Result |
+|---|---|---|
+| `false` | `false` | Scratch-only rebuild |
+| `true` | `false` | Provider-native history plus scratch |
+| `false` | `true` | Plaintext summary plus scratch |
+| `true` | `true` | Provider-native history, plaintext summary, and scratch |
+
+The composed modes call the existing core compaction engine. They persist one
+compaction entry, including provider replay state in `preserveData`, append the
+hidden current scratch message after that boundary, and rebuild model context
+once. Existing non-scratch compaction remains native-first with local-summary
+fallback. If native compaction is required but unavailable, scratch handoff
+falls back to the verified scratch-only rebuild. When the standard summary is
+enabled, native failure instead falls through to that plaintext summary before
+scratch is appended.
+
+Native compaction never substitutes for a valid scratch snapshot. A scratch file
+must contain an open TODO, a populated objective, and a next action before the
+runtime composes native or standard compression. Missing or incomplete scratch
+emits a repair warning and uses the scratch-only recovery path.
 
 In-process task subagents do not get their own scratch file. A headless worker
 launched as a top-level OMP process does, so Boss/worker runs can keep the same
@@ -468,7 +492,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.strategy` = `"snapcompact"` (`"context-full"`, `"handoff"`, `"shake"`, and `"off"` are also supported)
+- `compaction.strategy` = `"handoff"` (`"context-full"`, `"snapcompact"`, `"shake"`, and `"off"` are also supported)
 - `compaction.reserveTokens` = `16384`
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`
@@ -476,9 +500,10 @@ From `settings-schema.ts`:
 - `compaction.remoteEnabled` = `true`
 - `compaction.remoteEndpoint` = `undefined`
 - `compaction.maintenanceTrace` = `"assistant"` (`"loader"` hides trace cards/events; `"debug"` adds raw-SSE artifact refs)
-- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `-1`; when no positive override is set, the threshold is `contextWindow - max(15% of contextWindow, reserveTokens)`. A positive `thresholdTokens` override is capped at `contextWindow - 50000` on context windows above 50k tokens, with a runtime warning when the configured value is clamped.
+- `compaction.thresholdPercent` = `-1` and `compaction.thresholdTokens` = `242000`; a positive `thresholdTokens` override is capped at `contextWindow - 50000` on context windows above 50k tokens, with a runtime warning when the configured value is clamped.
 - `compaction.idleEnabled` = `false`
-- `scratchHandoff.enabled` = `false`
+- `scratchHandoff.enabled` = `true`
+- `scratchHandoff.standardCompactionEnabled` = `false`
 - `scratchHandoff.rootDir` = `"agent"`; relative paths resolve from the session cwd and create `agent/YYYYMMDD/<session-id>.org`
 - `compaction.idleThresholdTokens` = `200000`
 - `compaction.idleTimeoutSeconds` = `300`

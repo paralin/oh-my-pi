@@ -153,6 +153,7 @@ describe("Settings", () => {
 			expect(settings.get("compaction.handoffSaveToDisk")).toBe(true);
 			expect(settings.get("compaction.thresholdTokens")).toBe(242000);
 			expect(settings.get("scratchHandoff.enabled")).toBe(true);
+			expect(settings.get("scratchHandoff.standardCompactionEnabled")).toBe(false);
 			expect(settings.get("scratchHandoff.rootDir")).toBe("agent");
 			expect(settings.get("todo.enabled")).toBe(false);
 			expect(settings.get("dev.autoqaConsent")).toBe("denied");

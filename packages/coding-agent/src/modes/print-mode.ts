@@ -12,17 +12,11 @@ import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
-import { SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE } from "../session/scratch-handoff";
+import { SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE, scratchHandoffHasContent } from "../session/scratch-handoff";
 import { flushTelemetryExport } from "../telemetry-export";
 import { resolveToCwd } from "../tools/path-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../tools/resolve";
 import { initializeExtensions } from "./runtime-init";
-
-function scratchHandoffHasContent(text: string): boolean {
-	const fieldPattern =
-		/^-\s+(?:Objective|Skill stack|Work completed|Files changed|Verification|Blockers or risks|Next action|Source refs):[ \t]*(\S.*)$/gm;
-	return fieldPattern.test(text);
-}
 
 async function scratchHandoffFileIfWritten(
 	session: AgentSession,

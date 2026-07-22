@@ -2181,6 +2181,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"scratchHandoff.standardCompactionEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Scratch Handoff",
+			label: "Standard Compaction Summary",
+			description: "Generate a portable plaintext summary during composed scratch-handoff compaction",
+		},
+	},
+
 	"scratchHandoff.rootDir": {
 		type: "string",
 		default: "agent",
@@ -2199,7 +2210,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "Compaction",
 			label: "Remote Compaction",
-			description: "Use remote compaction endpoints when available instead of local summarization",
+			description: "Enable provider-native compaction endpoints when available",
 		},
 	},
 

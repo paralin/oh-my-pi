@@ -414,11 +414,18 @@ import {
 	SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
+	scratchHandoffIsComplete,
 } from "./scratch-handoff";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionEntry } from "./session-entries";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	NewSessionOptions,
+	ScratchCompactionModes,
+	SessionEntry,
+} from "./session-entries";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
@@ -12107,14 +12114,19 @@ export class AgentSession {
 		return this.#handoffAbortController !== undefined;
 	}
 
-	async #scratchHandoffMessageContent(
-		pendingMessages: readonly AgentMessage[] = [],
-	): Promise<CustomMessage["content"]> {
+	async #scratchHandoffMessageContent(pendingMessages: readonly AgentMessage[] = []): Promise<{
+		content: CustomMessage["content"];
+		verified: boolean;
+	}> {
 		if (this.#scratchHandoffDisplayPath) {
 			try {
 				const scratchPath = resolveToCwd(this.#scratchHandoffDisplayPath, this.sessionManager.getCwd());
 				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
 				const recentContextText = this.#scratchHandoffRecentContextText(pendingMessages);
+				const scratchIsFresh =
+					this.#scratchHandoffCloseout?.writeCompleted === true ||
+					(this.#scratchHandoffWriteCount(this.#scratchHandoffDisplayPath) > 0 && !recentContextText);
+				const verified = scratchHandoffIsComplete(scratchText) && scratchIsFresh;
 				if (recentContextText && this.model?.input.includes("image")) {
 					try {
 						const shape = snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape"));
@@ -12140,21 +12152,24 @@ export class AgentSession {
 						);
 						const archive = snapcompact.getPreservedArchive(result.preserveData);
 						if (archive) {
-							return [
-								{
-									type: "text",
-									text: renderScratchHandoffResumeMessage({
-										displayPath: this.#scratchHandoffDisplayPath,
-										parentDisplayPath: this.#parentScratchHandoffDisplayPath,
-										scratchText,
-										recentContextSnapcompactFrames: archive.frames.length,
+							return {
+								content: [
+									{
+										type: "text",
+										text: renderScratchHandoffResumeMessage({
+											displayPath: this.#scratchHandoffDisplayPath,
+											parentDisplayPath: this.#parentScratchHandoffDisplayPath,
+											scratchText,
+											recentContextSnapcompactFrames: archive.frames.length,
+										}),
+									},
+									{ type: "text", text: result.summary },
+									...snapcompact.historyBlocks(archive, {
+										maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
 									}),
-								},
-								{ type: "text", text: result.summary },
-								...snapcompact.historyBlocks(archive, {
-									maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
-								}),
-							];
+								],
+								verified,
+							};
 						}
 					} catch (error) {
 						logger.warn("Failed to compact scratch handoff delta with SnapCompact; preserving text", {
@@ -12163,17 +12178,20 @@ export class AgentSession {
 						});
 					}
 				}
-				return [
-					{
-						type: "text",
-						text: renderScratchHandoffResumeMessage({
-							displayPath: this.#scratchHandoffDisplayPath,
-							parentDisplayPath: this.#parentScratchHandoffDisplayPath,
-							scratchText,
-							recentContextText,
-						}),
-					},
-				];
+				return {
+					content: [
+						{
+							type: "text",
+							text: renderScratchHandoffResumeMessage({
+								displayPath: this.#scratchHandoffDisplayPath,
+								parentDisplayPath: this.#parentScratchHandoffDisplayPath,
+								scratchText,
+								recentContextText,
+							}),
+						},
+					],
+					verified,
+				};
 			} catch (error) {
 				logger.warn("Failed to build current scratch handoff payload; using launch snapshot", {
 					error: String(error),
@@ -12184,38 +12202,66 @@ export class AgentSession {
 		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
 			const message = this.agent.state.messages[index];
 			if (message?.role === "custom" && message.customType === SCRATCH_HANDOFF_READ_CUSTOM_TYPE) {
-				return message.content;
+				return { content: message.content, verified: false };
 			}
 		}
-		return [
-			{
-				type: "text",
-				text: `Current scratch continuity state is in ${this.#scratchHandoffDisplayPath ?? "(unknown)"}. Continue from that scratch file and the live launch prompt.`,
-			},
-		];
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Current scratch continuity state is in ${this.#scratchHandoffDisplayPath ?? "(unknown)"}. Continue from that scratch file and the live launch prompt.`,
+				},
+			],
+			verified: false,
+		};
 	}
 
-	async #compactScratchHandoffSession(
+	async #prepareScratchHandoffContext(
 		trace: MaintenanceTraceState,
 		pendingMessages: readonly AgentMessage[] = [],
-	): Promise<void> {
-		const scratchContent = await this.#scratchHandoffMessageContent(pendingMessages);
+	): Promise<{ content: CustomMessage["content"]; tokensBefore: number; verified: boolean }> {
+		const scratch = await this.#scratchHandoffMessageContent(pendingMessages);
+		let content = scratch.content;
+		if (!scratch.verified) {
+			const warning =
+				"Scratch continuity is missing, stale, or incomplete. Repair the current scratch TODO before treating this resume state as verified.";
+			this.emitNotice("warning", warning, "compaction");
+			content = [
+				{ type: "text", text: warning },
+				...(typeof content === "string" ? [{ type: "text" as const, text: content }] : content),
+			];
+		}
 		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
 		await this.sessionManager.flush();
+		return { content, tokensBefore, verified: scratch.verified };
+	}
+
+	async #appendScratchHandoffContext(
+		trace: MaintenanceTraceState,
+		scratch: { content: CustomMessage["content"]; tokensBefore: number },
+		createCompactionBoundary: boolean,
+		scratchCompaction: ScratchCompactionModes,
+	): Promise<void> {
 		const scratchEntryId = this.sessionManager.appendCustomMessageEntry(
 			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
-			scratchContent,
+			scratch.content,
 			false,
 			{ path: this.#scratchHandoffDisplayPath, parentPath: this.#parentScratchHandoffDisplayPath },
 			"agent",
 		);
-		this.sessionManager.appendCompaction(
-			"Continue from the scratch handoff state preserved after this compaction.",
-			"Scratch handoff",
-			scratchEntryId,
-			tokensBefore,
-		);
+		if (createCompactionBoundary) {
+			this.sessionManager.appendCompaction(
+				"Continue from the scratch handoff state preserved after this compaction.",
+				"Scratch handoff",
+				scratchEntryId,
+				scratch.tokensBefore,
+				undefined,
+				undefined,
+				undefined,
+				scratchCompaction,
+			);
+		}
 		const closeout = this.#scratchHandoffCloseout;
 		if (closeout && !closeout.writeCompleted) {
 			this.sessionManager.appendCustomMessageEntry(
@@ -12234,6 +12280,15 @@ export class AgentSession {
 		this.setTodoPhases([]);
 		await this.#emitMaintenanceTracePhase(trace, "scratch-session-compacted");
 		await this.#emitMaintenanceTracePhase(trace, "scratch-read-injected");
+	}
+
+	async #compactScratchHandoffSession(
+		trace: MaintenanceTraceState,
+		pendingMessages: readonly AgentMessage[] = [],
+		scratchCompaction: ScratchCompactionModes = { native: false, standard: false },
+	): Promise<void> {
+		const scratch = await this.#prepareScratchHandoffContext(trace, pendingMessages);
+		await this.#appendScratchHandoffContext(trace, scratch, true, scratchCompaction);
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#planReferenceSent = false;
@@ -15147,9 +15202,9 @@ export class AgentSession {
 			};
 		}
 
-		// Scratch handoff is the configured clean-break path: the agent has already
-		// been instructed to keep a durable scratch file current, so auto maintenance
-		// can reset into that file without a second LLM summarization call.
+		// Scratch handoff owns continuity. When a compression representation is
+		// enabled, compose it beneath that boundary; otherwise retain the verified
+		// scratch-only rebuild.
 		let action = resolveAutoCompactionAction({
 			strategy: compactionSettings.strategy,
 			reason,
@@ -15159,6 +15214,19 @@ export class AgentSession {
 		if (action === "scratch-handoff" && this.#scratchHandoffDisplayPath !== undefined) {
 			this.#stageScratchHandoffCloseout(this.#scratchHandoffDisplayPath, options.triggerContextTokens, reason);
 		}
+		const standardScratchCompaction = this.settings.get("scratchHandoff.standardCompactionEnabled");
+		const scratchCompactionModes: ScratchCompactionModes = {
+			native: action === "scratch-handoff" && compactionSettings.remoteEnabled !== false,
+			standard: action === "scratch-handoff" && standardScratchCompaction,
+		};
+		const composeScratchHandoff =
+			action === "scratch-handoff" &&
+			this.model !== undefined &&
+			(scratchCompactionModes.native || scratchCompactionModes.standard);
+		let preparedScratchHandoff:
+			| { content: CustomMessage["content"]; tokensBefore: number; verified: boolean }
+			| undefined;
+		let composedScratchBoundaryPersisted = false;
 		let fallbackCause: MaintenanceTraceFallbackCause | undefined;
 		if (action === "snapcompact" && this.model && !this.model.input.includes("image")) {
 			this.emitNotice(
@@ -15196,8 +15264,14 @@ export class AgentSession {
 			await this.#emitMaintenanceTraceStart(trace);
 			await this.#emitMaintenanceTraceDelta(trace, "activity", `Started ${action} maintenance for ${reason}.`);
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
-			if (action === "scratch-handoff") {
-				await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages);
+			if (composeScratchHandoff) {
+				preparedScratchHandoff = await this.#prepareScratchHandoffContext(trace, options.scratchRecentMessages);
+				if (!preparedScratchHandoff.verified) {
+					throw new Error("Current scratch handoff is missing or incomplete");
+				}
+			}
+			if (action === "scratch-handoff" && !composeScratchHandoff) {
+				await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages, scratchCompactionModes);
 				this.#scratchHandoffCloseout = undefined;
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
@@ -15291,6 +15365,9 @@ export class AgentSession {
 			}
 
 			const availableModels = this.#modelRegistry.getAvailable();
+			if (composeScratchHandoff && availableModels.length === 0) {
+				throw new Error("Compaction failed: no available model");
+			}
 			if (availableModels.length === 0) {
 				await this.#emitMaintenanceTraceDelta(
 					trace,
@@ -15353,6 +15430,9 @@ export class AgentSession {
 					});
 				}
 				if (!preparation) {
+					if (composeScratchHandoff) {
+						throw new Error("Compaction failed: nothing eligible for provider or standard compaction");
+					}
 					await this.#emitMaintenanceTraceDelta(trace, "activity", "Skipped: nothing eligible for maintenance.");
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
@@ -15403,7 +15483,7 @@ export class AgentSession {
 			let preserveData: Record<string, unknown> | undefined;
 			let codexCompaction: CodexCompactionContext | undefined;
 
-			if (this.#extensionRunner?.hasHandlers("session_before_compact")) {
+			if (!composeScratchHandoff && this.#extensionRunner?.hasHandlers("session_before_compact")) {
 				await this.#emitMaintenanceTraceDelta(trace, "activity", "Running session_before_compact extension hook.");
 				const hookResult = (await this.#extensionRunner.emit({
 					type: "session_before_compact",
@@ -15596,6 +15676,11 @@ export class AgentSession {
 									metadata: this.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+									localSummaryMode: composeScratchHandoff
+										? standardScratchCompaction
+											? "always"
+											: "never"
+										: undefined,
 									telemetry,
 									// Honor the user's /model thinking selection on the
 									// auto-compaction path — the most-fired compaction
@@ -15731,7 +15816,16 @@ export class AgentSession {
 				details,
 				fromExtension,
 				preserveData,
+				composeScratchHandoff ? scratchCompactionModes : undefined,
 			);
+			composedScratchBoundaryPersisted = composeScratchHandoff;
+			if (composeScratchHandoff) {
+				if (!preparedScratchHandoff) {
+					throw new Error("Scratch handoff payload was not prepared before compaction");
+				}
+				await this.#appendScratchHandoffContext(trace, preparedScratchHandoff, false, scratchCompactionModes);
+				this.#scratchHandoffCloseout = undefined;
+			}
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
@@ -15742,11 +15836,16 @@ export class AgentSession {
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#planReferenceSent = false;
 			this.#resetAllAdvisorRuntimes();
-			this.#syncTodoPhasesFromBranch();
+			if (!composeScratchHandoff) {
+				this.#syncTodoPhasesFromBranch();
+			}
 			if (codexCompaction) {
 				this.#resetCodexProviderAfterCompaction(codexCompaction);
 			} else {
 				this.#closeCodexProviderSessionsForHistoryRewrite();
+			}
+			if (composeScratchHandoff) {
+				await this.#emitMaintenanceTracePhase(trace, "scratch-session-rebuilt");
 			}
 
 			// Get the saved compaction entry for the hook
@@ -15892,6 +15991,46 @@ export class AgentSession {
 				});
 				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
+			}
+			if (composeScratchHandoff && !composedScratchBoundaryPersisted) {
+				const errorMessage = error instanceof Error ? error.message : String(error);
+				logger.warn("Composed scratch compaction failed; using scratch-only continuity", {
+					error: errorMessage,
+					reason,
+				});
+				const fallbackState = preparedScratchHandoff?.verified
+					? "verified scratch continuity"
+					: "scratch repair state";
+				await this.#emitMaintenanceTraceDelta(
+					trace,
+					"activity",
+					`Compression failed; rebuilding from ${fallbackState}: ${errorMessage}`,
+				);
+				if (preparedScratchHandoff) {
+					await this.#appendScratchHandoffContext(trace, preparedScratchHandoff, true, scratchCompactionModes);
+					const sessionContext = this.buildDisplaySessionContext();
+					this.agent.replaceMessages(sessionContext.messages);
+					this.#planReferenceSent = false;
+					this.#resetAllAdvisorRuntimes();
+					this.#closeCodexProviderSessionsForHistoryRewrite();
+					await this.#emitMaintenanceTracePhase(trace, "scratch-session-rebuilt");
+				} else {
+					await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages, scratchCompactionModes);
+				}
+				this.#scratchHandoffCloseout = undefined;
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
+				await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
+				const continuationScheduled = reason !== "idle" && shouldAutoContinue;
+				if (continuationScheduled) {
+					this.#scheduleAutoContinuePrompt(generation);
+				}
+				return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			const emittedErrorMessage =

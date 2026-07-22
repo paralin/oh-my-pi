@@ -43,6 +43,7 @@ import {
 	type ModeChangeEntry,
 	type ModelChangeEntry,
 	type NewSessionOptions,
+	type ScratchCompactionModes,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
 	type SessionHeader,
@@ -1596,6 +1597,7 @@ export class SessionManager {
 		details?: T,
 		fromExtension?: boolean,
 		preserveData?: Record<string, unknown>,
+		scratchCompaction?: ScratchCompactionModes,
 	): string {
 		const elidedSupersededCompactions = this.#elideSupersededCompactionsOnBranch(this.#index.leafId());
 		const entry: CompactionEntry<T> = {
@@ -1608,6 +1610,7 @@ export class SessionManager {
 			details,
 			fromExtension,
 			preserveData,
+			scratchCompaction,
 		};
 		this.#recordEntry(entry);
 		if (elidedSupersededCompactions) {
