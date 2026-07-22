@@ -1372,6 +1372,96 @@ describe("agentLoop with AgentMessage", () => {
 		).toBe(true);
 	});
 
+	it("interrupts an interruptible wait on an event-driven system notification", async () => {
+		const toolSchema = type({});
+		const toolStarted = Promise.withResolvers<void>();
+		const notificationReady = Promise.withResolvers<void>();
+		let notificationQueued = false;
+		let delivered = false;
+		let observedAbort = false;
+
+		const tool: AgentTool<typeof toolSchema, Record<string, never>> = {
+			name: "wait",
+			label: "Wait",
+			description: "Blocks until its interrupt signal fires.",
+			parameters: toolSchema,
+			interruptible: true,
+			async execute(_toolCallId, _params, signal) {
+				toolStarted.resolve();
+				const { promise, resolve } = Promise.withResolvers<void>();
+				if (signal?.aborted) {
+					observedAbort = true;
+					resolve();
+				} else {
+					signal?.addEventListener(
+						"abort",
+						() => {
+							observedAbort = true;
+							resolve();
+						},
+						{ once: true },
+					);
+				}
+				await promise;
+				return { content: [{ type: "text", text: "wait interrupted" }], details: {} };
+			},
+		};
+
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "wait", arguments: {} }] },
+				{ content: ["continued after notification"] },
+			],
+		});
+		const notification = { ...createUserMessage("scheduled notification"), attribution: "agent" as const };
+		const waitForSteeringMessages = (signal?: AbortSignal): Promise<void> => {
+			if (notificationQueued || signal?.aborted) return Promise.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			const onAbort = (): void => resolve();
+			signal?.addEventListener("abort", onAbort, { once: true });
+			return Promise.race([notificationReady.promise, promise]).finally(() => {
+				signal?.removeEventListener("abort", onAbort);
+			});
+		};
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			interruptMode: "immediate",
+			hasSteeringMessages: () => ({
+				queued: notificationQueued && !delivered,
+				source: "system",
+			}),
+			waitForSteeringMessages,
+			getSteeringMessages: async () => {
+				if (!notificationQueued || delivered) return [];
+				delivered = true;
+				return [notification];
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		const run = (async () => {
+			for await (const event of stream) events.push(event);
+		})();
+		await toolStarted.promise;
+		notificationQueued = true;
+		notificationReady.resolve();
+		await run;
+
+		expect(observedAbort).toBe(true);
+		expect(delivered).toBe(true);
+		expect(
+			events.some(
+				event =>
+					event.type === "message_start" &&
+					event.message.role === "user" &&
+					event.message.content === "scheduled notification",
+			),
+		).toBe(true);
+	});
+
 	it("keeps a completed error result instead of clobbering it into skipped when a steer aborts the signal (#4752)", async () => {
 		// A steer lands while an interruptible tool is in flight, aborting its shared
 		// signal via the mid-batch watch poll. The tool nonetheless runs to completion

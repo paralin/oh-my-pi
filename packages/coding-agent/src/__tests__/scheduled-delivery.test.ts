@@ -7,16 +7,32 @@ import {
 } from "../session/scheduled-notification";
 import { YieldQueue } from "../session/yield-queue";
 
-/** Model the exact session wiring the cron delivery owner depends on: the shared
- *  yield-queue routes a fired scheduled prompt to the next tool-call boundary
- *  while streaming (drainLazy at the aside poll) and wakes a turn while idle
- *  (scheduled flush -> injectIdle). */
+type SystemNotificationEntry = { content: string };
+
+function buildSystemNotification(entries: SystemNotificationEntry[]): AgentMessage {
+	return {
+		role: "custom",
+		customType: "system:notification",
+		content: entries.map(entry => entry.content).join("\n"),
+		display: true,
+		attribution: "agent",
+		timestamp: 0,
+	};
+}
+
+/** Model the exact session wiring the notification delivery owner depends on:
+ * streaming entries steer through the agent immediately, while idle entries
+ * schedule a wake turn through injectIdle. */
 function harness() {
 	let streaming = false;
 	const idleInjected: AgentMessage[][] = [];
+	const streamingInjected: AgentMessage[] = [];
 	const idleFlushes: Array<() => Promise<void>> = [];
 	const queue = new YieldQueue({
 		isStreaming: () => streaming,
+		injectStreaming: message => {
+			streamingInjected.push(message);
+		},
 		injectIdle: async messages => {
 			idleInjected.push(messages);
 		},
@@ -24,7 +40,14 @@ function harness() {
 			idleFlushes.push(run);
 		},
 	});
-	queue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, { build: buildScheduledNotification });
+	queue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, {
+		build: buildScheduledNotification,
+		interruptStreaming: true,
+	});
+	queue.register<SystemNotificationEntry>("system-notification", {
+		build: buildSystemNotification,
+		interruptStreaming: true,
+	});
 	queue.register<{ note: string }>("advisor", {
 		skipIdleFlush: true,
 		build: entries =>
@@ -39,6 +62,7 @@ function harness() {
 	return {
 		queue,
 		idleInjected,
+		streamingInjected,
 		idleFlushes,
 		setStreaming: (value: boolean) => {
 			streaming = value;
@@ -50,6 +74,7 @@ function harness() {
 				.drainLazy()
 				.map(thunk => thunk())
 				.filter((message): message is AgentMessage => message !== null),
+		fireSystem: (content: string) => queue.enqueue("system-notification", { content }),
 	};
 }
 
@@ -59,52 +84,31 @@ function customMessage(message: AgentMessage): Extract<AgentMessage, { role: "cu
 }
 
 describe("scheduled prompt delivery routing", () => {
-	it("delivers a fire during an active turn at the next tool boundary, not before and not on idle", () => {
+	it("interrupts an active turn through the streaming owner without a duplicate boundary delivery", () => {
 		const h = harness();
-		// Active turn -> cron fires. No idle flush is scheduled: delivery does not
-		// wait for Escape, idle, or any interactive input, and does not fire before
-		// the tool call completes.
 		h.setStreaming(true);
-		h.fire("boundary ping");
+		h.fire("blocking wait notification");
 		expect(h.idleFlushes).toEqual([]);
 		expect(h.idleInjected).toEqual([]);
-		// One completed tool call/result -> the aside poll drains the notification.
-		const messages = h.drainBoundary();
-		expect(messages).toHaveLength(1);
-		const message = customMessage(messages[0]!);
+		expect(h.streamingInjected).toHaveLength(1);
+		const message = customMessage(h.streamingInjected[0]!);
 		expect(message.attribution).toBe("agent");
-		expect(message.content).toContain("boundary ping");
-		// Drained exactly once: a later boundary yields no duplicate.
+		expect(message.content).toContain("blocking wait notification");
 		expect(h.drainBoundary()).toEqual([]);
+		expect(h.streamingInjected).toHaveLength(1);
 	});
-
-	it("re-arms a late active-turn fire at the idle transition without waking skip-idle kinds", async () => {
+	it("interrupts a comparable system notification in arrival order", () => {
 		const h = harness();
 		h.setStreaming(true);
-		// The final aside poll already ran before the scheduled job fired.
+		h.fireSystem("first system notification");
+		h.fireSystem("second system notification");
+
+		expect(h.streamingInjected).toHaveLength(2);
+		expect(h.streamingInjected.map(message => customMessage(message).content)).toEqual([
+			"first system notification",
+			"second system notification",
+		]);
 		expect(h.drainBoundary()).toEqual([]);
-		h.fire("tail ping");
-		h.queue.enqueue("advisor", { note: "deferred advice" });
-
-		h.setStreaming(false);
-		h.notifyIdle();
-		expect(h.idleFlushes).toHaveLength(1);
-		await h.idleFlushes[0]!();
-
-		const idleMessage = h.idleInjected[0]?.[0];
-		if (!idleMessage) throw new Error("Expected a scheduled idle notification.");
-		const notification = customMessage(idleMessage);
-		expect(notification.customType).toBe("scheduled:notification");
-		expect(notification.content).toContain("tail ping");
-		expect(h.queue.has(SCHEDULED_NOTIFICATION_KIND)).toBe(false);
-		// Advisor entries intentionally wait for a later boundary and must not be
-		// drained or included in the scheduled idle wake.
-		expect(h.queue.has("advisor")).toBe(true);
-		h.setStreaming(true);
-		const laterBoundary = h.drainBoundary();
-		expect(
-			laterBoundary.some(message => message.role === "custom" && message.customType === "scheduled:notification"),
-		).toBe(false);
 	});
 
 	it("wakes a turn when a job fires while idle", async () => {
@@ -120,14 +124,15 @@ describe("scheduled prompt delivery routing", () => {
 		expect(wokenMessage.content).toContain("idle ping");
 	});
 
-	it("batches multiple due jobs into one boundary notification", () => {
+	it("batches multiple due jobs into one idle notification", async () => {
 		const h = harness();
-		h.setStreaming(true);
 		h.fire("first");
 		h.fire("second");
-		const messages = h.drainBoundary();
-		expect(messages).toHaveLength(1);
-		const message = customMessage(messages[0]!);
+		expect(h.idleFlushes).toHaveLength(1);
+		await h.idleFlushes[0]!();
+		const batch = h.idleInjected[0];
+		if (!batch?.[0]) throw new Error("Expected an idle notification batch.");
+		const message = customMessage(batch[0]);
 		expect(message.content).toContain("first");
 		expect(message.content).toContain("second");
 	});

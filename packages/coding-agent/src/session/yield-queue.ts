@@ -8,6 +8,8 @@ export interface YieldDispatcher<P> {
 	build(survivors: P[]): AgentMessage | null;
 	/** If true, entries for this kind are drained only by {@link drainLazy} and never trigger the idle flush. */
 	skipIdleFlush?: boolean;
+	/** If true, enqueueing while streaming steers the built message into the agent immediately. */
+	interruptStreaming?: boolean;
 }
 
 export interface YieldQueueOptions {
@@ -23,6 +25,7 @@ interface StoredDispatcher {
 	isStale?: (entry: unknown) => boolean;
 	build: (survivors: unknown[]) => AgentMessage | null;
 	skipIdleFlush?: boolean;
+	interruptStreaming?: boolean;
 }
 
 function formatError(error: unknown): string {
@@ -44,6 +47,7 @@ export class YieldQueue {
 			...(dispatcher.isStale ? { isStale: entry => dispatcher.isStale?.(entry as P) ?? false } : {}),
 			build: survivors => dispatcher.build(survivors as P[]),
 			...(dispatcher.skipIdleFlush ? { skipIdleFlush: true } : {}),
+			...(dispatcher.interruptStreaming ? { interruptStreaming: true } : {}),
 		};
 		this.#dispatchers.set(kind, stored);
 		return () => {
@@ -54,7 +58,8 @@ export class YieldQueue {
 	}
 
 	enqueue<P>(kind: string, entry: P): void {
-		if (!this.#dispatchers.has(kind)) {
+		const dispatcher = this.#dispatchers.get(kind);
+		if (!dispatcher) {
 			logger.warn("Yield queue entry ignored for unregistered kind", { kind });
 			return;
 		}
@@ -64,7 +69,9 @@ export class YieldQueue {
 			this.#entries.set(kind, entries);
 		}
 		entries.push(entry);
-		if (!this.#options.isStreaming() && !this.#dispatchers.get(kind)!.skipIdleFlush) {
+		if (this.#options.isStreaming()) {
+			if (dispatcher.interruptStreaming) void this.flush("streaming", kind);
+		} else if (!dispatcher.skipIdleFlush) {
 			this.#scheduleIdleFlush();
 		}
 	}
@@ -89,12 +96,13 @@ export class YieldQueue {
 		}
 	}
 
-	async flush(mode: YieldFlushMode): Promise<void> {
+	async flush(mode: YieldFlushMode, onlyKind?: string): Promise<void> {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
 		}
 		const idleMessages: AgentMessage[] = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
+			if (onlyKind !== undefined && kind !== onlyKind) continue;
 			if (mode === "idle" && dispatcher.skipIdleFlush) continue;
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;

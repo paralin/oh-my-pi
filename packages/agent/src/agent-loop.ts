@@ -1807,17 +1807,26 @@ async function executeToolCalls(
 	const batchId = `${assistantMessage.timestamp ?? Date.now()}_${toolCalls[0]?.id ?? "batch"}`;
 	const shouldInterruptImmediately = interruptMode !== "wait";
 	const steeringAbortController = new AbortController();
+	const notificationAbortController = new AbortController();
 	const ircAbortController = new AbortController();
-	// Interruptible tools observe steering + external + IRC aborts; every other
-	// tool only sees steering + external, so an IRC-only interrupt never kills a
-	// partially side-effecting foreground tool (e.g. `bash`) running alongside a
-	// pure wait (e.g. `job` poll).
+	// System notifications interrupt only tools that explicitly opt into
+	// interruption. User steering keeps its established shared abort semantics;
+	// an IRC-only interrupt remains limited to interruptible tools.
 	const nonInterruptibleSignal: AbortSignal = signal
 		? AbortSignal.any([signal, steeringAbortController.signal])
 		: steeringAbortController.signal;
 	const interruptibleSignal: AbortSignal = signal
-		? AbortSignal.any([signal, steeringAbortController.signal, ircAbortController.signal])
-		: AbortSignal.any([steeringAbortController.signal, ircAbortController.signal]);
+		? AbortSignal.any([
+				signal,
+				steeringAbortController.signal,
+				notificationAbortController.signal,
+				ircAbortController.signal,
+			])
+		: AbortSignal.any([
+				steeringAbortController.signal,
+				notificationAbortController.signal,
+				ircAbortController.signal,
+			]);
 	const interruptState: { triggered: boolean; source?: SteeringInterruptSource | "irc" } = { triggered: false };
 
 	const records = toolCalls.map(toolCall => {
@@ -1880,12 +1889,11 @@ async function executeToolCalls(
 			}
 		}
 		if (steeringQueued) {
-			// Queued steering upgrades an in-flight IRC interrupt: it aborts the
-			// shared signal so foreground tools stop as they do for a user Esc.
-			// Idempotent — a second steer poll after the abort is a no-op.
-			if (!steeringAbortController.signal.aborted) {
-				interruptState.triggered = true;
-				interruptState.source = steeringSource ?? "unknown";
+			interruptState.triggered = true;
+			interruptState.source = steeringSource ?? "unknown";
+			if (steeringSource === "system") {
+				notificationAbortController.abort();
+			} else {
 				steeringAbortController.abort();
 			}
 			return;
@@ -2230,21 +2238,43 @@ async function executeToolCalls(
 
 	// While an interruptible tool call is in flight (e.g. a `hub` wait blocking
 	// on external work), queued steering or interrupting IRC would otherwise
-	// wait out the tool's own window. Poll only non-consuming queues and abort
-	// the shared tool signal so the boundary dequeue below injects the message
-	// promptly. Gated on immediate-interrupt mode + an interruptible call;
-	// checkSteering is idempotent (no-op once triggered).
+	// wait out the tool's own window. Prefer the event-driven steering wake when
+	// the host provides it; retain the timer fallback for direct loop consumers
+	// that only expose the legacy peek callbacks.
 	const watchSteeringWhileRunning =
 		shouldInterruptImmediately &&
 		(hasSteeringMessages !== undefined || hasIrcInterrupts !== undefined) &&
 		records.some(record => record.interruptible);
-	const steeringWatchTimer = watchSteeringWhileRunning
-		? setInterval(() => void checkSteering(), STEERING_INTERRUPT_POLL_MS)
-		: undefined;
+	const eventDrivenSteeringWatch =
+		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
+	const steeringWatchAbortController = new AbortController();
+	const steeringWatchSignal = signal
+		? AbortSignal.any([signal, steeringWatchAbortController.signal])
+		: steeringWatchAbortController.signal;
+	const steeringWatchPromise =
+		eventDrivenSteeringWatch
+			? (async (): Promise<void> => {
+					while (!steeringWatchSignal.aborted) {
+						await config.waitForSteeringMessages?.(steeringWatchSignal);
+						if (steeringWatchSignal.aborted) return;
+						await checkSteering();
+						if (interruptState.triggered) return;
+					}
+				})()
+			: undefined;
+	// IRC interrupt records have a separate session-owned queue and no wake
+	// callback. Keep its established timer fallback when that queue is present;
+	// system steering uses the event-driven path above and does not poll.
+	const steeringWatchTimer =
+		watchSteeringWhileRunning && (!eventDrivenSteeringWatch || hasIrcInterrupts !== undefined)
+			? setInterval(() => void checkSteering(), STEERING_INTERRUPT_POLL_MS)
+			: undefined;
 	try {
 		await Promise.allSettled(tasks);
 	} finally {
-		if (steeringWatchTimer !== undefined) clearInterval(steeringWatchTimer);
+		steeringWatchAbortController.abort();
+		await steeringWatchPromise?.catch(() => undefined);
+		clearInterval(steeringWatchTimer);
 	}
 	// Yield after batch tool execution to let GC and I/O catch up,
 	// especially when tool results are large (e.g. bash output).

@@ -3050,6 +3050,7 @@ export class AgentSession {
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
+			injectStreaming: message => this.agent.steer(message),
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -3064,18 +3065,18 @@ export class AgentSession {
 				);
 			},
 		});
-		// Fired scheduled-prompt (cron) jobs ride the same non-interrupting aside
-		// channel: a live turn folds them in at its next completed tool-call
-		// boundary, and an idle enqueue wakes a turn (no `skipIdleFlush`). They are
-		// system-authored, so delivery never synthesizes a user turn or waits for
-		// interactive input.
+		// Fired scheduled-prompt (cron) jobs are system notifications. During a
+		// live turn, the shared yield queue steers them immediately so interruptible
+		// waits can cancel through the agent loop; idle enqueues still wake a turn.
+		// They never synthesize a user-role message or wait for interactive input.
 		this.yieldQueue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, {
 			build: buildScheduledNotification,
+			interruptStreaming: true,
 		});
-		// Background-job completions / late diagnostics are pulled into the run at
-		// each step boundary as non-interrupting asides. Peer IRCs share the aside
-		// injection boundary, but also expose a non-consuming interrupt peek so
-		// `hub` waits can return early before the boundary drains them.
+		// Background-job and MCP notifications steer through the same queue owner;
+		// passive late diagnostics remain aside-only. Peer IRCs share the aside
+		// injection boundary but expose a non-consuming interrupt peek so `hub`
+		// waits can return early before the boundary drains them.
 		this.agent.hasIrcInterrupts = () => this.#pendingIrcInterrupts.length > 0;
 		this.agent.setAsideMessageProvider(() => {
 			const pendingIrc = [...this.#pendingIrcInterrupts, ...this.#pendingIrcAsides];

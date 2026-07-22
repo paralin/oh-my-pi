@@ -1,8 +1,8 @@
 import type { CustomMessage } from "@oh-my-pi/pi-agent-core";
 
 /** SCHEDULED_NOTIFICATION_KIND names the yield-queue channel that carries fired
- *  scheduled-prompt (cron) jobs. Streaming turns drain it at the next completed
- *  tool-call boundary; idle enqueues wake a turn. */
+ *  scheduled-prompt (cron) jobs. Streaming turns steer the notification through
+ *  the agent loop; idle enqueues wake a turn. */
 export const SCHEDULED_NOTIFICATION_KIND = "scheduled";
 
 /** ScheduledNotificationEntry is one fired scheduled-prompt awaiting delivery. */
@@ -23,9 +23,8 @@ export function formatScheduledNotificationContent(prompts: string[]): string {
 }
 
 /** buildScheduledNotification batches fired scheduled prompts into one
- *  system-authored (`attribution: "agent"`) custom message delivered as a
- *  non-interrupting aside. It never synthesizes a user-role turn. Returns null
- *  when no entry carries a non-empty prompt. */
+ *  system-authored (`attribution: "agent"`) custom message. It never synthesizes
+ *  a user-role turn. Returns null when no entry carries a non-empty prompt. */
 export function buildScheduledNotification(entries: ScheduledNotificationEntry[]): CustomMessage | null {
 	const prompts = entries.map(entry => entry.prompt).filter(text => text.trim().length > 0);
 	if (prompts.length === 0) return null;
