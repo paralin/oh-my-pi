@@ -45,7 +45,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
+import { mapWithConcurrencyLimitAllSettled, normalizeConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
@@ -165,6 +165,7 @@ function renderDescription(
 	asyncEnabled: boolean,
 	ircEnabled: boolean,
 	parentSpawns: string,
+	maxConcurrency: number,
 ): string {
 	const spawnPolicy = resolveSpawnPolicy(parentSpawns);
 	const spawningDisabled = !spawnPolicy.enabled;
@@ -191,6 +192,7 @@ function renderDescription(
 		asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
 		ircEnabled,
+		MAX_CONCURRENCY: normalizeConcurrencyLimit(maxConcurrency),
 	});
 }
 
@@ -560,6 +562,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.settings.get("async.enabled"),
 			isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			this.session.getSessionSpawns() ?? "*",
+			this.session.settings.get("task.maxConcurrency"),
 		);
 	}
 	private constructor(
@@ -1033,13 +1036,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
 		const buildFollowUpHint = (aborted: boolean): string => {
+			const ref = AgentRegistry.global().get(agentId);
 			if (aborted) {
-				const status = AgentRegistry.global().get(agentId)?.status;
-				if (status === "idle" || status === "parked") {
-					const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
-					return `\n\n${agentId} was stopped but is still resumable — ${followUp}transcript at history://${agentId}`;
+				if (ref?.sessionFile) {
+					if (ref.status === "idle" || ref.status === "parked") {
+						const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
+						return `\n\n${agentId} was stopped but is still resumable — ${followUp}transcript at history://${agentId}`;
+					}
+					return `\n\n${agentId} was aborted — transcript at history://${agentId}`;
 				}
-				return `\n\n${agentId} was aborted — transcript at history://${agentId}`;
+				return `\n\n${agentId} was aborted — transcript unavailable`;
 			}
 			const followUp = ircEnabled ? "message it via `hub` to follow up; " : "";
 			return `\n\n${agentId} is now idle — ${followUp}transcript at history://${agentId}`;
