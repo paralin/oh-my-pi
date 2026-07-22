@@ -156,7 +156,7 @@ describe("AgentSession shake", () => {
 	describe("auto-shake strategy", () => {
 		it("dispatches the elide path and emits a shake action for threshold maintenance", async () => {
 			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdPercent", 1);
+			session.settings.set("compaction.thresholdTokens", 5_000);
 			session.settings.set("contextPromotion.enabled", false);
 
 			// Reclaim enough that the corrected (provider − tokensFreed) figure lands
@@ -312,7 +312,7 @@ describe("AgentSession shake", () => {
 			// must be installed before auto_compaction_start is emitted, so a message
 			// typed as the loader appears is queued safely rather than mis-routed.
 			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdPercent", 1);
+			session.settings.set("compaction.thresholdTokens", 5_000);
 			session.settings.set("contextPromotion.enabled", false);
 
 			let capturedIsCompacting: boolean | undefined;
@@ -355,13 +355,12 @@ describe("AgentSession shake", () => {
 
 		it("falls back to context-full when shake cannot drop context below the threshold (regression #2119)", async () => {
 			session.settings.set("compaction.strategy", "shake");
-			session.settings.set("compaction.thresholdPercent", 1);
+			session.settings.set("compaction.thresholdTokens", 5_000);
 			session.settings.set("contextPromotion.enabled", false);
 
-			// Seed agent state so the post-shake estimate is well above the 1% threshold
-			// (~2K tokens for a 200K window). The mocked shake returns reclaimed=true but
-			// does not modify state, mimicking the dead-loop scenario where shake removes
-			// nothing material yet the threshold check stays positive.
+			// Seed agent state so the post-shake estimate stays above the pinned 5K-token
+			// threshold. The mocked shake reports reclaimed work but does not modify state,
+			// matching the dead-loop scenario where the threshold check stays positive.
 			session.agent.replaceMessages([
 				{
 					role: "user",
