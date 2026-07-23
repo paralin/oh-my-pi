@@ -992,9 +992,7 @@ describe("resolveModelOverride", () => {
 });
 describe("resolveCliModel", () => {
 	test("resolves --model provider/id without --provider", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliModel: "openai/gpt-4o",
@@ -1006,10 +1004,56 @@ describe("resolveCliModel", () => {
 		expect(result.model?.id).toBe("gpt-4o");
 	});
 
-	test("resolves bare configured role names from --model", () => {
+	test("prefers an authenticated provider for an unqualified exact model id", () => {
+		const availableModels = openaiGpt55Models.filter(model => model.provider === "openai-codex");
 		const registry = {
-			getAll: () => allModels,
+			getAll: () => openaiGpt55Models,
 		};
+
+		const result = resolveCliModel({
+			cliModel: "gpt-5.5",
+			modelRegistry: registry,
+			availableModels,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openai-codex");
+		expect(result.model?.id).toBe("gpt-5.5");
+	});
+
+	test("prefers an authenticated provider for flat slashful ids whose prefix is a provider slug", () => {
+		const mirror = (provider: string, baseUrl: string): Model<"anthropic-messages"> =>
+			buildModel({
+				id: "openai/gpt-oss-120b",
+				name: "GPT-OSS 120B",
+				api: "anthropic-messages",
+				provider,
+				baseUrl,
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+				contextWindow: 128000,
+				maxTokens: 4096,
+			});
+		const catalogFirst = mirror("fireworks", "https://api.fireworks.ai");
+		const authenticated = mirror("openrouter", "https://openrouter.ai");
+		// "openai" is a real provider slug in the catalog, but it does not carry
+		// this model — the selector is a flat aggregator id, not provider/id.
+		const catalog = [...allModels, catalogFirst, authenticated];
+
+		const result = resolveCliModel({
+			cliModel: "openai/gpt-oss-120b",
+			modelRegistry: { getAll: () => catalog },
+			availableModels: [authenticated],
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("openai/gpt-oss-120b");
+	});
+
+	test("resolves bare configured role names from --model", () => {
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: { task: "openai/gpt-4o" },
 		});
@@ -1026,9 +1070,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("resolves bare configured role names with thinking suffixes", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: { task: "anthropic/claude-sonnet-4-5" },
 		});
@@ -1046,9 +1088,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("preserves configured role fallback selectors for deferred resolution", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: {
 				task: "openrouter/z-ai/glm-4.7@cerebras,anthropic/claude-sonnet-4-5",
@@ -1065,9 +1105,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("reports when a configured role matches after unresolved candidates", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: {
 				task: "runtime-provider/runtime-model,anthropic/claude-sonnet-4-5",
@@ -1086,9 +1124,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("does not fuzzy-match unresolved configured roles", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: { sonnet: "runtime-provider/runtime-model" },
 		});
@@ -1105,9 +1141,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("keeps unknown --model names on the not-found path", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 
 		const result = resolveCliModel({
 			cliModel: "not-a-model",
@@ -1131,9 +1165,7 @@ describe("resolveCliModel", () => {
 			contextWindow: 128000,
 			maxTokens: 4096,
 		});
-		const registry = {
-			getAll: () => [...allModels, exactModel],
-		};
+		const registry = { getAll: () => [...allModels, exactModel] };
 		const settings = Settings.isolated({
 			modelRoles: { task: "anthropic/claude-sonnet-4-5" },
 		});
@@ -1158,9 +1190,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("resolves configured custom, legacy, and default role aliases from --model", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: {
 				default: "openai/gpt-4o",
@@ -1194,9 +1224,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("splits thinking suffixes and abbreviations off the * default alias", () => {
-		const registry = {
-			getAll: () => allModels,
-		};
+		const registry = { getAll: () => allModels };
 		const settings = Settings.isolated({
 			modelRoles: { default: "anthropic/claude-sonnet-4-5" },
 		});
@@ -1222,9 +1250,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("resolves fuzzy patterns within an explicit provider", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliProvider: "openai",
@@ -1238,9 +1264,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("supports --model <pattern>:<thinking> (without explicit --thinking)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliModel: "sonnet:high",
@@ -1253,9 +1277,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("prefers exact model id match over provider inference (OpenRouter-style ids)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliModel: "openai/gpt-4o:extended",
@@ -1268,9 +1290,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("does not strip invalid :suffix as thinking level in --model (fail fast)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliProvider: "openai",
@@ -1283,9 +1303,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("supports provider-prefixed OpenRouter route suffixes even when the base model is cataloged without them", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliModel: "openrouter/z-ai/glm-4.7-20251222:nitro",
@@ -1298,9 +1316,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("supports explicit OpenRouter provider with route suffixes that are not in the catalog", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliProvider: "openrouter",
@@ -1320,16 +1336,12 @@ describe("resolveCliModel", () => {
 		const baseResult = resolveCliModel({
 			cliProvider: "amazon-bedrock",
 			cliModel: profileArn,
-			modelRegistry: {
-				getAll: () => [defaultBedrockModel],
-			},
+			modelRegistry: { getAll: () => [defaultBedrockModel] },
 		});
 		const offResult = resolveCliModel({
 			cliProvider: "amazon-bedrock",
 			cliModel: `${profileArn}:off`,
-			modelRegistry: {
-				getAll: () => [defaultBedrockModel],
-			},
+			modelRegistry: { getAll: () => [defaultBedrockModel] },
 		});
 
 		expect(baseResult.error).toBeUndefined();
@@ -1348,9 +1360,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("returns a clear error when there are no models", () => {
-		const registry = {
-			getAll: () => [],
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => [] } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliProvider: "openai",
@@ -1416,9 +1426,7 @@ describe("resolveCliModel", () => {
 	});
 
 	test("resolves provider-prefixed fuzzy patterns (openrouter/qwen -> openrouter model)", () => {
-		const registry = {
-			getAll: () => allModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => allModels } as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliModel: "openrouter/qwen",
@@ -1459,9 +1467,9 @@ describe("resolveCliModel", () => {
 				maxTokens: 4096,
 			}),
 		];
-		const registry = {
-			getAll: () => ambiguousModels,
-		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const registry = { getAll: () => ambiguousModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
 
 		const result = resolveCliModel({
 			cliModel: "zai/glm-5",

@@ -1625,11 +1625,38 @@ export function filterAvailableModelsByEnabledPatterns(
 
 	return includeSyntheticAllowedModels(available, allowedModels);
 }
+function findExactCliModel(
+	selector: string,
+	allModels: Model<Api>[],
+	availableModels: Model<Api>[],
+	hasConfiguredAuth?: (model: Model<Api>) => boolean,
+): Model<Api> | undefined {
+	// Explicit provider/id references stay authoritative against the full catalog.
+	const referenced = findExactModelReferenceMatch(selector, allModels);
+	if (referenced) return referenced;
+
+	// Flat-id (or full-selector-string) matches prefer authenticated providers,
+	// then fall back to catalog order. This covers aggregator-style flat ids
+	// that merely look provider-qualified (e.g. "openai/gpt-oss-120b" hosted on
+	// OpenRouter), where the provider/id decomposition above found nothing.
+	// Among the flat-match ties, a provider with configured auth beats an
+	// uncredentialed catalog mirror of the same id: a newly cataloged mirror
+	// must not shadow the provider the user can actually call.
+	const lower = selector.toLowerCase();
+	const isFlatMatch = (model: Model<Api>) =>
+		model.id.toLowerCase() === lower || formatModelString(model).toLowerCase() === lower;
+	const flatMatches = availableModels.filter(isFlatMatch);
+	const preferred = (hasConfiguredAuth ? flatMatches.find(hasConfiguredAuth) : undefined) ?? flatMatches[0];
+	if (preferred) return preferred;
+	return availableModels === allModels ? undefined : allModels.find(isFlatMatch);
+}
 
 export interface ResolveCliModelResult {
 	model: Model<Api> | undefined;
-	/** configuredPatterns is the full configured fallback chain when the selector resolves through a role. */
+	/** configuredPatterns contains the role's ordered primary candidates. */
 	configuredPatterns?: string[];
+	/** configuredRole identifies the role expanded into configuredPatterns. */
+	configuredRole?: string;
 	/** configuredPatternIndex identifies the configured role pattern that matched an available model. */
 	configuredPatternIndex?: number;
 	selector?: string;
@@ -1647,17 +1674,19 @@ export function resolveCliModel(options: {
 	cliProvider?: string;
 	cliModel?: string;
 	modelRegistry: CliModelRegistry;
+	/** Authenticated models to prefer for unqualified selectors; omit to preserve catalog-order behavior. */
+	availableModels?: Model<Api>[];
 	settings?: Settings;
 	preferences?: ModelMatchPreferences;
 }): ResolveCliModelResult {
-	const { cliProvider, cliModel, modelRegistry, settings, preferences } = options;
+	const { cliProvider, cliModel, modelRegistry, settings, preferences, availableModels: preferredModels } = options;
 
 	if (!cliModel) {
 		return { model: undefined, selector: undefined, warning: undefined, error: undefined };
 	}
 
-	const availableModels = modelRegistry.getAll();
-	if (availableModels.length === 0) {
+	const allModels = modelRegistry.getAll();
+	if (allModels.length === 0) {
 		return {
 			model: undefined,
 			selector: undefined,
@@ -1666,8 +1695,9 @@ export function resolveCliModel(options: {
 		};
 	}
 
+	const availableModels = preferredModels ?? allModels;
 	const providerMap = new Map<string, string>();
-	for (const model of availableModels) {
+	for (const model of allModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);
 	}
 
@@ -1683,24 +1713,12 @@ export function resolveCliModel(options: {
 
 	const trimmedModel = cliModel.trim();
 	if (!provider) {
-		const lower = trimmedModel.toLowerCase();
-		// When input has provider/id format (e.g. "zai/glm-5"), prefer decomposed
-		// provider+id match over flat id match. Without this, a model with id
-		// "zai/glm-5" on provider "vercel-ai-gateway" wins over provider "zai"
-		// with id "glm-5", because Array.find returns the first catalog hit.
-		let exact = findExactModelReferenceMatch(trimmedModel, availableModels);
-		if (!exact) {
-			// Flat exact id (or full selector) by catalog order: CLI resolution
-			// stays deterministic across runs regardless of usage-based ranking.
-			// Among the exact-id ties, a provider with configured auth beats an
-			// uncredentialed catalog mirror of the same id (catalog order breaks
-			// ties within each group): a newly cataloged mirror must not shadow
-			// the provider the user can actually call.
-			const flatMatches = availableModels.filter(
-				model => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
-			);
-			exact = flatMatches.find(model => modelRegistry.hasConfiguredAuth?.(model)) ?? flatMatches[0];
-		}
+		const exact = findExactCliModel(
+			trimmedModel,
+			allModels,
+			availableModels,
+			modelRegistry.hasConfiguredAuth?.bind(modelRegistry),
+		);
 		if (exact) {
 			return {
 				model: exact,
@@ -1716,15 +1734,7 @@ export function resolveCliModel(options: {
 			MAX_THINKING_SUFFIX_OPTIONS,
 		);
 		if (exactThinkingLevel) {
-			let exactSuffixed = findExactModelReferenceMatch(exactBase, availableModels);
-			if (!exactSuffixed) {
-				const lowerExactBase = exactBase.toLowerCase();
-				exactSuffixed = availableModels.find(
-					model =>
-						model.id.toLowerCase() === lowerExactBase ||
-						`${model.provider}/${model.id}`.toLowerCase() === lowerExactBase,
-				);
-			}
+			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels);
 			if (exactSuffixed) {
 				return {
 					model: exactSuffixed,
@@ -1750,15 +1760,28 @@ export function resolveCliModel(options: {
 					? `${formatModelRoleAlias(bareRoleName)}${bareRoleThinkingLevel ? `:${bareRoleThinkingLevel}` : ""}`
 					: undefined;
 		if (roleSelector) {
+			const { base: roleAlias } = splitThinkingSuffix(
+				roleSelector,
+				modelRoleAliasPrefixLength(roleSelector) ?? -1,
+				MAX_THINKING_SUFFIX_OPTIONS,
+			);
+			const configuredRole = getModelRoleAlias(roleAlias, settings);
 			configuredPatterns = resolveConfiguredModelPatterns([roleSelector], settings);
-			const resolved = resolveModelRoleValue(roleSelector, availableModels, {
+			const availableResolved = resolveModelRoleValue(roleSelector, availableModels, {
 				settings,
 				matchPreferences: preferences,
 			});
+			const resolved = availableResolved.model
+				? availableResolved
+				: resolveModelRoleValue(roleSelector, allModels, {
+						settings,
+						matchPreferences: preferences,
+					});
 			if (resolved.model) {
 				return {
 					model: resolved.model,
 					selector: formatModelString(resolved.model),
+					configuredRole,
 					configuredPatterns,
 					configuredPatternIndex: resolved.matchedPatternIndex,
 					thinkingLevel: resolved.thinkingLevel,
@@ -1770,6 +1793,7 @@ export function resolveCliModel(options: {
 				return {
 					model: undefined,
 					configuredPatterns,
+					configuredRole,
 					selector: undefined,
 					thinkingLevel: undefined,
 					warning: resolved.warning,
@@ -1799,7 +1823,7 @@ export function resolveCliModel(options: {
 	}
 
 	if (provider) {
-		const exactProviderMatch = resolveProviderModelReference(provider, pattern, availableModels);
+		const exactProviderMatch = resolveProviderModelReference(provider, pattern, allModels);
 		if (exactProviderMatch) {
 			return {
 				model: exactProviderMatch,
@@ -1811,15 +1835,21 @@ export function resolveCliModel(options: {
 		}
 	}
 
-	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
+	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
 	const hasConfiguredAuth = modelRegistry.hasConfiguredAuth?.bind(modelRegistry);
 	const authAwarePreferences: ModelMatchPreferences = {
 		...preferences,
 		configuredAuth: preferences?.configuredAuth ?? hasConfiguredAuth,
 	};
-	const { model, thinkingLevel, warning, upstream } = parseModelPattern(pattern, candidates, authAwarePreferences, {
+	let parsed = parseModelPattern(pattern, candidates, authAwarePreferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
+	if (!parsed.model && !provider) {
+		parsed = parseModelPattern(pattern, allModels, authAwarePreferences, {
+			allowInvalidThinkingSelectorFallback: false,
+		});
+	}
+	const { model, thinkingLevel, warning, upstream } = parsed;
 
 	if (!model) {
 		const display = provider ? `${provider}/${pattern}` : cliModel;

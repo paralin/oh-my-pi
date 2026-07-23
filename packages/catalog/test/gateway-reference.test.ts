@@ -10,8 +10,9 @@ describe("Portkey gateway model references", () => {
 
 	test("cross-provider references do not inherit wire routing thinking", () => {
 		const index = getBundledModelReferenceIndex();
-		const devinGlm = resolveModelReference("glm-5-2", index);
-		expect(devinGlm?.provider).toBe("devin");
-		expect(inheritReferenceThinking(undefined, devinGlm, "gateway")).toBeUndefined();
+		const kiloGigaPotato = resolveModelReference("giga-potato", index);
+		expect(kiloGigaPotato?.provider).toBe("kilo");
+		expect(kiloGigaPotato?.thinking?.effortRouting).toBeDefined();
+		expect(inheritReferenceThinking(undefined, kiloGigaPotato, "gateway")).toBeUndefined();
 	});
 });

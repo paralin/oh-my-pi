@@ -2977,6 +2977,11 @@ export const SETTINGS_SCHEMA = {
 
 	"hindsight.debug": { type: "boolean", default: false },
 
+	"hindsight.requestTimeoutMs": { type: "number", default: 30_000 },
+	"hindsight.reflectTimeoutMs": { type: "number", default: 120_000 },
+	"hindsight.recallTimeoutMs": { type: "number", default: 30_000 },
+	"hindsight.retainTimeoutMs": { type: "number", default: 60_000 },
+
 	"hindsight.mentalModelsEnabled": {
 		type: "boolean",
 		default: true,

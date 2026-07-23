@@ -152,6 +152,14 @@ export class PlanReviewOverlay implements Component {
 	 *  motion mouse reports and cleared when the pointer leaves the option rows. */
 	#hoveredOption: number | undefined;
 
+	// Once a choice fires, the promise-based caller resolves but keeps this
+	// overlay mounted while it runs slow async approval work (e.g. context
+	// compaction). Lock input and switch to a "submitting" indicator so the
+	// overlay stops looking interactive and repeat Enter/Esc are not silently
+	// swallowed with zero feedback (#5926).
+	#committed = false;
+	/** Label of the committed choice, shown while the async approval settles. */
+	#committedLabel: string | undefined;
 	#annotating = false;
 	#input: Input;
 
@@ -283,11 +291,14 @@ export class PlanReviewOverlay implements Component {
 	#confirmSelection(): void {
 		const index = this.#selectedIndex;
 		if (index >= 0 && index < this.#options.length && !this.#disabled.has(index)) {
+			this.#committed = true;
+			this.#committedLabel = this.#options[index]!;
 			this.callbacks.onPick(this.#options[index]!);
 		}
 	}
 
 	handleInput(keyData: string): void {
+		if (this.#committed) return;
 		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
 		if (this.#annotating) {
 			if (this.callbacks.onAnnotationExternalEditor && matchesAppExternalEditor(keyData)) {
@@ -300,6 +311,7 @@ export class PlanReviewOverlay implements Component {
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
+			this.#committed = true;
 			this.callbacks.onCancel();
 			return;
 		}
@@ -838,10 +850,14 @@ export class PlanReviewOverlay implements Component {
 		const innerWidth = Math.max(1, width - 4);
 		const bodyContentWidth = sidebarShown ? splitBodyWidth(width, sidebarWidth) : innerWidth;
 
-		const sliderLines = this.#renderSliderLines();
-		const optionLines = this.#renderOptionLines();
+		const committed = this.#committed;
+		const sliderLines = committed ? [] : this.#renderSliderLines();
+		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
+		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
 		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
-		const footerLines = this.#renderFooterLines(innerWidth);
+		const footerLines = committed
+			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
+			: this.#renderFooterLines(innerWidth);
 
 		// Chrome rows: top border, two dividers, bottom border, plus the
 		// prompt/slider/option/footer rows between them.
@@ -884,7 +900,7 @@ export class PlanReviewOverlay implements Component {
 		for (const line of promptLines) out.push(row(line, width));
 		for (const line of sliderLines) out.push(row(line, width));
 		for (let i = 0; i < optionLines.length; i++) {
-			this.#optionClickRows.set(out.length, i);
+			if (!committed) this.#optionClickRows.set(out.length, i);
 			out.push(row(optionLines[i]!, width));
 		}
 		out.push(divider(width));

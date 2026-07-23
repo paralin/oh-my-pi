@@ -2631,7 +2631,16 @@ function getLmStudioNativeInput(entry: Record<string, unknown>): ("text" | "imag
 }
 
 function getLmStudioNativeContextWindow(entry: Record<string, unknown>): number | undefined {
+	// LM Studio serves `loaded_context_length` (the window the running instance
+	// actually accepts) alongside `max_context_length` (the architectural
+	// ceiling). A model is routinely loaded below its maximum — the user picks a
+	// smaller window, or MLX context auto-fit shrinks it to fit unified memory —
+	// so prefer what the runtime serves, matching the Ollama/llama.cpp rule from
+	// #3754. Unloaded models report `loaded_context_length: null` and fall
+	// through to the max/train chain unchanged.
+	const loadedContextWindow = entry.state === "loaded" ? toPositiveNumber(entry.loaded_context_length, null) : null;
 	return (
+		loadedContextWindow ??
 		toPositiveNumber(entry.max_context_length, null) ??
 		toPositiveNumber(entry.context_length, null) ??
 		toPositiveNumber(entry.max_model_len, null) ??

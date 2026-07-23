@@ -1311,7 +1311,7 @@ export class CommandController {
 
 			compactingLoader.stop();
 			this.ctx.statusContainer.disposeChildren();
-			this.ctx.rebuildChatFromMessages();
+			this.ctx.rebuildChatFromMessages({ reuseSettledComponents: true });
 
 			this.ctx.statusLine.invalidate();
 			// Same as the auto-compaction rebuild: a collapsed transcript is an
@@ -1857,17 +1857,34 @@ export function renderUsageReports(
 			for (const line of resetAccountLines) lines.push(uiTheme.fg("dim", line));
 		}
 
+		// Order account columns ONCE per provider (worst-first), then apply that
+		// same order to every window group. Sorting each group independently by
+		// its own used fraction (issue #6067) desynchronized the columns: an
+		// account exhausted on its 5h window but light on the weekly window would
+		// land in different column positions on each row, so the positional
+		// `account N` labels denoted different credentials per row and an
+		// exhausted limit appeared under a sibling that still had quota.
+		const accountRank = new Map<UsageReport, number>();
+		providerReports.forEach((report, position) => {
+			const worst = report.limits.reduce((max, limit) => {
+				const fraction = resolveUsedFraction(limit) ?? -1;
+				return fraction > max ? fraction : max;
+			}, -1);
+			// Encode worst-first primary key with the stable position as tiebreak
+			// so accounts tied on pressure keep their discovery order.
+			accountRank.set(report, -worst * 1000 + position);
+		});
+
 		const renderableGroups = Array.from(limitGroups.values()).map(group => {
 			const entries = group.limits.map((limit, index) => ({
 				limit,
 				report: group.reports[index],
-				fraction: resolveUsedFraction(limit),
 				index,
 			}));
 			entries.sort((a, b) => {
-				const aFraction = a.fraction ?? -1;
-				const bFraction = b.fraction ?? -1;
-				if (aFraction !== bFraction) return bFraction - aFraction;
+				const aRank = accountRank.get(a.report) ?? a.index;
+				const bRank = accountRank.get(b.report) ?? b.index;
+				if (aRank !== bRank) return aRank - bRank;
 				return a.index - b.index;
 			});
 			const sortedLimits = entries.map(entry => entry.limit);

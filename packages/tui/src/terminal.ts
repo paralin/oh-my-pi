@@ -18,6 +18,7 @@ import {
 	setOsc99Supported,
 	TERMINAL,
 } from "./terminal-capabilities";
+import { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 import { type HangulCompatibilityJamoWidth, setHangulCompatibilityJamoWidth } from "./utils";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
@@ -456,6 +457,7 @@ function parseOsc99KeyValues(section: string): Map<string, string> {
 	return values;
 }
 const XTERM_SCROLL_TO_BOTTOM_MODES = [1010, 1011] as const;
+type Osc11QueryRoute = "direct" | "tmux";
 
 function isXtermScrollToBottomMode(mode: number): boolean {
 	return mode === 1010 || mode === 1011;
@@ -509,7 +511,7 @@ export class ProcessTerminal implements Terminal {
 	#appearanceCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
-	#osc11QueryQueued = false;
+	#osc11QueuedRoute?: Osc11QueryRoute;
 	#osc11ResponseBuffer = "";
 	#osc99PendingId: string | undefined;
 	#osc99ResponseBuffer = "";
@@ -572,15 +574,15 @@ export class ProcessTerminal implements Terminal {
 
 	/**
 	 * Re-query the terminal background via a single OSC 11 probe. Reuses the
-	 * startup query path — same DA1-sentinel FIFO, pending/queued gating, parsing,
-	 * dedup, and appearance callbacks — so a light/dark switch is picked up
-	 * without a restart on terminals lacking end-to-end Mode 2031 notifications.
-	 * Bounded to one probe per call; no timers are armed. Suppressed while headless
-	 * or after the terminal is torn down.
+	 * startup DA1-sentinel FIFO, pending/queued gating, parsing, dedup, and
+	 * appearance callbacks. Inside tmux, only this explicit path wraps the query
+	 * and sentinel together for passthrough to the outer terminal; startup and
+	 * Mode 2031 probes remain direct. Bounded to one probe per call; no timers are
+	 * armed. Suppressed while headless or after the terminal is torn down.
 	 */
 	refreshAppearance(): void {
 		if (this.#headless || this.#dead) return;
-		this.#queryBackgroundColor();
+		this.#queryBackgroundColor(isInsideTmux() ? "tmux" : "direct");
 	}
 
 	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
@@ -917,13 +919,14 @@ export class ProcessTerminal implements Terminal {
 						}
 						// Start a queued OSC 11 query once the prior cycle is fully drained.
 						if (
-							this.#osc11QueryQueued &&
+							this.#osc11QueuedRoute !== undefined &&
 							!this.#osc11Pending &&
 							!this.#da1SentinelOwners.some(o => o.kind === "osc11") &&
 							!this.#dead
 						) {
-							this.#osc11QueryQueued = false;
-							this.#startOsc11Query();
+							const route = this.#osc11QueuedRoute;
+							this.#osc11QueuedRoute = undefined;
+							this.#startOsc11Query(route);
 						}
 						break;
 					}
@@ -1058,23 +1061,28 @@ export class ProcessTerminal implements Terminal {
 	 * DA1 avoids indefinite hangs: if DA1 response arrives before OSC 11,
 	 * the terminal does not support OSC 11.
 	 */
-	#queryBackgroundColor(): void {
+	#queryBackgroundColor(route: Osc11QueryRoute = "direct"): void {
 		if (this.#dead) return;
 		// Queue if an OSC 11 query is in flight or its DA1 sentinel hasn't been
 		// consumed yet. Starting a new query while a DA1 is outstanding would
 		// increment the sentinel counter, and the old DA1 arrival would then
-		// prematurely clear the new query's pending state.
+		// prematurely clear the new query's pending state. Preserve a requested
+		// tmux passthrough route when coalescing direct and explicit queries.
 		if (this.#osc11Pending || this.#da1SentinelOwners.some(o => o.kind === "osc11")) {
-			this.#osc11QueryQueued = true;
+			if (this.#osc11QueuedRoute !== "tmux") this.#osc11QueuedRoute = route;
 			return;
 		}
-		this.#startOsc11Query();
+		this.#startOsc11Query(route);
 	}
 
-	#startOsc11Query(): void {
+	#startOsc11Query(route: Osc11QueryRoute): void {
 		this.#osc11Pending = true;
 		this.#osc11ResponseBuffer = "";
 		this.#da1SentinelOwners.push({ kind: "osc11" });
+		if (route === "tmux") {
+			this.#safeWrite(wrapTmuxPassthrough("\x1b]11;?\x07\x1b[c"));
+			return;
+		}
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
 	}
@@ -1397,7 +1405,7 @@ export class ProcessTerminal implements Terminal {
 		this.#appearanceCallbacks = [];
 		this.#osc11Pending = false;
 		this.#clearWindowsTerminalAppearancePoll();
-		this.#osc11QueryQueued = false;
+		this.#osc11QueuedRoute = undefined;
 		this.#osc11ResponseBuffer = "";
 		this.#osc99PendingId = undefined;
 		this.#osc99ResponseBuffer = "";

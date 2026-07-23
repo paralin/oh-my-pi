@@ -121,6 +121,7 @@ const repoScriptTests = [
 	"scripts/ci-concurrency.test.ts",
 	"scripts/ci-build-native.test.ts",
 	"scripts/ci-release-notes.test.ts",
+	"scripts/ci-release-publish.test.ts",
 	"scripts/fix-dts-extensions.test.ts",
 	"scripts/link-omp.test.ts",
 ];
@@ -355,6 +356,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 						...onlyFailuresArgs,
 						"scripts/ci-concurrency.test.ts",
 						"scripts/ci-build-native.test.ts",
+						"scripts/ci-release-publish.test.ts",
 						"scripts/fix-dts-extensions.test.ts",
 					],
 				},

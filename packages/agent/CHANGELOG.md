@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [17.0.8] - 2026-07-22
+
+### Fixed
+
+- Improved resilience against transient stream JSON parse failures by recovering completed tool calls while safely preventing incomplete, unknown, refused, or sensitive calls from executing.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

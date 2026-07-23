@@ -2,6 +2,65 @@
 
 ## [Unreleased]
 
+## [17.0.8] - 2026-07-22
+
+### Added
+
+- Added a `/tree` re-answer option for past `ask` tool results, allowing users to re-open the picker with original questions and branch the new answer as a sibling while keeping the original branch reachable.
+- Added configurable Hindsight client request deadlines via `hindsight.requestTimeoutMs`, `reflectTimeoutMs`, `recallTimeoutMs`, and `retainTimeoutMs` settings (and matching `HINDSIGHT_*_TIMEOUT_MS` environment variables).
+- Added `omp-linux-musl-x64` and `omp-linux-musl-arm64` release binaries for Alpine and other musl-based Linux distributions, with automatic musl selection in the installer and self-updater.
+
+### Changed
+
+- Optimized edit-tool previews, diff components, and intra-line word highlighting to compute line and word diffs natively, reducing synchronous diff times by 2-10x on large inputs.
+- Updated diff generation and rendering components to rely exclusively on native UTF-16 diff bindings, removing `isWellFormed()` guards and JS fallback code paths.
+
+### Removed
+
+- Removed npm `diff` dependency.
+
+- Fixed an issue where `Ctrl+V` clipboard paste was ignored while API-key and other modal prompts had focus.
+- Fixed `scripts/install.sh` incorrectly installing an x86_64 build on Apple Silicon when running under Rosetta.
+- Fixed the model picker hiding Codex models available through secondary configured ChatGPT/Codex OAuth accounts by unioning catalogs across all stored accounts.
+- Fixed GitHub Copilot 1M-context models disappearing from the model picker on restart with a "Could not restore model" warning.
+- Fixed `--model <role>` startup selection skipping configured fallback chains when the primary model is unavailable.
+- Fixed global model role updates clobbering concurrent or external edits to `config.yml` by merging only the changed role instead of persisting a stale in-memory snapshot.
+- Fixed terminal provider errors on continuation turns after failed tool results silently ending runs without persisting the error diagnostics.
+- Fixed repeated OpenRouter Gemini stream closures consuming the full retry budget by limiting recovery attempts before surfacing the error.
+- Fixed Agent Hub performance freezes when opening large read-only Advisor transcripts by collapsing synthetic inputs into compact summary rows and rendering Markdown lazily on expansion.
+- Fixed `/agents` incorrectly showing prewalk as disabled for the bundled `task` agent when enabled by its runtime default.
+- Fixed `hub start` waiting for the full timeout when a launched process exited or became ready quickly.
+- Fixed `tools.maxTimeout` failing to clamp default tool timeouts when no explicit timeout was provided by the agent.
+- Fixed MCP argument-shaping parity between direct and subagent tool calls, ensuring strict servers do not reject proxied calls with unrecognized keys.
+- Fixed a crash in extensions like `pi-mcp-adapter` caused by the TypeBox compatibility shim omitting `Type.Unsafe`.
+- Fixed `omp models` hanging after output by properly clearing managed extension timers and shutting down sessions before returning.
+- Fixed HTML session exports causing browser call stack overflows when rendering deeply nested conversation trees.
+- Fixed task agents ending prematurely on connection errors instead of entering the auto-retry path.
+- Fixed a startup race condition where the default model role was incorrectly overridden by an unrelated provider's default on a cold cache.
+- Fixed unqualified `--model` startup selection preferring unauthenticated provider catalog entries over configured providers.
+- Fixed provider stream failures being invisible in the main log by logging a warning with error details when a turn ends in a provider error.
+- Fixed parallel `todo done` calls losing completions due to asynchronous session events overwriting newer tool states.
+- Fixed `omp` crashing when `git` is not installed or missing from the system `PATH`.
+- Fixed `/changelog` commands reporting no entries in standalone binaries by embedding the release history as a fallback.
+- Fixed isolated branch merge-backs rejecting committed agent edits when the parent branch had unrelated uncommitted changes in the same file.
+- Fixed the 30-second Hindsight client timeout aborting healthy `reflect` operations by applying dedicated, longer deadlines.
+- Fixed Mnemopi consolidation redundantly re-storing cumulative session transcripts after incremental auto-retain.
+- Fixed turn-ending Codex rate-limit errors being hidden behind the Plan Review overlay.
+- Fixed prewalked subagents continuing to display their starting model after switching to the target model.
+- Fixed the Escape key aborting an ongoing agent turn instead of stopping text-to-speech playback.
+- Fixed project system prompts shortening working directories to `~`, which could cause models to generate incorrect absolute paths for tool calls.
+- Fixed the TUI `/usage` matrix misaligning multi-account columns across quota windows.
+- Fixed near-miss `xd://` write targets silently creating filesystem paths instead of throwing a corrective URI error.
+- Fixed the `task` tool rejecting valid batch calls with misleading validation errors when batching is disabled.
+- Fixed JS/TS `debug` launches timing out on WSL2 with mirrored networking by waiting for the adapter's listening banner and handling transport closures immediately.
+- Fixed post-compaction transcript rebuilds blocking the main thread by reusing settled message components and layout caches.
+- Fixed the fullscreen Plan Review overlay remaining interactive and appearing frozen during slow asynchronous operations by locking input and showing a submitting indicator.
+- Fixed dynamic model discovery refreshes dropping provider-level compatibility overrides from `models.yml`.
+- Fixed a startup crash that locked users out of the app when `prewalk.enabled` was set but the prewalk hand-off target had no configured API key.
+- Fixed in-progress aborts awaiting `session_stop` extension handlers whose results would be discarded.
+- Fixed `/retry` reporting "Nothing to retry" after a stream stalled or aborted mid-tool-call.
+- Fixed locally consumed extension commands triggering automatic title generation and exposing their command text to the title model.
+
 ## [17.0.7] - 2026-07-21
 
 ### Fixed

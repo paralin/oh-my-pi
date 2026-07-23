@@ -141,13 +141,17 @@ function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";
 }
 
-function hasDedicatedServiceTierControl(provider: Provider | undefined): boolean {
-	return provider === "fireworks";
+function excludesInferredOpenAIServiceTier(provider: Provider | undefined): boolean {
+	// Fireworks has its own priority-only control. GitHub Copilot proxies OpenAI
+	// models but rejects OpenAI's `service_tier` request field.
+	return provider === "fireworks" || provider === "github-copilot";
 }
 
 function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
 	return (
-		!hasDedicatedServiceTierControl(model.provider) && isOpenAIServiceTierApi(model.api) && isOpenAIModelId(model.id)
+		!excludesInferredOpenAIServiceTier(model.provider) &&
+		isOpenAIServiceTierApi(model.api) &&
+		isOpenAIModelId(model.id)
 	);
 }
 
@@ -159,7 +163,8 @@ function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
  * `openai/`); Claude on Bedrock/Vertex (api `anthropic-messages`) is the
  * anthropic family even though its provider is `amazon-bedrock`/`google-vertex`.
  * Custom OpenAI-compatible relays that serve OpenAI model ids are OpenAI family
- * too unless that provider owns a separate tier control such as Fireworks.
+ * too unless the provider owns a separate tier control (Fireworks) or rejects
+ * OpenAI's service-tier field (GitHub Copilot).
  */
 export function serviceTierFamily(model: ServiceTierModel): ServiceTierFamily | undefined {
 	const provider = model.provider;

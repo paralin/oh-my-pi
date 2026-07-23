@@ -224,6 +224,26 @@ describe("task.batch validation", () => {
 		);
 		expect(text).toContain("Duplicate task name");
 	});
+
+	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {
+		// Regression (#6039): the flat single-spawn wire schema carries
+		// `"+": "delete"`, so a batch `{ context, tasks[] }` payload is stripped
+		// by arktype and rejected as `task must be a string (was missing)` in the
+		// agent loop — preempting the tool's own actionable message. The lenient
+		// flag makes the loop forward the raw args to execute() on that failure.
+		mockDiscovery();
+		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		expect(tool.lenientArgValidation).toBe(true);
+
+		// The raw batch payload the loop would forward reaches execute() and
+		// yields the actionable reason, never arktype's misleading missing-`task`.
+		const text = await executeText(
+			{ context: "Background.", tasks: [{ name: "Alpha", task: "Work." }] },
+			{ "task.batch": false },
+		);
+		expect(text).toContain("task.batch is disabled");
+		expect(text).not.toContain("was missing");
+	});
 });
 
 describe("task.batch spawning", () => {

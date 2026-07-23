@@ -101,6 +101,16 @@ import type {
 import { transformMessages } from "./transform-messages";
 import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
 
+/**
+ * Keyless-provider sentinel. Custom providers configured with `auth: none`
+ * (models.yml) have no credential, so the coding-agent resolves their API key
+ * to this literal instead of a real secret. Providers must treat it as "no
+ * credential" and suppress any credential-bearing header (e.g. `Authorization:
+ * Bearer …`) rather than forwarding the sentinel on the wire. See #6188; the
+ * google-vertex and amazon-bedrock transports apply the same guard inline.
+ */
+export const NO_AUTH_SENTINEL = "N/A";
+
 export interface OpenAIModelIdentity {
 	provider: string;
 	id: string;
@@ -279,7 +289,15 @@ export function resolveOpenAIRequestSetup(
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
 	}
 	const requestHeaders = { ...headers };
-	headers.Authorization ??= `Bearer ${apiKey}`;
+	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
+	// sentinel rather than a real key. Injecting `Authorization: Bearer N/A`
+	// breaks custom endpoints that authenticate via their own headers (e.g.
+	// `headers.x-api-key`) and reject the bogus bearer — mirror the sentinel
+	// guards in google-vertex / amazon-bedrock and send no Authorization here
+	// (#6188). A caller-supplied Authorization in `model.headers` still wins.
+	if (apiKey !== NO_AUTH_SENTINEL) {
+		headers.Authorization ??= `Bearer ${apiKey}`;
+	}
 	return { copilotPremiumRequests, baseUrl, headers, query, requestHeaders };
 }
 

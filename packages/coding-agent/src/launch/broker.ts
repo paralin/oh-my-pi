@@ -508,8 +508,17 @@ class DaemonBroker {
 		await this.#launch(record);
 		let readyTimedOut = false;
 		if (spec.ready && !terminalState(record.snapshot.state)) {
-			const ready = await this.#waitUntil(record, () => record.snapshot.state === "ready", spec.ready.timeoutMs);
-			readyTimedOut = !ready && !terminalState(record.snapshot.state);
+			// Wake on the sticky readyAt marker or any terminal state, not the live
+			// state: a fast process flips starting→ready→exited within one poll
+			// interval, so sampling `state === "ready"` never observes readiness even
+			// though #markReady durably recorded readyAt. A pre-ready exit must also
+			// wake the wait rather than block for the full timeout.
+			const ready = await this.#waitUntil(
+				record,
+				() => record.snapshot.readyAt !== undefined || terminalState(record.snapshot.state),
+				spec.ready.timeoutMs,
+			);
+			readyTimedOut = !ready;
 		}
 		await record.persistQueue;
 		return { op: "start", daemon: record.snapshot, readyTimedOut };
@@ -765,6 +774,11 @@ class DaemonBroker {
 			const uptime = Date.now() - record.snapshot.startedAt;
 			record.consecutiveFailures = uptime >= 30_000 ? 0 : record.consecutiveFailures + 1;
 			record.snapshot.restartCount++;
+			// Readiness belongs to the exited generation; clear it before the backoff
+			// so start / for:"ready" waits don't treat a dead service as ready during
+			// the restart window (readyAt is re-set by #launch once the child is up).
+			record.snapshot.readyAt = undefined;
+			record.snapshot.readyMatch = undefined;
 			record.snapshot.state = "restarting";
 			const delay = Math.min(1_000 * 2 ** Math.min(record.consecutiveFailures, 5), RESTART_MAX_DELAY_MS);
 			record.log?.append(
@@ -830,6 +844,12 @@ class DaemonBroker {
 				throw new Error(`Invalid wait regex: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
+		// Readiness was actually observed: the sticky readyAt survives a fast
+		// ready→exit, a live "ready" state, or a "running" daemon with no ready spec.
+		const readyObserved = (): boolean =>
+			record.snapshot.readyAt !== undefined ||
+			record.snapshot.state === "ready" ||
+			(record.snapshot.state === "running" && !record.spec.ready);
 		const condition = (): boolean => {
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
@@ -838,10 +858,16 @@ class DaemonBroker {
 				return true;
 			}
 			if (operation.for === "exit") return terminalState(record.snapshot.state);
-			return record.snapshot.state === "ready" || (record.snapshot.state === "running" && !record.spec.ready);
+			// Wake on observed readiness or any terminal state so the wait never
+			// blocks for the full timeout; success is judged by readyObserved below.
+			return readyObserved() || terminalState(record.snapshot.state);
 		};
-		const reached = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
-		return { op: "wait", daemon: record.snapshot, matched, timedOut: !reached };
+		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
+		// A for:"ready" wait that woke on a terminal exit without ever observing
+		// readiness is still "not ready" — surface it as timed out so callers and the
+		// renderer don't chain work against a dead process.
+		const timedOut = operation.for === "ready" && !pattern ? !readyObserved() : !woke;
+		return { op: "wait", daemon: record.snapshot, matched, timedOut };
 	}
 
 	async #send(operation: Extract<DaemonOperation, { op: "send" }>): Promise<DaemonRpcResult> {

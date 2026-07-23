@@ -1036,7 +1036,6 @@ export class Agent {
 		for (const resolve of waiters) resolve();
 	}
 
-
 	reset() {
 		this.#state.messages.length = 0;
 		this.#state.isStreaming = false;

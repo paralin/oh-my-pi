@@ -522,6 +522,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly summary = "Spawn subagents to complete delegated tasks";
 	readonly strict = false;
 	readonly loadMode = "essential";
+	// Arktype validates model calls against the active wire schema, but the flat
+	// single-spawn schema carries `"+": "delete"`: a batch `{ context, tasks[] }`
+	// payload has those keys stripped, then fails on the now-missing `task` with
+	// the misleading `task must be a string (was missing)`. That preempts the
+	// tool's own actionable shape checks (`validateShapeParams` /
+	// `validateSpawnParams`), which never run. Lenient validation forwards the
+	// raw args to `execute()` on any arktype failure so those checks surface the
+	// real reason ("enable task.batch, or use the flat `task` shape"). Valid
+	// calls still normalize through arktype; `execute()` resolves `agent`
+	// defaults independently, so the success path is unchanged.
+	readonly lenientArgValidation = true;
 	readonly renderResult = renderResult;
 	// Suppress the streaming call preview once a (partial or final) result exists
 	// so the task renders as ONE block that transitions in place — not a pending

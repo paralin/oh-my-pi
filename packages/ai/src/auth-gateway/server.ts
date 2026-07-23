@@ -726,13 +726,19 @@ async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal)
 }
 
 function handleModelsList(opts: AuthGatewayBootOptions): Response {
-	const list = opts.listModels ? Array.from(opts.listModels()) : [];
-	const data = list.map(model => ({
-		id: model.id,
-		object: "model" as const,
-		owned_by: model.provider,
-		api: model.api,
-	}));
+	const seen = new Set<string>();
+	const data: Array<{ id: string; object: "model"; owned_by: string; api: Api }> = [];
+	for (const model of opts.listModels?.() ?? []) {
+		const id = `${model.provider}/${model.id}`;
+		if (seen.has(id)) continue;
+		seen.add(id);
+		data.push({
+			id,
+			object: "model",
+			owned_by: model.provider,
+			api: model.api,
+		});
+	}
 	return json(200, { object: "list", data });
 }
 

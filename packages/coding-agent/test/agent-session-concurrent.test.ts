@@ -456,6 +456,51 @@ describe("AgentSession concurrent prompt guard", () => {
 		).toBe(true);
 	});
 
+	it("does not emit session_stop when abort starts before the settle pass", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			handler: () => ({ content: ["Done"] }),
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: mock.stream,
+			convertToLlm,
+		});
+		const settleGate = Promise.withResolvers<void>();
+		const settleReached = Promise.withResolvers<void>();
+		const emitSessionStop = vi.fn().mockResolvedValue(undefined);
+		const extensionRunner = {
+			emit: vi.fn().mockResolvedValue(undefined),
+			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
+			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
+			emitSessionStop,
+		} as unknown as ExtensionRunner;
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated();
+		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorages.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+
+		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
+		vi.spyOn(session.goalRuntime, "onAgentEnd").mockImplementation(() => {
+			settleReached.resolve();
+			return settleGate.promise;
+		});
+
+		const promptPromise = session.prompt("First message");
+		await settleReached.promise;
+		const abortPromise = session.abort();
+		settleGate.resolve();
+
+		await abortPromise;
+		await promptPromise;
+		await session.waitForIdle();
+
+		expect(emitSessionStop).not.toHaveBeenCalled();
+	});
+
 	it("does not continue session_stop feedback after aborting a slow hook", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
@@ -2186,12 +2231,28 @@ describe("AgentSession TTSR resume gate", () => {
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-promo.db"));
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("openai-codex", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		// The bundled catalog has no codex model whose promotion target carries a
+		// strictly larger window (gpt-5.5's bundled target gpt-5.4 is same-window),
+		// so pin gpt-5.5 (272k) -> gpt-5.6-sol (372k) via modelOverrides.
+		const modelsConfigPath = path.join(tempDir, "models-promo.json");
+		await Bun.write(
+			modelsConfigPath,
+			JSON.stringify({
+				providers: {
+					"openai-codex": {
+						modelOverrides: {
+							"gpt-5.5": { contextPromotionTarget: "openai-codex/gpt-5.6-sol" },
+						},
+					},
+				},
+			}),
+		);
+		const modelRegistry = new ModelRegistry(authStorage, modelsConfigPath);
 
-		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
-		const codexModel = modelRegistry.find("openai-codex", "gpt-5.5");
-		if (!sparkModel || !codexModel) {
-			throw new Error("Expected codex spark and codex models to exist");
+		const smallModel = modelRegistry.find("openai-codex", "gpt-5.5");
+		const largeModel = modelRegistry.find("openai-codex", "gpt-5.6-sol");
+		if (!smallModel || !largeModel) {
+			throw new Error("Expected small and large codex models to exist");
 		}
 
 		let streamCallCount = 0;
@@ -2200,9 +2261,9 @@ describe("AgentSession TTSR resume gate", () => {
 		const makeOverflowMessage = (): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "" }],
-			api: sparkModel.api,
-			provider: sparkModel.provider,
-			model: sparkModel.id,
+			api: smallModel.api,
+			provider: smallModel.provider,
+			model: smallModel.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -2219,9 +2280,9 @@ describe("AgentSession TTSR resume gate", () => {
 		const makeSuccessMessage = (): AssistantMessage => ({
 			role: "assistant",
 			content: [{ type: "text", text: "Recovered after promotion" }],
-			api: codexModel.api,
-			provider: codexModel.provider,
-			model: codexModel.id,
+			api: largeModel.api,
+			provider: largeModel.provider,
+			model: largeModel.id,
 			usage: {
 				input: 0,
 				output: 0,
@@ -2236,7 +2297,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: sparkModel, systemPrompt: ["Test"], tools: [] },
+			initialState: { model: smallModel, systemPrompt: ["Test"], tools: [] },
 			streamFn: () => {
 				streamCallCount++;
 				const stream = new AssistantMessageEventStream();
@@ -2277,7 +2338,7 @@ describe("AgentSession TTSR resume gate", () => {
 
 		expect(continuationCompleted).toBe(true);
 		expect(streamCallCount).toBeGreaterThanOrEqual(2);
-		expect(session.model?.id).toBe(codexModel.id);
+		expect(session.model?.id).toBe(largeModel.id);
 		expect(session.isStreaming).toBe(false);
 		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 	});

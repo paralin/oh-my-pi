@@ -129,7 +129,7 @@ describe("RPC harness session owner", () => {
 		await fs.mkdir(path.dirname(file), { recursive: true });
 		await fs.writeFile(
 			file,
-			[
+			`${[
 				JSON.stringify({ kind: "steering", steeringId: "steer-1", steeringSequence: 1, status: "ACCEPTED" }),
 				JSON.stringify({
 					kind: "event",
@@ -141,7 +141,7 @@ describe("RPC harness session owner", () => {
 						sequence: 1,
 					},
 				}),
-			].join("\n") + "\n",
+			].join("\n")}\n`,
 		);
 		const reopened = await RpcHarnessSessionOwner.open("session-1", file);
 		let deliveries = 0;

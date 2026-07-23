@@ -24,6 +24,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
 		pendingPythonComponents: [],
+		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		ui: { requestRender: vi.fn() },
 		present: (content: Component | readonly Component[]) => {
@@ -142,6 +143,7 @@ describe("InteractiveMode.showStatus", () => {
 	test("preserves optimistic user signatures when rebuilding transcript state", () => {
 		const ctx = {
 			chatContainer: new Container(),
+			transcriptMessageComponents: new WeakMap(),
 			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
 			viewSession: { isStreaming: false },

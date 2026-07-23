@@ -227,13 +227,12 @@ const GEMINI_3_PRO_FAMILY_BUDGETS: Readonly<Partial<Record<Effort, number>>> = {
 };
 
 /**
- * The two Cloud Code Assist providers share the same Antigravity discovery list
- * but disagree on the thinking transport: `google-antigravity` (daily-cloudcode-pa)
- * sends an explicit `thinkingBudget` (verified against captured requests), while
- * `google-gemini-cli` (cloudcode-pa) follows the official Gemini CLI and uses
- * `thinkingLevel`. The Gemini 3.x families therefore differ only in thinking
- * transport (and, for Flash, the per-tier wire-id routing); everything else is
- * shared verbatim.
+ * Cloud Code Assist's legacy Gemini 3.5 Flash and 3.1 Pro families use
+ * different thinking transports: `google-antigravity` (daily-cloudcode-pa)
+ * sends captured `thinkingBudget` values, while `google-gemini-cli`
+ * (cloudcode-pa) follows the official Gemini CLI and uses `thinkingLevel`.
+ * Gemini 3.6 exposes one wire id per level and uses `thinkingLevel` on both
+ * endpoints.
  */
 function geminiFlashFamily(mode: "budget" | "google-level"): EffortVariantFamily {
 	const budget = mode === "budget";
@@ -265,6 +264,23 @@ function geminiFlashFamily(mode: "budget" | "google-level"): EffortVariantFamily
 		extraAliases: ["gemini-3-flash"],
 	};
 }
+
+const GEMINI_36_FLASH_FAMILY: EffortVariantFamily = {
+	id: "gemini-3.6-flash",
+	name: "Gemini 3.6 Flash",
+	members: ["gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high", "gemini-3.6-flash-tiered"],
+	routing: {
+		[Effort.Minimal]: "gemini-3.6-flash-low",
+		[Effort.Low]: "gemini-3.6-flash-low",
+		[Effort.Medium]: "gemini-3.6-flash-medium",
+		[Effort.High]: "gemini-3.6-flash-high",
+	},
+	thinking: {
+		mode: "google-level",
+		efforts: GEMINI_3_FLASH_FAMILY_EFFORTS,
+		requiresEffort: true,
+	},
+};
 
 function geminiProFamily(mode: "budget" | "google-level"): EffortVariantFamily {
 	const budget = mode === "budget";
@@ -346,14 +362,19 @@ const SHARED_CCA_FAMILIES: readonly EffortVariantFamily[] = [
 	thinkingPair("gemini-2.5-flash", "Gemini 2.5 Flash"),
 ];
 
-/** `google-antigravity` (daily-cloudcode-pa): Gemini 3.x on the budget transport. */
+/** `google-antigravity` Gemini families, using each generation's native transport. */
 export const ANTIGRAVITY_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
-	families: [geminiFlashFamily("budget"), geminiProFamily("budget"), ...SHARED_CCA_FAMILIES],
+	families: [GEMINI_36_FLASH_FAMILY, geminiFlashFamily("budget"), geminiProFamily("budget"), ...SHARED_CCA_FAMILIES],
 };
 
-/** `google-gemini-cli` (cloudcode-pa): Gemini 3.x on the level transport (official CLI parity). */
+/** `google-gemini-cli` Gemini families on the official CLI's level transport. */
 export const GEMINI_CLI_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
-	families: [geminiFlashFamily("google-level"), geminiProFamily("google-level"), ...SHARED_CCA_FAMILIES],
+	families: [
+		GEMINI_36_FLASH_FAMILY,
+		geminiFlashFamily("google-level"),
+		geminiProFamily("google-level"),
+		...SHARED_CCA_FAMILIES,
+	],
 };
 export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 	families: [

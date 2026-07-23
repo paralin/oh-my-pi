@@ -161,7 +161,7 @@ describe("Kimi K3 thinking transport", () => {
 	it("downgrades named tool choice to required for K3 thinking", async () => {
 		vi.spyOn(kimiOauth, "getKimiCommonHeaders").mockReturnValue(KIMI_HEADERS);
 		const bundledModel = getBundledModel<"openai-completions">("kimi-code", "k3");
-		expect(bundledModel.compat.thinkingFormat).toBe("zai");
+		expect(bundledModel.compat.thinkingFormat).toBe("kimi");
 		let payload: unknown;
 		const capturePayload = async (
 			model: Model<"openai-completions">,

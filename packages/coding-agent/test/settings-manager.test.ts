@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
@@ -18,6 +18,7 @@ import {
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import * as fileLock from "../src/config/file-lock";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 function context(): Context {
@@ -62,6 +63,7 @@ describe("Settings", () => {
 	};
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		clearCustomApis();
 		__providerInFlightForTesting.setRoot(undefined);
 		AgentStorage.resetInstance();
@@ -469,6 +471,86 @@ describe("Settings", () => {
 			});
 			expect(settings.getModelRole("default")).toBe("openai/gpt-5.2-codex");
 			expect(settings.getModelRole("smol")).toBe("anthropic/claude-haiku-4-5");
+		});
+
+		it("preserves concurrent external per-role edits when saving one global role", async () => {
+			await writeSettings({
+				modelRoles: { default: "anthropic/claude-sonnet-4-5", advisor: "moonshot/kimi-k2" },
+			});
+
+			// Process loads its #global snapshot.
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// External edit (another omp instance / manual edit): changes advisor,
+			// adds vision. This process's #global is now stale.
+			await writeSettings({
+				modelRoles: {
+					default: "anthropic/claude-sonnet-4-5",
+					advisor: "moonshot/kimi-k3:max",
+					vision: "anthropic/claude-haiku-4-5",
+				},
+			});
+
+			// This process makes one global-scope role switch and flushes.
+			settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+			await settings.flush();
+
+			const savedSettings = await readSettings();
+			// The role we changed lands…
+			expect((savedSettings.modelRoles as Record<string, string>).smol).toBe("anthropic/claude-haiku-4-5");
+			// …and the concurrent external per-role edits survive rather than
+			// being clobbered by our stale whole-map snapshot.
+			expect(savedSettings.modelRoles).toEqual({
+				default: "anthropic/claude-sonnet-4-5",
+				advisor: "moonshot/kimi-k3:max",
+				vision: "anthropic/claude-haiku-4-5",
+				smol: "anthropic/claude-haiku-4-5",
+			});
+		});
+
+		it("does not replay a preserved role after the save writes it", async () => {
+			await writeSettings({
+				modelRoles: { default: "anthropic/claude-sonnet-4-5" },
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const firstSaveEntered = Promise.withResolvers<void>();
+			const releaseFirstSave = Promise.withResolvers<void>();
+			const firstSaveFinished = Promise.withResolvers<void>();
+			const withFileLock = fileLock.withFileLock;
+			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
+				firstSaveEntered.resolve();
+				await releaseFirstSave.promise;
+				const result = await withFileLock(filePath, fn, options);
+				firstSaveFinished.resolve();
+				return result;
+			});
+
+			settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
+			await firstSaveEntered.promise;
+			settings.setModelRole("advisor", "moonshot/kimi-k3:max");
+			releaseFirstSave.resolve();
+			await firstSaveFinished.promise;
+
+			expect((await readSettings()).modelRoles).toEqual({
+				default: "anthropic/claude-sonnet-4-5",
+				smol: "anthropic/claude-haiku-4-5",
+				advisor: "moonshot/kimi-k3:max",
+			});
+
+			await writeSettings({
+				modelRoles: {
+					default: "anthropic/claude-sonnet-4-5",
+					smol: "anthropic/claude-haiku-4-5",
+					advisor: "external/new-advisor",
+				},
+			});
+			await settings.flush();
+
+			expect((await readSettings()).modelRoles).toEqual({
+				default: "anthropic/claude-sonnet-4-5",
+				smol: "anthropic/claude-haiku-4-5",
+				advisor: "external/new-advisor",
+			});
 		});
 
 		it("restores persisted model roles after clearing runtime overrides", async () => {

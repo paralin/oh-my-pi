@@ -77,6 +77,7 @@ function createContext(
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
 		flushPendingCommandOutput: vi.fn(),
+		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map<string, unknown>(),
 		hideThinkingBlock: false,
 		setWorkingMessage: vi.fn(),

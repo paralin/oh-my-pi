@@ -355,6 +355,20 @@ describe("InteractiveMode plan review rendering", () => {
 		await expect(choice).resolves.toBeUndefined();
 	});
 
+	it("dismisses Plan Review and restores input when a provider error is pinned", async () => {
+		mode.ui.setFocus(mode.editor);
+		const choice = mode.showPlanReview("# Plan\n\nReady for approval.", "Plan mode - next step", ["Approve"]);
+
+		expect(mode.ui.hasOverlay()).toBe(true);
+
+		mode.showPinnedError("Codex rate limit reached");
+
+		expect(mode.ui.hasOverlay()).toBe(false);
+		expect(mode.ui.getFocused()).toBe(mode.editor);
+		expect(mode.errorBannerContainer.render(80).join("\n")).toContain("Codex rate limit reached");
+		await expect(choice).resolves.toBeUndefined();
+	});
+
 	it("copies the overlay's current edited plan markdown from the real plan review overlay", async () => {
 		let capturedOverlay: PlanReviewOverlay | undefined;
 		const overlayHandle = { hide: vi.fn() };
@@ -1670,14 +1684,13 @@ describe("InteractiveMode plan review rendering", () => {
 	// `#approvePlan`'s `finally`. No aborted message_end is required to consume it,
 	// so a stranded flag could otherwise silence the next unrelated abort. One
 	// parametrized case per outcome keeps ok/cancelled/failed each covered.
-	it.each([
-		"ok",
-		"cancelled",
-		"failed",
-	] as const)("B1-B3: Approve and compact context + %s outcome → flag cleared by finally", async outcome => {
-		await approveWithCompact(outcome);
-		expect(session.isPlanInternalAbortPending).toBe(false);
-	});
+	it.each(["ok", "cancelled", "failed"] as const)(
+		"B1-B3: Approve and compact context + %s outcome → flag cleared by finally",
+		async outcome => {
+			await approveWithCompact(outcome);
+			expect(session.isPlanInternalAbortPending).toBe(false);
+		},
+	);
 
 	it("B4: Approve and compact context + handleCompactCommand throws → showError surfaces the failure AND flag cleared by finally before the outer catch", async () => {
 		// `handlePlanApproval` wraps `#approvePlan` in a try/catch

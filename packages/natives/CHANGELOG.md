@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+## [17.0.8] - 2026-07-22
+
+### Added
+
+- Added jsdiff-compatible native diff exports: `diffLines`, `diffWords`, `diffLineRuns`, and `structuredPatchHunks`.
+- Added batch vector kernels for mnemopi recall paths: `cosineSimilarityPairs`, `vectorIndexTopK`, and `mmrRerankIndices`.
+
+### Changed
+
+- Updated diff functions (`diffLines`, `diffWords`, `diffLineRuns`, `structuredPatchHunks`) to process UTF-16 code units natively end to end via `Utf16String`, supporting ill-formed JS strings with unpaired surrogates without throwing or converting to UTF-8.
+
+### Fixed
+
+- Fixed a critical issue where the in-process `rm` builtin treated an empty path operand as the current working directory, causing `rm -rf ""` to recursively delete the current directory. Empty operands are now rejected, matching GNU `rm` behavior.
+
+### Removed
+
+- Removed unused `similar` crate dependency and dev-dependency on npm `diff`.
 ## [17.0.5] - 2026-07-18
 
 ### Added

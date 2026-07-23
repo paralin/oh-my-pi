@@ -56,7 +56,7 @@ import { SkillMessageComponent } from "./skill-message";
 import { ToolExecutionComponent } from "./tool-execution";
 import { TranscriptContainer } from "./transcript-container";
 import { createUsageRowBlock } from "./usage-row";
-import { UserMessageComponent } from "./user-message";
+import { CollapsedSyntheticMessageComponent, UserMessageComponent } from "./user-message";
 
 export interface ChatTranscriptBuilderDeps {
 	ui: TUI;
@@ -233,7 +233,18 @@ export class ChatTranscriptBuilder {
 				const textContent = message.role === "user" ? userMessageText(message) : "";
 				if (textContent) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
-					this.container.addChild(new UserMessageComponent(textContent, isSynthetic));
+					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session
+					// update` replay dumps — can be hundreds of KiB of Markdown each.
+					// Rendering their full body on cold open blocked the TUI (issue #6308);
+					// collapse them behind a compact summary that builds Markdown only on
+					// ctrl+o expand. Real user prompts stay fully rendered.
+					if (isSynthetic) {
+						const collapsed = new CollapsedSyntheticMessageComponent(textContent);
+						this.#trackExpandable(collapsed);
+						this.container.addChild(collapsed);
+					} else {
+						this.container.addChild(new UserMessageComponent(textContent, false));
+					}
 				}
 				break;
 			}

@@ -115,4 +115,62 @@ describe("AgentSession manual retry", () => {
 		expect(mock.calls.length).toBe(1);
 		expect(lastAgentMessage(session).content).toContainEqual({ type: "text", text: "already done" });
 	});
+
+	it("retries past synthetic tool results left by a mid-tool-call stream stall", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) {
+			throw new Error("Expected bundled Anthropic test model to exist");
+		}
+
+		// First turn stalls mid-tool-call: the assistant emits a `write` tool call
+		// but the stream ends with an error before it runs, so `stopReason: "error"`.
+		// The agent loop then appends a synthetic tool_result for the un-run call,
+		// which trails the failed assistant turn in agent state.
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "write", arguments: { path: "plan.md", content: "x" } }],
+					stopReason: "error",
+					errorMessage: "OpenAI completions stream stalled while waiting for the next event",
+				},
+				{ content: ["recovered after stalled tool call"], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: mock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false, "retry.enabled": false }),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		session.subscribe(() => {});
+
+		await session.prompt("write the plan");
+		await session.waitForIdle();
+
+		// The failed assistant turn is shadowed by a trailing synthetic tool_result.
+		const messages = session.agent.state.messages;
+		expect(messages.at(-1)?.role).toBe("toolResult");
+		const failedAssistant = messages.findLast(m => m.role === "assistant") as AssistantMessage;
+		expect(failedAssistant.stopReason).toBe("error");
+
+		await expect(session.retry()).resolves.toBe(true);
+		await session.waitForIdle();
+
+		expect(mock.calls.length).toBe(2);
+		expect(lastAgentMessage(session).stopReason).toBe("stop");
+		expect(lastAgentMessage(session).content).toContainEqual({
+			type: "text",
+			text: "recovered after stalled tool call",
+		});
+	});
 });

@@ -58,6 +58,7 @@ function makeHarness(showTokenUsage: boolean): { ctx: InteractiveModeContext; he
 	let helpers: UiHelpers;
 	const ctx = {
 		chatContainer: new Container(),
+		transcriptMessageComponents: new WeakMap(),
 		pendingTools: new Map(),
 		ui: { requestRender: vi.fn() },
 		statusLine: { invalidate: vi.fn() },

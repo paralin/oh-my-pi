@@ -18,6 +18,7 @@ function createContext() {
 		settings: { get: () => false },
 		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
+		transcriptMessageComponents: new WeakMap(),
 		pendingTools,
 		hideThinkingBlock: false,
 		setWorkingMessage,

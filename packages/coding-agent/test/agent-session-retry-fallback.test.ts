@@ -221,9 +221,86 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("continues a startup-owned role fallback chain from the active fallback", async () => {
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		if (!firstFallback || !secondFallback) {
+			throw new Error("Expected bundled fallback models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: firstFallback,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === firstFallback.provider && model.id === firstFallback.id) {
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else if (model.provider === secondFallback.provider && model.id === secondFallback.id) {
+					mock.push({ content: ["Recovered on the remaining fallback"] });
+				} else {
+					throw new Error(
+						`Unexpected model requested during startup fallback test: ${model.provider}/${model.id}`,
+					);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const primarySelector = "missing-provider/missing-model";
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				slow: [`${firstFallback.provider}/${firstFallback.id}`, `${secondFallback.provider}/${secondFallback.id}`],
+			},
+		});
+		settings.setModelRole("slow", primarySelector);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			initialRetryFallback: {
+				role: "slow",
+				originalSelector: primarySelector,
+				originalThinkingLevel: undefined,
+			},
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackAppliedEvents.push(event);
+		});
+
+		await session.prompt("Continue the startup fallback chain");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${firstFallback.provider}/${firstFallback.id}`,
+			`${secondFallback.provider}/${secondFallback.id}`,
+		]);
+		expect(session.model?.provider).toBe(secondFallback.provider);
+		expect(session.model?.id).toBe(secondFallback.id);
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${firstFallback.provider}/${firstFallback.id}`,
+				to: `${secondFallback.provider}/${secondFallback.id}`,
+				role: "slow",
+			},
+		]);
+	});
+
 	it("applies a model-keyed fallback chain to advisor quota failures", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
-		const advisorPrimary = getBundledModel("devin", "gpt-5-6-sol");
+		const advisorPrimary = getBundledModel("devin", "swe-1-6-slow");
 		const advisorFallback = getBundledModel("openai-codex", "gpt-5.6-sol");
 		if (!mainModel || !advisorPrimary || !advisorFallback) {
 			throw new Error("Expected bundled advisor fallback models to exist");
@@ -313,7 +390,9 @@ describe("AgentSession retry fallback", () => {
 		expect(fallbackAppliedEvents).toEqual([
 			{
 				type: "retry_fallback_applied",
-				from: `${advisorPrimarySelector}:medium`,
+				// devin-agent models expose no controllable effort (#4579), so the
+				// advisor selector renders without a `:level` suffix.
+				from: advisorPrimarySelector,
 				to: advisorFallbackSelector,
 				role: advisorPrimarySelector,
 			},
@@ -321,7 +400,9 @@ describe("AgentSession retry fallback", () => {
 		expect(fallbackSucceededEvents).toEqual([
 			{
 				type: "retry_fallback_succeeded",
-				model: `${advisorFallbackSelector}:medium`,
+				// The fallback inherits the primary's (effort-less) thinking level,
+				// so its selector renders without a suffix too.
+				model: advisorFallbackSelector,
 				role: advisorPrimarySelector,
 			},
 		]);

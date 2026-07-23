@@ -64,6 +64,10 @@ function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 		recallMaxQueryChars: 800,
 		recallPromptPreamble: "preamble",
 		debug: false,
+		requestTimeoutMs: 30_000,
+		reflectTimeoutMs: 120_000,
+		recallTimeoutMs: 30_000,
+		retainTimeoutMs: 60_000,
 		mentalModelsEnabled: false,
 		mentalModelAutoSeed: false,
 		mentalModelRefreshIntervalMs: 5 * 60 * 1000,
@@ -154,6 +158,7 @@ function makeMnemopiConfig(
 interface RegisterMnemopiStateOptions {
 	cwd?: string;
 	sessionId?: string;
+	entries?: () => unknown[];
 }
 
 function registerMnemopiState(
@@ -168,7 +173,7 @@ function registerMnemopiState(
 		session: {
 			sessionId,
 			sessionManager: {
-				getEntries: () => [],
+				getEntries: options.entries ?? (() => []),
 				getCwd: () => options.cwd ?? "/tmp",
 			} as never,
 			emitNotice: () => {},
@@ -457,9 +462,9 @@ describe("Mnemopi backend lifecycle", () => {
 		}));
 		const state = registerMnemopiState(makeMnemopiConfig({ retainEveryNTurns: 2 }), {
 			cwd: "/work/project-alpha",
+			entries: () => entries,
 		});
 		state.lastRetainedTurn = 2;
-		(state.session.sessionManager as { getEntries: () => unknown[] }).getEntries = () => entries;
 		const retainSpy = vi.spyOn(state, "retainMessages").mockResolvedValue();
 
 		await state.maybeRetainOnAgentEnd([{ role: "user", content: [{ type: "text", text: "turn 4" }] }] as never);
@@ -470,6 +475,86 @@ describe("Mnemopi backend lifecycle", () => {
 			{ role: "user", content: "turn 4" },
 		]);
 		expect(state.lastRetainedTurn).toBe(4);
+	});
+
+	it("does not re-store retained turns during consolidation or after resume", async () => {
+		const entries = Array.from({ length: 6 }, (_, index) => ({
+			type: "message",
+			message: { role: "user", content: `turn ${index + 1}` },
+		}));
+		let visibleTurns = 2;
+		const config = makeMnemopiConfig({ retainEveryNTurns: 2 });
+		const state = registerMnemopiState(config, {
+			cwd: "/work/project-alpha",
+			entries: () => entries.slice(0, visibleTurns),
+		});
+
+		await state.maybeRetainOnAgentEnd([] as never);
+		visibleTurns = 4;
+		await state.maybeRetainOnAgentEnd([] as never);
+		await state.forceRetainCurrentSession();
+		await state.dispose({ consolidate: false });
+
+		visibleTurns = 6;
+		const resumed = registerMnemopiState(config, {
+			cwd: "/work/project-alpha",
+			entries: () => entries.slice(0, visibleTurns),
+		});
+		await resumed.forceRetainCurrentSession();
+
+		const rows = resumed.memory.beam.db
+			.prepare<{ content: string; retainedThroughUserTurn: number }, [string]>(`
+				SELECT
+					content,
+					CAST(json_extract(metadata_json, '$.retained_through_user_turn') AS INTEGER)
+						AS retainedThroughUserTurn
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+				  AND json_extract(metadata_json, '$.session_id') = ?
+				ORDER BY rowid
+			`)
+			.all(TEST_SESSION_ID);
+		expect(rows.map(row => row.content.match(/turn \d+/g))).toEqual([
+			["turn 1", "turn 2"],
+			["turn 3", "turn 4"],
+			["turn 5", "turn 6"],
+		]);
+		expect(rows.map(row => row.retainedThroughUserTurn)).toEqual([2, 4, 6]);
+	});
+
+	it("does not over-count legacy cumulative resumed rows when restoring the cursor", async () => {
+		const entries = Array.from({ length: 8 }, (_, index) => ({
+			type: "message",
+			message: { role: "user", content: `turn ${index + 1}` },
+		}));
+		const config = makeMnemopiConfig({ retainEveryNTurns: 2 });
+		const seed = registerMnemopiState(config, { cwd: "/work/project-alpha" });
+		const turn = (index: number) => ({ role: "user", content: `turn ${index}` });
+		// Legacy pre-fix bank: two incremental rows plus a cumulative row written
+		// by a resumed session whose in-memory cursor had reset to zero. None of
+		// them carry retained_through_user_turn metadata.
+		await seed.retainMessages([turn(1), turn(2)], `${TEST_SESSION_ID}-1`);
+		await seed.retainMessages([turn(3), turn(4)], `${TEST_SESSION_ID}-2`);
+		await seed.retainMessages([turn(1), turn(2), turn(3), turn(4), turn(5), turn(6)], `${TEST_SESSION_ID}-3`);
+		await seed.dispose({ consolidate: false });
+
+		const resumed = registerMnemopiState(config, {
+			cwd: "/work/project-alpha",
+			entries: () => entries,
+		});
+		await resumed.maybeRetainOnAgentEnd([] as never);
+
+		const rows = resumed.memory.beam.db
+			.prepare<{ content: string }, [string]>(`
+				SELECT content
+				FROM working_memory
+				WHERE source = 'coding-agent-transcript'
+				  AND json_extract(metadata_json, '$.session_id') = ?
+				ORDER BY rowid
+			`)
+			.all(TEST_SESSION_ID);
+		expect(rows).toHaveLength(4);
+		expect(rows.at(-1)?.content.match(/turn \d+/g)).toEqual(["turn 7", "turn 8"]);
 	});
 
 	it("retains the full transcript but extracts and embeds clean projections", async () => {

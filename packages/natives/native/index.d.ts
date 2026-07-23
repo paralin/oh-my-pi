@@ -178,7 +178,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV17_0_7(): void
+export declare function __piNativesV17_0_8(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -471,6 +471,17 @@ export interface ContextLine {
 export declare function copyToClipboard(text: string): void
 
 /**
+ * All pairs `(i, j)` with `i < j` whose cosine similarity meets `threshold`.
+ *
+ * `vectors` is `count` vectors flattened row-major at `dim` `f64` elements
+ * per row (zero-padded, which matches the TS `?? 0` missing-element
+ * semantics), so the similarity is bit-identical to the TS pairwise loop in
+ * `clusterBySimilarity`. Returns pairs flattened as `[i0, j0, i1, j1, ...]`
+ * in the same `(i, j)` visit order as the TS nested loop.
+ */
+export declare function cosineSimilarityPairs(vectors: Float64Array, count: number, dim: number, threshold: number): Uint32Array
+
+/**
  * Count tokens in `input`.
  *
  * `input` may be a single string or an array of strings; an array returns
@@ -489,6 +500,57 @@ export declare function countTokens(input: string | Array<string>, encoding?: En
  * Returns `"dark"` or `"light"` on macOS, `null` on other platforms.
  */
 export declare function detectMacOSAppearance(): MacOSAppearance | null
+
+/** One jsdiff change object: a run of added, removed, or common tokens. */
+export interface DiffChange {
+  /** Joined token text for this run (lines keep their `
+  ` terminators). */
+  value: string
+  /** Number of tokens in this run. */
+  count: number
+  /** True when this run exists only in the new text. */
+  added: boolean
+  /** True when this run exists only in the old text. */
+  removed: boolean
+}
+
+/**
+ * Diff `oldText.split("
+")` against `newText.split("
+")` with jsdiff
+ * `diffArrays` semantics (exact code-unit equality, empty lines preserved),
+ * returning only run lengths.
+ *
+ * Callers that map line numbers — like hashline recovery — need the counts,
+ * not another copy of the text.
+ */
+export declare function diffLineRuns(oldText: string, newText: string): Array<DiffRun>
+
+/**
+ * Line diff with jsdiff `diffLines(oldText, newText)` semantics (default
+ * options). Change values keep line terminators, and common runs are joined
+ * from the new text.
+ */
+export declare function diffLines(oldText: string, newText: string): Array<DiffChange>
+
+/** A change run without its token text, for callers that only need counts. */
+export interface DiffRun {
+  /** Number of tokens in this run. */
+  count: number
+  /** True when this run exists only in the new text. */
+  added: boolean
+  /** True when this run exists only in the old text. */
+  removed: boolean
+}
+
+/**
+ * Word diff with jsdiff `diffWords(oldText, newText)` semantics (default
+ * options).
+ *
+ * Tokens carry surrounding whitespace, equality ignores it, and the
+ * post-pass dedupes whitespace across change boundaries.
+ */
+export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
 
 /** Ellipsis strategy for [`truncate_to_width`]. */
 export declare enum Ellipsis {
@@ -1199,6 +1261,28 @@ export interface MinimizerResult {
   outputBytes: number
 }
 
+/**
+ * MMR selection over pre-sorted candidates using Jaccard word similarity.
+ *
+ * `contents[i]` and `scores[i]` describe candidate `i`, already sorted by
+ * relevance exactly as the TS `mmrRerank` sorts them (the JS stable sort
+ * stays on the TS side so its tie and NaN semantics are preserved).
+ * Replicates the TS selection loop exactly: candidate `0` is always taken
+ * first; each round picks the remaining candidate maximizing
+ * `lambda * score - (1 - lambda) * maxSimilarity(selected)` with strict
+ * `>` comparisons, so ties keep the earliest remaining candidate — and a
+ * round where every score is `NaN` picks the first remaining candidate,
+ * matching the TS `bestIdx = 0` initialisation. Returns the selected
+ * indices into the input order.
+ *
+ * Word tokenization matches `text.toLowerCase().split(/\s+/)` (ECMA `\s`,
+ * Unicode default full case conversion). Known divergence: unpaired
+ * surrogates arrive here as U+FFFD, while JS keeps the lone surrogate; both
+ * tokenize to a single non-whitespace word so Jaccard counts still agree
+ * unless a text mixes U+FFFD words with lone-surrogate words.
+ */
+export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1226,6 +1310,23 @@ export declare function parseKey(data: string, kittyProtocolActive: boolean): st
  * Returns a structured parse result when the input is a valid Kitty sequence.
  */
 export declare function parseKittySequence(data: string): ParsedKittyResult | null
+
+/** One hunk of a unified diff, matching jsdiff `structuredPatch` hunks. */
+export interface PatchHunk {
+  /** 1-based first line of the hunk in the old text. */
+  oldStart: number
+  /** Number of old-text lines covered by the hunk. */
+  oldLines: number
+  /** 1-based first line of the hunk in the new text. */
+  newStart: number
+  /** Number of new-text lines covered by the hunk. */
+  newLines: number
+  /**
+   * Hunk body: `+`/`-`/` `-prefixed lines without trailing newlines, plus
+   * `\ No newline at end of file` markers where applicable.
+   */
+  lines: Array<string>
+}
 
 /** Current state of a process reference. */
 export declare enum ProcessStatus {
@@ -1530,6 +1631,13 @@ export interface SnapcompactRenderOptions {
  */
 export declare function snapcompactSupportedChars(font: string, chars: string): string
 
+/**
+ * Unified-diff hunks with jsdiff
+ * `structuredPatch(_, _, oldText, newText, _, _, { context }).hunks`
+ * semantics. `context` defaults to 4 like jsdiff.
+ */
+export declare function structuredPatchHunks(oldText: string, newText: string, context?: number | undefined | null): Array<PatchHunk>
+
 export declare function summarizeCode(options: SummaryOptions): SummaryResult
 
 export interface SummaryOptions {
@@ -1592,6 +1700,31 @@ export declare function supportsLanguage(lang: string): boolean
  * Pads with spaces when requested.
  */
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
+
+/**
+ * Score every row of a normalized `f32` matrix against `query` and return
+ * the top `limit` rows.
+ *
+ * Mirrors the TS `searchExactVectorIndex` loop bit-exactly: the query is
+ * normalized by the L2 norm of its *full* length, each row score sums
+ * `matrix[row][col] * (query[col] / norm)` over
+ * `min(query.len, dimensions)` columns in column order. Ranking matches the
+ * TS stable sort: score descending, lower row index first on exact ties
+ * (`-0.0` and `+0.0` compare equal). Callers are expected to enforce the TS
+ * guards first (finite query with a positive norm, non-empty matrix).
+ */
+export declare function vectorIndexTopK(matrix: Float32Array, dimensions: number, query: Float64Array, limit: number): VectorTopK
+
+/**
+ * Top-k rows of a normalized vector matrix ranked by dot product with a
+ * normalized query.
+ */
+export interface VectorTopK {
+  /** Row indices of the selected hits, best score first. */
+  indices: Uint32Array
+  /** Scores aligned with `indices`. */
+  scores: Float64Array
+}
 
 /**
  * Calculate visible width of text, excluding ANSI escape sequences.

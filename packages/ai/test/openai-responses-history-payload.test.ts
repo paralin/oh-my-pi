@@ -108,7 +108,7 @@ const assistantSnapshotContext: Context = {
 const codexAssistantSnapshotContext: Context = {
 	messages: [
 		{ role: "user", content: "generic history that should be replaced", timestamp: Date.now() },
-		makeAssistantMessage(snapshotHistoryItems, false, "openai-codex", "gpt-5.2-codex"),
+		makeAssistantMessage(snapshotHistoryItems, false, "openai-codex", "gpt-5.5"),
 		{ role: "user", content: "follow-up user", timestamp: Date.now() },
 	],
 };
@@ -117,7 +117,7 @@ const codexToCopilotContext: Context = {
 	messages: [
 		{ role: "user", content: "generic user before switch", timestamp: Date.now() },
 		{
-			...makeAssistantMessage([], false, "openai-codex", "gpt-5.2-codex"),
+			...makeAssistantMessage([], false, "openai-codex", "gpt-5.5"),
 			content: [{ type: "text", text: "generic assistant that should be rebuilt" }],
 			providerPayload: createOpenAIResponsesHistoryPayload("openai-codex", [
 				{ type: "reasoning", encrypted_content: "enc_123" },
@@ -267,7 +267,7 @@ function makeAssistantMessage(
 	items: Record<string, unknown>[],
 	incremental = false,
 	provider: "openai" | "openai-codex" | "github-copilot" = "openai",
-	model = provider === "openai-codex" ? "gpt-5.2-codex" : provider === "github-copilot" ? "gpt-5.4" : "gpt-5-mini",
+	model = provider === "openai-codex" ? "gpt-5.5" : provider === "github-copilot" ? "gpt-5.4" : "gpt-5-mini",
 ) {
 	return {
 		role: "assistant" as const,
@@ -428,7 +428,7 @@ describe("OpenAI responses history payload", () => {
 		});
 		assertWireOrder(openaiItems);
 
-		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.2-codex");
+		const codexModel = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		const codexItems = convertCodexResponsesMessages(codexModel, makeContext("openai-codex"));
 		assertWireOrder(codexItems);
 	});
@@ -810,7 +810,7 @@ describe("OpenAI responses history payload", () => {
 	});
 
 	it("prefers assistant native history snapshots for openai-codex-responses", async () => {
-		const model = getBundledModel("openai-codex", "gpt-5.2-codex") as Model<"openai-codex-responses">;
+		const model = getBundledModel("openai-codex", "gpt-5.5") as Model<"openai-codex-responses">;
 		const payload = (await captureCodexPayload(model, codexAssistantSnapshotContext)) as { input?: unknown[] };
 		expect(payload.input).toEqual([
 			...snapshotHistoryItems,
@@ -1279,7 +1279,7 @@ describe("OpenAI responses history payload", () => {
 					content: [{ type: "toolCall", id: callId, name: "read", arguments: { path: "README.md" } }],
 					api: "openai-codex-responses",
 					provider: "openai-codex",
-					model: "gpt-5.2-codex",
+					model: "gpt-5.5",
 					usage: {
 						input: 0,
 						output: 0,
@@ -1303,7 +1303,7 @@ describe("OpenAI responses history payload", () => {
 				{ role: "user", content: "Resume", timestamp: Date.now() },
 			],
 		};
-		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.2-codex");
+		const model = getBundledModel<"openai-codex-responses">("openai-codex", "gpt-5.5");
 		const payload = (await captureCodexPayload(model, context)) as { input?: unknown[] };
 		const functionCallItem = findResponsesInputItem(payload.input, "function_call");
 		const functionCallOutputItem = findResponsesInputItem(payload.input, "function_call_output");

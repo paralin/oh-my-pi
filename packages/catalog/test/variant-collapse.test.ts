@@ -109,6 +109,41 @@ describe("collapseEffortVariants", () => {
 		});
 	});
 
+	it("collapses Gemini 3.6 Flash tiers into one routed logical spec", () => {
+		const out = collapseEffortVariants(
+			[
+				memberSpec("gemini-3.6-flash-high"),
+				memberSpec("gemini-3.6-flash-low"),
+				memberSpec("gemini-3.6-flash-medium"),
+				memberSpec("gemini-3.6-flash-tiered"),
+			],
+			ANTIGRAVITY_VARIANT_COLLAPSE_TABLE,
+		);
+
+		expect(out).toHaveLength(1);
+		const flash = out[0];
+		expect(flash?.id).toBe("gemini-3.6-flash");
+		expect(flash?.name).toBe("Gemini 3.6 Flash");
+		expect(flash?.requestModelId).toBe("gemini-3.6-flash-low");
+		expect(flash?.thinking).toEqual({
+			mode: "google-level",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+			requiresEffort: true,
+			effortRouting: {
+				minimal: "gemini-3.6-flash-low",
+				low: "gemini-3.6-flash-low",
+				medium: "gemini-3.6-flash-medium",
+				high: "gemini-3.6-flash-high",
+			},
+		});
+
+		const model = buildModel(flash as ModelSpec<"google-gemini-cli">);
+		expect(resolveWireModelId(model, Effort.Minimal)).toBe("gemini-3.6-flash-low");
+		expect(resolveWireModelId(model, Effort.Low)).toBe("gemini-3.6-flash-low");
+		expect(resolveWireModelId(model, Effort.Medium)).toBe("gemini-3.6-flash-medium");
+		expect(resolveWireModelId(model, Effort.High)).toBe("gemini-3.6-flash-high");
+	});
+
 	it("drops routes whose target member is absent", () => {
 		const out = collapseEffortVariants(
 			[memberSpec("gemini-3.5-flash-extra-low")],

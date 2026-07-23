@@ -75,7 +75,7 @@ describe("PlanReviewOverlay", () => {
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
 	});
 
-	it("moves the option cursor with up/down and confirms the new target", () => {
+	it("moves the option cursor with down and confirms the new target", () => {
 		const onPick = vi.fn();
 		const overlay = new PlanReviewOverlay(
 			"plan",
@@ -85,11 +85,42 @@ describe("PlanReviewOverlay", () => {
 		overlay.handleInput(DOWN);
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and compact context");
+	});
 
-		onPick.mockClear();
+	it("confirms the up-moved target from a lower start", () => {
+		const onPick = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS, initialIndex: 1 },
+			{ onPick, onCancel: vi.fn() },
+		);
 		overlay.handleInput(UP);
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+	});
+
+	it("locks input and shows a submitting indicator after a pick, ignoring repeat keys", () => {
+		const onPick = vi.fn();
+		const onCancel = vi.fn();
+		const overlay = new PlanReviewOverlay(
+			"plan",
+			{ promptTitle: "next", options: APPROVAL_OPTIONS },
+			{ onPick, onCancel },
+		);
+		overlay.handleInput(ENTER);
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPick).toHaveBeenCalledWith("Approve and execute");
+
+		const committed = stripVTControlCharacters(overlay.render(80).join("\n"));
+		expect(committed).toContain("Approve and execute — submitting…");
+
+		// The async approval window keeps the overlay mounted; further keys must
+		// not fire a second callback or move the cursor (#5926).
+		overlay.handleInput(DOWN);
+		overlay.handleInput(ENTER);
+		overlay.handleInput("\x1b");
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onCancel).not.toHaveBeenCalled();
 	});
 
 	it("skips disabled options and never confirms them", () => {
@@ -654,14 +685,14 @@ describe("PlanReviewOverlay", () => {
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
 		expect(optionLineRaw(overlay, "Approve and keep context")).toContain(selectedBg);
 
+		// Pointer onto the top border (a non-option row) drops the highlight.
+		overlay.handleInput("\x1b[<35;6;1M");
+		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
+
 		// Hover is visual only: the keyboard cursor stays on index 0, so Enter still
 		// confirms the first option rather than the hovered one.
 		overlay.handleInput(ENTER);
 		expect(onPick).toHaveBeenCalledWith("Approve and execute");
-
-		// Pointer onto the top border (a non-option row) drops the highlight.
-		overlay.handleInput("\x1b[<35;6;1M");
-		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
 	});
 
 	it("never hovers a disabled option", () => {
