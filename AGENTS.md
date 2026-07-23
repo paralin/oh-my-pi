@@ -245,6 +245,7 @@ Location: `packages/*/CHANGELOG.md` (per package).
 - New entries always go under `## [Unreleased]`.
 - Never modify already-released sections (e.g., `## [0.12.2]`) — they are immutable.
 - Don't flag changelog section order or formatting in reviews or PRs — `bun run release` runs `fix-changelogs` which normalizes everything automatically.
+- Before opening a PR with a user-visible change (fix, feature, behavior change), add the matching entry under `## [Unreleased]` in the affected package's `CHANGELOG.md` (usually `packages/coding-agent`) in the same commit. Upstream review treats a missing entry as a required touch, so include it up front rather than in a review round.
 
 **Attribution:**
 - Internal (from issues): `Fixed foo bar ([#123](https://github.com/can1357/oh-my-pi/issues/123))`.
