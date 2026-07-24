@@ -309,7 +309,14 @@ export interface ModelTagsSettings {
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
+/** One Codex home directory omp may read credentials from, in chain order. */
+export interface CodexHomeSettingsEntry {
+	name?: string;
+	path: string;
+}
+
 const EMPTY_STRING_ARRAY: string[] = [];
+const EMPTY_CODEX_HOMES: CodexHomeSettingsEntry[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
@@ -4953,6 +4960,10 @@ export const SETTINGS_SCHEMA = {
 			description: "Providers that web_search should never use, even as fallbacks",
 			options: SEARCH_PROVIDER_CHOICES,
 		},
+	},
+	"providers.codexHomes": {
+		type: "array",
+		default: EMPTY_CODEX_HOMES,
 	},
 	"providers.webSearchGeminiModel": {
 		type: "string",
