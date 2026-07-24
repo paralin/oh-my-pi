@@ -381,6 +381,8 @@ export interface AuthCredentialStore {
 	getCredentialBlockReconcileAfter?(credentialId: number, providerKey: string, blockScope: string): number | undefined;
 	/** Upsert with MAX semantics: keep the later blockedUntilMs on conflict. */
 	upsertCredentialBlock?(block: StoredCredentialBlock): void;
+	/** Drop one block row for a credential/provider/scope key. */
+	deleteCredentialBlock?(credentialId: number, providerKey: string, blockScope: string): void;
 	/** Drop every block row for a credential (all providerKeys/scopes). */
 	deleteCredentialBlocks?(credentialId: number): void;
 	/** Prune rows with blocked_until_ms <= nowMs. */
@@ -1654,11 +1656,16 @@ export class AuthStorage {
 		provider: string,
 		providerKey: string,
 		credentialIndex: number,
-		blockScope: string | undefined = undefined,
+		blockScopeOrScopes: string | readonly string[] | undefined = undefined,
 	): number | undefined {
 		const nowMs = Date.now();
+		// A request honours its own scope plus any legacy catch-all scope, so a
+		// block written before backoff was scoped still applies to everything.
+		const scopes = (
+			typeof blockScopeOrScopes === "string" ? [blockScopeOrScopes] : (blockScopeOrScopes ?? [])
+		).filter(scope => scope.length > 0);
 		let blockedUntil = this.#getCredentialBlockedUntilForKey(providerKey, credentialIndex, nowMs);
-		if (blockScope) {
+		for (const blockScope of scopes) {
 			const scopedBlockedUntil = this.#getCredentialBlockedUntilForKey(
 				this.#toScopedBackoffKey(providerKey, blockScope),
 				credentialIndex,
@@ -1671,16 +1678,14 @@ export class AuthStorage {
 
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return blockedUntil;
-		if (!blockScope || provider !== "openai-codex") {
-			const persistedGlobalBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, "");
-			if (
-				persistedGlobalBlockedUntil !== undefined &&
-				(blockedUntil === undefined || persistedGlobalBlockedUntil > blockedUntil)
-			) {
-				blockedUntil = persistedGlobalBlockedUntil;
-			}
+		const persistedGlobalBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, "");
+		if (
+			persistedGlobalBlockedUntil !== undefined &&
+			(blockedUntil === undefined || persistedGlobalBlockedUntil > blockedUntil)
+		) {
+			blockedUntil = persistedGlobalBlockedUntil;
 		}
-		if (blockScope) {
+		for (const blockScope of scopes) {
 			const persistedScopedBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, blockScope);
 			if (
 				persistedScopedBlockedUntil !== undefined &&
@@ -1697,7 +1702,7 @@ export class AuthStorage {
 		provider: string,
 		providerKey: string,
 		credentialIndex: number,
-		blockScope: string | undefined = undefined,
+		blockScope: string | readonly string[] | undefined = undefined,
 	): boolean {
 		return this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScope) !== undefined;
 	}
@@ -1882,6 +1887,8 @@ export class AuthStorage {
 		strategy: CredentialRankingStrategy;
 		rankingContext: CredentialRankingContext;
 		blockScope?: string;
+		/** Scopes a block may live under for this request; reads honour all of them. */
+		blockScopes?: readonly string[];
 	}): Promise<ApiKeyCandidate[]> {
 		const nowMs = Date.now();
 		const { strategy } = args;
@@ -1895,7 +1902,7 @@ export class AuthStorage {
 					args.provider,
 					args.providerKey,
 					selection.index,
-					args.blockScope,
+					args.blockScopes ?? args.blockScope,
 				);
 				if (blockedUntil !== undefined) {
 					return { selection, usage: null, usageChecked: false, blockedUntil };
@@ -1920,7 +1927,7 @@ export class AuthStorage {
 					args.provider,
 					args.providerKey,
 					selection.index,
-					args.blockScope,
+					args.blockScopes ?? args.blockScope,
 				);
 				return { selection, usage: null, usageChecked: false, blockedUntil };
 			});
@@ -2003,6 +2010,7 @@ export class AuthStorage {
 
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy.blockScope?.(rankingContext);
+		const blockScopes = strategy.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
 		const candidates = await this.#rankApiKeySelections({
 			providerKey,
 			provider,
@@ -2012,6 +2020,7 @@ export class AuthStorage {
 			strategy,
 			rankingContext,
 			blockScope,
+			blockScopes,
 		});
 		return candidates[0]?.selection ?? fallback;
 	}
@@ -3684,6 +3693,7 @@ export class AuthStorage {
 
 		const rankingContext: CredentialRankingContext = { modelId: options.modelId };
 		const blockScope = strategy.blockScope?.(rankingContext);
+		const blockScopes = strategy.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
 		const reserveFraction = Number.isFinite(options.reserveFraction)
 			? Math.max(0, Math.min(1, options.reserveFraction))
 			: 0;
@@ -3692,7 +3702,7 @@ export class AuthStorage {
 			pool.map(async ({ entry, index }): Promise<ModelUsageAccountHealth> => {
 				const credentialType = entry.credential.type;
 				const providerKey = this.#getProviderTypeKey(provider, credentialType);
-				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScope);
+				let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				if (blockedUntil !== undefined && provider !== "openai-codex") {
 					return {
 						credentialId: entry.id,
@@ -3718,7 +3728,7 @@ export class AuthStorage {
 				}
 
 				if (provider === "openai-codex") {
-					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScope);
+					blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScopes);
 				}
 				if (blockedUntil !== undefined) {
 					return {
@@ -4145,6 +4155,7 @@ export class AuthStorage {
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
+		const siblingBlockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
 
@@ -4179,11 +4190,14 @@ export class AuthStorage {
 
 		let retryAtMs: number | undefined;
 		for (const candidate of remainingCredentials) {
+			// Sibling availability must use the same scope set selection reads, or
+			// this reports a sibling as free that selection will then refuse, most
+			// visibly when the sibling still carries a legacy shared block.
 			const candidateBlockedUntil = this.#getCredentialBlockedUntil(
 				provider,
 				providerKey,
 				candidate.index,
-				blockScope,
+				siblingBlockScopes,
 			);
 			if (candidateBlockedUntil === undefined) return { switched: true };
 			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
@@ -4305,6 +4319,8 @@ export class AuthStorage {
 		strategy: CredentialRankingStrategy;
 		rankingContext: CredentialRankingContext;
 		blockScope?: string;
+		/** Scopes a block may live under for this request; reads honour all of them. */
+		blockScopes?: readonly string[];
 	}): Promise<OAuthCandidate[]> {
 		const nowMs = Date.now();
 		const { strategy } = args;
@@ -4322,7 +4338,7 @@ export class AuthStorage {
 					args.provider,
 					args.providerKey,
 					selection.index,
-					args.blockScope,
+					args.blockScopes ?? args.blockScope,
 				);
 				let usage: UsageReport | null = null;
 				let usageChecked = false;
@@ -4336,7 +4352,7 @@ export class AuthStorage {
 						args.provider,
 						args.providerKey,
 						selection.index,
-						args.blockScope,
+						args.blockScopes ?? args.blockScope,
 					);
 				}
 				if (blockedUntil !== undefined) return { selection, usage, usageChecked, blockedUntil };
@@ -4447,6 +4463,8 @@ export class AuthStorage {
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
 		const blockScope = strategy?.blockScope?.(rankingContext);
+		// Reads honour every scope that applies; the scalar above is for args that persist.
+		const blockScopes = strategy?.blockScopes?.(rankingContext) ?? (blockScope ? [blockScope] : []);
 		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
 		const hasPlanRequirement = planRequirement !== "none";
 		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
@@ -4475,7 +4493,7 @@ export class AuthStorage {
 		const sessionPreferredIsAvailable =
 			sessionPreferredIndex !== undefined &&
 			sessionPreferredCanRefreshOrUse &&
-			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScope);
+			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScopes);
 		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || !sessionPreferredIsWarm || hasPlanRequirement);
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better
@@ -4504,6 +4522,7 @@ export class AuthStorage {
 					strategy: strategy!,
 					rankingContext,
 					blockScope,
+					blockScopes,
 				})
 			: order
 					.map(idx => credentials[idx])
@@ -4516,7 +4535,7 @@ export class AuthStorage {
 		if (!shouldRank && sessionPreferredIndex !== undefined && !hasPlanRequirement) {
 			const sessionPreferredCandidate = candidates.findIndex(
 				candidate =>
-					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScope) &&
+					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
 					candidate.selection.index === sessionPreferredIndex,
 			);
 			if (sessionPreferredCandidate > 0) {
@@ -4610,7 +4629,7 @@ export class AuthStorage {
 		if (hasPlanRequirement && sessionPreferredIndex !== undefined) {
 			const sessionPreferredCandidate = candidates.findIndex(
 				candidate =>
-					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScope) &&
+					!this.#isCredentialBlocked(provider, providerKey, candidate.selection.index, blockScopes) &&
 					candidate.selection.index === sessionPreferredIndex,
 			);
 			if (sessionPreferredCandidate > 0) {
@@ -4647,6 +4666,7 @@ export class AuthStorage {
 						strategy,
 						rankingContext,
 						blockScope,
+						blockScopes,
 					},
 				);
 				if (resolved) return resolved;
@@ -4824,6 +4844,7 @@ export class AuthStorage {
 			strategy?: CredentialRankingStrategy;
 			rankingContext?: CredentialRankingContext;
 			blockScope?: string;
+			blockScopes?: readonly string[];
 			/** When false, a definitive failure of THIS credential returns undefined instead of falling back to the ranked/round-robin selector (target-only resolution). */
 			allowFallback?: boolean;
 		},
@@ -4838,9 +4859,13 @@ export class AuthStorage {
 			strategy,
 			rankingContext,
 			blockScope,
+			blockScopes,
 			allowFallback = true,
 		} = usageOptions;
-		if (!allowBlocked && this.#isCredentialBlocked(provider, providerKey, selection.index, blockScope)) {
+		if (
+			!allowBlocked &&
+			this.#isCredentialBlocked(provider, providerKey, selection.index, blockScopes ?? blockScope)
+		) {
 			return undefined;
 		}
 
@@ -5573,6 +5598,70 @@ export class AuthStorage {
 	 * persisted and in-memory `openai-codex:oauth` blocks so credential selection
 	 * can re-include recovered seats before a stale block naturally expires.
 	 */
+	/**
+	 * Narrow a usage report to the limits a backoff scope covers, so a scope is
+	 * judged only by the meters it gates. A legacy scope that meant "block
+	 * everything" keeps the whole report.
+	 */
+	#scopeUsageReportToBlockScope(
+		report: UsageReport,
+		blockScope: string | undefined,
+		strategy: CredentialRankingStrategy | undefined,
+	): UsageReport {
+		if (!blockScope || !strategy?.scopeLimits || !strategy.blockScopes) return report;
+		// Find a request context whose scope set leads with this scope; its scoped
+		// limits are the ones this block gates.
+		const modelId = blockScope === "spark" ? "gpt-5.3-codex-spark" : "gpt-5.3-codex";
+		if (strategy.blockScopes({ modelId })[0] !== blockScope) return report;
+		const scopedLimits = strategy.scopeLimits(report, { modelId });
+		const meterStates = report.metadata?.meterStates;
+		const meterState =
+			meterStates !== null && typeof meterStates === "object"
+				? (meterStates as Record<string, { allowed?: boolean; limitReached?: boolean }>)[blockScope]
+				: undefined;
+		return {
+			...report,
+			limits: scopedLimits,
+			metadata:
+				meterState || blockScope === "spark"
+					? {
+							...report.metadata,
+							allowed: meterState?.allowed,
+							limitReached: meterState?.limitReached,
+						}
+					: report.metadata,
+		};
+	}
+
+	/**
+	 * Clear one backoff scope. The in-memory backoff is per scope so it is
+	 * dropped directly; the persisted store deletes a credential's blocks as a
+	 * unit, so it is only purged once no other scope still holds a live block.
+	 * Leaving a persisted row behind is safe: the scope it belongs to is
+	 * unblocked in memory, and the row heals on the pass where its own meter
+	 * recovers.
+	 */
+	#clearCredentialBlockScope(
+		provider: string,
+		credentialId: number,
+		credentialIndex: number,
+		providerKey: string,
+		blockScope: string | undefined,
+	): void {
+		const key = this.#toScopedBackoffKey(providerKey, blockScope);
+		const backoffMap = this.#credentialBackoff.get(key);
+		backoffMap?.delete(credentialIndex);
+		if (backoffMap?.size === 0) this.#credentialBackoff.delete(key);
+		const probeAfterMap = this.#credentialBackoffProbeAfter.get(key);
+		probeAfterMap?.delete(credentialIndex);
+		if (probeAfterMap?.size === 0) this.#credentialBackoffProbeAfter.delete(key);
+		try {
+			this.deleteCredentialBlock(credentialId, providerKey, blockScope ?? "");
+		} catch (err) {
+			logger.debug("Failed to clear persisted credential block", { err, provider, credentialId, blockScope });
+		}
+	}
+
 	#isHealthyCodexUsageReport(report: UsageReport): boolean {
 		if (report.provider !== "openai-codex") return false;
 		const metadata = report.metadata;
@@ -5581,13 +5670,51 @@ export class AuthStorage {
 	}
 
 	#reconcileCodexUsageBlockForCredential(provider: Provider, credentialId: number, report: UsageReport): void {
-		if (!this.#isHealthyCodexUsageReport(report)) return;
 		const providerKey = this.#getProviderTypeKey(provider, "oauth");
 		const credentialIndex = this.#getStoredCredentials(provider).findIndex(entry => entry.id === credentialId);
 		if (credentialIndex < 0) return;
 		// Mirror selection: consult the same strategy scope `markUsageLimitReached`
 		// persists under, else a scoped block is invisible here and never healed.
-		const blockScope = this.#rankingStrategyResolver?.(provider)?.blockScope?.({});
+		// Reconciliation has no request context, so it cannot know which scope a
+		// block was written under. Heal every scope the strategy can produce, plus
+		// any legacy scope it still lists, or a block persisted under one scope
+		// stays invisible here forever.
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const blockScopes =
+			strategy?.blockScopes?.() ?? [strategy?.blockScope?.({})].filter(scope => scope !== undefined);
+		const scopesToHeal = blockScopes.length > 0 ? blockScopes : [undefined];
+		for (const blockScope of scopesToHeal) {
+			this.#healCodexUsageBlockScope(
+				provider,
+				providerKey,
+				credentialId,
+				credentialIndex,
+				blockScope,
+				report,
+				strategy,
+			);
+		}
+	}
+
+	/**
+	 * Heal one backoff scope against the limits that scope actually covers.
+	 *
+	 * Judging a scope by the whole report is wrong once scopes are per-meter: an
+	 * exhausted Spark meter would keep a recovered chat block alive, and healing
+	 * would then delete every scope including a block that is still valid. So
+	 * each scope is evaluated against its own limits and cleared on its own.
+	 */
+	#healCodexUsageBlockScope(
+		provider: Provider,
+		providerKey: string,
+		credentialId: number,
+		credentialIndex: number,
+		blockScope: string | undefined,
+		report: UsageReport,
+		strategy: CredentialRankingStrategy | undefined,
+	): void {
+		const scopedReport = this.#scopeUsageReportToBlockScope(report, blockScope, strategy);
+		if (!this.#isHealthyCodexUsageReport(scopedReport)) return;
 		const blockedUntilMs = this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScope);
 		if (blockedUntilMs === undefined) return;
 		// `/usage` can lag the request path that just returned 429. Fresh local or
@@ -5603,10 +5730,11 @@ export class AuthStorage {
 		if (Math.max(globalProbeAfterMs, scopedProbeAfterMs, storeGlobalProbeAfterMs, storeScopedProbeAfterMs) > nowMs) {
 			return;
 		}
-		this.#clearCredentialBlocks(provider, credentialId);
+		this.#clearCredentialBlockScope(provider, credentialId, credentialIndex, providerKey, blockScope);
 		logger.info("Cleared stale Codex usage-limit block after healthy live usage report", {
 			credentialId,
 			provider,
+			blockScope,
 			clearedBlockedUntilMs: blockedUntilMs,
 		});
 	}
@@ -5647,7 +5775,6 @@ export class AuthStorage {
 	#reconcileCodexUsageBlocksFromReports(reports: UsageReport[]): void {
 		const reconciled = new Set<number>();
 		for (const report of reports) {
-			if (!this.#isHealthyCodexUsageReport(report)) continue;
 			for (const credentialId of this.#findStoredCredentialIdsForUsageReport(report)) {
 				if (reconciled.has(credentialId)) continue;
 				reconciled.add(credentialId);
@@ -6069,6 +6196,14 @@ export class AuthStorage {
 	/**
 	 * Broker-server seam: clear all persisted blocks for one credential and notify snapshot waiters.
 	 */
+	deleteCredentialBlock(credentialId: number, providerKey: string, blockScope: string): void {
+		const deleteCredentialBlock = this.#store.deleteCredentialBlock?.bind(this.#store);
+		if (!deleteCredentialBlock) return;
+		deleteCredentialBlock(credentialId, providerKey, blockScope);
+		this.#invalidateUsageReportCacheForProviderKey(providerKey);
+		this.#bumpGeneration("credential-block");
+	}
+
 	deleteCredentialBlocks(credentialId: number): void {
 		const deleteCredentialBlocks = this.#store.deleteCredentialBlocks?.bind(this.#store);
 		if (!deleteCredentialBlocks) return;
@@ -6445,6 +6580,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#listCredentialBlocksByCredentialStmt: Statement;
 	#upsertCredentialBlockStmt: Statement;
 	#deleteCredentialBlocksStmt: Statement;
+	#deleteCredentialBlockStmt: Statement;
 	#deleteExpiredCredentialBlocksStmt: Statement;
 	#acquireCredentialRefreshLeaseStmt: Statement;
 	#getCredentialRefreshLeaseStmt: Statement;
@@ -6532,6 +6668,9 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				updated_at = excluded.updated_at`,
 		);
 		this.#deleteCredentialBlocksStmt = this.#db.prepare("DELETE FROM auth_credential_blocks WHERE credential_id = ?");
+		this.#deleteCredentialBlockStmt = this.#db.prepare(
+			"DELETE FROM auth_credential_blocks WHERE credential_id = ? AND provider_key = ? AND block_scope = ?",
+		);
 		this.#deleteExpiredCredentialBlocksStmt = this.#db.prepare(
 			"DELETE FROM auth_credential_blocks WHERE blocked_until_ms <= ?",
 		);
@@ -7296,6 +7435,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		);
 	}
 
+	deleteCredentialBlock(credentialId: number, providerKey: string, blockScope: string): void {
+		this.#deleteCredentialBlockStmt.run(credentialId, providerKey, blockScope);
+		this.#credentialBlockReconcileAfter.delete(`${credentialId}\0${providerKey}\0${blockScope}`);
+	}
+
 	deleteCredentialBlocks(credentialId: number): void {
 		this.#deleteCredentialBlocksStmt.run(credentialId);
 		for (const key of this.#credentialBlockReconcileAfter.keys()) {
@@ -7666,6 +7810,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listCredentialBlocksByCredentialStmt.finalize();
 		this.#upsertCredentialBlockStmt.finalize();
 		this.#deleteCredentialBlocksStmt.finalize();
+		this.#deleteCredentialBlockStmt.finalize();
 		this.#deleteExpiredCredentialBlocksStmt.finalize();
 		this.#insertUsageHistoryStmt.finalize();
 		this.#lastUsageHistoryStmt.finalize();

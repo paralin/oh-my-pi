@@ -533,6 +533,12 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 			});
 	}
 
+	deleteCredentialBlock(_credentialId: number, _providerKey: string, _blockScope: string): void {
+		// The broker protocol only supports deleting every block for a credential.
+		// Keep scoped blocks until expiry rather than risk deleting unrelated or
+		// newer broker state through that broader operation.
+	}
+
 	deleteCredentialBlocks(credentialId: number): void {
 		this.#deleteSnapshotBlocks(credentialId);
 		for (const key of this.#credentialBlockReconcileAfter.keys()) {
