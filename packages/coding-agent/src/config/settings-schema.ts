@@ -380,6 +380,8 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
 
+	"docs.hideInternal": { type: "boolean", default: true },
+
 	autoResume: {
 		type: "boolean",
 		default: false,
