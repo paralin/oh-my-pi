@@ -427,10 +427,13 @@ import {
 	buildScratchHandoffRecentContext,
 	renderScratchHandoffCloseoutMessage,
 	renderScratchHandoffResumeMessage,
+	resolveScratchContinuityState,
 	SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
-	scratchHandoffIsComplete,
+	type ScratchContinuityState,
+	type ScratchHandoffDelta,
+	scratchHandoffRecentContextBudget,
 } from "./scratch-handoff";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
@@ -4341,11 +4344,17 @@ export class AgentSession {
 		}
 	}
 
-	#scratchHandoffRecentContextText(pendingMessages: readonly AgentMessage[] = []): string | undefined {
+	/**
+	 * Work recorded after the last scratch write. `bounded` is what may go into
+	 * the rebuilt prefix as text; `text` is the full delta for SnapCompact, which
+	 * bounds itself by frame budget and carries far more work per prefix token.
+	 */
+	#scratchHandoffRecentContext(pendingMessages: readonly AgentMessage[] = []): ScratchHandoffDelta | undefined {
 		return buildScratchHandoffRecentContext({
 			entries: this.sessionManager.getBranch(),
 			scratchPath: this.#scratchHandoffDisplayPath,
 			pendingMessages,
+			maxTokens: scratchHandoffRecentContextBudget(this.model?.contextWindow ?? 0),
 			convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 		});
 	}
@@ -12289,18 +12298,23 @@ export class AgentSession {
 
 	async #scratchHandoffMessageContent(pendingMessages: readonly AgentMessage[] = []): Promise<{
 		content: CustomMessage["content"];
-		verified: boolean;
+		state: ScratchContinuityState;
 	}> {
 		if (this.#scratchHandoffDisplayPath) {
 			try {
 				const scratchPath = resolveToCwd(this.#scratchHandoffDisplayPath, this.sessionManager.getCwd());
 				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
-				const recentContextText = this.#scratchHandoffRecentContextText(pendingMessages);
-				const scratchIsFresh =
-					this.#scratchHandoffCloseout?.writeCompleted === true ||
-					(this.#scratchHandoffWriteCount(this.#scratchHandoffDisplayPath) > 0 && !recentContextText);
-				const verified = scratchHandoffIsComplete(scratchText) && scratchIsFresh;
-				if (recentContextText && this.model?.input.includes("image")) {
+				const delta = this.#scratchHandoffRecentContext(pendingMessages);
+				const state = resolveScratchContinuityState({
+					scratchText,
+					closeoutWriteCompleted: this.#scratchHandoffCloseout?.writeCompleted === true,
+					hasRecordedWrite: this.#scratchHandoffWriteCount(this.#scratchHandoffDisplayPath) > 0,
+					hasDelta: delta !== undefined,
+				});
+				// SnapCompact carries the COMPLETE delta: frames are bounded by their
+				// own budget and cost a fraction of the same work as text, so trimming
+				// before it would drop work the successor then re-reads for no saving.
+				if (delta && this.model?.input.includes("image")) {
 					try {
 						const shape = snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape"));
 						const maxFrames = Math.min(
@@ -12313,12 +12327,12 @@ export class AgentSession {
 								messagesToSummarize: [
 									{
 										role: "user",
-										content: [{ type: "text", text: recentContextText }],
+										content: [{ type: "text", text: delta.text }],
 										timestamp: Date.now(),
 									},
 								],
 								turnPrefixMessages: [],
-								tokensBefore: countTokens(recentContextText),
+								tokensBefore: countTokens(delta.text),
 								fileOps: snapcompact.createFileOps(),
 							},
 							{ model: this.model, shape, maxFrames, dimToolResults: false },
@@ -12341,7 +12355,7 @@ export class AgentSession {
 										maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET,
 									}),
 								],
-								verified,
+								state,
 							};
 						}
 					} catch (error) {
@@ -12351,6 +12365,9 @@ export class AgentSession {
 						});
 					}
 				}
+				// Text fallback: this delta lands in the rebuilt prefix uncompressed and
+				// is re-billed on every request of the next segment, so it takes the
+				// inline budget.
 				return {
 					content: [
 						{
@@ -12359,11 +12376,11 @@ export class AgentSession {
 								displayPath: this.#scratchHandoffDisplayPath,
 								parentDisplayPath: this.#parentScratchHandoffDisplayPath,
 								scratchText,
-								recentContextText,
+								recentContextText: delta?.bounded,
 							}),
 						},
 					],
-					verified,
+					state,
 				};
 			} catch (error) {
 				logger.warn("Failed to build current scratch handoff payload; using launch snapshot", {
@@ -12375,7 +12392,7 @@ export class AgentSession {
 		for (let index = this.agent.state.messages.length - 1; index >= 0; index--) {
 			const message = this.agent.state.messages[index];
 			if (message?.role === "custom" && message.customType === SCRATCH_HANDOFF_READ_CUSTOM_TYPE) {
-				return { content: message.content, verified: false };
+				return { content: message.content, state: "unusable" };
 			}
 		}
 		return {
@@ -12385,19 +12402,28 @@ export class AgentSession {
 					text: `Current scratch continuity state is in ${this.#scratchHandoffDisplayPath ?? "(unknown)"}. Continue from that scratch file and the live launch prompt.`,
 				},
 			],
-			verified: false,
+			state: "unusable",
 		};
 	}
 
+	/**
+	 * Build the scratch continuity payload for one maintenance pass.
+	 *
+	 * A `stale` document is the ordinary state when context pressure arrives
+	 * before a closeout turn: the attached delta and the closeout instruction
+	 * appended by {@link #appendScratchHandoffContext} carry that work, so it
+	 * stays silent. Only an `unusable` document needs the model to rebuild the
+	 * TODO, and only that case is worth the operator's attention.
+	 */
 	async #prepareScratchHandoffContext(
 		trace: MaintenanceTraceState,
 		pendingMessages: readonly AgentMessage[] = [],
-	): Promise<{ content: CustomMessage["content"]; tokensBefore: number; verified: boolean }> {
+	): Promise<{ content: CustomMessage["content"]; tokensBefore: number; state: ScratchContinuityState }> {
 		const scratch = await this.#scratchHandoffMessageContent(pendingMessages);
 		let content = scratch.content;
-		if (!scratch.verified) {
+		if (scratch.state === "unusable") {
 			const warning =
-				"Scratch continuity is missing, stale, or incomplete. Repair the current scratch TODO before treating this resume state as verified.";
+				"Scratch continuity is missing or incomplete. Rebuild the scratch TODO (objective, open TODO, next action) from the state below before continuing task work.";
 			this.emitNotice("warning", warning, "compaction");
 			content = [
 				{ type: "text", text: warning },
@@ -12407,7 +12433,7 @@ export class AgentSession {
 		const tokensBefore = this.getContextUsage()?.tokens ?? 0;
 		await this.#emitMaintenanceTracePhase(trace, "scratch-target-resolved");
 		await this.sessionManager.flush();
-		return { content, tokensBefore, verified: scratch.verified };
+		return { content, tokensBefore, state: scratch.state };
 	}
 
 	async #appendScratchHandoffContext(
@@ -12451,16 +12477,17 @@ export class AgentSession {
 		this.#todoReminderCount = 0;
 		this.#todoReminderAwaitingProgress = false;
 		this.setTodoPhases([]);
-		await this.#emitMaintenanceTracePhase(trace, "scratch-session-compacted");
 		await this.#emitMaintenanceTracePhase(trace, "scratch-read-injected");
+		await this.#emitMaintenanceTracePhase(trace, "scratch-session-compacted");
 	}
 
 	async #compactScratchHandoffSession(
 		trace: MaintenanceTraceState,
 		pendingMessages: readonly AgentMessage[] = [],
 		scratchCompaction: ScratchCompactionModes = { native: false, standard: false },
+		prepared?: { content: CustomMessage["content"]; tokensBefore: number },
 	): Promise<void> {
-		const scratch = await this.#prepareScratchHandoffContext(trace, pendingMessages);
+		const scratch = prepared ?? (await this.#prepareScratchHandoffContext(trace, pendingMessages));
 		await this.#appendScratchHandoffContext(trace, scratch, true, scratchCompaction);
 		const sessionContext = this.buildDisplaySessionContext();
 		this.agent.replaceMessages(sessionContext.messages);
@@ -15382,8 +15409,8 @@ export class AgentSession {
 		}
 
 		// Scratch handoff owns continuity. When a compression representation is
-		// enabled, compose it beneath that boundary; otherwise retain the verified
-		// scratch-only rebuild.
+		// enabled and the scratch document already covers the delta, compose it
+		// beneath that boundary; otherwise rebuild from the scratch document alone.
 		let action = resolveAutoCompactionAction({
 			strategy: compactionSettings.strategy,
 			reason,
@@ -15394,16 +15421,16 @@ export class AgentSession {
 			this.#stageScratchHandoffCloseout(this.#scratchHandoffDisplayPath, options.triggerContextTokens, reason);
 		}
 		const standardScratchCompaction = this.settings.get("scratchHandoff.standardCompactionEnabled");
-		const scratchCompactionModes: ScratchCompactionModes = {
+		let scratchCompactionModes: ScratchCompactionModes = {
 			native: action === "scratch-handoff" && compactionSettings.remoteEnabled !== false,
 			standard: action === "scratch-handoff" && standardScratchCompaction,
 		};
-		const composeScratchHandoff =
+		let composeScratchHandoff =
 			action === "scratch-handoff" &&
 			this.model !== undefined &&
 			(scratchCompactionModes.native || scratchCompactionModes.standard);
 		let preparedScratchHandoff:
-			| { content: CustomMessage["content"]; tokensBefore: number; verified: boolean }
+			| { content: CustomMessage["content"]; tokensBefore: number; state: ScratchContinuityState }
 			| undefined;
 		let composedScratchBoundaryPersisted = false;
 		let fallbackCause: MaintenanceTraceFallbackCause | undefined;
@@ -15445,12 +15472,28 @@ export class AgentSession {
 			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (composeScratchHandoff) {
 				preparedScratchHandoff = await this.#prepareScratchHandoffContext(trace, options.scratchRecentMessages);
-				if (!preparedScratchHandoff.verified) {
-					throw new Error("Current scratch handoff is missing or incomplete");
+				if (preparedScratchHandoff.state !== "verified") {
+					// Composed native or standard history hangs beneath the scratch
+					// boundary, so it needs a document that already covers the delta.
+					// Rebuilding from scratch continuity alone is the designed route
+					// here, not a failure: the delta rides along in the resume message
+					// and the appended closeout instruction refreshes the document.
+					await this.#emitMaintenanceTraceDelta(
+						trace,
+						"activity",
+						`Scratch continuity is ${preparedScratchHandoff.state}; rebuilding from the scratch handoff alone.`,
+					);
+					composeScratchHandoff = false;
+					scratchCompactionModes = { native: false, standard: false };
 				}
 			}
 			if (action === "scratch-handoff" && !composeScratchHandoff) {
-				await this.#compactScratchHandoffSession(trace, options.scratchRecentMessages, scratchCompactionModes);
+				await this.#compactScratchHandoffSession(
+					trace,
+					options.scratchRecentMessages,
+					scratchCompactionModes,
+					preparedScratchHandoff,
+				);
 				this.#scratchHandoffCloseout = undefined;
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
@@ -16169,13 +16212,10 @@ export class AgentSession {
 					error: errorMessage,
 					reason,
 				});
-				const fallbackState = preparedScratchHandoff?.verified
-					? "verified scratch continuity"
-					: "scratch repair state";
 				await this.#emitMaintenanceTraceDelta(
 					trace,
 					"activity",
-					`Compression failed; rebuilding from ${fallbackState}: ${errorMessage}`,
+					`Compression failed; rebuilding from the scratch handoff: ${errorMessage}`,
 				);
 				if (preparedScratchHandoff) {
 					await this.#appendScratchHandoffContext(trace, preparedScratchHandoff, true, scratchCompactionModes);

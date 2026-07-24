@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, countTokens } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
@@ -86,6 +86,34 @@ export function scratchHandoffIsComplete(text: string): boolean {
 	return hasOpenTodo && hasObjective && hasNextAction;
 }
 
+/**
+ * Continuity state of the scratch document for one maintenance pass.
+ *
+ * - `verified`: resumable content that already covers every message in the delta
+ *   window, so it can anchor composed native or standard compaction.
+ * - `stale`: resumable content with work recorded after the last scratch write.
+ *   The attached delta and the closeout instruction carry that work; this is the
+ *   ordinary state whenever context pressure arrives before a closeout turn.
+ * - `unusable`: the document lacks the objective, open TODO, or next action an
+ *   autonomous resume needs, so the model must rebuild it.
+ */
+export type ScratchContinuityState = "verified" | "stale" | "unusable";
+
+/** Classify scratch continuity from document content and recorded write state. */
+export function resolveScratchContinuityState(input: {
+	scratchText: string;
+	/** A closeout turn wrote the document during this maintenance episode. */
+	closeoutWriteCompleted: boolean;
+	/** The current branch records at least one write to this scratch path. */
+	hasRecordedWrite: boolean;
+	/** Session work landed after the newest recorded write. */
+	hasDelta: boolean;
+}): ScratchContinuityState {
+	if (!scratchHandoffIsComplete(input.scratchText)) return "unusable";
+	if (input.closeoutWriteCompleted) return "verified";
+	return input.hasRecordedWrite && !input.hasDelta ? "verified" : "stale";
+}
+
 function nonEmptyString(value: unknown): string | undefined {
 	if (typeof value !== "string") return undefined;
 	const trimmed = value.trim();
@@ -146,14 +174,84 @@ function sessionEntryMessage(entry: SessionEntry): AgentMessage | undefined {
 	);
 }
 
-function latestScratchHandoffWriteEntryIndex(entries: readonly SessionEntry[], scratchPath?: string): number {
+/** Smallest inline delta the recent-context budget ever allows. */
+export const SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS = 2_048;
+/** Share of the context window an inline delta may consume. */
+export const SCRATCH_HANDOFF_RECENT_CONTEXT_WINDOW_FRACTION = 0.1;
+
+/**
+ * scratchHandoffRecentContextBudget sizes the inline delta carried past a
+ * handoff.
+ *
+ * Everything in the rebuilt context is a new prefix paid at full price, so an
+ * unbounded inline delta re-buys the context the handoff exists to release.
+ * Applies to serialized text only: a SnapCompact archive of the same delta is
+ * bounded by its own frame budget and carries far more work per prefix token,
+ * so it is never trimmed against this number.
+ */
+export function scratchHandoffRecentContextBudget(contextWindow: number): number {
+	if (!Number.isFinite(contextWindow) || contextWindow <= 0) return SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS;
+	return Math.max(
+		SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS,
+		Math.floor(contextWindow * SCRATCH_HANDOFF_RECENT_CONTEXT_WINDOW_FRACTION),
+	);
+}
+
+/**
+ * Index of the first entry the latest compaction kept. Entries before it left
+ * the model context at that boundary, so the delta window must never reach back
+ * across it even when no scratch write has been recorded since.
+ */
+function latestCompactionBoundaryIndex(entries: readonly SessionEntry[]): number {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (entry.type !== "compaction") continue;
+		const keptIndex = entries.findIndex(candidate => candidate.id === entry.firstKeptEntryId);
+		return keptIndex >= 0 ? keptIndex : index + 1;
+	}
+	return 0;
+}
+
+/** First entry of the work not yet represented in the scratch document. */
+function scratchHandoffDeltaStartIndex(entries: readonly SessionEntry[], scratchPath?: string): number {
+	let start = 0;
 	for (let index = entries.length - 1; index >= 0; index--) {
 		const entry = entries[index];
 		if (entry.type !== "custom" || entry.customType !== SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE) continue;
 		if (scratchPath && (!isRecord(entry.data) || entry.data.path !== scratchPath)) continue;
-		return index;
+		start = index + 1;
+		break;
 	}
-	return -1;
+	return Math.max(start, latestCompactionBoundaryIndex(entries));
+}
+
+/** Work recorded after the scratch document was last written. */
+export interface ScratchHandoffDelta {
+	/**
+	 * The complete delta. Use it for representations that carry their own bound
+	 * and compress well, such as a SnapCompact archive.
+	 */
+	text: string;
+	/**
+	 * The delta trimmed to the caller's token budget, for inline prefix text.
+	 * Equal to {@link text} when the delta already fits.
+	 */
+	bounded: string;
+}
+
+/** Keep the newest messages that fit the budget; the oldest are dropped first. */
+function trimDeltaToBudget(messages: Message[], maxTokens: number): { kept: Message[]; dropped: number } {
+	if (!Number.isFinite(maxTokens) || maxTokens <= 0) return { kept: messages, dropped: 0 };
+	let total = 0;
+	let start = messages.length;
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const cost = countTokens(snapcompact.serializeConversation([messages[index]]));
+		if (start < messages.length && total + cost > maxTokens) break;
+		total += cost;
+		start = index;
+		if (total >= maxTokens) break;
+	}
+	return { kept: messages.slice(start), dropped: start };
 }
 
 export function buildScratchHandoffRecentContext(input: {
@@ -161,19 +259,38 @@ export function buildScratchHandoffRecentContext(input: {
 	pendingMessages?: readonly AgentMessage[];
 	scratchPath?: string;
 	convertToLlm: ScratchHandoffMessageConverter;
-}): string | undefined {
+	/** Token ceiling for {@link ScratchHandoffDelta.bounded}; unbounded when omitted. */
+	maxTokens?: number;
+}): ScratchHandoffDelta | undefined {
 	const pendingMessages = input.pendingMessages ?? [];
-	const latestWriteIndex = latestScratchHandoffWriteEntryIndex(input.entries, input.scratchPath);
-	const messages = [
+	const messages = input.convertToLlm([
 		...input.entries
-			.slice(Math.max(latestWriteIndex + 1, 0))
+			.slice(scratchHandoffDeltaStartIndex(input.entries, input.scratchPath))
 			.map(sessionEntryMessage)
 			.filter((message): message is AgentMessage => message !== undefined),
 		...pendingMessages,
-	];
-	const llmMessages = input.convertToLlm(messages);
-	const text = snapcompact.serializeConversation(llmMessages).trim();
-	return text.length > 0 ? text : undefined;
+	]);
+	const text = snapcompact.serializeConversation(messages).trim();
+	if (text.length === 0) return undefined;
+	const maxTokens = input.maxTokens ?? Number.POSITIVE_INFINITY;
+	const { kept, dropped } = trimDeltaToBudget(messages, maxTokens);
+	let bounded = dropped === 0 ? text : snapcompact.serializeConversation(kept).trim();
+	// A single oversized message survives the message-level trim, so clamp the
+	// serialized tail too: the inline budget is a hard bound, not a target.
+	const maxChars = Number.isFinite(maxTokens) ? maxTokens * 4 : Number.POSITIVE_INFINITY;
+	const omitted: string[] = [];
+	if (dropped > 0) omitted.push(`${dropped} older message${dropped === 1 ? "" : "s"}`);
+	if (bounded.length > maxChars) {
+		bounded = bounded.slice(bounded.length - maxChars);
+		omitted.push("an oversized head");
+	}
+	if (omitted.length > 0) {
+		// Do not point at the scratch document here: this delta exists precisely
+		// because the document does not cover it yet. Re-deriving is correct and
+		// cheaper than acting on a guess.
+		bounded = `[Older session context was dropped to keep this resume small: ${omitted.join(" and ")} omitted. If continuing needs detail from that span, re-derive it from the workspace (re-read files, re-run commands) instead of assuming it.]\n\n${bounded}`;
+	}
+	return { text, bounded };
 }
 
 export async function buildScratchHandoffContext(input: {

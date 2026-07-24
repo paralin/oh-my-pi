@@ -1334,8 +1334,8 @@ describe("AgentSession handoff", () => {
 		]);
 		expect(tracePhases.map(event => event.phase)).toEqual([
 			"scratch-target-resolved",
-			"scratch-session-compacted",
 			"scratch-read-injected",
+			"scratch-session-compacted",
 			"scratch-session-rebuilt",
 		]);
 		expect(traceDeltas.map(event => event.content)).toEqual(["activity"]);
@@ -1630,20 +1630,12 @@ describe("AgentSession handoff", () => {
 		);
 	});
 
-	it.each([
-		{ name: "incomplete", scratchText: "partial notes without an actionable TODO" },
-		{
-			name: "stale",
-			scratchText:
-				"* TODO Continue stale work\n- Objective: Stale scratch objective\n- Next action:\n  1. Resume from stale state\n",
-		},
-	])("does not treat $name scratch as authority for native compaction", async ({ scratchText }) => {
-		await session.dispose();
+	const startScratchOnlyCompactionSession = (scratchText: string) => {
 		const scratchPath = "agent/current.org";
 		const scratchAbsolutePath = path.join(tempDir.path(), scratchPath);
 		fs.mkdirSync(path.dirname(scratchAbsolutePath), { recursive: true });
 		fs.writeFileSync(scratchAbsolutePath, scratchText, "utf8");
-		session = new AgentSession({
+		return new AgentSession({
 			agent: new Agent({
 				initialState: {
 					model,
@@ -1666,6 +1658,12 @@ describe("AgentSession handoff", () => {
 			obfuscator,
 			scratchHandoffDisplayPath: scratchPath,
 		});
+	};
+
+	it("asks the model to rebuild an unusable scratch instead of composing native compaction", async () => {
+		await session.dispose();
+		session = startScratchOnlyCompactionSession("partial notes without an actionable TODO");
+		session.subscribe(event => events.push(event));
 		const compactSpy = vi.spyOn(compactionModule, "compact");
 
 		await session.runIdleCompaction();
@@ -1676,9 +1674,40 @@ describe("AgentSession handoff", () => {
 		const scratchEntry = entries.find(
 			entry => entry.type === "custom_message" && entry.customType === "scratch-handoff-read",
 		);
-		expect(JSON.stringify(scratchEntry)).toContain("Scratch continuity is missing, stale, or incomplete");
+		expect(JSON.stringify(scratchEntry)).toContain("Scratch continuity is missing or incomplete");
 		expect(JSON.stringify(sessionManager.buildSessionContext().messages)).toContain(
-			"Repair the current scratch TODO before treating this resume state as verified",
+			"Rebuild the scratch TODO (objective, open TODO, next action)",
+		);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				type: "notice",
+				level: "warning",
+				message: expect.stringContaining("Scratch continuity is missing or incomplete"),
+			}),
+		);
+	});
+
+	it("rebuilds silently from a stale but resumable scratch", async () => {
+		await session.dispose();
+		session = startScratchOnlyCompactionSession(
+			"* TODO Continue stale work\n- Objective: Stale scratch objective\n- Next action:\n  1. Resume from stale state\n",
+		);
+		session.subscribe(event => events.push(event));
+		const compactSpy = vi.spyOn(compactionModule, "compact");
+
+		await session.runIdleCompaction();
+
+		expect(compactSpy).not.toHaveBeenCalled();
+		const entries = sessionManager.getEntries();
+		expect(entries.filter(entry => entry.type === "compaction")).toHaveLength(1);
+		const rebuilt = JSON.stringify(sessionManager.buildSessionContext().messages);
+		expect(rebuilt).toContain("Stale scratch objective");
+		expect(rebuilt).not.toContain("Scratch continuity is missing");
+		expect(events).not.toContainEqual(
+			expect.objectContaining({ type: "notice", level: "warning", source: "compaction" }),
+		);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({ type: "auto_compaction_end", errorMessage: expect.anything() }),
 		);
 	});
 

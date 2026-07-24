@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, countTokens } from "@oh-my-pi/pi-agent-core";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { convertToLlm, SKILL_PROMPT_MESSAGE_TYPE } from "./messages";
 import {
@@ -11,10 +11,13 @@ import {
 	latestPersistedScratchHandoffPathSelection,
 	renderScratchHandoffCloseoutMessage,
 	renderScratchHandoffResumeMessage,
+	resolveScratchContinuityState,
 	resolveScratchHandoffPathSelection,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
+	SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS,
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
 	scratchHandoffIsComplete,
+	scratchHandoffRecentContextBudget,
 } from "./scratch-handoff";
 import type { SessionEntry } from "./session-entries";
 
@@ -27,6 +30,59 @@ describe("scratchHandoffIsComplete", () => {
 		).toBe(true);
 		expect(scratchHandoffIsComplete("- Objective: Missing TODO\n- Next action: Continue\n")).toBe(false);
 		expect(scratchHandoffIsComplete("* TODO Missing next action\n- Objective: Continue\n")).toBe(false);
+	});
+});
+
+describe("resolveScratchContinuityState", () => {
+	const resumable = "* TODO Resume implementation\n- Objective: Finish compaction\n- Next action: Run focused tests\n";
+
+	it("rejects a document without resumable state", () => {
+		expect(
+			resolveScratchContinuityState({
+				scratchText: "notes without a TODO",
+				closeoutWriteCompleted: true,
+				hasRecordedWrite: true,
+				hasDelta: false,
+			}),
+		).toBe("unusable");
+	});
+
+	it("verifies a closeout write and a write with no delta after it", () => {
+		expect(
+			resolveScratchContinuityState({
+				scratchText: resumable,
+				closeoutWriteCompleted: true,
+				hasRecordedWrite: false,
+				hasDelta: true,
+			}),
+		).toBe("verified");
+		expect(
+			resolveScratchContinuityState({
+				scratchText: resumable,
+				closeoutWriteCompleted: false,
+				hasRecordedWrite: true,
+				hasDelta: false,
+			}),
+		).toBe("verified");
+	});
+
+	it("treats resumable content with newer work as stale, not broken", () => {
+		expect(
+			resolveScratchContinuityState({
+				scratchText: resumable,
+				closeoutWriteCompleted: false,
+				hasRecordedWrite: true,
+				hasDelta: true,
+			}),
+		).toBe("stale");
+		expect(
+			resolveScratchContinuityState({
+				scratchText: resumable,
+				closeoutWriteCompleted: false,
+				hasRecordedWrite: false,
+				hasDelta: false,
+			}),
+		).toBe("stale");
 	});
 });
 
@@ -114,6 +170,19 @@ function assistantToolEntry(id: string): SessionEntry {
 			timestamp: Date.parse("2026-06-29T00:00:00.000Z"),
 		} as unknown as AgentMessage,
 	};
+}
+
+function compactionEntry(id: string, firstKeptEntryId: string): SessionEntry {
+	return {
+		type: "compaction",
+		id,
+		parentId: null,
+		timestamp: "2026-06-29T00:00:00.000Z",
+		summary: "Continue from the scratch handoff state preserved after this compaction.",
+		shortSummary: "Scratch handoff",
+		firstKeptEntryId,
+		tokensBefore: 0,
+	} as SessionEntry;
 }
 
 function toolResultEntry(id: string, text: string): SessionEntry {
@@ -295,8 +364,8 @@ describe("scratch handoff recent context", () => {
 			convertToLlm,
 		});
 
-		expect(context).not.toContain("old user request");
-		expect(context).toContain("after scratch write");
+		expect(context?.text).not.toContain("old user request");
+		expect(context?.text).toContain("after scratch write");
 	});
 
 	it("ignores write markers for a different scratch target", () => {
@@ -310,8 +379,8 @@ describe("scratch handoff recent context", () => {
 			convertToLlm,
 		});
 
-		expect(context).toContain("old user request");
-		expect(context).toContain("after old scratch write");
+		expect(context?.text).toContain("old user request");
+		expect(context?.text).toContain("after old scratch write");
 	});
 
 	it("keeps the complete delta after the most recent scratch write", () => {
@@ -325,9 +394,9 @@ describe("scratch handoff recent context", () => {
 			convertToLlm,
 		});
 
-		expect(context).toContain("old assistant context");
-		expect(context).toContain("latest user request");
-		expect(context).toContain("new assistant context");
+		expect(context?.text).toContain("old assistant context");
+		expect(context?.text).toContain("latest user request");
+		expect(context?.text).toContain("new assistant context");
 	});
 
 	it("appends pending messages to the complete persisted delta", () => {
@@ -337,9 +406,9 @@ describe("scratch handoff recent context", () => {
 			convertToLlm,
 		});
 
-		expect(context).toContain("old persisted request");
-		expect(context).toContain("old answer");
-		expect(context).toContain("fresh skill-read request");
+		expect(context?.text).toContain("old persisted request");
+		expect(context?.text).toContain("old answer");
+		expect(context?.text).toContain("fresh skill-read request");
 	});
 
 	it("serializes the post-write delta for SnapCompact", () => {
@@ -363,9 +432,75 @@ describe("scratch handoff recent context", () => {
 				expect.objectContaining({ role: "toolResult" }),
 			]),
 		);
-		expect(context).toContain("latest user request");
-		expect(context).toContain("read(");
-		expect(context).toContain("decisive tool result");
+		expect(context?.text).toContain("latest user request");
+		expect(context?.text).toContain("read(");
+		expect(context?.text).toContain("decisive tool result");
+	});
+
+	it("never reaches back across the latest compaction boundary", () => {
+		const context = buildScratchHandoffRecentContext({
+			entries: [
+				userEntry("user-old", "already compacted request"),
+				scratchReadEntry("kept", "agent/current.org"),
+				compactionEntry("compaction", "kept"),
+				assistantEntry("after", "work after the boundary"),
+			],
+			scratchPath: "agent/current.org",
+			convertToLlm,
+		});
+
+		expect(context?.text).not.toContain("already compacted request");
+		expect(context?.text).toContain("work after the boundary");
+	});
+
+	it("bounds the inline delta while leaving the SnapCompact delta complete", () => {
+		const entries = Array.from({ length: 40 }, (_, index) =>
+			userEntry(`user-${index}`, `request ${index} ${"filler ".repeat(200)}`),
+		);
+
+		const context = buildScratchHandoffRecentContext({ entries, convertToLlm, maxTokens: 512 });
+
+		// Inline text is re-billed on every request of the next segment, so it takes
+		// the budget and says what it dropped.
+		expect(context?.bounded).toContain("Older session context was dropped");
+		expect(context?.bounded).toContain("re-derive it from the workspace");
+		expect(context?.bounded).toContain("request 39");
+		expect(context?.bounded).not.toContain("request 0 ");
+		expect(countTokens(context?.bounded ?? "")).toBeLessThan(1_024);
+		// SnapCompact frames carry their own bound and cost a fraction of the same
+		// work, so the full delta stays available to them.
+		expect(context?.text).toContain("request 0 ");
+		expect(context?.text).toContain("request 39");
+	});
+
+	it("clamps a single oversized message to the inline budget", () => {
+		const context = buildScratchHandoffRecentContext({
+			entries: [userEntry("huge", `head marker ${"filler ".repeat(20_000)} tail marker`)],
+			convertToLlm,
+			maxTokens: 256,
+		});
+
+		expect(context?.bounded).toContain("tail marker");
+		expect(context?.bounded).not.toContain("head marker");
+		expect(countTokens(context?.bounded ?? "")).toBeLessThan(512);
+		expect(context?.text).toContain("head marker");
+	});
+
+	it("leaves a delta that already fits untouched", () => {
+		const context = buildScratchHandoffRecentContext({
+			entries: [userEntry("small", "short request")],
+			convertToLlm,
+			maxTokens: 4_096,
+		});
+
+		expect(context?.bounded).toBe(context?.text);
+		expect(context?.bounded).not.toContain("Older session context was dropped");
+	});
+
+	it("sizes the budget from the context window", () => {
+		expect(scratchHandoffRecentContextBudget(200_000)).toBe(20_000);
+		expect(scratchHandoffRecentContextBudget(8_000)).toBe(SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS);
+		expect(scratchHandoffRecentContextBudget(0)).toBe(SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS);
 	});
 
 	it("renders the SnapCompact delta after the scratch body", () => {
