@@ -24,6 +24,7 @@ import {
 import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
+import { applyCodexHomeAuthChain, toRuntimeCodexHomeChain } from "./cli/codex-home";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -1206,6 +1207,15 @@ export async function runRootCommand(
 	if (scratchCompactionOverrides) {
 		settingsInstance.override("compaction.remoteEnabled", scratchCompactionOverrides.remoteEnabled);
 		settingsInstance.override("scratchHandoff.standardCompactionEnabled", scratchCompactionOverrides.standardEnabled);
+	}
+	// Read Codex credentials from each configured home, in chain order. They stay
+	// where Codex wrote them; nothing is copied into this process's own store, so
+	// re-authenticating with the `codex` CLI is immediately effective here.
+	const codexHomeAuth = applyCodexHomeAuthChain({
+		configuredHomes: settingsInstance.get("providers.codexHomes"),
+	});
+	if (codexHomeAuth.credentials.length > 0) {
+		authStorage.setRuntimeApiKeyChain("openai-codex", toRuntimeCodexHomeChain(codexHomeAuth.credentials));
 	}
 	if (parsedArgs.approvalMode) {
 		// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
