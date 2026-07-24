@@ -10,6 +10,7 @@ import { getEditClipboard } from "../../edit/edit-clipboard";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
+import { MaintenanceTraceCard } from "../../modes/components/maintenance-trace-card";
 import {
 	groupedReadUsageCallIds,
 	ReadToolGroupComponent,
@@ -26,7 +27,7 @@ import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "t
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
-import { previewLine, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
 import { nextActionableTask } from "../../tools/todo";
 import { SpeechEnhancer } from "../../tts/speech-enhancer";
@@ -69,6 +70,18 @@ function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknow
 	return typeof tool.renderCall === "function";
 }
 
+/** Formats a remaining duration as a compact `1h 23m 04s` / `4m 12s` / `38s` countdown. */
+function formatResumeCountdown(remainingMs: number): string {
+	const totalSeconds = Math.max(0, Math.ceil(remainingMs / 1000));
+	const hours = Math.floor(totalSeconds / 3600);
+	const minutes = Math.floor((totalSeconds % 3600) / 60);
+	const seconds = totalSeconds % 60;
+	const pad = (value: number) => value.toString().padStart(2, "0");
+	if (hours > 0) return `${hours}h ${pad(minutes)}m ${pad(seconds)}s`;
+	if (minutes > 0) return `${minutes}m ${pad(seconds)}s`;
+	return `${seconds}s`;
+}
+
 type AgentSessionEventHandlers = {
 	[E in AgentSessionEventKind]: (event: Extract<AgentSessionEvent, { type: E }>) => Promise<void>;
 };
@@ -80,6 +93,7 @@ interface ApprovalPreviewGate {
 }
 
 export class EventController {
+	#maintenanceTraceCards = new Map<string, MaintenanceTraceCard>();
 	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
 	// Count of visible assistant content blocks (rendered non-empty text/thinking)
 	// already seen in the current streaming message. A newly appearing one breaks
@@ -243,6 +257,10 @@ export class EventController {
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
+			maintenance_trace_start: async e => this.#handleMaintenanceTraceStart(e),
+			maintenance_trace_phase: async e => this.#handleMaintenanceTracePhase(e),
+			maintenance_trace_delta: async e => this.#handleMaintenanceTraceDelta(e),
+			maintenance_trace_end: async e => this.#handleMaintenanceTraceEnd(e),
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
 			auto_retry_end: e => this.#handleAutoRetryEnd(e),
 			retry_fallback_applied: e => this.#handleRetryFallbackApplied(e),
@@ -282,6 +300,7 @@ export class EventController {
 				this.ctx.ui.resetDisplay();
 			},
 			goal_updated: async () => {},
+			steering_received: async () => {},
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -1823,6 +1842,81 @@ export class EventController {
 		return this.ctx.focusedAgentId ? "" : " (esc to cancel)";
 	}
 
+	#maintenanceTraceVisibility(): "loader" | "assistant" | "debug" {
+		return this.ctx.settings.get("compaction.maintenanceTrace");
+	}
+
+	#shouldShowMaintenanceTraceCard(): boolean {
+		return this.#maintenanceTraceVisibility() !== "loader";
+	}
+
+	#handleMaintenanceTraceStart(event: Extract<AgentSessionEvent, { type: "maintenance_trace_start" }>): void {
+		if (!this.#shouldShowMaintenanceTraceCard()) return;
+		this.#maintenanceTraceCards.get(event.traceId)?.finish();
+		const card = new MaintenanceTraceCard({
+			action: event.action,
+			reason: event.reason,
+			fallbackCause: event.fallbackCause,
+			targetPath: event.targetPath,
+			canCancel: this.#maintenanceEscHint() !== "",
+		});
+		this.#maintenanceTraceCards.set(event.traceId, card);
+		this.ctx.present(card);
+	}
+
+	#handleMaintenanceTracePhase(event: Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }>): void {
+		const card = this.#maintenanceTraceCards.get(event.traceId);
+		card?.updatePhase(event.phase, event.targetPath);
+		if (event.action !== "scratch-handoff" || !this.ctx.autoCompactionLoader) return;
+		this.ctx.autoCompactionLoader.setMessage(
+			`${this.#scratchHandoffTracePhaseLabel(event.phase)}${this.#scratchHandoffTraceTarget(event.targetPath)}…${this.#maintenanceEscHint()}`,
+		);
+		this.ctx.ui.requestRender();
+	}
+
+	#handleMaintenanceTraceDelta(event: Extract<AgentSessionEvent, { type: "maintenance_trace_delta" }>): void {
+		if (!this.#shouldShowMaintenanceTraceCard()) return;
+		this.#maintenanceTraceCards.get(event.traceId)?.appendTraceDelta(event.content, event.delta);
+	}
+
+	#handleMaintenanceTraceEnd(event: Extract<AgentSessionEvent, { type: "maintenance_trace_end" }>): void {
+		const card = this.#maintenanceTraceCards.get(event.traceId);
+		if (!card) return;
+		if (!this.ctx.chatContainer.children.includes(card)) {
+			this.ctx.present(card);
+		}
+		card.complete(event.terminalResult, {
+			errorMessage: event.errorMessage,
+			willRetry: event.willRetry,
+			debugLogRef: event.debugLogRef,
+		});
+		this.#maintenanceTraceCards.delete(event.traceId);
+	}
+
+	#scratchHandoffTracePhaseLabel(
+		eventPhase: Extract<AgentSessionEvent, { type: "maintenance_trace_phase" }>["phase"],
+	): string {
+		switch (eventPhase) {
+			case "scratch-target-resolved":
+				return "Context pressure: scratch target resolved";
+			case "scratch-session-compacted":
+				return "Context pressure: scratch session compacted";
+			case "scratch-read-injected":
+				return "Context pressure: scratch state loaded";
+			case "scratch-session-rebuilt":
+				return "Context pressure: session rebuilt";
+			case "scratch-todo-synced":
+				return "Context pressure: todos synced";
+			case "action-fallback":
+				return "Context pressure: maintenance fallback";
+		}
+	}
+
+	#scratchHandoffTraceTarget(targetPath: string | undefined): string {
+		if (!targetPath) return "";
+		return ` (${previewLine(shortenPath(targetPath), TRUNCATE_LENGTHS.SHORT)})`;
+	}
+
 	async #handleAutoCompactionStart(
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
@@ -1839,23 +1933,32 @@ export class EventController {
 					: event.reason === "idle"
 						? "Idle "
 						: "";
-		const actionLabel =
-			event.action === "handoff"
-				? "Auto-handoff"
-				: event.action === "shake"
-					? "Auto-shake"
-					: event.action === "snapcompact"
-						? "Auto-snapcompact"
-						: "Auto context-full maintenance";
+		const actionLabel = this.#maintenanceActionLabel(event.action);
+		const prefix = event.action === "scratch-handoff" ? "Context pressure: " : reasonText;
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
 			text => theme.fg("muted", text),
-			`${reasonText}${actionLabel}…${this.#maintenanceEscHint()}`,
+			`${prefix}${actionLabel}…${this.#maintenanceEscHint()}`,
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
 		this.ctx.ui.requestRender();
+	}
+
+	#maintenanceActionLabel(action: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>["action"]): string {
+		switch (action) {
+			case "handoff":
+				return "Auto-handoff";
+			case "shake":
+				return "Auto-shake";
+			case "snapcompact":
+				return "Auto-snapcompact";
+			case "scratch-handoff":
+				return "syncing scratch";
+			case "context-full":
+				return "Auto context-full maintenance";
+		}
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
@@ -1870,15 +1973,18 @@ export class EventController {
 		const isHandoffAction = event.action === "handoff";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
+		const isScratchHandoffAction = event.action === "scratch-handoff";
 		if (event.aborted) {
 			this.ctx.showStatus(
-				isHandoffAction
-					? "Auto-handoff cancelled"
-					: isShakeAction
-						? "Auto-shake cancelled"
-						: isSnapcompactAction
-							? "Auto-snapcompact cancelled"
-							: "Auto context-full maintenance cancelled",
+				isScratchHandoffAction
+					? "Scratch handoff cancelled"
+					: isHandoffAction
+						? "Auto-handoff cancelled"
+						: isShakeAction
+							? "Auto-shake cancelled"
+							: isSnapcompactAction
+								? "Auto-snapcompact cancelled"
+								: "Auto context-full maintenance cancelled",
 			);
 		} else if (isShakeAction) {
 			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
@@ -1918,6 +2024,11 @@ export class EventController {
 			}
 		} else if (event.errorMessage) {
 			this.ctx.showWarning(event.errorMessage);
+		} else if (isScratchHandoffAction) {
+			// Hidden Boss scratch-handoff is operator-visible only while it is active;
+			// success should not leave a transcript breadcrumb or resemble a user turn.
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorBorderColor();
 		} else if (isHandoffAction) {
 			this.ctx.clearTransientSessionUi();
 			this.ctx.lastAssistantUsage = undefined;
@@ -1965,11 +2076,20 @@ export class EventController {
 			this.ctx.clearPinnedError();
 		}
 		const delaySeconds = Math.round(event.delayMs / 1000);
+		const escHint = this.#maintenanceEscHint();
+		const resetAtMs = event.usageResetAtMs;
+		// When every account is rate-limited and a concrete reset is known, show a
+		// live countdown to auto-resume; the function message re-evaluates each
+		// spinner tick so the remaining time ticks down without further events.
+		const message =
+			resetAtMs !== undefined
+				? () => `All accounts rate-limited. Resuming in ${formatResumeCountdown(resetAtMs - Date.now())}…${escHint}`
+				: `Retrying (${event.attempt}/${event.maxAttempts}) in ${delaySeconds}s…${escHint}`;
 		this.ctx.retryLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("warning", spinner),
 			text => theme.fg("muted", text),
-			`Retrying (${event.attempt}/${event.maxAttempts}) in ${delaySeconds}s…${this.#maintenanceEscHint()}`,
+			message,
 			getSymbolTheme().spinnerFrames,
 		);
 		this.ctx.statusContainer.addChild(this.ctx.retryLoader);

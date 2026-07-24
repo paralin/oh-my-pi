@@ -32,7 +32,7 @@ export class Loader extends Text {
 		ui: TUI,
 		private spinnerColorFn: ColorFn,
 		private messageColorFn: LoaderMessageColorFn,
-		private message: string = "Loading...",
+		private message: string | (() => string) = "Loading...",
 		spinnerFrames?: string[],
 	) {
 		super("", 1, 0);
@@ -114,7 +114,7 @@ export class Loader extends Text {
 		this.stop();
 	}
 
-	setMessage(message: string) {
+	setMessage(message: string | (() => string)) {
 		if (message === this.message) {
 			return;
 		}
@@ -149,11 +149,15 @@ export class Loader extends Text {
 		}, delayMs);
 		this.#intervalId = timer;
 	}
+
 	/** Re-wrap the underlying Text only when its message or frame width changes. */
 	#syncText(): boolean {
 		const layoutFrame = this.#layoutFrames[this.#currentFrame];
 		this.#layoutFrame = layoutFrame;
-		return this.setText(`${layoutFrame} ${this.message}`);
+		// Function messages are live values and must be sampled by the loader's
+		// animation owner instead of requiring callers to schedule updates.
+		const message = typeof this.message === "function" ? this.message() : this.message;
+		return this.setText(`${layoutFrame} ${message}`);
 	}
 
 	#requestPaint() {

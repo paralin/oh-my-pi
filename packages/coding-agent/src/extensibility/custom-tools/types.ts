@@ -30,7 +30,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { Theme } from "../../modes/theme/theme";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import type { TodoItem } from "../../tools/todo";
-import type { RetryErrorUpdate } from "../shared-events";
+import type { AutoCompactionAction, AutoCompactionReason, RetryErrorUpdate } from "../shared-events";
 
 /** Alias for clarity */
 export type CustomToolUIContext = HookUIContext;
@@ -70,7 +70,7 @@ export interface CustomToolAPI {
 	typebox: typeof TypeBox;
 	/** Injected arktype module for arktype-authored custom tools. */
 	arktype: typeof ArkType;
-	/** Injected Zod-compatible omptype builder for custom tools. */
+	/** Injected omptype-backed zod facade for parameter schemas. */
 	zod: typeof zod;
 	/** Injected pi-coding-agent exports */
 	pi: typeof PiCodingAgent;
@@ -115,12 +115,12 @@ export type CustomToolSessionEvent =
 	  }
 	| {
 			reason: "auto_compaction_start";
-			trigger: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			trigger: AutoCompactionReason;
+			action: AutoCompactionAction;
 	  }
 	| {
 			reason: "auto_compaction_end";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			action: AutoCompactionAction;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;

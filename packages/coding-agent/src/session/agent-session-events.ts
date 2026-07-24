@@ -2,7 +2,15 @@ import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
-import type { RetryErrorUpdate } from "../extensibility/shared-events";
+import type {
+	AutoCompactionAction,
+	AutoCompactionReason,
+	MaintenanceTraceDeltaEvent,
+	MaintenanceTraceEndEvent,
+	MaintenanceTracePhaseEvent,
+	MaintenanceTraceStartEvent,
+	RetryErrorUpdate,
+} from "../extensibility/shared-events";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { TodoItem } from "../tools/todo";
@@ -17,12 +25,12 @@ export type AgentSessionEvent =
 	  })
 	| {
 			type: "auto_compaction_start";
-			reason: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			reason: AutoCompactionReason;
+			action: AutoCompactionAction;
 	  }
 	| {
 			type: "auto_compaction_end";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			action: AutoCompactionAction;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -30,6 +38,10 @@ export type AgentSessionEvent =
 			/** True when compaction was skipped for a benign reason. */
 			skipped?: boolean;
 	  }
+	| MaintenanceTraceStartEvent
+	| MaintenanceTracePhaseEvent
+	| MaintenanceTraceDeltaEvent
+	| MaintenanceTraceEndEvent
 	| {
 			type: "auto_retry_start";
 			attempt: number;
@@ -37,6 +49,11 @@ export type AgentSessionEvent =
 			delayMs: number;
 			errorMessage: string;
 			errorId?: number;
+			/**
+			 * Epoch ms the retry is sleeping until because every configured account
+			 * is rate-limited and the provider reported a concrete reset.
+			 */
+			usageResetAtMs?: number;
 	  }
 	| {
 			type: "auto_retry_end";
@@ -61,7 +78,15 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| {
+			/** Steering records were drained from the session steering file and queued. */
+			type: "steering_received";
+			sessionId: string;
+			steeringFile: string;
+			count: number;
+			entries: Array<{ offset: number; bytes: number }>;
+	  };
 
 /** Listener function for agent session events. */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
