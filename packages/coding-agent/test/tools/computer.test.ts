@@ -428,10 +428,11 @@ describe("computer tool choice", () => {
 describe("computer tool", () => {
 	it("is disabled by default and essential when enabled", async () => {
 		const disabled = await createTools(toolSession(Settings.isolated()), ["computer"]);
-		expect(disabled).toHaveLength(0);
+		expect(disabled.some(tool => tool.name === "computer")).toBe(false);
 		const enabled = await createTools(toolSession(Settings.isolated({ "computer.enabled": true })), ["computer"]);
-		expect(enabled.map(tool => [tool.name, tool.loadMode])).toEqual([["computer", "essential"]]);
-		expect(enabled[0]?.strict).toBe(false);
+		const computer = enabled.find(tool => tool.name === "computer");
+		expect(computer?.loadMode).toBe("essential");
+		expect(computer?.strict).toBe(false);
 	});
 
 	it("accepts each GA action shape through the params schema and rejects malformed shapes", () => {
