@@ -302,6 +302,11 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
+import {
+	buildScheduledNotification,
+	SCHEDULED_NOTIFICATION_KIND,
+	type ScheduledNotificationEntry,
+} from "./scheduled-notification";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -1077,6 +1082,7 @@ export class AgentSession {
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
+			injectStreaming: message => this.agent.steer(message),
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -1090,6 +1096,14 @@ export class AgentSession {
 					{ delayMs: 1 },
 				);
 			},
+		});
+		// Fired scheduled prompts are system notifications: during a live turn they
+		// steer in immediately so an interruptible wait can cancel through the agent
+		// loop, and while idle they wake a turn. They never synthesize a user-role
+		// message or wait for interactive input.
+		this.yieldQueue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, {
+			build: buildScheduledNotification,
+			interruptStreaming: true,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -6697,6 +6711,16 @@ export class AgentSession {
 	}
 
 	/** Delivers an IRC message into this recipient session. */
+	/**
+	 * Deliver a scheduled prompt (a fired cron job) into this session as a
+	 * system notification. It flushes at the next idle boundary rather than
+	 * interrupting a running turn, so a scheduled job never lands mid-tool-loop.
+	 */
+	deliverScheduledPrompt(promptText: string): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, { prompt: promptText });
+	}
+
 	deliverIrcMessage(msg: IrcMessage, opts?: { expectsReply?: boolean }): Promise<"injected" | "woken"> {
 		return this.#irc.deliver(msg, opts);
 	}
