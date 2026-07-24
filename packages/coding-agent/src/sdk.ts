@@ -62,6 +62,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { CronManager } from "./cron";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
@@ -1647,6 +1648,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
+	// Agent-created cron jobs are owned by the session that can actually run
+	// them: delivery is gated on idle so a fired job never lands mid-tool-loop.
+	const cronManager = new CronManager({
+		getSessionFile: () => sessionManager.getSessionFile(),
+		getSessionId: () => sessionManager.getSessionId(),
+		isIdle: () => Boolean(session) && !session.isStreaming,
+		enqueuePrompt: async promptText => session?.deliverScheduledPrompt(promptText),
+	});
+	await cronManager.load();
+
+
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
@@ -1812,6 +1824,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+			cronManager,
 		};
 
 		// Wire process-wide internal URL singletons owned by their real classes.
