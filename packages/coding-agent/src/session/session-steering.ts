@@ -7,12 +7,17 @@ export const SESSION_STEERING_OFFSET_FILE_NAME = "steer.offset";
 export interface SessionSteeringRecord {
 	message: string;
 	timestamp?: string;
+	/** Start a turn when the session is idle, matching cron injection semantics.
+	 *  Without it a drained record waits in the steering queue for the next
+	 *  externally started turn. */
+	triggerTurn?: boolean;
 }
 
 export interface DrainedSteeringRecord {
 	message: string;
 	offset: number;
 	bytes: number;
+	triggerTurn: boolean;
 }
 
 export interface SessionSteeringDrainResult {
@@ -34,7 +39,7 @@ function parseOffset(value: string): number {
 	return Number.isFinite(offset) && offset >= 0 ? offset : 0;
 }
 
-function parseRecord(line: string): string | undefined {
+function parseRecord(line: string): { message: string; triggerTurn: boolean } | undefined {
 	const trimmed = line.trim();
 	if (!trimmed) return undefined;
 	const value = JSON.parse(trimmed) as SessionSteeringRecord;
@@ -42,7 +47,8 @@ function parseRecord(line: string): string | undefined {
 		throw new Error("steering entry must be a JSON object with a string message");
 	}
 	const message = value.message.trim();
-	return message || undefined;
+	if (!message) return undefined;
+	return { message, triggerTurn: value.triggerTurn === true };
 }
 
 export function sessionSteeringDirForSessionFile(sessionFile: string): string {
@@ -105,8 +111,8 @@ export function drainSessionSteeringFile(sessionFile: string): SessionSteeringDr
 		const newline = completeContent.indexOf("\n", start);
 		const line = completeContent.slice(start, newline);
 		const bytes = textEncoder.encode(completeContent.slice(start, newline + 1)).byteLength;
-		const message = parseRecord(line);
-		if (message) records.push({ message, offset: cursor, bytes });
+		const parsed = parseRecord(line);
+		if (parsed) records.push({ message: parsed.message, triggerTurn: parsed.triggerTurn, offset: cursor, bytes });
 		cursor += bytes;
 		start = newline + 1;
 	}

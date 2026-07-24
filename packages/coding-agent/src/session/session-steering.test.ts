@@ -102,6 +102,21 @@ describe("session steering drain", () => {
 	});
 });
 
+describe("session steering triggerTurn", () => {
+	it("parses the optional triggerTurn flag and defaults it to false", async () => {
+		const sessionPath = sessionFile("trigger-turn");
+		const content = `${JSON.stringify({ message: "wake up", triggerTurn: true })}\n${jsonl("plain steer")}`;
+		await writeSteering(sessionPath, content);
+
+		const drain = drainSessionSteeringFile(sessionPath);
+
+		expect(drain.records.map(record => [record.message, record.triggerTurn])).toEqual([
+			["wake up", true],
+			["plain steer", false],
+		]);
+	});
+});
+
 describe("SessionSteeringWatcher", () => {
 	it("delivers startup records and persists the offset only after onRecords resolves", async () => {
 		const sessionPath = sessionFile("watcher-startup");

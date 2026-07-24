@@ -4602,7 +4602,9 @@ export class AgentSession {
 	async #injectSessionSteering(records: DrainedSteeringRecord[], result: SessionSteeringDrainResult): Promise<void> {
 		if (this.#isDisposed || records.length === 0) return;
 		for (const record of records) {
-			await this.sendUserMessage(record.message, { deliverAs: "steer" });
+			// triggerTurn records start a turn when idle (omitted deliverAs), matching
+			// cron injection; plain records queue as steers for the next turn boundary.
+			await this.sendUserMessage(record.message, record.triggerTurn ? undefined : { deliverAs: "steer" });
 		}
 		this.#emit({
 			type: "steering_received",
