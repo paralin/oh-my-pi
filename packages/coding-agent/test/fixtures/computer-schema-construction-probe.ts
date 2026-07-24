@@ -64,7 +64,7 @@ await Promise.all([firstTool.close(), secondTool.close()]);
 process.stdout.write(
 	JSON.stringify({
 		counts,
-		disabledToolCount: disabledTools.length,
+		disabledToolCount: disabledTools.filter(tool => tool.name === "computer").length,
 		schema: {
 			callable: typeof firstSchema === "function",
 			repeatedIdentity: firstSchema === repeatedSchema,
