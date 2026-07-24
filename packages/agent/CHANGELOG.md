@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a pre-model-call gate: `AgentLoopConfig.beforeModelCall` receives the finalized provider context and may return `{ stop: true, reason? }` to end the run before the provider is called, so a host can refuse a request it has decided not to pay for (prompt no longer fits, budget boundary crossed, session should hand off). `Agent.setBeforeModelCall` installs the host callback; `Agent.addBeforeModelCall` registers an additional one without displacing it and returns a disposer
+
+### Fixed
+
+- Preserved pending soft tool reminders and escalations when the pre-model-call gate stops a run, and rejected deferred hard choices that become unavailable before the next call.
+
 ## [17.1.2] - 2026-07-24
 
 ### Added

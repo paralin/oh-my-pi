@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Dropped unavailable forced tool choices through the queue rejection lifecycle so multi-step choice sequences advance without leaving stale in-flight state.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed

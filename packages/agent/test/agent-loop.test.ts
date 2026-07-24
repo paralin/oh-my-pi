@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import {
 	agentLoop,
 	agentLoopContinue,
@@ -14,7 +15,7 @@ import type {
 	AgentToolContext,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
-import type { AssistantMessage, AssistantMessageEvent, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -97,6 +98,9 @@ describe("agentLoop with AgentMessage", () => {
 		expect(await stream.result()).toEqual([prompt]);
 		expect(mock.calls).toHaveLength(0);
 		expect(events.map(event => event.type)).toContain("agent_end");
+		expect(events.filter(event => event.type === "message_end")).toEqual([
+			expect.objectContaining({ message: prompt }),
+		]);
 	});
 
 	it("returns detailed telemetry when awaiting detailed() directly", async () => {
@@ -2502,6 +2506,427 @@ it("recovers from provider whitespace loop recovery without duplicating assistan
 	// Should have message_updates
 	const updates = events.filter(e => e.type === "message_update");
 	expect(updates.length).toBeGreaterThan(0);
+});
+
+describe("agentLoop pre-model-call gate", () => {
+	const echoToolSchema = type({ value: "string" });
+
+	function echoTool(executed: string[]): AgentTool<typeof echoToolSchema> {
+		const toolSchema = echoToolSchema;
+		return {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			async execute(_toolCallId, params) {
+				executed.push(params.value);
+				return { content: [{ type: "text", text: `ok:${params.value}` }], details: { value: params.value } };
+			},
+		};
+	}
+
+	it("gates the provider-bound context before opening the initial turn", async () => {
+		const context: AgentContext = { systemPrompt: ["stale"], messages: [], tools: [] };
+		const queued = createUserMessage("queued");
+		const providerMessage = createUserMessage("provider") as Message;
+		const mock = createMockModel({ responses: [{ content: ["should not be reached"] }] });
+		let pending = true;
+		let gatedContext: Context | undefined;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getSteeringMessages: async () => {
+				if (!pending) return [];
+				pending = false;
+				return [queued];
+			},
+			syncContextBeforeModelCall: current => {
+				current.systemPrompt = ["fresh"];
+			},
+			transformProviderContext: providerContext => ({
+				...providerContext,
+				systemPrompt: [...(providerContext.systemPrompt ?? []), "provider"],
+				messages: [...providerContext.messages, providerMessage],
+			}),
+			beforeModelCall: current => {
+				gatedContext = current;
+				return { stop: true, reason: "over budget" };
+			},
+		};
+
+		const prompts = [createUserMessage("start")];
+		const events: AgentEvent[] = [];
+		const stream = agentLoop(prompts, context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		expect(gatedContext?.systemPrompt).toEqual(["fresh", "provider"]);
+		expect(gatedContext?.messages.at(-1)).toEqual(providerMessage);
+		expect(prompts).toHaveLength(1);
+		expect(events.filter(event => event.type === "message_end")).toHaveLength(2);
+		expect(events.filter(event => event.type === "turn_start")).toHaveLength(0);
+		expect(events.filter(event => event.type === "turn_end")).toHaveLength(0);
+	});
+
+	it("balances the synthetic error turn when the gate throws", async () => {
+		const mock = createMockModel({ responses: [{ content: ["should not be reached"] }] });
+		const agent = new Agent({ streamFn: mock.stream });
+		agent.setBeforeModelCall(() => {
+			throw new Error("gate failed");
+		});
+		const events: AgentEvent[] = [];
+		const unsubscribe = agent.subscribe(event => events.push(event));
+
+		await agent.prompt("start");
+		unsubscribe();
+
+		expect(agent.state.messages.some(message => message.role === "user")).toBe(true);
+		expect(events.filter(event => event.type === "turn_start")).toHaveLength(1);
+		expect(events.filter(event => event.type === "turn_end")).toHaveLength(1);
+		const turnStartIndex = events.findIndex(event => event.type === "turn_start");
+		const userStartIndex = events.findIndex(event => event.type === "message_start" && event.message.role === "user");
+		expect(turnStartIndex).toBeLessThan(userStartIndex);
+	});
+
+	it("stops before the provider call and closes the open turn", async () => {
+		const executed: string[] = [];
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [echoTool(executed)] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
+				// A second provider call would consume this; the gate must prevent it.
+				{ content: ["should not be reached"] },
+			],
+		});
+
+		let calls = 0;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			// Allow the first request, refuse the one that would follow the tool call.
+			beforeModelCall: () => (++calls > 1 ? ({ stop: true, reason: "over budget" } as const) : undefined),
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		// The tool ran, then the gate stopped the follow-up request.
+		expect(executed).toEqual(["first"]);
+		expect(calls).toBe(2);
+		expect(events.some(e => e.type === "agent_end")).toBe(true);
+
+		// Every started turn is closed, so consumers pairing the events are not
+		// left mid-turn by the stop.
+		const starts = events.filter(e => e.type === "turn_start").length;
+		const ends = events.filter(e => e.type === "turn_end").length;
+		expect(ends).toBe(starts);
+	});
+
+	it("returns a hard tool choice when the gate stops before serving it", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		let toolChoiceCalls = 0;
+		let gateCalls = 0;
+		const agent = new Agent({
+			streamFn: mock.stream,
+			getToolChoice: () => {
+				toolChoiceCalls++;
+				return "none";
+			},
+		});
+		agent.setBeforeModelCall(() => (++gateCalls === 1 ? { stop: true, reason: "over budget" } : undefined));
+
+		await agent.prompt("stop");
+		await agent.prompt("continue");
+
+		expect(toolChoiceCalls).toBe(1);
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0]?.options?.toolChoice).toBe("none");
+	});
+
+	it("discards a deferred tool choice when its tool is no longer active", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		let toolChoiceCalls = 0;
+		let gateCalls = 0;
+		let unavailableToolChoices = 0;
+		const agent = new Agent({
+			streamFn: mock.stream,
+			getToolChoice: () => {
+				toolChoiceCalls++;
+				return toolChoiceCalls === 1 ? { type: "tool", name: "echo" } : "none";
+			},
+			onToolChoiceUnavailable: () => {
+				unavailableToolChoices++;
+			},
+		});
+		agent.setTools([echoTool([])]);
+		agent.setBeforeModelCall(() => (++gateCalls === 1 ? { stop: true, reason: "over budget" } : undefined));
+
+		await agent.prompt("stop");
+		agent.setTools([]);
+		await agent.prompt("continue");
+
+		expect(toolChoiceCalls).toBe(2);
+		expect(unavailableToolChoices).toBe(1);
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0]?.options?.toolChoice).toBe("none");
+	});
+
+	it("clears a deferred tool choice when the agent resets", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		let toolChoiceCalls = 0;
+		let gateCalls = 0;
+		const agent = new Agent({
+			streamFn: mock.stream,
+			getToolChoice: () => {
+				toolChoiceCalls++;
+				return toolChoiceCalls === 1 ? "none" : "auto";
+			},
+		});
+		agent.setBeforeModelCall(() => (++gateCalls === 1 ? { stop: true, reason: "over budget" } : undefined));
+
+		await agent.prompt("stop");
+		agent.reset();
+		await agent.prompt("continue");
+
+		expect(toolChoiceCalls).toBe(2);
+		expect(mock.calls).toHaveLength(1);
+		expect(mock.calls[0]?.options?.toolChoice).toBe("auto");
+	});
+
+	it("leaves tool-choice rejection to a concurrent abort", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({ responses: [{ content: ["should not be reached"] }] });
+		const gateEntered = Promise.withResolvers<void>();
+		const releaseGate = Promise.withResolvers<void>();
+		const controller = new AbortController();
+		let rejectedToolChoices = 0;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolChoice: () => "none",
+			onToolChoiceRejected: () => {
+				rejectedToolChoices++;
+			},
+			beforeModelCall: async () => {
+				gateEntered.resolve();
+				await releaseGate.promise;
+				return { stop: true, reason: "over budget" };
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("start")], context, config, controller.signal, mock.stream);
+		const drain = (async () => {
+			for await (const _event of stream) {
+				// drain
+			}
+		})();
+		await gateEntered.promise;
+		controller.abort();
+		releaseGate.resolve();
+		await drain;
+
+		expect(rejectedToolChoices).toBe(0);
+		expect(mock.calls).toHaveLength(0);
+	});
+
+	it("emits accepted inputs before a tool-choice rejection hook throws", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({ responses: [{ content: ["should not be reached"] }] });
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolChoice: () => "none",
+			onToolChoiceRejected: () => {
+				throw new Error("rejection failed");
+			},
+			beforeModelCall: () => ({ stop: true, reason: "over budget" }),
+		};
+		const events: AgentEvent[] = [];
+		let failure: unknown;
+
+		try {
+			const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+			for await (const event of stream) events.push(event);
+		} catch (error) {
+			failure = error;
+		}
+
+		expect(failure).toBeInstanceOf(Error);
+		expect((failure as Error).message).toBe("rejection failed");
+		expect(events.some(event => event.type === "message_end" && event.message.role === "user")).toBe(true);
+		expect(mock.calls).toHaveLength(0);
+	});
+
+	it("does not return a hard tool choice already served before a later gate stop", async () => {
+		const executed: string[] = [];
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
+				{ content: ["done"] },
+			],
+		});
+		let toolChoiceCalls = 0;
+		let gateCalls = 0;
+		const agent = new Agent({
+			streamFn: mock.stream,
+			getToolChoice: () => {
+				toolChoiceCalls++;
+				return toolChoiceCalls === 1 ? { type: "tool", name: "echo" } : undefined;
+			},
+		});
+		agent.setTools([echoTool(executed)]);
+		agent.setBeforeModelCall(() => (++gateCalls === 2 ? { stop: true, reason: "over budget" } : undefined));
+
+		await agent.prompt("run");
+		await agent.prompt("continue");
+
+		expect(executed).toEqual(["first"]);
+		expect(toolChoiceCalls).toBe(3);
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[0]?.options?.toolChoice).toEqual({ type: "tool", name: "echo" });
+		expect(mock.calls[1]?.options?.toolChoice).toBeUndefined();
+	});
+	it("gates a soft reminder once in the final provider context", async () => {
+		const reminder = createUserMessage("resolve the pending preview");
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({ responses: [{ content: ["done"], stopReason: "aborted" }] });
+		let gatedContext: Context | undefined;
+		let gateCalls = 0;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getToolChoice: () => ({
+				soft: true,
+				id: "preview-1",
+				toolName: "resolve",
+				reminder: [reminder],
+			}),
+			beforeModelCall: providerContext => {
+				gateCalls++;
+				gatedContext = providerContext;
+				return undefined;
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(gateCalls).toBe(1);
+		expect(gatedContext?.messages).toContain(reminder);
+		expect(mock.calls).toHaveLength(1);
+	});
+
+	it("retains a soft reminder escalation when a gate stops the forced call", async () => {
+		const reminder = createUserMessage("resolve the pending preview");
+		const executed: string[] = [];
+		let pending = true;
+		const tool = echoTool(executed);
+		const execute = tool.execute.bind(tool);
+		tool.execute = async (...args) => {
+			pending = false;
+			return execute(...args);
+		};
+		const mock = createMockModel({
+			responses: [
+				{ content: ["not yet"] },
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "resolved" } }] },
+				{ content: ["done"] },
+			],
+		});
+		let gateCalls = 0;
+		const agent = new Agent({
+			streamFn: mock.stream,
+			getToolChoice: () =>
+				pending
+					? {
+							soft: true,
+							id: "preview-1",
+							toolName: "echo",
+							reminder: [reminder],
+						}
+					: undefined,
+		});
+		agent.setTools([tool]);
+		agent.setBeforeModelCall(() => (++gateCalls === 2 ? { stop: true, reason: "over budget" } : undefined));
+
+		await agent.prompt("start");
+		await agent.prompt("continue");
+
+		expect(mock.calls).toHaveLength(3);
+		expect(mock.calls[1]?.options?.toolChoice).toEqual({ type: "tool", name: "echo" });
+		expect(executed).toEqual(["resolved"]);
+		expect(agent.state.messages.filter(message => message === reminder)).toHaveLength(1);
+	});
+
+	it("closes an open Harmony retry turn when the gate stops the retry", async () => {
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({
+			provider: "openai-codex",
+			responses: [{ content: ["Some prose. analysis to=functions.edit code"] }],
+		});
+		let gateCalls = 0;
+		let turnEndCalls = 0;
+		let rejectedToolChoices = 0;
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeModelCall: () => (++gateCalls > 1 ? { stop: true, reason: "over budget" } : undefined),
+			onTurnEnd: () => {
+				turnEndCalls++;
+			},
+			onToolChoiceRejected: () => {
+				rejectedToolChoices++;
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const messages = await stream.result();
+
+		expect(mock.calls).toHaveLength(1);
+		expect(events.filter(event => event.type === "turn_start")).toHaveLength(1);
+		expect(events.filter(event => event.type === "turn_end")).toHaveLength(1);
+		expect(turnEndCalls).toBe(1);
+		expect(rejectedToolChoices).toBe(0);
+		const final = messages.at(-1);
+		expect(final?.role).toBe("assistant");
+		if (final?.role !== "assistant") throw new Error("expected stopped assistant message");
+		expect(final.stopReason).toBe("aborted");
+		expect(final.errorMessage).toBe("over budget");
+	});
+
+	it("proceeds when the gate returns undefined", async () => {
+		const executed: string[] = [];
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [echoTool(executed)] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "only" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeModelCall: () => undefined,
+		};
+
+		const stream = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream);
+		for await (const _event of stream) {
+			// drain
+		}
+
+		expect(executed).toEqual(["only"]);
+	});
 });
 
 describe("agentLoop useless-flag propagation", () => {

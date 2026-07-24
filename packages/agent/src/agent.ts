@@ -43,6 +43,7 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentPreModelCallResult,
 	AgentState,
 	AgentTool,
 	AgentToolContext,
@@ -267,6 +268,8 @@ export interface AgentOptions {
 	abortOnFabricatedToolResult?: boolean;
 	/** Dynamic tool-choice directive (hard {@link ToolChoice} or {@link SoftToolRequirement}), resolved once per turn. */
 	getToolChoice?: () => ToolChoiceDirective | undefined;
+	/** Reject a deferred hard choice when its named tool is no longer active. */
+	onToolChoiceUnavailable?: () => void;
 
 	/**
 	 * Cursor exec handlers for local tool execution.
@@ -391,6 +394,9 @@ export class Agent {
 	#dialect?: Dialect;
 	#abortOnFabricatedToolResult?: boolean;
 	#getToolChoice?: () => ToolChoiceDirective | undefined;
+	#onToolChoiceUnavailable?: () => void;
+	#softToolRequirementState: NonNullable<AgentLoopConfig["softToolRequirementState"]> = { escalations: 0 };
+	#deferredToolChoice?: ToolChoice;
 	#onPayload?: SimpleStreamOptions["onPayload"];
 	#onResponse?: SimpleStreamOptions["onResponse"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
@@ -398,6 +404,11 @@ export class Agent {
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
+	#beforeModelCall?: (context: Context) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>;
+	#additionalBeforeModelCalls = new Set<
+		(context: Context) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>
+	>();
+	#beforeModelContextBuild = new Set<(context: AgentContext) => Promise<void> | void>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
@@ -472,6 +483,7 @@ export class Agent {
 		this.#dialect = opts.dialect;
 		this.#abortOnFabricatedToolResult = opts.abortOnFabricatedToolResult;
 		this.#getToolChoice = opts.getToolChoice;
+		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
@@ -786,6 +798,36 @@ export class Agent {
 	}
 
 	/**
+	 * Add work that must update the mutable agent context before the provider
+	 * context is converted, normalized, and passed to pre-model gates.
+	 */
+	addBeforeModelContextBuild(fn: (context: AgentContext) => Promise<void> | void): () => void {
+		this.#beforeModelContextBuild.add(fn);
+		return () => {
+			this.#beforeModelContextBuild.delete(fn);
+		};
+	}
+
+	setBeforeModelCall(
+		fn: ((context: Context) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>) | undefined,
+	): void {
+		this.#beforeModelCall = fn;
+	}
+
+	/**
+	 * Add a pre-model callback without replacing callbacks owned by the host.
+	 * Returns a disposer that removes only this callback.
+	 */
+	addBeforeModelCall(
+		fn: (context: Context) => AgentPreModelCallResult | Promise<AgentPreModelCallResult>,
+	): () => void {
+		this.#additionalBeforeModelCalls.add(fn);
+		return () => {
+			this.#additionalBeforeModelCalls.delete(fn);
+		};
+	}
+
+	/**
 	 * Provide a source of non-interrupting "aside" messages (e.g. background-job
 	 * completions, late LSP diagnostics) drained at each step boundary. Never
 	 * aborts in-flight tools. See `AgentLoopConfig.getAsideMessages`.
@@ -998,6 +1040,8 @@ export class Agent {
 		this.#state.error = undefined;
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		this.#deferredToolChoice = undefined;
+		this.#softToolRequirementState = { escalations: 0 };
 	}
 
 	/** Send a prompt with an AgentMessage */
@@ -1148,13 +1192,28 @@ export class Agent {
 					}
 				: undefined;
 
+		let claimedToolChoice: ToolChoice | undefined;
 		const getToolChoice = (): ToolChoiceDirective | undefined => {
+			claimedToolChoice = undefined;
+			const deferred = this.#deferredToolChoice;
+			if (deferred !== undefined) {
+				this.#deferredToolChoice = undefined;
+				const active = refreshToolChoiceForActiveTools(deferred, this.#state.tools);
+				if (active !== undefined) {
+					claimedToolChoice = deferred;
+					return active;
+				}
+				this.#onToolChoiceUnavailable?.();
+			}
+
 			const queued = this.#getToolChoice?.();
 			if (queued !== undefined) {
 				if (isSoftToolRequirement(queued)) {
 					return (this.#state.tools ?? []).some(tool => tool.name === queued.toolName) ? queued : undefined;
 				}
-				return refreshToolChoiceForActiveTools(queued, this.#state.tools);
+				const active = refreshToolChoiceForActiveTools(queued, this.#state.tools);
+				if (active !== undefined) claimedToolChoice = queued;
+				return active;
 			}
 			return refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 		};
@@ -1196,6 +1255,18 @@ export class Agent {
 				}
 				context.systemPrompt = this.#state.systemPrompt;
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+				for (const callback of this.#beforeModelContextBuild) {
+					await callback(context);
+				}
+			},
+			beforeModelCall: async context => {
+				const result = await this.#beforeModelCall?.(context);
+				if (result?.stop) return result;
+				for (const callback of this.#additionalBeforeModelCalls) {
+					const callbackResult = await callback(context);
+					if (callbackResult?.stop) return callbackResult;
+				}
+				return undefined;
 			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
@@ -1217,6 +1288,10 @@ export class Agent {
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			getToolChoice,
+			softToolRequirementState: this.#softToolRequirementState,
+			onToolChoiceRejected: () => {
+				if (claimedToolChoice !== undefined) this.#deferredToolChoice = claimedToolChoice;
+			},
 			getModel: () => this.#state.model ?? model,
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
@@ -1250,6 +1325,7 @@ export class Agent {
 
 		let partial: AgentMessage | null = null;
 		const completedToolCallIds = new Set<string>();
+		let turnOpen = false;
 
 		try {
 			const stream = messages
@@ -1257,6 +1333,8 @@ export class Agent {
 				: agentLoopContinue(context, config, this.#abortController.signal, this.streamFn);
 
 			for await (const event of stream) {
+				if (event.type === "turn_start") turnOpen = true;
+				if (event.type === "turn_end") turnOpen = false;
 				// Update internal state based on events
 				switch (event.type) {
 					case "message_start":
@@ -1367,6 +1445,10 @@ export class Agent {
 						};
 
 			if (shouldEmitVisibleError) {
+				if (!turnOpen) {
+					this.#emit({ type: "turn_start" });
+					turnOpen = true;
+				}
 				if (!hadAssistantStart) {
 					this.#state.streamMessage = errorMsg;
 					this.#emit({ type: "message_start", message: errorMsg });
@@ -1408,6 +1490,7 @@ export class Agent {
 					toolResults.push(toolResult);
 				}
 				this.#emit({ type: "turn_end", message: errorMsg, toolResults });
+				turnOpen = false;
 				this.#emit({ type: "agent_end", messages: [errorMsg, ...toolResults] });
 			} else {
 				this.appendMessage(errorMsg);
