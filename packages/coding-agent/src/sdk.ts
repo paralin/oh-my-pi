@@ -60,7 +60,6 @@ import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CronManager } from "./cron";
 import { CursorExecHandlers } from "./cursor";
-import { type AsyncResultEntry, buildAsyncResultBatchMessage } from "./session/async-job-delivery";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
@@ -3204,13 +3203,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
 		hasSession = true;
-		if (asyncJobManager) {
-			session.yieldQueue.register<AsyncResultEntry>("async-result", {
-				isStale: entry => asyncJobManager.isDeliverySuppressed(entry.jobId),
-				build: buildAsyncResultBatchMessage,
-				interruptStreaming: true,
-			});
-		}
+		// The async-result dispatcher is registered by AgentSession beside its
+		// owner-routed delivery sink, so subagents inheriting the process manager
+		// get the same follow-up path as the top-level session.
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
 			interruptStreaming: true,

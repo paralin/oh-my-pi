@@ -33,6 +33,7 @@
 
 ### Fixed
 
+- Fixed owner-routed async job delivery never reaching the session: no `AgentSession` registered a delivery sink, so every owned background bash/task completion was dead-lettered and the result was silently dropped from the run. Sessions now register their sink (and the async-result dispatcher) at construction, `settleAsyncWork` waits for the injected follow-up turn, and a delivered-but-not-yet-injected result still counts as pending async work.
 - Fixed `models.yml` compatibility validation accepting invalid OpenAI-specific values through the Bedrock schema branch.
 
 - Pinned displaceable transcript snapshots (`hub` waiting polls and live `todo` lists) to the viewport like the `vibe_wait` wall: when the transcript outgrows the terminal, their still-mutating rows are no longer committed to native scrollback on every spinner tick, which previously spammed hundreds of duplicated "waiting on N jobs" rows and force-sealed the poll so follow-up polls stacked instead of replacing it.

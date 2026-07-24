@@ -371,6 +371,13 @@ import { formatLocalCalendarDate } from "../utils/local-date";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
+import {
+	ASYNC_INLINE_RESULT_MAX_CHARS,
+	ASYNC_PREVIEW_MAX_CHARS,
+	ASYNC_RESULT_MESSAGE_TYPE,
+	type AsyncResultEntry,
+	buildAsyncResultBatchMessage,
+} from "./async-job-delivery";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
 import {
@@ -2271,6 +2278,8 @@ export class AgentSession {
 	 * undefined to avoid reading the primary's jobs.
 	 */
 	readonly #asyncJobManager: AsyncJobManager | undefined;
+	/** Detaches this session from owner-routed async job delivery on teardown. */
+	#unregisterAsyncDeliverySink: (() => void) | undefined;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
 	#activeEvalExecutions = new Set<Promise<unknown>>();
 	#evalExecutionDisposing = false;
@@ -3153,6 +3162,22 @@ export class AgentSession {
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
+		// Owner-routed async delivery: completions for jobs this agent owns are
+		// injected into THIS session's run as async-result follow-ups. The manager
+		// dead-letters an owned delivery that has no registered sink, so this
+		// registration is what makes background jobs usable — for the main session
+		// and for subagents inheriting the process manager alike.
+		if (this.#asyncJobManager && this.#agentId) {
+			const manager = this.#asyncJobManager;
+			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
+				this.#deliverAsyncJobResult(manager, jobId, text, job),
+			);
+			this.yieldQueue.register<AsyncResultEntry>(ASYNC_RESULT_MESSAGE_TYPE, {
+				isStale: entry => manager.isDeliverySuppressed(entry.jobId),
+				build: buildAsyncResultBatchMessage,
+				interruptStreaming: true,
+			});
+		}
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			const event: AgentEvent = {
 				type: "message_update",
@@ -4178,7 +4203,13 @@ export class AgentSession {
 		return this.#hasPendingAsyncWake();
 	}
 
-	/** Wait for this session's jobs to settle and route their pending deliveries. */
+	/**
+	 * Settle one generation of owner-scoped async work: wait for running owner
+	 * jobs to finish, deliver their queued results (which enqueue async-result
+	 * follow-ups on this session's yield queue), and wait for the injected
+	 * follow-up turn(s) to go idle. Callers loop while {@link hasPendingAsyncWork}
+	 * still holds — a follow-up turn may start new jobs.
+	 */
 	async settleAsyncWork(): Promise<void> {
 		const manager = this.#asyncJobManager;
 		if (!manager) return;
@@ -4189,6 +4220,40 @@ export class AgentSession {
 			await manager.waitForAll();
 		}
 		await manager.drainDeliveries({ filter: ownerFilter });
+		await this.waitForIdle();
+	}
+
+	/**
+	 * Delivery sink for async jobs owned by this agent: format the result
+	 * (spilling oversized output to an artifact) and enqueue it as an
+	 * async-result follow-up on the yield queue. The queue's idle flush starts
+	 * the follow-up turn when the session is between turns.
+	 */
+	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
+		if (this.#isDisposed) return;
+		if (manager.isDeliverySuppressed(jobId)) return;
+		const result = await this.#formatAsyncResultForFollowUp(text);
+		if (this.#isDisposed || manager.isDeliverySuppressed(jobId)) return;
+		const durationMs = job ? Math.max(0, Date.now() - job.startTime) : undefined;
+		this.yieldQueue.enqueue<AsyncResultEntry>(ASYNC_RESULT_MESSAGE_TYPE, { jobId, result, job, durationMs });
+	}
+
+	/** Spill an oversized async result to an artifact, keeping an inline preview. */
+	async #formatAsyncResultForFollowUp(result: string): Promise<string> {
+		if (result.length <= ASYNC_INLINE_RESULT_MAX_CHARS) return result;
+		const preview = `${result.slice(0, ASYNC_PREVIEW_MAX_CHARS)}\n\n[Output truncated. Showing first ${ASYNC_PREVIEW_MAX_CHARS.toLocaleString()} characters.]`;
+		try {
+			const { path: artifactPath, id: artifactId } = await this.sessionManager.allocateArtifactPath("async");
+			if (artifactPath && artifactId) {
+				await Bun.write(artifactPath, result);
+				return `${preview}\nFull output: artifact://${artifactId}`;
+			}
+		} catch (error) {
+			logger.warn("Failed to persist async follow-up artifact", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+		return preview;
 	}
 
 	/** Start a new local rollout-memory generation and cancel its predecessor. */
@@ -4586,7 +4651,12 @@ export class AgentSession {
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
-			manager.hasPendingDeliveries(ownerFilter)
+			manager.hasPendingDeliveries(ownerFilter) ||
+			// Delivered but not yet injected: the sink has enqueued the async-result
+			// follow-up on the yield queue and the manager no longer reports it.
+			// Without this leg a terminal yield in the idle-flush window would read
+			// as quiescent and the run driver would drop the queued result.
+			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
 		);
 	}
 
@@ -7618,6 +7688,8 @@ export class AgentSession {
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
 		this.#flushPendingIrcAsides();
+		this.#unregisterAsyncDeliverySink?.();
+		this.#unregisterAsyncDeliverySink = undefined;
 		this.yieldQueue.clear();
 		this.agent.setAsideMessageProvider(undefined);
 		this.agent.hasIrcInterrupts = undefined;
