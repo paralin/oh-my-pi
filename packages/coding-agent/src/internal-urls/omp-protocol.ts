@@ -9,7 +9,8 @@
  */
 import * as path from "node:path";
 import { getDocFilenames, getEmbeddedDoc } from "./docs-index";
-import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
+import { isMaintainerDocPath } from "./omp-doc-visibility";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /**
  * Handler for omp:// URLs.
@@ -20,25 +21,25 @@ export class OmpProtocolHandler implements ProtocolHandler {
 	readonly scheme = "omp";
 	readonly immutable = true;
 
-	async resolve(url: InternalUrl): Promise<InternalResource> {
+	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		// Extract filename from host + path
 		const host = url.rawHost || url.hostname;
 		const pathname = url.rawPathname ?? url.pathname;
 		const filename = host ? (pathname && pathname !== "/" ? host + pathname : host) : "";
 
 		if (!filename) {
-			return this.#listDocs(url);
+			return this.#listDocs(url, context);
 		}
 
-		return this.#readDoc(filename, url);
+		return this.#readDoc(filename, url, context);
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
-		return getDocFilenames().map(value => ({ value }));
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
+		return this.#docFilenames(context).map(value => ({ value }));
 	}
 
-	async #listDocs(url: InternalUrl): Promise<InternalResource> {
-		const filenames = getDocFilenames();
+	async #listDocs(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const filenames = this.#docFilenames(context);
 		if (filenames.length === 0) {
 			throw new Error("No documentation files found");
 		}
@@ -54,7 +55,7 @@ export class OmpProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async #readDoc(filename: string, url: InternalUrl): Promise<InternalResource> {
+	async #readDoc(filename: string, url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		// Validate: no traversal, no absolute paths
 		if (path.isAbsolute(filename)) {
 			throw new Error("Absolute paths are not allowed in omp:// URLs");
@@ -68,13 +69,14 @@ export class OmpProtocolHandler implements ProtocolHandler {
 		const docPath =
 			normalized === "docs" ? "" : normalized.startsWith("docs/") ? normalized.slice("docs/".length) : normalized;
 		if (!docPath) {
-			return this.#listDocs(url);
+			return this.#listDocs(url, context);
 		}
 
-		const content = await getEmbeddedDoc(docPath);
+		const filenames = this.#docFilenames(context);
+		const content = filenames.includes(docPath) ? await getEmbeddedDoc(docPath) : undefined;
 		if (content === undefined) {
 			const lookup = docPath.replace(/\.md$/, "");
-			const suggestions = getDocFilenames()
+			const suggestions = filenames
 				.filter(f => f.includes(lookup) || lookup.includes(f.replace(/\.md$/, "")))
 				.slice(0, 5);
 			const suffix =
@@ -90,5 +92,16 @@ export class OmpProtocolHandler implements ProtocolHandler {
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content, "utf-8"),
 		};
+	}
+
+	#docFilenames(context: ResolveContext | undefined): readonly string[] {
+		const settings = context?.settings;
+		if (settings !== null && typeof settings === "object") {
+			const get = Reflect.get(settings, "get");
+			if (typeof get === "function" && Reflect.apply(get, settings, ["docs.hideInternal"]) === false) {
+				return getDocFilenames();
+			}
+		}
+		return getDocFilenames().filter(filename => !isMaintainerDocPath(filename));
 	}
 }
