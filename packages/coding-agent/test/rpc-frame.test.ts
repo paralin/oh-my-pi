@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { encodeRpcFrame, MAX_RPC_FRAME_BYTES, RpcFrameEncoder } from "../src/modes/rpc/rpc-frame";
+import {
+	encodeRpcFrame,
+	MAX_RPC_FRAME_BYTES,
+	MAX_RPC_REASSEMBLED_BYTES,
+	RpcFrameDecoder,
+	RpcFrameEncoder,
+} from "../src/modes/rpc/rpc-frame";
 
 function decode(frame: string): Record<string, unknown> {
 	return JSON.parse(frame) as Record<string, unknown>;
@@ -177,5 +183,107 @@ describe("RPC frame encoding", () => {
 		expect(Buffer.byteLength(encoded, "utf8")).toBeLessThanOrEqual(MAX_RPC_FRAME_BYTES);
 		expect(decoded.success).toBe(false);
 		expect(decoded.id).toContain("chars elided for RPC frame");
+	});
+
+	it("losslessly chunks oversized protocol v2 responses into bounded JSONL frames", () => {
+		const frame = {
+			id: "request-v2",
+			type: "response",
+			command: "get_messages",
+			success: true,
+			data: { messages: [{ role: "assistant", content: "😀".repeat(400_000) }] },
+		};
+		const encoder = new RpcFrameEncoder();
+		encoder.setProtocolVersion(2);
+		const encoded = encoder.encode(frame);
+		const lines = encoded.trimEnd().split("\n");
+		const decoder = new RpcFrameDecoder();
+		let decoded: object | undefined;
+
+		expect(lines.length).toBeGreaterThan(1);
+		for (const line of lines) {
+			expect(Buffer.byteLength(`${line}\n`, "utf8")).toBeLessThanOrEqual(MAX_RPC_FRAME_BYTES);
+			decoded = decoder.push(JSON.parse(line));
+		}
+		expect(decoded).toEqual(frame);
+	});
+
+	it("accepts a chunked logical frame at the exact physical-frame boundary", () => {
+		const frame = {
+			id: "request-boundary",
+			type: "response",
+			command: "get_state",
+			success: true,
+			data: { payload: "" },
+		};
+		const emptyBytes = Buffer.byteLength(JSON.stringify(frame), "utf8");
+		frame.data.payload = "x".repeat(MAX_RPC_FRAME_BYTES - emptyBytes);
+		expect(Buffer.byteLength(JSON.stringify(frame), "utf8")).toBe(MAX_RPC_FRAME_BYTES);
+
+		const encoder = new RpcFrameEncoder();
+		encoder.setProtocolVersion(2);
+		const decoder = new RpcFrameDecoder();
+		let decoded: object | undefined;
+		for (const line of encoder.encode(frame).trimEnd().split("\n")) decoded = decoder.push(JSON.parse(line));
+
+		expect(decoded).toEqual(frame);
+	});
+
+	it("preserves terminal message counts above the protocol v2 ceiling", () => {
+		const encoder = new RpcFrameEncoder();
+		encoder.setProtocolVersion(2);
+		const encoded = encoder.encode({
+			type: "agent_end",
+			messages: [{ role: "assistant", content: "x".repeat(MAX_RPC_REASSEMBLED_BYTES) }],
+		});
+
+		expect(decode(encoded)).toEqual({
+			type: "agent_end",
+			messages: [],
+			messageCount: 1,
+		});
+	});
+
+	it("rejects protocol v2 logical frames above the advertised reassembly ceiling", () => {
+		const encoder = new RpcFrameEncoder();
+		encoder.setProtocolVersion(2);
+		const encoded = encoder.encode({
+			id: "request-too-large",
+			type: "response",
+			command: "get_messages",
+			success: true,
+			data: { transcript: "x".repeat(MAX_RPC_REASSEMBLED_BYTES) },
+		});
+
+		expect(decode(encoded)).toEqual({
+			id: "request-too-large",
+			type: "response",
+			command: "get_messages",
+			success: false,
+			error: "RPC response exceeded the transport limit",
+		});
+	});
+
+	it("rejects interrupted protocol v2 chunk sequences", () => {
+		const decoder = new RpcFrameDecoder();
+		decoder.push({
+			type: "rpc_chunk",
+			chunkId: "chunk-1",
+			index: 0,
+			count: 2,
+			byteLength: MAX_RPC_FRAME_BYTES + 1,
+			data: "ew==",
+		});
+
+		expect(() =>
+			decoder.push({
+				type: "rpc_chunk",
+				chunkId: "chunk-2",
+				index: 1,
+				count: 2,
+				byteLength: MAX_RPC_FRAME_BYTES + 1,
+				data: "fQ==",
+			}),
+		).toThrow("rpc chunk sequence mismatch");
 	});
 });

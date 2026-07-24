@@ -90,6 +90,10 @@ export default class Index extends Command {
 				"Scratch compaction for this process: configured keeps current settings (default); native, standard, both, or scratch-only override them",
 			options: [...SCRATCH_COMPACTION_METHOD_VALUES],
 		}),
+		"add-dir": Flags.string({
+			description: "Add a workspace directory beyond the working directory (repeatable)",
+			multiple: true,
+		}),
 		print: Flags.boolean({
 			char: "p",
 			description: "Non-interactive mode: process prompt and exit",

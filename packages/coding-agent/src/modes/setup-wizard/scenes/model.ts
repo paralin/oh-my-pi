@@ -10,7 +10,8 @@ import { theme } from "../../theme/theme";
 import type { SetupScene, SetupSceneController, SetupSceneHost } from "./types";
 
 const MAX_VISIBLE_MODELS = 10;
-const WIZARD_SCREEN_RESERVE = 22;
+/** ModelBrowser chrome: search row + blank above the list, blank + two detail rows below. */
+const BROWSER_FRAME_ROWS = 5;
 
 class ModelSceneController implements SetupSceneController {
 	title = "Choose your default model";
@@ -54,16 +55,13 @@ class ModelSceneController implements SetupSceneController {
 		this.#browser.routeMouse(event, line - this.#browserRowStart);
 	}
 
-	render(width: number): readonly string[] {
-		const visibleRows = Math.max(
-			1,
-			Math.min(MAX_VISIBLE_MODELS, this.host.ctx.ui.terminal.rows - WIZARD_SCREEN_RESERVE),
-		);
-		this.#browser.setMaxVisible(visibleRows);
+	render(width: number, maxLines?: number): readonly string[] {
 		const lines = [
 			this.#status ?? theme.fg("muted", "Type to search. Enter saves the highlighted model as your default."),
 			"",
 		];
+		const budget = maxLines === undefined ? MAX_VISIBLE_MODELS : maxLines - lines.length - BROWSER_FRAME_ROWS;
+		this.#browser.setMaxVisible(Math.max(1, Math.min(MAX_VISIBLE_MODELS, budget)));
 		this.#browserRowStart = lines.length;
 		lines.push(...this.#browser.render(width));
 		return lines;

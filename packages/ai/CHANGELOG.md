@@ -2,9 +2,31 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Anthropic extra-usage reporting across `omp usage`, interactive `/usage`, and ACP `/usage`: the OAuth usage endpoint's authoritative `spend` payload (or legacy `extra_usage` fallback when absent) is normalized into a `Claude Extra Usage` USD row; capped accounts show limit/remaining/fractions and status, while uncapped spend exposes only its absolute used amount—rendered as `$… used` in CLI/TUI and `123.45 usd used` in ACP—without a fabricated cap, percentage, or status. ([#5575](https://github.com/can1357/oh-my-pi/issues/5575))
+
+### Fixed
+
+- Fixed Bedrock cache checkpoints to use resolved model compatibility: unsupported 1-hour retention now falls back to the provider-default 5-minute cache, bundled Nova Lite, Micro, Pro, and Premier requests—and Nova Premier's documented in-region model ID—emit AWS-recommended explicit checkpoints for cache savings, and forced opaque profiles remain conservative.
+- Fixed outbound credential-pattern redaction (`[github_token_redacted]` & co.) running unconditionally: it is now opt-in via `configureCredentialRedaction` and disabled by default, so credential-shaped strings the user deliberately pastes reach the provider unmodified unless the host enables redaction.
+- Added interactive Meta Model API key login and `MODEL_API_KEY` / `META_API_KEY` environment authentication ([#4941](https://github.com/can1357/oh-my-pi/issues/4941)).
+- Fixed SuperGrok (`xai-oauth`) `/usage` showing "no usage data" for unified-billing accounts: when `?format=credits` lacks `creditUsagePercent` (or marks `isUnifiedBillingUser`), fall back to / merge the default monthly `monthlyLimit`/`used` payload.
+- Fixed sessions wedging onto their fallback model with `400 Invalid \`signature\` in \`thinking\` block` after switching to an Anthropic signing endpoint while the latest assistant turn came from a different Anthropic-compatible provider (e.g. Kimi k3). The cross-model thinking-signature strip skipped the latest surviving assistant turn entirely, replaying the foreign signature verbatim on every attempt; the latest turn now strips signatures whose issuing provider differs from the target (same-provider switches keep their byte-for-byte latest turn), and foreign `redacted_thinking` siblings are dropped alongside instead of riding the wire unverifiable.
+- Fixed OAuth callback servers aborting login when an invalid callback arrives before the legitimate browser redirect, and restricted `localhost` callback listeners to the IPv4 loopback interface ([#4106](https://github.com/can1357/oh-my-pi/issues/4106)).
+
+## [17.0.9] - 2026-07-23
+
+### Added
+
+- Added Synthetic (synthetic.new) usage provider: `/usage` now reports the rolling 5-hour request limit and weekly credit quota via `GET /v2/quotas`, including per-tick regeneration rates in the window labels.
+- Added optional `UsageWindow.resetLabel` so rolling windows can render their countdown with an accurate verb (e.g. "tick in 12m" / "regen in 51m" instead of "resets in") — both quota windows on Synthetic regenerate incrementally rather than hard-resetting.
+
 ### Fixed
 
 - Fixed GitHub Copilot OpenAI-compatible requests being rejected when the session's native OpenAI service tier was set to `priority` ([#5160](https://github.com/can1357/oh-my-pi/pull/5160) by [@audreyt](https://github.com/audreyt)).
+- Fixed OpenAI Responses token-cap truncations suppressing fully streamed function and custom tool calls whose inputs are complete.
+- Added SuperGrok (`xai-oauth`) usage tracking for weekly credits, product limits, and positive on-demand caps.
 
 ## [17.0.8] - 2026-07-22
 

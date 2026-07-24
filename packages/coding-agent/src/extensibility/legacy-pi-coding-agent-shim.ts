@@ -1362,4 +1362,5 @@ export function getPackageDir(): string {
 
 export * from "../index";
 export { formatBytes as formatSize } from "../tools/render-utils";
+export { copyToClipboard } from "../utils/clipboard";
 export { Type } from "./typebox";

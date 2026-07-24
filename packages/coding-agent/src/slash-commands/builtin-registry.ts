@@ -16,6 +16,7 @@ import {
 	resolveActiveProjectRegistryPath,
 	resolveOrDefaultProjectRegistryPath,
 } from "../discovery/helpers.js";
+import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import { PluginManager } from "../extensibility/plugins";
 import {
@@ -210,6 +211,13 @@ function formatEffortChoices(session: AgentSession): string {
 }
 
 const EFFORT_COMMAND_USAGE = "Usage: /effort <level> [--default]";
+/** Format the session's workspace directories (cwd + additional) for display. */
+function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string): string {
+	const cwd = runtime.sessionManager.getCwd();
+	const additional = runtime.sessionManager.getAdditionalDirectories();
+	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
+	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
+}
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "settings",
@@ -669,19 +677,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "export",
 		description: "Export session to HTML file",
-		inlineHint: "[path]",
+		inlineHint: "[--themes] [path]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const arg = command.args.trim();
-			// Match the interactive `/export` behavior: clipboard aliases are not a
-			// valid export target. Without this, the literal value (`copy`,
-			// `--copy`, `clipboard`) is passed to `exportToHtml` and becomes the
-			// output filename.
-			if (arg === "--copy" || arg === "clipboard" || arg === "copy") {
-				return usage("Use /dump to copy the session to clipboard.", runtime);
-			}
 			try {
-				const filePath = await runtime.session.exportToHtml(arg || undefined);
+				const { outputPath, useUserThemes } = parseExportArgs(command.args);
+				if (outputPath === "--copy" || outputPath === "clipboard" || outputPath === "copy") {
+					return usage("Use /dump to copy the session to clipboard.", runtime);
+				}
+				const filePath = await runtime.session.exportToHtml(outputPath, useUserThemes);
 				await runtime.output(`Session exported to: ${filePath}`);
 				return commandConsumed();
 			} catch (err) {
@@ -1775,7 +1779,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
 			}
 			try {
-				await runtime.sessionManager.moveTo(resolvedPath);
+				await runtime.session.moveSession(resolvedPath);
 			} catch (err) {
 				return usage(`Move failed: ${errorMessage(err)}`, runtime);
 			}
@@ -1794,6 +1798,74 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.addToHistory(command.text);
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleMoveCommand(command.args || undefined);
+		},
+	},
+	{
+		name: "add-dir",
+		description: "Add a workspace directory to this session (multi-root)",
+		acpDescription: "Add a workspace directory to this session",
+		inlineHint: "<path>",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) return usage("Cannot add a directory while streaming.", runtime);
+			if (!command.args) return usage(formatWorkspaceDirectories(runtime, "Usage: /add-dir <path>"), runtime);
+			const resolved = resolveToCwd(command.args, runtime.cwd);
+			try {
+				const stat = await fs.stat(resolved);
+				if (!stat.isDirectory()) return usage(`Not a directory: ${resolved}`, runtime);
+			} catch {
+				return usage(`Directory does not exist: ${resolved}`, runtime);
+			}
+			let added: string | null;
+			try {
+				added = await runtime.sessionManager.addWorkspaceDirectory(resolved);
+			} catch (err) {
+				return usage(errorMessage(err), runtime);
+			}
+			if (added === null) {
+				await runtime.output(`Already in the workspace: ${resolved}`);
+				return commandConsumed();
+			}
+			await runtime.session.refreshBaseSystemPrompt();
+			await runtime.output(formatWorkspaceDirectories(runtime, `Added ${added}.`));
+			return commandConsumed();
+		},
+	},
+	{
+		name: "remove-dir",
+		description: "Remove a workspace directory from this session",
+		acpDescription: "Remove a workspace directory from this session",
+		inlineHint: "<path>",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (runtime.session.isStreaming) return usage("Cannot remove a directory while streaming.", runtime);
+			if (!command.args) return usage("Usage: /remove-dir <path>", runtime);
+			const resolved = resolveToCwd(command.args, runtime.cwd);
+			if (resolved === path.resolve(runtime.cwd)) {
+				return usage("Cannot remove the working directory; use /move to change it.", runtime);
+			}
+			let removed: string | null;
+			try {
+				removed = await runtime.sessionManager.removeWorkspaceDirectory(resolved);
+			} catch (err) {
+				return usage(errorMessage(err), runtime);
+			}
+			if (removed === null) {
+				await runtime.output(`Not a workspace directory: ${resolved}`);
+				return commandConsumed();
+			}
+			await runtime.session.refreshBaseSystemPrompt();
+			await runtime.output(formatWorkspaceDirectories(runtime, `Removed ${removed}.`));
+			return commandConsumed();
+		},
+	},
+	{
+		name: "dirs",
+		description: "List this session's workspace directories",
+		acpDescription: "List this session's workspace directories",
+		handle: async (_command, runtime) => {
+			await runtime.output(formatWorkspaceDirectories(runtime));
+			return commandConsumed();
 		},
 	},
 	{

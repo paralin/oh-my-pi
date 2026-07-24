@@ -1,9 +1,8 @@
-import { afterEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock, vi } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { runOnboardingSetup } from "@oh-my-pi/pi-coding-agent/commands/setup";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import {
 	ALL_SCENES,
 	CURRENT_SETUP_VERSION,
@@ -13,11 +12,13 @@ import {
 	type SetupSceneHost,
 	selectSetupScenes,
 } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard";
+import { providersSetupScene } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/providers";
+import { themeSetupScene } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/theme";
 import { WebSearchTab } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/scenes/web-search";
 import { SetupWizardComponent } from "@oh-my-pi/pi-coding-agent/modes/setup-wizard/wizard-overlay";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 function fakeContextWithConfiguredModel(): InteractiveModeContext {
 	return {
@@ -342,6 +343,80 @@ describe("setup wizard mouse routing", () => {
 		}
 	});
 });
+describe("setup wizard short terminals", () => {
+	function shortTerminalCtx(rows: number): InteractiveModeContext {
+		return {
+			settings: Settings.isolated(),
+			ui: {
+				terminal: { rows },
+				setFocus: () => {},
+				requestRender: () => {},
+				invalidate: () => {},
+			},
+			session: {
+				modelRegistry: {
+					authStorage: {
+						has: () => false,
+						hasAuth: () => false,
+						getCredentialOrigin: () => undefined,
+					},
+				},
+			},
+			openInBrowser: () => {},
+		} as unknown as InteractiveModeContext;
+	}
+
+	/**
+	 * Advance the wizard's dissolve clock past SCENE_TRANSITION_MS so render()
+	 * shows the fully revealed scene without waiting real time. Activate after
+	 * the splash→scene input (the transition timestamps itself on entry).
+	 */
+	function skipDissolve(): { mockRestore(): void } {
+		const realNow = performance.now.bind(performance);
+		return vi.spyOn(performance, "now").mockImplementation(() => realNow() + 1_000);
+	}
+
+	it("keeps the selected provider row visible while navigating on a 24-row terminal", async () => {
+		await initTheme(false, "unicode", false, "titanium", "light");
+		const component = new SetupWizardComponent(shortTerminalCtx(24), [providersSetupScene]);
+		void component.run();
+		component.handleInput("\r"); // splash → scene
+		const nowSpy = skipDissolve();
+		try {
+			// Walk down past a full wrap and back up; the selection must stay
+			// inside the 24-row frame on every step (the list window used to
+			// assume ten visible rows and the wizard clipped the cursor off).
+			for (const key of [...Array(45).fill("\x1b[B"), "\x1b[A", "\x1b[A"]) {
+				component.handleInput(key);
+				const frame = component.render(80).map(line => Bun.stripANSI(line));
+				expect(frame.length).toBe(24);
+				expect(frame.some(line => line.trimStart().startsWith(theme.nav.cursor))).toBe(true);
+			}
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
+	});
+
+	it("keeps the curated theme list and its selection visible on a 24-row terminal", async () => {
+		await initTheme(false, "unicode", false, "titanium", "light");
+		const component = new SetupWizardComponent(shortTerminalCtx(24), [themeSetupScene]);
+		void component.run();
+		component.handleInput("\r"); // splash → scene
+		const nowSpy = skipDissolve();
+		try {
+			const frame = component.render(80).map(line => Bun.stripANSI(line));
+			expect(frame.length).toBe(24);
+			expect(frame.some(line => line.trimStart().startsWith(theme.nav.cursor))).toBe(true);
+			for (const label of ["Match terminal", "Titanium", "Light", "Colorblind colors", "ANSI-safe", "Browse all"]) {
+				expect(frame.some(line => line.includes(label))).toBe(true);
+			}
+		} finally {
+			nowSpy.mockRestore();
+			component.dispose();
+		}
+	});
+});
 
 describe("setup wizard theme previews", () => {
 	it("restores the selected glyph preset after previewing ANSI-safe mode", async () => {
@@ -411,13 +486,12 @@ describe("setup wizard glyph scene", () => {
 });
 
 describe("setup wizard web search tab", () => {
-	it("exposes every web-search provider preference in the schema-backed TUI list", () => {
-		const schema = SETTINGS_SCHEMA["providers.webSearch"];
-		expect(schema.values).toEqual(SEARCH_PROVIDER_PREFERENCES);
-		expect(schema.ui.options).toEqual(SEARCH_PROVIDER_OPTIONS);
+	it("exposes every web-search provider preference in the shared TUI list", () => {
+		expect(SEARCH_PROVIDER_OPTIONS[0]?.value).toBe("auto");
+		expect(SEARCH_PROVIDER_OPTIONS.slice(1).map(option => option.value)).toEqual([...SEARCH_PROVIDER_ORDER]);
 	});
 
-	it("persists the highlighted provider as the web search preference", async () => {
+	it("persists the highlighted provider as the head of the web search order", async () => {
 		const settings = Settings.isolated();
 		const host = {
 			ctx: {
@@ -435,9 +509,12 @@ describe("setup wizard web search tab", () => {
 		tab.handleInput("\n"); // confirm the highlighted provider
 		await Bun.sleep(20);
 
-		const expected = SETTINGS_SCHEMA["providers.webSearch"].ui.options[1].value;
+		const expected = SEARCH_PROVIDER_OPTIONS[1]!.value;
 		expect(expected).not.toBe("auto");
-		expect(settings.get("providers.webSearch")).toBe(expected);
+		expect(settings.get("providers.webSearchOrder")).toEqual([
+			expected,
+			...SEARCH_PROVIDER_ORDER.filter(id => id !== expected),
+		]);
 	});
 
 	it("can select the last provider in the setup TUI list", async () => {
@@ -461,7 +538,12 @@ describe("setup wizard web search tab", () => {
 		await Bun.sleep(20);
 
 		const lastOption = SEARCH_PROVIDER_OPTIONS[SEARCH_PROVIDER_OPTIONS.length - 1]!;
-		expect(settings.get("providers.webSearch")).toBe(lastOption.value);
+		const lastValue = lastOption.value;
+		if (lastValue === "auto") throw new Error("last option must be a concrete provider");
+		expect(settings.get("providers.webSearchOrder")).toEqual([
+			lastValue,
+			...SEARCH_PROVIDER_ORDER.filter(id => id !== lastValue),
+		]);
 	});
 });
 

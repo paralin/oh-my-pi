@@ -57,12 +57,10 @@ import {
 	parseConfiguredThinkingLevel,
 } from "../../thinking";
 import {
-	isImageProviderPreference,
 	isSearchProviderId,
-	isSearchProviderPreference,
 	setExcludedSearchProviders,
-	setPreferredImageProvider,
-	setPreferredSearchProvider,
+	setImageProviderOrder,
+	setSearchProviderOrder,
 	type ToolSession,
 } from "../../tools";
 import { AskTool, type AskToolDetails, type AskToolInput } from "../../tools/ask";
@@ -439,6 +437,11 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply personality: ${err}`);
 				});
 				break;
+			case "memory.backend":
+				void this.ctx.session.applyMemoryBackend().catch(err => {
+					this.ctx.showError(`Failed to apply memory backend: ${err}`);
+				});
+				break;
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
@@ -609,9 +612,9 @@ export class SelectorController {
 			}
 
 			// Provider settings - update runtime preferences
-			case "providers.webSearch":
-				if (typeof value === "string" && isSearchProviderPreference(value)) {
-					setPreferredSearchProvider(value);
+			case "providers.webSearchOrder":
+				if (Array.isArray(value)) {
+					setSearchProviderOrder(value.filter(isSearchProviderId));
 				}
 				break;
 			case "providers.webSearchExclude":
@@ -619,9 +622,9 @@ export class SelectorController {
 					setExcludedSearchProviders(value.filter(isSearchProviderId));
 				}
 				break;
-			case "providers.image":
-				if (isImageProviderPreference(value)) {
-					setPreferredImageProvider(value);
+			case "providers.imageOrder":
+				if (Array.isArray(value)) {
+					setImageProviderOrder(value.filter((entry): entry is string => typeof entry === "string"));
 				}
 				break;
 

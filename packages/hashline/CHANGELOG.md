@@ -12,6 +12,7 @@
 ### Removed
 
 - Removed npm `diff` dependency.
+
 ## [17.0.4] - 2026-07-18
 
 ### Fixed

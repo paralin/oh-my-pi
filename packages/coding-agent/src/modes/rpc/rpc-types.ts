@@ -19,12 +19,16 @@ import type {
 	SubagentProgressPayload,
 } from "../../task";
 import type { TodoPhase } from "../../tools/todo";
+import type { RpcMessagesPage } from "./rpc-messages";
 
 // ============================================================================
 // RPC Commands (stdin)
 // ============================================================================
 
 export type RpcCommand =
+	// Protocol
+	| { id?: string; type: "negotiate_protocol"; protocolVersion: number }
+
 	// Prompting
 	| { id?: string; type: "prompt"; message: string; images?: ImageContent[]; streamingBehavior?: "steer" | "followUp" }
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[] }
@@ -86,6 +90,7 @@ export type RpcCommand =
 
 	// Messages
 	| { id?: string; type: "get_messages" }
+	| { id?: string; type: "get_messages_page"; cursor?: string; limit?: number }
 
 	// Login
 	| { id?: string; type: "get_login_providers" }
@@ -135,6 +140,23 @@ export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;
 	agentInvoked: boolean;
+}
+
+export interface RpcReadyFrame {
+	type: "ready";
+	protocolVersion: 1;
+	supportedProtocolVersions: [1, 2];
+	maxFrameBytes: number;
+	maxReassembledFrameBytes: number;
+}
+
+export interface RpcChunkFrame {
+	type: "rpc_chunk";
+	chunkId: string;
+	index: number;
+	count: number;
+	byteLength: number;
+	data: string;
 }
 
 export interface RpcHandoffResult {
@@ -198,6 +220,15 @@ export type RpcSessionStartData = { run_id: string; session_id: string; existing
 
 // Success responses with data
 export type RpcResponse =
+	// Protocol
+	| {
+			id?: string;
+			type: "response";
+			command: "negotiate_protocol";
+			success: true;
+			data: { protocolVersion: 2 };
+	  }
+
 	// Prompting (async - events follow)
 	| { id?: string; type: "response"; command: "prompt"; success: true; data?: { agentInvoked: boolean } }
 	| { id?: string; type: "response"; command: "steer"; success: true }
@@ -330,6 +361,7 @@ export type RpcResponse =
 
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }
+	| { id?: string; type: "response"; command: "get_messages_page"; success: true; data: RpcMessagesPage }
 
 	// Login
 	| {
@@ -341,8 +373,8 @@ export type RpcResponse =
 	  }
 	| { id?: string; type: "response"; command: "login"; success: true; data: { providerId: string } }
 
-	// Error response (any command can fail)
-	| { id?: string; type: "response"; command: string; success: false; error: string };
+	// Error response (any command can fail); `code` is an optional machine-readable reason.
+	| { id?: string; type: "response"; command: string; success: false; error: string; code?: string };
 
 // ============================================================================
 // Subagent Events (stdout)

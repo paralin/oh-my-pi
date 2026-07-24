@@ -1311,16 +1311,87 @@ describe("compact() remote compaction failure handling", () => {
 		const baseSettings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
 
 		// Remote disabled → the V2 replay is unusable → re-expand the pre-V2 original.
-		const reexpanded = prepareCompaction(entries, { ...baseSettings, remoteEnabled: false }, [v2Model]);
+		const reexpanded = prepareCompaction(entries, { ...baseSettings, remoteEnabled: false }, v2Model);
 		expect(reexpanded).toBeDefined();
 		const reexpandedText = JSON.stringify(reexpanded?.messagesToSummarize ?? []);
 		expect(reexpandedText).toContain("ORIGINAL ALPHA port 4242");
 
 		// Remote + V2 still enabled, same provider → reuse the replay, don't re-summarize originals.
-		const reused = prepareCompaction(entries, { ...baseSettings, remoteStreamingV2Enabled: true }, [v2Model]);
+		const reused = prepareCompaction(entries, { ...baseSettings, remoteStreamingV2Enabled: true }, v2Model);
 		expect(reused).toBeDefined();
 		const reusedText = JSON.stringify(reused?.messagesToSummarize ?? []);
 		expect(reusedText).not.toContain("ORIGINAL ALPHA port 4242");
+	});
+
+	test("re-expands a stranded remote compaction when the active model cannot replay it (#6343)", () => {
+		const ts = (n: number) => new Date(n).toISOString();
+		const anthropicActive = buildModel({
+			id: "claude-sonnet-4-5",
+			name: "Claude Sonnet 4.5",
+			api: "anthropic-messages",
+			provider: "anthropic",
+			baseUrl: "https://api.anthropic.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+		});
+		const openaiSmol = makeOpenAiModel({ id: "gpt-5-mini", name: "GPT-5 mini" });
+		// Prior OpenAI remote compaction: opaque placeholder summary, provider-native
+		// replay stored under preserveData tagged "openai".
+		const entries: SessionEntry[] = [
+			{
+				type: "message",
+				id: "m1",
+				parentId: null,
+				timestamp: ts(1),
+				message: { role: "user", content: "ORIGINAL ALPHA port 4242", timestamp: 1 },
+			},
+			{
+				type: "compaction",
+				id: "c1",
+				parentId: "m1",
+				timestamp: ts(2),
+				summary: "Remote compaction preserved provider-native history for this session.",
+				firstKeptEntryId: "m1",
+				tokensBefore: 100_000,
+				preserveData: {
+					openaiRemoteCompaction: {
+						provider: "openai",
+						replacementHistory: [{ type: "message", role: "user", content: "opaque native replay" }],
+						compactionItem: { type: "compaction", encrypted_content: "enc_v1" },
+					},
+				},
+			},
+			{
+				type: "message",
+				id: "m2",
+				parentId: "c1",
+				timestamp: ts(3),
+				message: { role: "user", content: "second turn", timestamp: 3 },
+			},
+			{
+				type: "message",
+				id: "m3",
+				parentId: "m2",
+				timestamp: ts(4),
+				message: { role: "user", content: "third turn", timestamp: 4 },
+			},
+		];
+		const settings = { ...DEFAULT_COMPACTION_SETTINGS, keepRecentTokens: 1 };
+		// Reuse is judged by the ACTIVE model, not the candidate set. The active
+		// anthropic model's encoder drops the OpenAI replay payload, so the stranded
+		// originals are re-expanded into a portable local summary — even though the
+		// OpenAI smol role could still replay the blob.
+		const foreignActive = prepareCompaction(entries, settings, anthropicActive);
+		expect(foreignActive).toBeDefined();
+		expect(JSON.stringify(foreignActive?.messagesToSummarize ?? [])).toContain("ORIGINAL ALPHA port 4242");
+		// The same-provider OpenAI model can replay the payload, so the boundary is
+		// kept and the originals are not re-summarized.
+		const sameProviderActive = prepareCompaction(entries, settings, openaiSmol);
+		expect(sameProviderActive).toBeDefined();
+		expect(JSON.stringify(sameProviderActive?.messagesToSummarize ?? [])).not.toContain("ORIGINAL ALPHA port 4242");
 	});
 
 	test("user abort during the remote compact request rejects without falling back to local summarization", async () => {

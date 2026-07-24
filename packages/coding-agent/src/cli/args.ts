@@ -21,6 +21,8 @@ export type Mode = "text" | "json" | "rpc" | "acp" | "rpc-ui";
 
 export interface Args {
 	cwd?: string;
+	/** Workspace directories beyond cwd for this session (repeatable `--add-dir`). */
+	addDir?: string[];
 	profile?: string;
 	alias?: string;
 	allowHome?: boolean;

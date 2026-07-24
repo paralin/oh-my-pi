@@ -10,6 +10,7 @@ import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
 
 export interface BashExecutorOptions {
@@ -54,6 +55,78 @@ export interface BashResult {
 	outputBytes: number;
 	artifactId?: string;
 	workingDir?: string;
+}
+
+/** POSIX-safe variable name — gates which direnv unsets we inject into the
+ *  command line, so a hostile `.envrc` can't smuggle shell syntax through
+ *  `unset`. `.envrc` never produces non-identifier names in practice. */
+const SAFE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+export interface DirenvPreflightOptions {
+	/** Caller-supplied env overlay; these values win over direnv-provided ones. */
+	callerEnv?: Record<string, string>;
+	signal?: AbortSignal;
+	/** Full direnv-load budget (`bash.direnvLoadTimeoutMs`). A positive
+	 *  `callerTimeoutMs` clamps the effective load below this; `0`/undefined
+	 *  leaves the full budget. */
+	timeoutMs?: number;
+	/** The caller's command deadline (ms). A positive value clamps the direnv
+	 *  load so a cold `.envrc` can't outlast a short-timeout command; `0` or
+	 *  undefined means "no caller clamp" — the load keeps its full `timeoutMs`
+	 *  budget (a disabled command deadline is NOT a 0 ms load). Centralizing the
+	 *  clamp here keeps every backend (executeBash, ACP terminal, PTY) on one
+	 *  contract instead of each re-deriving it. */
+	callerTimeoutMs?: number;
+	/** `bash.direnv` setting — `"off"` skips the load entirely. */
+	direnvSetting: "auto" | "off";
+	/** Shell wrapper prefix (profiler/strace) to place *after* the unset prefix,
+	 *  matching `executeBash`'s ordering. Backends that apply their own shell
+	 *  wrapping (ACP `wrapShellLineForClientTerminal`) omit this. */
+	commandPrefix?: string | undefined;
+}
+
+/**
+ * Load the repo's direnv/devenv env and fold it into a `(command, env)` pair so
+ * every bash backend (one-shot `executeBash`, ACP client terminal, PTY) exposes
+ * the same devenv tools. Encapsulates: load the diff, merge `set` under the
+ * caller's overlay (caller wins), and prepend a regex-gated `unset -v` for
+ * variables the `.envrc` removes (skipping any the caller re-supplied).
+ *
+ * Returns the possibly-prefixed command plus the merged env, or the inputs
+ * unchanged (`env` = `callerEnv`) when direnv is off, absent, or has no `.envrc`.
+ * Pure transform: does NOT layer non-interactive env defaults — that stays the
+ * caller's job (so interactive PTY/ACP paths keep their own env shape).
+ */
+export async function applyDirenvPreflight(
+	command: string,
+	cwd: string,
+	opts: DirenvPreflightOptions,
+): Promise<{ command: string; env: Record<string, string> | undefined }> {
+	const withPrefix = (line: string): string => (opts.commandPrefix ? `${opts.commandPrefix} ${line}` : line);
+	// A positive caller deadline clamps the direnv load below its full budget so
+	// a cold `.envrc` can't outlast a short-timeout command; `0`/undefined means
+	// "no caller clamp" (a disabled command deadline is not a 0 ms load). Every
+	// backend routes through here, so the clamp lives in one place.
+	const loadTimeoutMs =
+		opts.callerTimeoutMs !== undefined && opts.callerTimeoutMs > 0
+			? Math.min(opts.timeoutMs ?? opts.callerTimeoutMs, opts.callerTimeoutMs)
+			: opts.timeoutMs;
+	const direnvDiff =
+		opts.direnvSetting === "off" ? null : await loadDirenvEnv(cwd, { timeoutMs: loadTimeoutMs, signal: opts.signal });
+	if (!direnvDiff) {
+		return { command: withPrefix(command), env: opts.callerEnv };
+	}
+	// The caller's explicit env still wins over direnv-provided values.
+	const mergedEnv = { ...direnvDiff.set, ...opts.callerEnv };
+	// direnv can also *remove* inherited variables (a `.envrc` doing
+	// `unset AWS_PROFILE`). An env overlay can only add/override, so prepend a
+	// real `unset` for those — unless the caller re-supplied the same var
+	// explicitly, in which case the caller wins.
+	const direnvUnsets = direnvDiff.unset.filter(
+		name => !(opts.callerEnv && name in opts.callerEnv) && SAFE_ENV_NAME.test(name),
+	);
+	const unsetPrefix = direnvUnsets.length > 0 ? `unset -v ${direnvUnsets.join(" ")}; ` : "";
+	return { command: `${unsetPrefix}${withPrefix(command)}`, env: mergedEnv };
 }
 
 const shellSessions = new Map<string, Shell>();
@@ -279,15 +352,25 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
-	const commandEnv = buildNonInteractiveEnv(options?.env);
-
-	// Apply command prefix if configured
-	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
+	// Fold the repo's direnv/devenv env into the command + env so devenv tools
+	// land on PATH; the caller's explicit `env` still wins. Thread the caller's
+	// signal + timeout so an aborted / short-timeout call can't hang on a cold
+	// `.envrc` load before the abort listener is installed. The helper applies
+	// the configured shell `prefix` after any `unset -v` it prepends.
+	const preflight = await applyDirenvPreflight(command, commandCwd ?? process.cwd(), {
+		callerEnv: options?.env,
+		signal: options?.signal,
+		timeoutMs: settings.get("bash.direnvLoadTimeoutMs"),
+		callerTimeoutMs: options?.timeout,
+		direnvSetting: settings.get("bash.direnv"),
+		commandPrefix: prefix,
+	});
+	const commandEnv = buildNonInteractiveEnv(preflight.env);
 	const runCdInPersistentShell = options?.useUserShell === true && !prefix && isPersistentShellCdCommand(command);
 	const finalCommand =
 		options?.useUserShell === true && !bashShell && !runCdInPersistentShell
-			? buildUserShellCommand(shell, args, prefixedCommand)
-			: prefixedCommand;
+			? buildUserShellCommand(shell, args, preflight.command)
+			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({

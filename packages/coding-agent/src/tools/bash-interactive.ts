@@ -32,6 +32,10 @@ function normalizeCaptureChunk(chunk: string): string {
 	return sanitizeWithOptionalSixelPassthrough(normalized, sanitizeText);
 }
 
+// Caps only the live xterm display backlog; OutputSink remains the bounded
+// source of truth for the final captured output.
+const MAX_LIVE_WRITE_QUEUE_CHUNKS = 512;
+
 // @xterm/headless is only needed once an interactive PTY session actually starts,
 // so it is loaded lazily (and memoized) instead of weighing down CLI startup.
 let xtermTerminalCtor: typeof XtermModule.Terminal | undefined;
@@ -142,7 +146,29 @@ class BashInteractiveOverlayComponent implements Component {
 
 	appendOutput(chunk: string): void {
 		this.#writeQueue.push(chunk);
+		this.#trimWriteQueue();
 		this.#drainQueue();
+	}
+
+	#trimWriteQueue(): void {
+		// Compact the consumed prefix first: the queue only self-resets on a
+		// full drain, which never happens while a fast producer keeps a
+		// backlog alive, so already-written chunks must be released here to
+		// keep the retained array itself bounded.
+		if (this.#writeOffset > 0) {
+			this.#writeQueue.splice(0, this.#writeOffset);
+			this.#writeOffset = 0;
+		}
+		const firstPending = this.#writing ? 1 : 0;
+		const overflow = this.#writeQueue.length - firstPending - MAX_LIVE_WRITE_QUEUE_CHUNKS;
+		if (overflow > 0) {
+			this.#writeQueue.splice(firstPending, overflow);
+			// Dropped chunks can split an in-flight DCS/OSC/APC string (e.g. a
+			// sixel payload) across the gap; a stray string terminator is a
+			// no-op in the ground state but resynchronizes the parser if the
+			// terminator was dropped.
+			this.#writeQueue[firstPending] = `\u001b\\${this.#writeQueue[firstPending]}`;
+		}
 	}
 
 	#drainQueue(): void {

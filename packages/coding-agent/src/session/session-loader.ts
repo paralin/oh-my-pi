@@ -306,10 +306,12 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
 }
 
 /**
- * Read-only message view of a session file: load entries, migrate to the
- * current version, resolve blob refs, and build the context along the
- * persisted leaf path (last entry). Does NOT create a writer or take the
- * session lock — safe to call against a file another session is writing.
+ * Read-only transcript view of a session file: load entries, migrate to the
+ * current version, resolve blob refs, and build the display transcript along
+ * the persisted leaf path (last entry). Uses transcript mode (collapsed to the
+ * latest compaction) so failed/aborted tail turns stay visible, unlike the
+ * provider-context builder which drops them. Does NOT create a writer or take
+ * the session lock — safe to call against a file another session is writing.
  */
 export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
 	const entries = await loadEntriesFromFile(filePath);
@@ -317,5 +319,8 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
 	migrateToCurrentVersion(entries);
 	await resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));
 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
-	return buildSessionContext(sessionEntries).messages;
+	return buildSessionContext(sessionEntries, undefined, undefined, {
+		transcript: true,
+		collapseCompactedHistory: true,
+	}).messages;
 }

@@ -12,6 +12,13 @@ import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
+import {
+	RPC_MESSAGES_PAGE_BUSY_ERROR,
+	RPC_MESSAGES_PAGE_STALE_ERROR,
+	type RpcMessagesPage,
+	type RpcMessagesPageOptions,
+} from "./rpc-messages";
 import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
@@ -141,6 +148,16 @@ function isRpcResponse(value: unknown): value is RpcResponse {
 	return true;
 }
 
+function supportsRpcProtocolV2(value: Record<string, unknown>): boolean {
+	return (
+		value.type === "ready" &&
+		Array.isArray(value.supportedProtocolVersions) &&
+		value.supportedProtocolVersions.includes(2) &&
+		value.maxFrameBytes === MAX_RPC_FRAME_BYTES &&
+		value.maxReassembledFrameBytes === MAX_RPC_REASSEMBLED_BYTES
+	);
+}
+
 function isAgentEvent(value: unknown): value is AgentEvent {
 	if (!isRecord(value)) return false;
 	const type = value.type;
@@ -205,6 +222,26 @@ function normalizeToolResult<TDetails>(result: RpcClientToolResult<TDetails>): A
 	return result;
 }
 
+/** Failed RPC command; `code` mirrors the server's machine-readable error code when present. */
+export class RpcCommandError extends Error {
+	constructor(
+		message: string,
+		readonly command: string,
+		readonly code?: string,
+	) {
+		super(message);
+		this.name = "RpcCommandError";
+	}
+}
+
+/** True when a high-level `getMessages()` drain should discard partial pages and fall back to `get_messages`. */
+function isPageFallbackError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	if (error instanceof RpcCommandError && (error.code === "session_busy" || error.code === "stale_cursor"))
+		return true;
+	return error.message === RPC_MESSAGES_PAGE_BUSY_ERROR || error.message === RPC_MESSAGES_PAGE_STALE_ERROR;
+}
+
 // ============================================================================
 // RPC Client
 // ============================================================================
@@ -223,6 +260,7 @@ export class RpcClient {
 	#customTools: RpcClientCustomTool[] = [];
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
+	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
 
@@ -247,6 +285,7 @@ export class RpcClient {
 		// Mint a fresh controller so a previous stop()'s abort does not
 		// short-circuit the new stdout reader (issue #4079).
 		this.#abortController = new AbortController();
+		this.#protocolVersion = 1;
 
 		const cliPath = this.options.cliPath ?? "dist/cli.js";
 		const args = ["--mode", "rpc"];
@@ -274,6 +313,9 @@ export class RpcClient {
 		// Wait for the "ready" signal or process exit
 		const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
 		let readySettled = false;
+		let protocolV2Supported = false;
+		let protocolV2Enabled = false;
+		const frameDecoder = new RpcFrameDecoder();
 
 		const reapAfterOutputFailure = async (error: Error) => {
 			if (this.#process !== child) return;
@@ -299,11 +341,15 @@ export class RpcClient {
 		void (async () => {
 			for await (const line of lines) {
 				if (!readySettled && isRecord(line) && line.type === "ready") {
+					protocolV2Supported = supportsRpcProtocolV2(line);
 					readySettled = true;
 					readyResolve();
 					continue;
 				}
-				this.#handleLine(line);
+				if (isRecord(line) && line.type === "rpc_chunk" && !protocolV2Enabled)
+					throw new Error("RPC chunk received before protocol negotiation");
+				const decoded = frameDecoder.push(line);
+				if (decoded) this.#handleLine(decoded);
 			}
 			// A closed stdout is terminal even if the child remains alive. Startup
 			// failures are reaped by the readyPromise catch below; established
@@ -364,6 +410,18 @@ export class RpcClient {
 
 		try {
 			await readyPromise;
+			if (protocolV2Supported) {
+				protocolV2Enabled = true;
+				const response = await this.#send({ type: "negotiate_protocol", protocolVersion: 2 });
+				if (
+					!response.success ||
+					response.command !== "negotiate_protocol" ||
+					!isRecord(response.data) ||
+					response.data.protocolVersion !== 2
+				)
+					throw new Error("RPC protocol v2 negotiation failed");
+				this.#protocolVersion = 2;
+			}
 			if (this.#customTools.length > 0) {
 				await this.setCustomTools(this.#customTools);
 			}
@@ -749,9 +807,42 @@ export class RpcClient {
 	}
 
 	/**
-	 * Get all messages in the session.
+	 * Get one stable, byte-bounded message page.
 	 */
+	async getMessagesPage(options: RpcMessagesPageOptions = {}): Promise<RpcMessagesPage> {
+		const response = await this.#send({ type: "get_messages_page", ...options });
+		return this.#getData<RpcMessagesPage>(response);
+	}
+
+	/** Get all messages, draining stable pages when protocol v2 is available. */
 	async getMessages(): Promise<AgentMessage[]> {
+		if (this.#protocolVersion === 2) {
+			try {
+				const messages: AgentMessage[] = [];
+				const seenCursors = new Set<string>();
+				let totalMessages: number | undefined;
+				let cursor: string | undefined;
+				do {
+					const page = await this.getMessagesPage({ cursor, limit: 256 });
+					if (
+						!Number.isSafeInteger(page.totalMessages) ||
+						page.totalMessages < 0 ||
+						(totalMessages !== undefined && page.totalMessages !== totalMessages)
+					)
+						throw new Error("RPC message pagination returned an inconsistent total");
+					totalMessages = page.totalMessages;
+					messages.push(...page.messages);
+					cursor = page.nextCursor;
+					if (cursor && seenCursors.has(cursor)) throw new Error("RPC message pagination repeated a cursor");
+					if (cursor) seenCursors.add(cursor);
+				} while (cursor);
+				if (messages.length !== totalMessages)
+					throw new Error("RPC message pagination ended before the advertised total");
+				return messages;
+			} catch (error) {
+				if (!isPageFallbackError(error)) throw error;
+			}
+		}
 		const response = await this.#send({ type: "get_messages" });
 		return this.#getData<{ messages: AgentMessage[] }>(response).messages;
 	}
@@ -1099,7 +1190,7 @@ export class RpcClient {
 	#getData<T>(response: RpcResponse): T {
 		if (!response.success) {
 			const errorResponse = response as Extract<RpcResponse, { success: false }>;
-			throw new Error(errorResponse.error);
+			throw new RpcCommandError(errorResponse.error, errorResponse.command, errorResponse.code);
 		}
 		// Type assertion: we trust response.data matches T based on the command sent.
 		// This is safe because each public method specifies the correct T for its command.
