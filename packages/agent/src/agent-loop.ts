@@ -10,6 +10,7 @@ import {
 	type Context,
 	EventStream,
 	isApiKeyResolver,
+	type Model,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
@@ -42,7 +43,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-import { sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
@@ -67,6 +68,7 @@ import type {
 	AgentEvent,
 	AgentLoopConfig,
 	AgentMessage,
+	AgentPreModelCallResult,
 	AgentTool,
 	AgentToolResult,
 	AgentTurnEndContext,
@@ -526,14 +528,9 @@ export function agentLoop(
 		};
 
 		stream.push({ type: "agent_start" });
-		stream.push({ type: "turn_start" });
-		for (const prompt of prompts) {
-			stream.push({ type: "message_start", message: prompt });
-			stream.push({ type: "message_end", message: prompt });
-		}
 
 		try {
-			await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
+			await runLoop(currentContext, newMessages, config, signal, stream, streamFn, prompts);
 		} catch (err) {
 			stream.fail(err);
 		}
@@ -571,7 +568,6 @@ export function agentLoopContinue(
 		const currentContext: AgentContext = { ...context, messages: [...context.messages] };
 
 		stream.push({ type: "agent_start" });
-		stream.push({ type: "turn_start" });
 
 		try {
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
@@ -621,12 +617,34 @@ async function emitTurnEnd(
 	config: AgentLoopConfig,
 	signal?: AbortSignal,
 	context?: Omit<AgentTurnEndContext, "message" | "toolResults">,
+	runHookOnAbortedMessage = false,
 ): Promise<void> {
 	stream.push({ type: "turn_end", message, toolResults });
 	const isAbortedOrError =
 		message.role === "assistant" && (message.stopReason === "aborted" || message.stopReason === "error");
-	if (signal?.aborted || isAbortedOrError) return;
+	if (signal?.aborted || (isAbortedOrError && !runHookOnAbortedMessage)) return;
 	await config.onTurnEnd?.(currentContext.messages, signal, { message, toolResults, willContinue: false, ...context });
+}
+
+function createGateStopMessage(model: Model, reason: string | undefined): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text: "" }],
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "aborted",
+		errorMessage: reason ?? "Stopped before model call",
+		timestamp: Date.now(),
+	};
 }
 
 /**
@@ -866,6 +884,7 @@ async function runLoop(
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	streamFn?: StreamFn,
+	initialMessages: AgentMessage[] = [],
 ): Promise<void> {
 	const telemetry = resolveTelemetry(config.telemetry, config.sessionId);
 	const invokeAgentSpan = startInvokeAgentSpan(telemetry, config.model);
@@ -882,6 +901,7 @@ async function runLoop(
 				telemetry,
 				invokeAgentSpan,
 				stepCounter,
+				initialMessages,
 				streamFn,
 			),
 		);
@@ -913,6 +933,12 @@ function endAgentStream(
 	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCount));
 	stream.end(newMessages);
 }
+function emitInputMessages(stream: EventStream<AgentEvent, AgentMessage[]>, messages: readonly AgentMessage[]): void {
+	for (const message of messages) {
+		stream.push({ type: "message_start", message });
+		stream.push({ type: "message_end", message });
+	}
+}
 
 /**
  * Resolve aside entries at the moment the loop is about to inject them. Each entry
@@ -940,6 +966,7 @@ async function runLoopBody(
 	telemetry: AgentTelemetry | undefined,
 	invokeAgentSpan: Span | undefined,
 	stepCounter: StepCounter,
+	initialMessages: AgentMessage[],
 	streamFn?: StreamFn,
 ): Promise<void> {
 	let deadlineTimer: Timer | undefined;
@@ -957,26 +984,33 @@ async function runLoopBody(
 		signal = signal ? AbortSignal.any([signal, deadlineAbortController.signal]) : deadlineAbortController.signal;
 	}
 
+	const softRequirementState = config.softToolRequirementState ?? { escalations: 0 };
+	let preserveSoftRequirementState = false;
+
 	try {
-		let firstTurn = true;
+		let messagesToEmit = [...initialMessages];
 		if (isDeadlineExceeded(config.deadline)) {
+			emitInputMessages(stream, messagesToEmit);
 			endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 			return;
 		}
 		// Check for steering messages at start (user may have typed while waiting).
 		// Skip when the run is already externally aborted — dequeuing would strand
 		// the messages in a run that is about to die.
-		let pendingMessages: AgentMessage[] = signal?.aborted ? [] : (await config.getSteeringMessages?.()) || [];
+		let pendingMessages: AgentMessage[];
+		try {
+			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.()) || [];
+		} catch (error) {
+			stream.push({ type: "turn_start" });
+			emitInputMessages(stream, messagesToEmit);
+			throw error;
+		}
 		let harmonyRetryAttempt = 0;
 		let harmonyTruncateResumeCount = 0;
 		let pausedTurnContinuations = 0;
 
-		// Soft tool requirement lifecycle (reminder → escalate; see SoftToolRequirement).
-		// `forcedToolChoice` carries a one-turn escalation into the next model call. It
-		// overrides the static toolChoice but NEVER the host's hard getToolChoice().
-		let softRequirementId: string | undefined;
-		let forcedToolChoice: ToolChoice | undefined;
-		let softEscalations = 0;
+		// Soft tool requirement lifecycle (reminder then escalation; see SoftToolRequirement).
+		// The host-owned state survives only a gate stop between Agent.prompt calls.
 		// Resolved once per logical turn at the fetch site below and reused across
 		// Harmony-leak re-samples (which re-enter the same turn) so the consuming
 		// getToolChoice is never advanced twice; the flag resets at the message boundary.
@@ -984,6 +1018,7 @@ async function runLoopBody(
 		let softRequiredTool: string | undefined;
 		let softSatisfies: SoftToolRequirement["satisfies"];
 		let directiveResolvedForTurn = false;
+		let turnOpen = false;
 
 		// Outer loop: continues when queued follow-up messages arrive after agent would stop
 		while (true) {
@@ -992,6 +1027,7 @@ async function runLoopBody(
 			// Inner loop: process tool calls and steering messages
 			while (hasMoreToolCalls || pendingMessages.length > 0) {
 				if (isDeadlineExceeded(config.deadline)) {
+					emitInputMessages(stream, messagesToEmit);
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
@@ -1002,62 +1038,111 @@ async function runLoopBody(
 				// engaged (host /pause). An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
 				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
-				if (!firstTurn) {
-					stream.push({ type: "turn_start" });
-				} else {
-					firstTurn = false;
-				}
 
-				// Process pending messages (inject before next assistant response)
+				// Build the provider-bound context before opening the turn. Queue
+				// messages are added now but their events remain deferred until
+				// provider preparation either succeeds or opens an error turn.
+				const turnMessages = messagesToEmit;
+				messagesToEmit = [];
 				if (pendingMessages.length > 0) {
 					for (const message of pendingMessages) {
-						stream.push({ type: "message_start", message });
-						stream.push({ type: "message_end", message });
 						currentContext.messages.push(message);
 						newMessages.push(message);
+						turnMessages.push(message);
 					}
 					pendingMessages = [];
 				}
 
-				// Refresh prompt/tool context from live state before each model call
-				if (config.syncContextBeforeModelCall) {
-					await config.syncContextBeforeModelCall(currentContext);
+				let preparedProviderCall: PreparedProviderCall;
+				let gateResult: AgentPreModelCallResult;
+				try {
+					if (config.syncContextBeforeModelCall) {
+						await config.syncContextBeforeModelCall(currentContext);
+					}
+
+					if (!directiveResolvedForTurn) {
+						const directive = signal?.aborted ? undefined : config.getToolChoice?.();
+						const softReq = isSoftToolRequirement(directive) ? directive : undefined;
+						hostToolChoice = directive === undefined || isSoftToolRequirement(directive) ? undefined : directive;
+						softRequiredTool = softReq?.toolName;
+						softSatisfies = softReq?.satisfies;
+						const softRequirementId = softRequirementState.id;
+						if (softReq !== undefined) {
+							if (softReq.id !== softRequirementId) {
+								softRequirementState.id = softReq.id;
+								softRequirementState.forcedToolChoice = undefined;
+								softRequirementState.escalations = 0;
+								for (const reminder of softReq.reminder) {
+									currentContext.messages.push(reminder);
+									newMessages.push(reminder);
+									turnMessages.push(reminder);
+								}
+							}
+						} else {
+							softRequirementState.id = undefined;
+							softRequirementState.forcedToolChoice = undefined;
+							softRequirementState.escalations = 0;
+						}
+						directiveResolvedForTurn = true;
+					}
+
+					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+					gateResult = await config.beforeModelCall?.(preparedProviderCall.context, signal);
+				} catch (error) {
+					if (!turnOpen) {
+						stream.push({ type: "turn_start" });
+						emitInputMessages(stream, turnMessages);
+						turnOpen = true;
+					}
+					throw error;
+				}
+				if (config.beforeModelCall && signal?.aborted) {
+					emitInputMessages(stream, turnMessages);
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
+				}
+				if (gateResult?.stop) {
+					if (gateResult.reason) {
+						logger.debug("Agent loop stopped before the model call", { reason: gateResult.reason });
+					}
+					if (!turnOpen && !signal?.aborted) {
+						try {
+							config.onToolChoiceRejected?.();
+						} catch (error) {
+							stream.push({ type: "turn_start" });
+							emitInputMessages(stream, turnMessages);
+							turnOpen = true;
+							throw error;
+						}
+					}
+					emitInputMessages(stream, turnMessages);
+					if (turnOpen) {
+						const stopMessage = createGateStopMessage(preparedProviderCall.model, gateResult.reason);
+						currentContext.messages.push(stopMessage);
+						newMessages.push(stopMessage);
+						stream.push({ type: "message_start", message: stopMessage });
+						stream.push({ type: "message_end", message: stopMessage });
+						await emitTurnEnd(
+							stream,
+							currentContext,
+							stopMessage,
+							[],
+							config,
+							signal,
+							{ willContinue: false },
+							true,
+						);
+						turnOpen = false;
+					}
+					preserveSoftRequirementState = !signal?.aborted;
+					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
+					return;
 				}
 
-				// Resolve the per-turn tool-choice directive ONCE per logical turn. The
-				// host hard-choice path (getToolChoice → nextToolChoice) is CONSUMING — it
-				// advances a generator on every call — so Harmony-leak retries, which
-				// re-sample the same turn via `continue` without a turn_end, must reuse the
-				// values fetched on the first attempt rather than double-advancing it.
-				// Fetched here (after pending-message flush + context sync, immediately
-				// before the call) so a throw in between cannot wedge an in-flight
-				// directive. A hard ToolChoice is applied verbatim; a SoftToolRequirement
-				// triggers the remind-then-escalate lifecycle: inject its reminder inline
-				// once per new id (toolChoice stays auto), and the gate below escalates to
-				// a forced choice only if the model declines. The host wrapper already
-				// dropped a soft requirement whose tool is inactive.
-				if (!directiveResolvedForTurn) {
-					const directive = signal?.aborted ? undefined : config.getToolChoice?.();
-					const softReq = isSoftToolRequirement(directive) ? directive : undefined;
-					hostToolChoice = directive === undefined || isSoftToolRequirement(directive) ? undefined : directive;
-					softRequiredTool = softReq?.toolName;
-					softSatisfies = softReq?.satisfies;
-					if (softReq !== undefined) {
-						if (softReq.id !== softRequirementId) {
-							softRequirementId = softReq.id;
-							softEscalations = 0;
-							for (const reminder of softReq.reminder) {
-								stream.push({ type: "message_start", message: reminder });
-								stream.push({ type: "message_end", message: reminder });
-								currentContext.messages.push(reminder);
-								newMessages.push(reminder);
-							}
-						}
-					} else {
-						softRequirementId = undefined;
-						softEscalations = 0;
-					}
-					directiveResolvedForTurn = true;
+				if (!turnOpen) {
+					stream.push({ type: "turn_start" });
+					emitInputMessages(stream, turnMessages);
+					turnOpen = true;
 				}
 
 				// Stream assistant response
@@ -1075,7 +1160,8 @@ async function runLoopBody(
 						streamFn,
 						harmonyRetryAttempt,
 						hostToolChoice,
-						forcedToolChoice,
+						softRequirementState.forcedToolChoice,
+						preparedProviderCall,
 					);
 					harmonyRetryAttempt = 0;
 					harmonyTruncateResumeCount = 0;
@@ -1118,7 +1204,7 @@ async function runLoopBody(
 
 				// The escalation choice (if any) applied to the call above; clear it so
 				// only the single escalation turn carries the forced choice.
-				forcedToolChoice = undefined;
+				softRequirementState.forcedToolChoice = undefined;
 
 				// A fresh logical turn re-resolves the directive next iteration; a Harmony
 				// retry `continue`s before this line and keeps the cached value.
@@ -1161,6 +1247,7 @@ async function runLoopBody(
 						});
 					}
 					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, { willContinue: false });
+					turnOpen = false;
 
 					stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
 					stream.end(newMessages);
@@ -1212,7 +1299,7 @@ async function runLoopBody(
 
 				const toolResults: ToolResultMessage[] = [];
 				if (softNonCompliant && softRequiredTool !== undefined) {
-					if (softEscalations >= MAX_SOFT_TOOL_ESCALATIONS) {
+					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
 						throw new Error(
 							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
 						);
@@ -1239,8 +1326,8 @@ async function runLoopBody(
 							status: "skipped",
 						});
 					}
-					forcedToolChoice = { type: "tool", name: softRequiredTool };
-					softEscalations++;
+					softRequirementState.forcedToolChoice = { type: "tool", name: softRequiredTool };
+					softRequirementState.escalations++;
 					hasMoreToolCalls = true;
 				} else if (hasMoreToolCalls) {
 					const executionResult = await executeToolCalls(
@@ -1306,6 +1393,7 @@ async function runLoopBody(
 				await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, {
 					willContinue: hasMoreToolCalls && !isDeadlineExceeded(config.deadline),
 				});
+				turnOpen = false;
 
 				if (isDeadlineExceeded(config.deadline)) {
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
@@ -1361,6 +1449,11 @@ async function runLoopBody(
 
 		endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 	} finally {
+		if (!preserveSoftRequirementState) {
+			softRequirementState.id = undefined;
+			softRequirementState.forcedToolChoice = undefined;
+			softRequirementState.escalations = 0;
+		}
 		if (deadlineTimer) {
 			clearTimeout(deadlineTimer);
 		}
@@ -1384,45 +1477,29 @@ async function emitHarmonyAudit(
 	);
 }
 
-/**
- * Stream an assistant response from the LLM.
- * This is where AgentMessage[] gets transformed to Message[] for the LLM.
- */
-async function streamAssistantResponse(
+interface PreparedProviderCall {
+	model: Model;
+	context: Context;
+	promptToolWireTools: Context["tools"];
+	ownedDialect: Dialect | undefined;
+}
+
+async function prepareProviderCall(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
-	stream: EventStream<AgentEvent, AgentMessage[]>,
-	telemetry: AgentTelemetry | undefined,
-	invokeAgentSpan: Span | undefined,
-	stepCounter: StepCounter,
-	streamFn?: StreamFn,
-	harmonyRetryAttempt = 0,
-	hostToolChoice?: ToolChoice,
-	forcedToolChoice?: ToolChoice,
-): Promise<AssistantMessage> {
-	// Re-resolve the model per provider call (like `getReasoning`): mid-run
-	// model switches — context promotion, retry fallback — must apply on the
-	// next call instead of the run silently finishing on the stale model
-	// captured at run start.
+): Promise<PreparedProviderCall> {
 	const model = config.getModel?.() ?? config.model;
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
 	if (config.transformContext) {
 		messages = await config.transformContext(messages, signal);
 	}
 
-	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
-
 	const ownedDialect: Dialect | undefined = config.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	const exampleDialect = ownedDialect ?? preferredDialect(model.id);
-	// Owned/in-band dialects carry the catalog in the prompt as text and send no
-	// native `tools`, so description pruning only applies to native tool calling.
 	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
-	// Build LLM context — append-only mode caches system prompt + tools
-	// AND keeps an append-only message log so prior-turn bytes are stable.
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
@@ -1442,9 +1519,6 @@ async function streamAssistantResponse(
 		llmContext = await config.transformProviderContext(llmContext, model);
 	}
 
-	// Owned tool calling: take tool calls away from the provider and run them
-	// through the selected in-band prompt dialect. `PI_DIALECT=1` still
-	// force-enables GLM; `PI_DIALECT=<dialect>` force-enables that dialect.
 	let promptToolWireTools: Context["tools"];
 	if (ownedDialect && llmContext.tools && llmContext.tools.length > 0) {
 		promptToolWireTools = llmContext.tools;
@@ -1455,6 +1529,29 @@ async function streamAssistantResponse(
 			tools: undefined,
 		};
 	}
+	return { model, context: llmContext, promptToolWireTools, ownedDialect };
+}
+
+/**
+ * Stream an assistant response from the LLM.
+ * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ */
+async function streamAssistantResponse(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	telemetry: AgentTelemetry | undefined,
+	invokeAgentSpan: Span | undefined,
+	stepCounter: StepCounter,
+	streamFn?: StreamFn,
+	harmonyRetryAttempt = 0,
+	hostToolChoice?: ToolChoice,
+	forcedToolChoice?: ToolChoice,
+	prepared?: PreparedProviderCall,
+): Promise<AssistantMessage> {
+	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
+	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
 
 	const streamFunction = streamFn || streamSimple;
 

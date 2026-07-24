@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Dropped unavailable forced tool choices through the queue rejection lifecycle and discarded their remaining sequence yields so a skipped force cannot disable tools on the next request.
+
 ## [17.1.3] - 2026-07-24
 
 ### Fixed

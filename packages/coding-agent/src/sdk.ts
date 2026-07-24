@@ -3020,6 +3020,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			dialect: resolveDialect(settings.get("tools.format"), model),
 			abortOnFabricatedToolResult: settings.get("tools.abortOnFabricatedResult"),
 			getToolChoice: () => session?.nextToolChoiceDirective(),
+			onToolChoiceUnavailable: () => session?.toolChoiceQueue.reject("unavailable"),
 			telemetry: options.telemetry,
 			appendOnlyContext: model
 				? shouldEnableAppendOnlyContext(settings.get("provider.appendOnlyContext"), model)

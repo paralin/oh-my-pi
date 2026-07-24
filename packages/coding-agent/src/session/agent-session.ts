@@ -1518,7 +1518,7 @@ export class AgentSession {
 
 		this.#toolChoiceQueue.pushSequence([forced, "none"], {
 			label: "user-force",
-			onRejected: () => "requeue",
+			onRejected: info => (info.reason === "unavailable" ? "drop_sequence" : "requeue"),
 		});
 	}
 

@@ -89,16 +89,16 @@ it("forces specific tool, then transitions to none, then clears", () => {
 	expect(third).toBeUndefined();
 });
 
-it("requeues a forced choice whose tool is filtered out before dequeue", async () => {
+it("drops an unavailable forced choice with the rest of its sequence", async () => {
 	session.setForcedToolChoice("write");
 
 	await session.setActiveToolsByName(["bash"]);
 	expect(session.nextToolChoiceDirective()).toBeUndefined();
 	expect(session.toolChoiceQueue.hasInFlight).toBe(false);
+	expect(session.nextToolChoiceDirective()).toBeUndefined();
 
 	await session.setActiveToolsByName(["bash", "write"]);
-	expect(session.nextToolChoiceDirective()).toEqual({ type: "tool", name: "write" });
-	session.toolChoiceQueue.clear();
+	expect(session.nextToolChoiceDirective()).toBeUndefined();
 });
 
 it("throws when forcing a non-active tool", () => {
