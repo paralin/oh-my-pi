@@ -709,6 +709,12 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 
 		await authStorage.getApiKey(PROVIDER, "sess");
 		const outcome = await authStorage.markUsageLimitReached(PROVIDER, "sess", { retryAfterMs: 3_600_000 });
-		expect(outcome).toEqual({ switched: false, retryAtMs: undefined });
+		// No sibling credential to switch to, so there is no retry time. The
+		// credential is still reported as usage-limited with the reset the provider
+		// gave, which is what lets a caller wait for the window instead of failing.
+		expect(outcome.switched).toBe(false);
+		expect(outcome.retryAtMs).toBeUndefined();
+		expect(outcome.usageLimited).toBe(true);
+		expect(outcome.resumeAtMs).toBeGreaterThan(Date.now());
 	});
 });

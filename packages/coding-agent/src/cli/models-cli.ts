@@ -21,6 +21,7 @@ import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } 
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { EventBus } from "../utils/event-bus";
+import { applyCodexHomeAuthToStorage } from "./codex-home";
 
 export type ModelsAction = "ls" | "find" | "refresh";
 
@@ -360,6 +361,9 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 	const authStorage = await discoverAuthStorage();
 	try {
 		const settings = await Settings.init({ cwd, configFiles: command.flags.config });
+		applyCodexHomeAuthToStorage(authStorage, {
+			configuredHomes: settings.get("providers.codexHomes"),
+		});
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		if (action === "refresh" && !json && process.stderr.isTTY) {

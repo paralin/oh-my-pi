@@ -24,6 +24,8 @@ import {
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
+import { type Args, reportUnrecognizedFlags } from "./cli/args";
+import { applyCodexHomeAuthToStorage } from "./cli/codex-home";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -1312,6 +1314,9 @@ export async function runRootCommand(
 		settingsInstance.override("compaction.remoteEnabled", scratchCompactionOverrides.remoteEnabled);
 		settingsInstance.override("scratchHandoff.standardCompactionEnabled", scratchCompactionOverrides.standardEnabled);
 	}
+	applyCodexHomeAuthToStorage(authStorage, {
+		configuredHomes: settingsInstance.get("providers.codexHomes"),
+	});
 	if (parsedArgs.approvalMode) {
 		// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 		// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.

@@ -120,6 +120,15 @@ export type AuthCredentialEntry = AuthCredential | AuthCredential[];
 
 export type AuthStorageData = Record<string, AuthCredentialEntry>;
 
+export interface RuntimeApiKeyChainCredential {
+	key: string;
+	label?: string;
+	accountId?: string;
+	email?: string;
+	projectId?: string;
+	usageType?: UsageCredential["type"];
+}
+
 /**
  * Cascade leg that supplies a provider's active credential, highest precedence
  * first — mirrors {@link AuthStorage.getApiKey}'s resolution order.
@@ -678,6 +687,10 @@ const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
 
 const USAGE_CACHE_PREFIX = "usage_cache:";
 const USAGE_FORCE_REFRESH_CACHE_PREFIX = "force-refresh:";
+// Provider-key suffix marking the runtime API key chain (config `codexHomes` /
+// `--codex-home-chain`). Chain block state is process-local; see
+// `#isRuntimeApiKeyChainProviderKey`.
+const RUNTIME_API_KEY_CHAIN_PROVIDER_KEY_SUFFIX = ":runtime_chain";
 const USAGE_HEADER_INGEST_INTERVAL_MS = 60_000;
 const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
 /**
@@ -749,10 +762,29 @@ export { isDefinitiveOAuthFailure } from "./error/auth-classify";
  * multi-hour) retry-after when it is sooner. `retryAtMs` is `undefined` when
  * no sibling credentials exist at all, or when the session has no tracked
  * credential to rotate away from.
+ *
+ * `resumeAtMs` (epoch ms) is the soonest moment any account in the pool regains
+ * capacity, derived from the provider's usage report: the current account's own
+ * window reset (uncapped by the default backoff) combined with `retryAtMs`. It
+ * is set even for a single-account pool, so a caller with nowhere to switch can
+ * sleep until the account itself resets and auto-resume instead of failing on
+ * the provider's blunt retry-after. When no usage report makes a concrete
+ * reset time known (API-key credential, a failed or lagging usage endpoint),
+ * the live usage-limit error the caller classified is itself the evidence, so
+ * `resumeAtMs` falls back to the current credential's block window (`now` +
+ * the caller's `retryAfterMs`, or the default backoff). It is `undefined` only
+ * on the `usageLimited: false` early return.
+ *
+ * `usageLimited` is `false` only when a caller asked for usage-report evidence
+ * before mutating credential state and the scoped report did not prove the
+ * current credential is exhausted. Ordinary `usage_limit_reached` callers omit
+ * that guard because the provider error is already the evidence.
  */
 export interface UsageLimitMarkResult {
 	switched: boolean;
 	retryAtMs?: number;
+	resumeAtMs?: number;
+	usageLimited?: boolean;
 }
 
 export type ModelUsageHealthState = "healthy" | "reserve" | "depleted" | "unknown";
@@ -1266,6 +1298,8 @@ export class AuthStorage {
 	/** Provider -> credentials cache, populated from store on reload(). */
 	#data: Map<string, StoredCredential[]> = new Map();
 	#runtimeOverrides: Map<string, string> = new Map();
+	#runtimeApiKeyChains: Map<string, RuntimeApiKeyChainCredential[]> = new Map();
+	#runtimeChainSessionLastCredential: Map<string, Map<string, number>> = new Map();
 	#configOverrides: Map<string, string> = new Map();
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
@@ -1469,6 +1503,25 @@ export class AuthStorage {
 		this.#runtimeOverrides.delete(provider);
 	}
 
+	setRuntimeApiKeyChain(provider: string, credentials: RuntimeApiKeyChainCredential[]): void {
+		const usable = credentials
+			.map(credential => ({ ...credential, key: credential.key.trim() }))
+			.filter(credential => credential.key.length > 0);
+		if (usable.length === 0) {
+			this.removeRuntimeApiKeyChain(provider);
+			return;
+		}
+		this.#runtimeApiKeyChains.set(provider, usable);
+		this.#runtimeChainSessionLastCredential.delete(provider);
+		this.#clearRuntimeApiKeyChainBackoff(provider);
+	}
+
+	removeRuntimeApiKeyChain(provider: string): void {
+		this.#runtimeApiKeyChains.delete(provider);
+		this.#runtimeChainSessionLastCredential.delete(provider);
+		this.#clearRuntimeApiKeyChainBackoff(provider);
+	}
+
 	/**
 	 * Register a per-provider API key sourced from user configuration
 	 * (e.g. `models.yml` `providers.<name>.apiKey`). Higher priority than
@@ -1670,6 +1723,31 @@ export class AuthStorage {
 		return `${provider}:${type}`;
 	}
 
+	#getRuntimeApiKeyChainProviderKey(provider: string): string {
+		return `${provider}${RUNTIME_API_KEY_CHAIN_PROVIDER_KEY_SUFFIX}`;
+	}
+
+	// Runtime API key chains (e.g. Codex `codexHomes`) are rebuilt from config
+	// every process and indexed by chain position, which has no stable mapping to
+	// a stored-credential DB id. The persisted per-credential block table is keyed
+	// by stored credentialId, so consulting it for a chain index attributes one
+	// account's block to whichever stored credential shares that numeric index —
+	// a differently-ordered set — poisoning a healthy home with an exhausted
+	// account's reset. Chain block state therefore stays in-memory only.
+	#isRuntimeApiKeyChainProviderKey(providerKey: string): boolean {
+		return providerKey.endsWith(RUNTIME_API_KEY_CHAIN_PROVIDER_KEY_SUFFIX);
+	}
+
+	#clearRuntimeApiKeyChainBackoff(provider: string): void {
+		const providerKey = this.#getRuntimeApiKeyChainProviderKey(provider);
+		const scopedPrefix = `${providerKey}\0`;
+		for (const key of this.#credentialBackoff.keys()) {
+			if (key === providerKey || key.startsWith(scopedPrefix)) {
+				this.#credentialBackoff.delete(key);
+			}
+		}
+	}
+
 	/**
 	 * Returns next index in round-robin sequence for load distribution.
 	 * Increments stored counter and wraps at total.
@@ -1799,6 +1877,11 @@ export class AuthStorage {
 			}
 		}
 
+		// Runtime chain indices do not map to a stored credentialId; the persisted
+		// block table would attribute a stored account's block to a chain home at
+		// the same numeric position. Keep chain blocks in-memory only.
+		if (this.#isRuntimeApiKeyChainProviderKey(providerKey)) return blockedUntil;
+
 		const credentialId = this.#getStoredCredentials(provider)[credentialIndex]?.id;
 		if (credentialId === undefined) return blockedUntil;
 		const persistedGlobalBlockedUntil = this.#readPersistedCredentialBlock(credentialId, providerKey, "");
@@ -1848,6 +1931,11 @@ export class AuthStorage {
 		probeAfterMap.set(credentialIndex, Math.min(nextBlockedUntil, Date.now() + USAGE_REPORT_TTL_MS));
 		this.#credentialBackoffProbeAfter.set(backoffKey, probeAfterMap);
 		this.#invalidateUsageReportCache(provider);
+
+		// Runtime chain blocks stay in-memory: their index has no stored
+		// credentialId, so persisting would poison an unrelated stored credential's
+		// block at the same numeric position (see #isRuntimeApiKeyChainProviderKey).
+		if (this.#isRuntimeApiKeyChainProviderKey(providerKey)) return;
 
 		const upsertCredentialBlock = this.#store.upsertCredentialBlock?.bind(this.#store);
 		if (!upsertCredentialBlock || this.#persistedBlockStoreDamaged) return;
@@ -1901,6 +1989,20 @@ export class AuthStorage {
 			"Persistent credential store is corrupt; cross-process rate-limit persistence is disabled for this process. In-memory backoff still applies. Repair the store with `sqlite3 <path> '.recover'` or delete it to recreate on next login.",
 			{ err, store },
 		);
+	}
+
+	#clearCredentialBlocked(
+		providerKey: string,
+		credentialIndex: number,
+		blockScope: string | undefined = undefined,
+	): void {
+		const backoffKey = this.#toScopedBackoffKey(providerKey, blockScope);
+		const backoffMap = this.#credentialBackoff.get(backoffKey);
+		if (!backoffMap) return;
+		backoffMap.delete(credentialIndex);
+		if (backoffMap.size === 0) {
+			this.#credentialBackoff.delete(backoffKey);
+		}
 	}
 
 	/**
@@ -1999,6 +2101,28 @@ export class AuthStorage {
 			this.#store.setCache(cacheKey, "", 0);
 		} catch (err) {
 			logger.debug("Failed to clear session sticky credential from persistent store cache", { err });
+		}
+	}
+
+	#recordRuntimeApiKeyChainSessionCredential(provider: string, sessionId: string | undefined, index: number): void {
+		if (!sessionId) return;
+		const sessionMap = this.#runtimeChainSessionLastCredential.get(provider) ?? new Map<string, number>();
+		sessionMap.set(sessionId, index);
+		this.#runtimeChainSessionLastCredential.set(provider, sessionMap);
+	}
+
+	#getRuntimeApiKeyChainSessionCredential(provider: string, sessionId: string | undefined): number | undefined {
+		if (!sessionId) return undefined;
+		return this.#runtimeChainSessionLastCredential.get(provider)?.get(sessionId);
+	}
+
+	#clearRuntimeApiKeyChainSessionCredential(provider: string, sessionId: string | undefined): void {
+		if (!sessionId) return;
+		const sessionMap = this.#runtimeChainSessionLastCredential.get(provider);
+		if (!sessionMap) return;
+		sessionMap.delete(sessionId);
+		if (sessionMap.size === 0) {
+			this.#runtimeChainSessionLastCredential.delete(provider);
 		}
 	}
 
@@ -2685,6 +2809,7 @@ export class AuthStorage {
 	 */
 	hasAuth(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
+		if ((this.#runtimeApiKeyChains.get(provider)?.length ?? 0) > 0) return true;
 		if (this.#configOverrides.has(provider)) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if (getEnvApiKey(provider)) return true;
@@ -2705,6 +2830,7 @@ export class AuthStorage {
 	 */
 	hasNonEnvCredential(provider: string): boolean {
 		if (this.#runtimeOverrides.has(provider)) return true;
+		if ((this.#runtimeApiKeyChains.get(provider)?.length ?? 0) > 0) return true;
 		if (this.#configOverrides.has(provider)) return true;
 		if (this.#getCredentialsForProvider(provider).length > 0) return true;
 		if (this.#fallbackResolver?.(provider)) return true;
@@ -2721,6 +2847,7 @@ export class AuthStorage {
 	 */
 	getCredentialOrigin(provider: string): CredentialOrigin | undefined {
 		if (this.#runtimeOverrides.has(provider)) return { kind: "runtime" };
+		if ((this.#runtimeApiKeyChains.get(provider)?.length ?? 0) > 0) return { kind: "runtime" };
 		if (this.#configOverrides.has(provider)) return { kind: "config" };
 		const stored = this.#getCredentialsForProvider(provider);
 		if (stored.some(credential => credential.type === "oauth")) return { kind: "oauth" };
@@ -2737,6 +2864,7 @@ export class AuthStorage {
 	 * Check if OAuth credentials are configured for a provider.
 	 */
 	hasOAuth(provider: string): boolean {
+		if (this.#runtimeApiKeyChains.get(provider)?.some(credential => credential.usageType === "oauth")) return true;
 		return this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth");
 	}
 
@@ -2787,6 +2915,9 @@ export class AuthStorage {
 	 * Returns `undefined` when no OAuth credential carries an `accountId`.
 	 */
 	getOAuthAccountId(provider: string, sessionId?: string): string | undefined {
+		const runtimeIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+		const runtimeCredential = this.#runtimeApiKeyChains.get(provider)?.[runtimeIndex];
+		if (runtimeCredential?.usageType === "oauth" && runtimeCredential.accountId) return runtimeCredential.accountId;
 		const preferred = this.#resolveActiveOAuthCredential(provider, sessionId);
 		const accountId = preferred?.accountId;
 		return typeof accountId === "string" && accountId.length > 0 ? accountId : undefined;
@@ -2798,6 +2929,15 @@ export class AuthStorage {
 	 * metadata paths; it does not refresh tokens, rank usage, or advance selection.
 	 */
 	getOAuthAccountIdentity(provider: string, sessionId?: string): OAuthAccountIdentity | undefined {
+		const runtimeIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+		const runtimeCredential = this.#runtimeApiKeyChains.get(provider)?.[runtimeIndex];
+		if (runtimeCredential?.usageType === "oauth") {
+			const identity: OAuthAccountIdentity = {};
+			if (runtimeCredential.accountId) identity.accountId = runtimeCredential.accountId;
+			if (runtimeCredential.email) identity.email = runtimeCredential.email;
+			if (runtimeCredential.projectId) identity.projectId = runtimeCredential.projectId;
+			if (identity.accountId || identity.email || identity.projectId) return identity;
+		}
 		const preferred = this.#resolveActiveOAuthCredential(provider, sessionId);
 		if (!preferred) return undefined;
 		const identity: OAuthAccountIdentity = {};
@@ -2818,6 +2958,21 @@ export class AuthStorage {
 		}
 		if (!identity.accountId && !identity.email && !identity.projectId && !identity.orgId) return undefined;
 		return identity;
+	}
+
+	/**
+	 * Label of the runtime API key chain credential the session is currently
+	 * bound to for a provider — the `--codex-home` / `codexHomes` entry name (or
+	 * its email/account id when unnamed). Returns undefined when the provider has
+	 * no runtime chain, so callers can surface the active account only while a
+	 * chain is in use.
+	 */
+	getActiveRuntimeChainLabel(provider: string, sessionId?: string): string | undefined {
+		const chain = this.#runtimeApiKeyChains.get(provider);
+		if (!chain || chain.length === 0) return undefined;
+		const index = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+		const credential = chain[index] ?? chain[0];
+		return credential.label ?? credential.email ?? credential.accountId;
 	}
 
 	/**
@@ -3048,6 +3203,33 @@ export class AuthStorage {
 		baseUrl?: string,
 	): UsageRequestDescriptor {
 		return this.#buildUsageRequest(provider, this.#buildUsageCredential(credential), baseUrl);
+	}
+
+	#buildUsageCredentialForRuntimeApiKey(credential: RuntimeApiKeyChainCredential): UsageCredential {
+		if (credential.usageType === "oauth") {
+			return {
+				type: "oauth",
+				accessToken: credential.key,
+				accountId: credential.accountId,
+				email: credential.email,
+				projectId: credential.projectId,
+			};
+		}
+		return {
+			type: "api_key",
+			apiKey: credential.key,
+			accountId: credential.accountId,
+			email: credential.email,
+			projectId: credential.projectId,
+		};
+	}
+
+	#buildUsageRequestForRuntimeApiKey(
+		provider: Provider,
+		credential: RuntimeApiKeyChainCredential,
+		baseUrl?: string,
+	): UsageRequestDescriptor {
+		return this.#buildUsageRequest(provider, this.#buildUsageCredentialForRuntimeApiKey(credential), baseUrl);
 	}
 
 	#buildRefreshableOauthCredential(credential: UsageCredential): OAuthCredential | null {
@@ -3420,6 +3602,33 @@ export class AuthStorage {
 		return this.#store.getClientUsageSummary?.(sinceMs) ?? { clients: [] };
 	}
 
+	#resolveObservedUsageCredential(provider: Provider, sessionId?: string): UsageCredential | undefined {
+		const runtimeChain = this.#runtimeApiKeyChains.get(provider);
+		const runtimeIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId);
+		if (runtimeChain && runtimeIndex !== undefined && runtimeChain[runtimeIndex]) {
+			return this.#buildUsageCredentialForRuntimeApiKey(runtimeChain[runtimeIndex]);
+		}
+		const entries = this.#getStoredCredentials(provider);
+		const sessionCredential = this.#getSessionCredential(provider, sessionId);
+		if (sessionCredential) {
+			const credential = entries[sessionCredential.index]?.credential;
+			if (credential) {
+				return credential.type === "api_key"
+					? { type: "api_key", apiKey: credential.key }
+					: this.#buildUsageCredential(credential);
+			}
+		}
+		if (entries.length === 1) {
+			const credential = entries[0]!.credential;
+			return credential.type === "api_key"
+				? { type: "api_key", apiKey: credential.key }
+				: this.#buildUsageCredential(credential);
+		}
+		const envKey = getEnvApiKey(provider);
+		if (envKey) return { type: "api_key", apiKey: envKey };
+		return undefined;
+	}
+
 	ingestUsageHeaders(
 		provider: Provider,
 		headers: Record<string, string>,
@@ -3429,12 +3638,10 @@ export class AuthStorage {
 		const parseHeaders = this.#usageProviderResolver?.(provider)?.parseRateLimitHeaders;
 		if (!parseHeaders) return false;
 
-		const credential = this.#resolveActiveOAuthCredential(provider, options?.sessionId);
+		const credential = this.#resolveObservedUsageCredential(provider, options?.sessionId);
 		if (!credential) return false;
 
-		const cacheKey = this.#buildUsageReportCacheKey(
-			this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl),
-		);
+		const cacheKey = this.#buildUsageReportCacheKey(this.#buildUsageRequest(provider, credential, options?.baseUrl));
 		const now = Date.now();
 		const parsedReport = parseHeaders(headers, now);
 		if (!parsedReport) return false;
@@ -3553,6 +3760,15 @@ export class AuthStorage {
 			}
 
 			if (entries.length === 0) {
+				const runtimeChain = this.#runtimeApiKeyChains.get(providerId);
+				if (runtimeChain && runtimeChain.length > 0) {
+					for (const credential of runtimeChain) {
+						const request = this.#buildUsageRequestForRuntimeApiKey(provider, credential, baseUrl);
+						if (providerImpl.supports && !providerImpl.supports(request)) continue;
+						requests.push(request);
+					}
+					continue;
+				}
 				const runtimeKey = this.#runtimeOverrides.get(providerId);
 				const envKey = getEnvApiKey(providerId);
 				const apiKey = runtimeKey ?? envKey;
@@ -3768,6 +3984,26 @@ export class AuthStorage {
 		return Math.min(...candidates);
 	}
 
+	/**
+	 * Returns the epoch ms at which an account regains capacity: the latest reset
+	 * among its exhausted windows that report one. An account is usable only once
+	 * every exhausted window has reset, so this takes the max, unlike
+	 * {@link #getUsageResetAtMs} which returns the soonest reset for block timing.
+	 * Exhausted windows with no known reset are skipped — the wait targets the
+	 * windows we can time and a post-resume retry re-checks and waits again if the
+	 * account is still limited.
+	 */
+	#getUsageUsableAtMs(limits: UsageLimit[], nowMs: number): number | undefined {
+		let usableAt: number | undefined;
+		for (const limit of limits) {
+			if (!this.#isUsageLimitExhausted(limit)) continue;
+			const resetsAt = limit.window?.resetsAt;
+			if (resetsAt === undefined || !(resetsAt > nowMs)) continue;
+			if (usableAt === undefined || resetsAt > usableAt) usableAt = resetsAt;
+		}
+		return usableAt;
+	}
+
 	async #getUsageReport(
 		provider: Provider,
 		credential: AuthCredential,
@@ -3801,6 +4037,55 @@ export class AuthStorage {
 		return this.#fetchUsageCached(this.#buildUsageRequest(provider, usageCredential, options?.baseUrl), {
 			timeoutMs: options?.timeoutMs ?? this.#usageRequestTimeoutMs,
 		});
+	}
+
+	async #getUsageReportFreshForOauth(
+		provider: Provider,
+		credential: OAuthCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null> {
+		const storeHook = this.#store.getUsageReport?.bind(this.#store);
+		if (storeHook) {
+			return storeHook(provider, credential, options?.signal);
+		}
+		const request = this.#buildUsageRequestForOauth(provider, credential, options?.baseUrl);
+		const report = await this.#fetchUsageUncached(request, options?.timeoutMs ?? this.#usageRequestTimeoutMs);
+		if (report !== null) {
+			this.#usageCache.set(this.#buildUsageReportCacheKey(request), {
+				value: report,
+				expiresAt: Date.now() + USAGE_REPORT_TTL_MS,
+			});
+			this.#recordUsageHistory(request, report);
+		}
+		return report;
+	}
+
+	async #getUsageReportForRuntimeApiKey(
+		provider: Provider,
+		credential: RuntimeApiKeyChainCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null> {
+		return this.#fetchUsageCached(
+			this.#buildUsageRequestForRuntimeApiKey(provider, credential, options?.baseUrl),
+			options?.timeoutMs ?? this.#usageRequestTimeoutMs,
+		);
+	}
+
+	async #getUsageReportFreshForRuntimeApiKey(
+		provider: Provider,
+		credential: RuntimeApiKeyChainCredential,
+		options?: { baseUrl?: string; timeoutMs?: number; signal?: AbortSignal },
+	): Promise<UsageReport | null> {
+		const request = this.#buildUsageRequestForRuntimeApiKey(provider, credential, options?.baseUrl);
+		const report = await this.#fetchUsageUncached(request, options?.timeoutMs ?? this.#usageRequestTimeoutMs);
+		if (report !== null) {
+			this.#usageCache.set(this.#buildUsageReportCacheKey(request), {
+				value: report,
+				expiresAt: Date.now() + USAGE_REPORT_TTL_MS,
+			});
+			this.#recordUsageHistory(request, report);
+		}
+		return report;
 	}
 
 	/**
@@ -4412,8 +4697,12 @@ export class AuthStorage {
 			apiKey?: string;
 			credentialId?: number;
 			signal?: AbortSignal;
+			requireUsageEvidence?: boolean;
 		},
 	): Promise<UsageLimitMarkResult> {
+		const runtimeMark = await this.#markRuntimeApiKeyChainUsageLimitReached(provider as Provider, sessionId, options);
+		if (runtimeMark) return runtimeMark;
+
 		let sessionCredential = await this.#resolveCredentialTarget(provider, sessionId, {
 			credentialId: options?.credentialId,
 			apiKey: options?.apiKey,
@@ -4440,6 +4729,8 @@ export class AuthStorage {
 		const routing = this.#credentialBlockRouting(provider, credentialType, options?.modelId);
 		const now = Date.now();
 		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		let currentResumeAtMs: number | undefined;
+		let currentUsageLimited = false;
 
 		if (credentialType === "oauth" && target.credential.type === "oauth" && routing.strategy) {
 			const report = await raceUsageWithSignal(
@@ -4449,21 +4740,117 @@ export class AuthStorage {
 			if (report) {
 				const scopedLimits = this.#getScopedUsageLimits(routing.strategy, report, routing.rankingContext);
 				if (this.#isUsageLimitReached(scopedLimits)) {
+					currentUsageLimited = true;
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
 					if (resetAtMs && resetAtMs > blockedUntil) {
 						blockedUntil = resetAtMs;
 					}
+					currentResumeAtMs = this.#getUsageUsableAtMs(scopedLimits, now);
 				}
 			}
 		}
 		options?.signal?.throwIfAborted();
+
+		if (options?.requireUsageEvidence && !currentUsageLimited) {
+			return { switched: false, usageLimited: false };
+		}
 
 		// Usage lookup may refresh, disable, or remove a row. Re-resolve its
 		// durable id before applying positional in-memory and persisted blocks.
 		const targetIndex = this.#getStoredCredentials(provider).findIndex(
 			entry => entry.id === targetCredentialId && entry.credential.type === credentialType,
 		);
-		return this.#blockCredentialForRotation(provider, credentialType, targetIndex, blockedUntil, routing);
+		if (targetIndex >= 0) {
+			this.#markCredentialBlocked(provider, routing.providerKey, targetIndex, blockedUntil, routing.blockScope);
+		}
+
+		const remainingCredentials = this.#getCredentialsForProvider(provider)
+			.map((credential, index) => ({ credential, index }))
+			.filter(
+				(entry): entry is { credential: AuthCredential; index: number } =>
+					entry.credential.type === credentialType && entry.index !== targetIndex,
+			);
+
+		let retryAtMs: number | undefined;
+		let soonestSiblingIndex: number | undefined;
+		for (const candidate of remainingCredentials) {
+			// Sibling availability must use the same scope set selection reads, or
+			// this reports a sibling as free that selection will then refuse, most
+			// visibly when the sibling still carries a legacy shared block.
+			let candidateBlockedUntil = this.#getCredentialBlockedUntil(
+				provider,
+				routing.providerKey,
+				candidate.index,
+				routing.siblingBlockScopes,
+			);
+			if (candidateBlockedUntil === undefined) return { switched: true, usageLimited: true };
+			if (candidate.credential.type === "oauth" && routing.strategy) {
+				const report = await this.#getUsageReportFreshForOauth(provider as Provider, candidate.credential, {
+					...options,
+					timeoutMs: this.#usageRequestTimeoutMs,
+				});
+				if (report) {
+					const scopedLimits = this.#getScopedUsageLimits(routing.strategy, report, routing.rankingContext);
+					if (!this.#isUsageLimitReached(scopedLimits)) {
+						this.#clearCredentialBlocked(routing.providerKey, candidate.index, routing.blockScope);
+						return { switched: true, usageLimited: true };
+					}
+					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
+					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
+						this.#markCredentialBlocked(provider, routing.providerKey, candidate.index, resetAtMs, routing.blockScope);
+						candidateBlockedUntil = resetAtMs;
+					}
+				}
+			}
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) {
+				retryAtMs = candidateBlockedUntil;
+				soonestSiblingIndex = candidate.index;
+			}
+		}
+
+		// Every account of this type/scope is usage-limited (no sibling returned
+		// `switched: true` above). Compute the soonest moment any account regains
+		// capacity, switch the session's sticky credential to that account so the
+		// post-wait re-rank resumes on it, and log the concrete reset time so the
+		// wait is auditable. The current account's usable-at uses the later of its
+		// exhausted windows (`currentResumeAtMs`); a sibling's is the soonest reset
+		// it was blocked until (`retryAtMs`). Whichever is earlier owns both the
+		// wait target the caller sleeps on and the account it resumes on.
+		// When the usage report supplied no usable-at time (API-key credential,
+		// a failed or lagging usage endpoint), the live usage-limit error that
+		// brought the caller here is itself the evidence: the current
+		// credential's block window (`now` + the caller's retry-after) is the
+		// soonest known reset. Without this fallback a single-account pool has
+		// resumeAtMs undefined and the session bails at the fail-fast cap
+		// instead of sleeping out the provider's own wait and auto-resuming.
+		if (currentResumeAtMs === undefined) {
+			currentResumeAtMs = blockedUntil;
+		}
+		const resumeAtMs = this.#soonestDefined(currentResumeAtMs, retryAtMs);
+		if (resumeAtMs !== undefined) {
+			const switchToSibling =
+				retryAtMs !== undefined && (currentResumeAtMs === undefined || retryAtMs < currentResumeAtMs);
+			const switchIndex = switchToSibling ? soonestSiblingIndex : sessionCredential.index;
+			if (switchIndex !== undefined && switchIndex !== sessionCredential.index) {
+				this.#recordSessionCredential(provider, sessionId, sessionCredential.type, switchIndex);
+			}
+			logger.info("All OAuth accounts usage-limited; waiting for the soonest reset", {
+				provider,
+				accountCount: remainingCredentials.length + 1,
+				switchToIndex: switchIndex,
+				resumeAtMs,
+				resumeAt: new Date(resumeAtMs).toISOString(),
+				waitMs: Math.max(0, resumeAtMs - now),
+			});
+		}
+		return { switched: false, retryAtMs, resumeAtMs, usageLimited: true };
+	}
+
+	/** Returns the smaller of two optional epoch-ms values, or whichever is defined. */
+	#soonestDefined(a: number | undefined, b: number | undefined): number | undefined {
+		if (a === undefined) return b;
+		if (b === undefined) return a;
+		return Math.min(a, b);
 	}
 
 	#resolveWindowResetAt(window: UsageLimit["window"]): number | undefined {
@@ -4687,6 +5074,159 @@ export class AuthStorage {
 			});
 		}
 		return this.#orderUsageRankedCandidates(ranked, args.planRequirement);
+	}
+
+	async #resolveRuntimeApiKeyChain(
+		provider: Provider,
+		sessionId: string | undefined,
+		options?: AuthApiKeyOptions,
+	): Promise<string | undefined> {
+		const credentials = this.#runtimeApiKeyChains.get(provider);
+		if (!credentials || credentials.length === 0) return undefined;
+
+		const providerKey = this.#getRuntimeApiKeyChainProviderKey(provider);
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		const planRequirement = resolveOpenAICodexPlanRequirement(provider, options?.modelId);
+		const hasPlanRequirement = planRequirement !== "none";
+		const checkUsage = strategy !== undefined && (credentials.length > 1 || hasPlanRequirement);
+		const sessionPreferredIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId);
+		if (
+			sessionPreferredIndex !== undefined &&
+			credentials[sessionPreferredIndex] &&
+			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScope) &&
+			!hasPlanRequirement
+		) {
+			return credentials[sessionPreferredIndex].key;
+		}
+
+		let fallbackIndex = 0;
+		let fallbackBlockedUntil: number | undefined;
+		for (let index = 0; index < credentials.length; index += 1) {
+			const blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index, blockScope);
+			if (
+				index === 0 ||
+				(blockedUntil !== undefined && (fallbackBlockedUntil === undefined || blockedUntil < fallbackBlockedUntil))
+			) {
+				fallbackIndex = index;
+				fallbackBlockedUntil = blockedUntil;
+			}
+			if (blockedUntil !== undefined) continue;
+
+			const credential = credentials[index]!;
+			if (checkUsage && strategy) {
+				const usage = await this.#getUsageReportForRuntimeApiKey(provider, credential, {
+					...options,
+					timeoutMs: this.#usageRequestTimeoutMs,
+				});
+				if (hasPlanRequirement && getOpenAICodexPlanEligibility(usage, planRequirement) !== true) continue;
+				if (usage) {
+					const scopedLimits = this.#getScopedUsageLimits(strategy, usage, rankingContext);
+					if (this.#isUsageLimitReached(scopedLimits)) {
+						const resetAtMs = this.#getUsageResetAtMs(scopedLimits, Date.now());
+						this.#markCredentialBlocked(
+							provider,
+							providerKey,
+							index,
+							resetAtMs ?? Date.now() + AuthStorage.#defaultBackoffMs,
+							blockScope,
+						);
+						continue;
+					}
+				}
+			}
+
+			this.#recordRuntimeApiKeyChainSessionCredential(provider, sessionId, index);
+			return credential.key;
+		}
+
+		const fallback = credentials[fallbackIndex];
+		if (!fallback) return undefined;
+		this.#recordRuntimeApiKeyChainSessionCredential(provider, sessionId, fallbackIndex);
+		return fallback.key;
+	}
+
+	async #markRuntimeApiKeyChainUsageLimitReached(
+		provider: Provider,
+		sessionId: string | undefined,
+		options?: {
+			retryAfterMs?: number;
+			baseUrl?: string;
+			modelId?: string;
+			signal?: AbortSignal;
+			requireUsageEvidence?: boolean;
+		},
+	): Promise<UsageLimitMarkResult | undefined> {
+		const credentials = this.#runtimeApiKeyChains.get(provider);
+		const index = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId);
+		if (!credentials || index === undefined || !credentials[index]) return undefined;
+
+		const providerKey = this.#getRuntimeApiKeyChainProviderKey(provider);
+		const strategy = this.#rankingStrategyResolver?.(provider);
+		const rankingContext: CredentialRankingContext = { modelId: options?.modelId };
+		const blockScope = strategy?.blockScope?.(rankingContext);
+		const now = Date.now();
+		let blockedUntil = now + (options?.retryAfterMs ?? AuthStorage.#defaultBackoffMs);
+		let currentResumeAtMs: number | undefined;
+		let currentUsageLimited = false;
+		if (strategy) {
+			const report = await this.#getUsageReportForRuntimeApiKey(provider, credentials[index], options);
+			if (report) {
+				const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+				if (this.#isUsageLimitReached(scopedLimits)) {
+					currentUsageLimited = true;
+					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
+					if (resetAtMs && resetAtMs > blockedUntil) {
+						blockedUntil = resetAtMs;
+					}
+					currentResumeAtMs = this.#getUsageUsableAtMs(scopedLimits, now);
+				}
+			}
+		}
+		if (options?.requireUsageEvidence && !currentUsageLimited) {
+			return { switched: false, usageLimited: false };
+		}
+		this.#markCredentialBlocked(provider, providerKey, index, blockedUntil, blockScope);
+		this.#clearRuntimeApiKeyChainSessionCredential(provider, sessionId);
+
+		let retryAtMs: number | undefined;
+		for (let candidateIndex = 0; candidateIndex < credentials.length; candidateIndex += 1) {
+			if (candidateIndex === index) continue;
+			let candidateBlockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, candidateIndex, blockScope);
+			if (candidateBlockedUntil === undefined) return { switched: true, usageLimited: true };
+			if (strategy) {
+				const report = await this.#getUsageReportFreshForRuntimeApiKey(provider, credentials[candidateIndex]!, {
+					...options,
+					timeoutMs: this.#usageRequestTimeoutMs,
+				});
+				if (report) {
+					const scopedLimits = this.#getScopedUsageLimits(strategy, report, rankingContext);
+					if (!this.#isUsageLimitReached(scopedLimits)) {
+						this.#clearCredentialBlocked(providerKey, candidateIndex, blockScope);
+						return { switched: true, usageLimited: true };
+					}
+					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
+					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
+						this.#markCredentialBlocked(provider, providerKey, candidateIndex, resetAtMs, blockScope);
+						candidateBlockedUntil = resetAtMs;
+					}
+				}
+			}
+			if (retryAtMs === undefined || candidateBlockedUntil < retryAtMs) retryAtMs = candidateBlockedUntil;
+		}
+		// Same fallback as the OAuth path: with no usage-report usable-at time,
+		// the current credential's block window is the soonest known reset, so
+		// single-key pools sleep and auto-resume instead of failing at the cap.
+		if (currentResumeAtMs === undefined) {
+			currentResumeAtMs = blockedUntil;
+		}
+		return {
+			switched: false,
+			retryAtMs,
+			resumeAtMs: this.#soonestDefined(currentResumeAtMs, retryAtMs),
+			usageLimited: true,
+		};
 	}
 
 	/**
@@ -5340,6 +5880,11 @@ export class AuthStorage {
 			return runtimeKey;
 		}
 
+		const runtimeChain = this.#runtimeApiKeyChains.get(provider);
+		if (runtimeChain?.[0]) {
+			return runtimeChain[0].key;
+		}
+
 		const configKey = this.#configOverrides.get(provider);
 		if (configKey) {
 			return configKey;
@@ -5399,6 +5944,11 @@ export class AuthStorage {
 		const runtimeKey = this.#runtimeOverrides.get(provider);
 		if (runtimeKey) {
 			return runtimeKey;
+		}
+
+		const runtimeChainKey = await this.#resolveRuntimeApiKeyChain(provider as Provider, sessionId, options);
+		if (runtimeChainKey) {
+			return runtimeChainKey;
 		}
 
 		// Config override: explicit apiKey pinned in models.yml beats the broker's
@@ -5462,8 +6012,8 @@ export class AuthStorage {
 	 * scenarios, prefer {@link AuthStorage.getApiKey}.
 	 *
 	 * Returns `undefined` when no OAuth credential is available, the
-	 * credential fails to refresh, or runtime/config overrides have replaced
-	 * OAuth with an explicit API key.
+	 * credential fails to refresh, or a runtime/config API-key override has
+	 * replaced OAuth.
 	 */
 	async getOAuthAccess(
 		provider: string,
@@ -5475,6 +6025,20 @@ export class AuthStorage {
 		// suppressed (same contract as `getOAuthAccountId`).
 		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
 			return undefined;
+		}
+		const runtimeChain = this.#runtimeApiKeyChains.get(provider);
+		if (runtimeChain && runtimeChain.length > 0) {
+			const accessToken = await this.#resolveRuntimeApiKeyChain(provider as Provider, sessionId, options);
+			if (!accessToken) return undefined;
+			const runtimeIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+			const credential = runtimeChain[runtimeIndex] ?? runtimeChain[0];
+			if (credential?.usageType !== "oauth") return undefined;
+			return {
+				accessToken,
+				accountId: credential.accountId,
+				email: credential.email,
+				projectId: credential.projectId,
+			};
 		}
 		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);
 		if (!resolved) return undefined;
@@ -6190,6 +6754,28 @@ export class AuthStorage {
 		const error = options?.error;
 		const status = AIError.status(error);
 		const message = error instanceof Error ? error.message : typeof error === "string" ? error : undefined;
+		const runtimeIndex = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId);
+		const runtimeChain = this.#runtimeApiKeyChains.get(provider);
+		if (runtimeChain && runtimeIndex !== undefined && runtimeChain[runtimeIndex]) {
+			if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
+				return (
+					(
+						await this.#markRuntimeApiKeyChainUsageLimitReached(provider as Provider, sessionId, {
+							modelId: options?.modelId,
+							signal: options?.signal,
+						})
+					)?.switched === true
+				);
+			}
+			const providerKey = this.#getRuntimeApiKeyChainProviderKey(provider);
+			const hasSibling = runtimeChain.some(
+				(_credential, index) => index !== runtimeIndex && !this.#isCredentialBlocked(provider, providerKey, index),
+			);
+			this.#clearRuntimeApiKeyChainSessionCredential(provider, sessionId);
+			this.#markCredentialBlocked(provider, providerKey, runtimeIndex, Date.now() + AuthStorage.#defaultBackoffMs);
+			return hasSibling;
+		}
+
 		if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) {
 			// Thread the provider-specified reset window (e.g. Devin "Your limit
 			// will reset in 13 minutes") into the block duration so the credential
@@ -6603,6 +7189,13 @@ export class AuthStorage {
 	describeCredentialSource(provider: string, sessionId?: string): string | undefined {
 		if (this.#runtimeOverrides.has(provider)) {
 			return "runtime override (--api-key)";
+		}
+		const runtimeChain = this.#runtimeApiKeyChains.get(provider);
+		if (runtimeChain && runtimeChain.length > 0) {
+			const index = this.#getRuntimeApiKeyChainSessionCredential(provider, sessionId) ?? 0;
+			const credential = runtimeChain[index] ?? runtimeChain[0];
+			const identity = credential.label ?? credential.email ?? credential.accountId ?? `entry ${index + 1}`;
+			return `runtime credential chain (${identity})`;
 		}
 		if (this.#configOverrides.has(provider)) {
 			return "config override (models.yml)";
