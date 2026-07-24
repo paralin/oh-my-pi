@@ -2183,6 +2183,40 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"scratchHandoff.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Scratch Handoff",
+			label: "Scratch Handoff",
+			description:
+				"Create a per-session scratch handoff file and inject continuity instructions into the system prompt",
+		},
+	},
+
+	"scratchHandoff.standardCompactionEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Scratch Handoff",
+			label: "Standard Compaction Summary",
+			description: "Generate a portable plaintext summary during composed scratch-handoff compaction",
+		},
+	},
+
+	"scratchHandoff.rootDir": {
+		type: "string",
+		default: "agent",
+		ui: {
+			tab: "context",
+			group: "Scratch Handoff",
+			label: "Scratch Handoff Directory",
+			description: "Directory where per-session scratch handoff org files are created",
+		},
+	},
+
 	"compaction.maintenanceTrace": {
 		type: "enum",
 		values: ["loader", "assistant", "debug"] as const,
