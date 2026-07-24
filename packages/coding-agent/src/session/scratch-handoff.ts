@@ -422,6 +422,7 @@ export function renderScratchHandoffCloseoutMessage(displayPath: string): string
 		"Do not clear, recreate, truncate, rename, or replace the scratch file with a fresh template.",
 		"Update the current TODO heading completely and accurately as a full, comprehensive snapshot so another agent can resume with little to no warm-up: objective; only skills required by the current open TODO or next concrete action, in original relative load order; completed work; touched files; current proof; blockers or risks; next action; and source refs. The skill stack is not session history: remove completed-phase, one-shot, stale, superseded, duplicate, and merely historical skills; leave it empty when none are required.",
 		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path.",
+		"After a successful scratch write, do not reread or separately verify the file. The next turn owns resume validation.",
 		"After the scratch write succeeds, END THE TURN immediately. NEVER start or continue task work, invoke another task tool, emit a user-facing scratch status, or name the scratch path. The next turn or agent resumes from the scratch; the runtime observes the write directly.",
 	].join("\n");
 }
@@ -458,6 +459,8 @@ export function renderScratchHandoffResumeMessage(input: {
 		"Resume this session from the scratch handoff below.",
 		"Use the scratch file's current open TODO and next action to choose skills for immediate work. Load only relevant entries from its `Skill stack:` field, preserving their recorded order. Skip clearly irrelevant, stale, historical, or duplicate entries; apply normal skill matching if immediate work needs an unrecorded skill. NEVER mechanically replay the full field. Then resume the work already in progress.",
 		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
+		"Treat the injected scratch and any recent-session delta as supplied continuation state. Do not reread the scratch file, summarize it, reconstruct completed work, or rerun stable checks unless a newer event invalidates a specific fact.",
+		"Load only the skill needed for the first executable step of a multi-step next action; defer skills for later steps until execution reaches them. Then batch the live checks required by that step and execute it in the same turn. A preceding repair-only turn completed startup; do not repeat repair or orientation.",
 		"",
 		scratchContext,
 		recentContextBlock ? `\n${recentContextBlock}` : "",

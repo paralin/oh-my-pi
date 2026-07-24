@@ -333,6 +333,7 @@ describe("scratch handoff prompt", () => {
 		expect(prompt).toContain("END THE TURN immediately");
 		expect(prompt).toContain("NEVER start or continue task work");
 		expect(prompt).toContain("The next turn or agent resumes from the scratch");
+		expect(prompt).toContain("do not reread or separately verify the file");
 		expect(prompt).not.toContain("stop with a brief note");
 	});
 	it("resumes with judgment instead of replaying historical skills", () => {
@@ -348,6 +349,11 @@ describe("scratch handoff prompt", () => {
 		expect(message).toContain("apply normal skill matching");
 		expect(message).toContain("NEVER mechanically replay the full field");
 		expect(message).not.toContain("Before any other work");
+		expect(message).toContain("supplied continuation state");
+		expect(message).toContain("first executable step");
+		expect(message).toContain("defer skills for later steps");
+		expect(message).toContain("execute it in the same turn");
+		expect(message).toContain("do not repeat repair or orientation");
 		expect(message).not.toContain("load exactly");
 		expect(message).toContain("- Skill stack: orient -> investigate-issue -> write-review -> investigate-issue");
 	});
