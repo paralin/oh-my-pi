@@ -39,6 +39,7 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
+import { applyCodexHomeAuthToStorage } from "./codex-home";
 
 const DEFAULT_RUNS = 10;
 const DEFAULT_PAR = 4;
@@ -621,6 +622,9 @@ async function createDefaultRuntime(): Promise<BenchRuntime> {
 	try {
 		const cwd = getProjectDir();
 		const settings = await Settings.init({ cwd });
+		applyCodexHomeAuthToStorage(authStorage, {
+			configuredHomes: settings.get("providers.codexHomes"),
+		});
 		const modelRegistry = new ModelRegistry(authStorage);
 		await loadCliExtensionProviders(modelRegistry, settings, cwd);
 		return {
