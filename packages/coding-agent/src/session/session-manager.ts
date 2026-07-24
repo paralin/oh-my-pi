@@ -45,6 +45,7 @@ import {
 	type ModelChangeEntry,
 	type NewSessionOptions,
 	type ResetBoundaryEntry,
+	type ScratchCompactionModes,
 	type ServiceTierChangeEntry,
 	type SessionEntry,
 	type SessionHeader,
@@ -2077,6 +2078,7 @@ export class SessionManager {
 		details?: T,
 		fromExtension?: boolean,
 		preserveData?: Record<string, unknown>,
+		scratchCompaction?: ScratchCompactionModes,
 	): string {
 		const entry: CompactionEntry<T> = {
 			type: "compaction",
@@ -2088,6 +2090,7 @@ export class SessionManager {
 			details,
 			fromExtension,
 			preserveData,
+			scratchCompaction,
 		};
 		this.#recordEntry(entry);
 		return entry.id;
