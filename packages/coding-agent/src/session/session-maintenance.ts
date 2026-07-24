@@ -54,6 +54,7 @@ import type { Settings } from "../config/settings";
 import { getDefault } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import type { AutoCompactionAction, AutoCompactionReason } from "../extensibility/shared-events";
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
@@ -71,9 +72,10 @@ import {
 	resolveContextPromotionConfiguredTarget,
 	resolveRoleModelFull,
 } from "./role-models";
+import type { PreparedScratchHandoffContext, ScratchHandoffController } from "./scratch-handoff-controller";
 import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry } from "./session-context";
-import type { CompactionEntry, SessionEntry } from "./session-entries";
+import type { CompactionEntry, ScratchCompactionModes, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 
@@ -161,6 +163,23 @@ const PRUNE_IDLE_FLUSH_MS = 90 * 60_000;
  */
 const COMPACTION_RECOVERY_BAND = 0.8;
 
+/**
+ * Resolve which maintenance action a pass runs. Scratch handoff owns continuity
+ * whenever a scratch document is active: it rebuilds context from the document
+ * instead of paying for an LLM-authored handoff.
+ */
+export function resolveAutoCompactionAction(input: {
+	strategy: CompactionSettings["strategy"];
+	reason: AutoCompactionReason;
+	suppressHandoff: boolean;
+	hasScratchHandoff: boolean;
+}): AutoCompactionAction {
+	if (input.strategy === "snapcompact") return "snapcompact";
+	if (input.strategy === "handoff" && input.hasScratchHandoff) return "scratch-handoff";
+	if (input.strategy === "handoff" && input.reason !== "overflow" && !input.suppressHandoff) return "handoff";
+	return "context-full";
+}
+
 function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
@@ -217,6 +236,9 @@ export interface SessionMaintenanceHost {
 		terminalTextAnswer: boolean;
 		suppressContinuation: boolean;
 	}): boolean;
+	scheduleAutoContinuePrompt(generation: number): boolean;
+	/** Scratch continuity owner; inactive when the session has no scratch document. */
+	scratchHandoff(): ScratchHandoffController;
 	persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean>;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	disconnectFromAgent(): void;
@@ -300,7 +322,7 @@ export class SessionMaintenance {
 	 * already carry skill protection). The matcher reads the current plan
 	 * reference path at match time, so retitled plans are covered.
 	 */
-	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
+	withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
 		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
@@ -310,7 +332,7 @@ export class SessionMaintenance {
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
 			branchEntries,
-			this.#withPlanProtection({
+			this.withPlanProtection({
 				...DEFAULT_PRUNE_CONFIG,
 				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
@@ -352,7 +374,7 @@ export class SessionMaintenance {
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneSupersededToolResults(
 			branchEntries,
-			this.#withPlanProtection({
+			this.withPlanProtection({
 				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
 				pruneUseless: dropUseless,
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
@@ -445,19 +467,36 @@ export class SessionMaintenance {
 		}
 
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const config = this.#withPlanProtection({
+		const config = this.withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
 			// Skip entries summarized away by the latest compaction — shaking them
 			// only churns persisted history with no prompt/cache effect.
 			keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
 		});
-		const regions = collectShakeRegions(branchEntries, config);
+		return await this.applyShakeRegions(mode, collectShakeRegions(branchEntries, config));
+	}
+
+	/**
+	 * Offload `regions` to a session artifact and replace them with placeholders.
+	 *
+	 * `requireArtifact` refuses the rewrite when the artifact write failed:
+	 * callers that elide to buy headroom for one more turn must not destroy
+	 * content the agent has no way to read back.
+	 */
+	async applyShakeRegions(
+		mode: Exclude<ShakeMode, "images">,
+		regions: ShakeRegion[],
+		requireArtifact = false,
+	): Promise<ShakeResult> {
 		if (regions.length === 0) {
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
 		}
 
 		const artifactId = await this.#saveShakeArtifact(regions);
-		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
+		if (requireArtifact && artifactId === undefined) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		}
+		const replacements = regions.map((region, index) => this.shakeElidePlaceholder(region, index, artifactId));
 
 		let toolResultsDropped = 0;
 		let blocksDropped = 0;
@@ -489,7 +528,7 @@ export class SessionMaintenance {
 		};
 	}
 
-	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
+	shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
 		if (artifactId) {
 			return `[shaken ~${region.tokens} tokens — recover: artifact://${artifactId} (region ${index + 1})]`;
 		}
@@ -537,6 +576,18 @@ export class SessionMaintenance {
 		// fallback (issue #4359).
 		if (compactMode?.rejectsFocus && (customInstructions || options?.internalGuidance)) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
+		}
+		// Bare `/compact` (no explicit native mode) on a session with scratch handoff
+		// active is the clean-break path: compact the current session around its
+		// durable scratch state instead of running an LLM summary. Explicit modes
+		// (soft/remote/snapcompact) still drive the native engine, and `strategy:
+		// off` disables auto-maintenance so manual stays native.
+		if (
+			!compactMode &&
+			this.#host.scratchHandoff().displayPath !== undefined &&
+			this.#host.settings.getGroup("compaction").strategy !== "off"
+		) {
+			return this.#host.scratchHandoff().runManualCompaction();
 		}
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
@@ -937,7 +988,7 @@ export class SessionMaintenance {
 	 * floor the compaction decision respects so on-wire compression can never
 	 * suppress it.
 	 */
-	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = []): number {
+	estimateStoredContextTokens(pendingMessages: AgentMessage[] = []): number {
 		// Exclude encrypted reasoning (thinkingSignature / redactedThinking): its
 		// local byte size diverges from what the provider bills, so counting it here
 		// would let a thinking-heavy turn falsely trip the floor. The provider usage
@@ -952,7 +1003,7 @@ export class SessionMaintenance {
 
 	#estimatePrePromptContextTokens(messages: AgentMessage[], contextWindow: number): number {
 		const breakdown = this.#host.getContextBreakdown({ contextWindow, pendingMessages: messages });
-		const localEstimate = this.#estimateStoredContextTokens(messages);
+		const localEstimate = this.estimateStoredContextTokens(messages);
 		// Floor by the local estimate: a payload-shrinking before_provider_request
 		// hook deflates the provider-anchored breakdown, which must not suppress
 		// pre-prompt compaction (see #estimateStoredContextTokens).
@@ -989,6 +1040,7 @@ export class SessionMaintenance {
 		await this.runAutoCompaction("threshold", false, false, false, {
 			autoContinue: false,
 			triggerContextTokens: contextTokens,
+			scratchRecentMessages: messages,
 			phase: "pre_turn",
 		});
 	}
@@ -1039,9 +1091,16 @@ export class SessionMaintenance {
 		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
 
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
-		const storedContextTokens = this.#estimateStoredContextTokens();
+		const storedContextTokens = this.estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
-		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
+		const scratch = this.#host.scratchHandoff();
+		const scratchPath = scratch.displayPath;
+		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const shouldScratchHandoffCloseout =
+			compactionSettings.strategy === "handoff" &&
+			scratchPath !== undefined &&
+			scratch.shouldRequestCloseout(contextTokens, contextWindow, compactionSettings, scratchPath);
+		if (!shouldThresholdCompact && !shouldScratchHandoffCloseout) return;
 
 		// Promote to a larger-context sibling before compacting, mirroring the
 		// pre-prompt (runPrePromptCompactionIfNeeded) and post-turn threshold
@@ -1055,6 +1114,17 @@ export class SessionMaintenance {
 				contextWindow,
 				from: `${model?.provider}/${model?.id}`,
 			});
+			return;
+		}
+		if (compactionSettings.strategy === "handoff" && scratchPath) {
+			logger.debug("Mid-run scratch-handoff queued closeout steer", {
+				contextTokens,
+				contextWindow,
+				scratchPath,
+				shouldThresholdCompact,
+				shouldScratchHandoffCloseout,
+			});
+			await scratch.requestCloseout(contextTokens);
 			return;
 		}
 
@@ -1112,6 +1182,7 @@ export class SessionMaintenance {
 		skipAbortedCheck = true,
 		allowDefer = true,
 		autoContinue = true,
+		options: { suppressHandoff?: boolean } = {},
 	): Promise<CompactionCheckResult> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
@@ -1248,6 +1319,9 @@ export class SessionMaintenance {
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		const scratch = this.#host.scratchHandoff();
+		const scratchCloseoutResult = await scratch.finishCloseoutIfReady(assistantMessage, allowDefer, autoContinue);
+		if (scratchCloseoutResult !== undefined) return scratchCloseoutResult;
 
 		// Case 4: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
@@ -1268,7 +1342,7 @@ export class SessionMaintenance {
 		const assistantUsageContextTokens = assistantPredatesCompaction
 			? 0
 			: calculateContextTokens(assistantMessage.usage);
-		const storedContextTokens = this.#estimateStoredContextTokens();
+		const storedContextTokens = this.estimateStoredContextTokens();
 		// Pruning frees bytes for the NEXT prompt; it does not change the size of
 		// the prompt the LLM just billed for. Earlier revisions subtracted the
 		// per-turn supersede/prune `tokensSaved` from the threshold input, which
@@ -1287,6 +1361,12 @@ export class SessionMaintenance {
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
+		const scratchPath = scratch.displayPath;
+		const shouldScratchHandoffCloseout =
+			compactionSettings.strategy === "handoff" &&
+			scratchPath !== undefined &&
+			!options.suppressHandoff &&
+			scratch.shouldRequestCloseout(postMaintenanceContextTokens, contextWindow, compactionSettings, scratchPath);
 		logger.debug("Auto-compaction threshold decision", {
 			phase: "post-agent-end",
 			goalModeEnabled: this.#goalModeState?.enabled === true,
@@ -1302,14 +1382,20 @@ export class SessionMaintenance {
 			postMaintenanceContextTokens,
 			maintenanceTokensFreed,
 			shouldCompact: shouldThresholdCompact,
+			shouldScratchHandoffCloseout,
 			contextPromotionEnabled: this.#host.settings.get("contextPromotion.enabled") === true,
 		});
-		if (shouldThresholdCompact) {
+		if (shouldThresholdCompact || shouldScratchHandoffCloseout) {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
+				if (compactionSettings.strategy === "handoff" && scratchPath !== undefined && !options.suppressHandoff) {
+					await scratch.requestCloseout(postMaintenanceContextTokens);
+					return COMPACTION_CHECK_CONTINUATION;
+				}
 				return await this.runAutoCompaction("threshold", false, false, allowDefer, {
 					autoContinue,
+					suppressHandoff: options.suppressHandoff,
 					triggerContextTokens: postMaintenanceContextTokens,
 					phase: "pre_turn",
 					terminalTextAnswer: isTerminalTextAssistantAnswer(assistantMessage),
@@ -1699,7 +1785,7 @@ export class SessionMaintenance {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
-			this.#estimateStoredContextTokens(),
+			this.estimateStoredContextTokens(),
 		);
 		const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 		const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
@@ -1743,7 +1829,7 @@ export class SessionMaintenance {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
 			this.#host.getContextUsage({ contextWindow })?.tokens ?? 0,
-			this.#estimateStoredContextTokens(),
+			this.estimateStoredContextTokens(),
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
@@ -2029,7 +2115,7 @@ export class SessionMaintenance {
 	 * @returns whether auto-compaction scheduled a follow-up turn.
 	 */
 	async runAutoCompaction(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		deferred = false,
 		allowDefer = true,
@@ -2038,6 +2124,7 @@ export class SessionMaintenance {
 			triggerContextTokens?: number;
 			suppressContinuation?: boolean;
 			suppressHandoff?: boolean;
+			scratchRecentMessages?: readonly AgentMessage[];
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
 		} = {},
@@ -2101,12 +2188,31 @@ export class SessionMaintenance {
 		// "overflow" forces context-full because the input itself is broken — a handoff
 		// LLM call would hit the same overflow. "incomplete" is an output-side problem,
 		// so a handoff request on the existing context is still viable.
-		let action: "context-full" | "handoff" | "snapcompact" =
-			compactionSettings.strategy === "snapcompact"
-				? "snapcompact"
-				: compactionSettings.strategy === "handoff" && reason !== "overflow" && !suppressHandoff
-					? "handoff"
-					: "context-full";
+		//
+		// Scratch handoff owns continuity. When a compression representation is
+		// enabled and the scratch document already covers the delta, compose it
+		// beneath that boundary; otherwise rebuild from the scratch document alone.
+		const scratch = this.#host.scratchHandoff();
+		let action = resolveAutoCompactionAction({
+			strategy: compactionSettings.strategy,
+			reason,
+			suppressHandoff,
+			hasScratchHandoff: scratch.displayPath !== undefined,
+		});
+		if (action === "scratch-handoff" && scratch.displayPath !== undefined) {
+			scratch.stageCloseout(scratch.displayPath, options.triggerContextTokens, reason);
+		}
+		const standardScratchCompaction = this.#host.settings.get("scratchHandoff.standardCompactionEnabled");
+		let scratchCompactionModes: ScratchCompactionModes = {
+			native: action === "scratch-handoff" && compactionSettings.remoteEnabled !== false,
+			standard: action === "scratch-handoff" && standardScratchCompaction,
+		};
+		let composeScratchHandoff =
+			action === "scratch-handoff" &&
+			this.#model !== undefined &&
+			(scratchCompactionModes.native || scratchCompactionModes.standard);
+		let preparedScratchHandoff: PreparedScratchHandoffContext | undefined;
+		let composedScratchBoundaryPersisted = false;
 		if (action === "snapcompact" && this.#model && !this.#model.input.includes("image")) {
 			this.#host.emitNotice(
 				"warning",
@@ -2127,6 +2233,39 @@ export class SessionMaintenance {
 			// a message typed as the compaction loader appears must land in the compaction
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
 			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
+			if (composeScratchHandoff) {
+				preparedScratchHandoff = await scratch.prepareContext(options.scratchRecentMessages);
+				if (preparedScratchHandoff.state !== "verified") {
+					// Composed native or standard history hangs beneath the scratch
+					// boundary, so it needs a document that already covers the delta.
+					// Rebuilding from scratch continuity alone is the designed route
+					// here, not a failure: the delta rides along in the resume message
+					// and the appended closeout instruction refreshes the document.
+					logger.debug("Scratch continuity is not verified; rebuilding from the scratch handoff alone", {
+						state: preparedScratchHandoff.state,
+						reason,
+					});
+					composeScratchHandoff = false;
+					scratchCompactionModes = { native: false, standard: false };
+				}
+			}
+			if (action === "scratch-handoff" && !composeScratchHandoff) {
+				await scratch.compactSession(options.scratchRecentMessages, scratchCompactionModes, preparedScratchHandoff);
+				scratch.clearCloseout();
+				await this.#host.emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
+				const continuationScheduled = !autoCompactionSignal.aborted && reason !== "idle" && shouldAutoContinue;
+				if (continuationScheduled) {
+					this.#host.scheduleAutoContinuePrompt(generation);
+				}
+				return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+			}
+
 			if (action === "handoff") {
 				let handoffSwitchCancelled = false;
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
@@ -2190,6 +2329,9 @@ export class SessionMaintenance {
 			}
 
 			const availableModels = this.#host.modelRegistry.getAvailable();
+			if (composeScratchHandoff && availableModels.length === 0) {
+				throw new Error("Compaction failed: no available model");
+			}
 			if (availableModels.length === 0) {
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
@@ -2262,6 +2404,9 @@ export class SessionMaintenance {
 					}
 				}
 				if (!preparation) {
+					if (composeScratchHandoff) {
+						throw new Error("Compaction failed: nothing eligible for provider or standard compaction");
+					}
 					const noProgressDeadEnd = reason !== "idle" && !frameRescueCreatedHeadroom;
 					const deadEndWarning = noProgressDeadEnd
 						? compactionDeadEndWarning("shrink it (e.g. clear large tool output)")
@@ -2330,7 +2475,7 @@ export class SessionMaintenance {
 			let preserveData: Record<string, unknown> | undefined;
 			let codexCompaction: CodexCompactionContext | undefined;
 
-			if (this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
+			if (!composeScratchHandoff && this.#host.extensionRunner?.hasHandlers("session_before_compact")) {
 				const hookResult = (await this.#host.extensionRunner.emit({
 					type: "session_before_compact",
 					preparation,
@@ -2503,6 +2648,11 @@ export class SessionMaintenance {
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
+									localSummaryMode: composeScratchHandoff
+										? standardScratchCompaction
+											? "always"
+											: "never"
+										: undefined,
 									telemetry,
 									// Honor the user's /model thinking selection on the
 									// auto-compaction path — the most-fired compaction
@@ -2622,7 +2772,16 @@ export class SessionMaintenance {
 				details,
 				fromExtension,
 				preserveData,
+				composeScratchHandoff ? scratchCompactionModes : undefined,
 			);
+			composedScratchBoundaryPersisted = composeScratchHandoff;
+			if (composeScratchHandoff) {
+				if (!preparedScratchHandoff) {
+					throw new Error("Scratch handoff payload was not prepared before compaction");
+				}
+				await scratch.appendContext(preparedScratchHandoff, false, scratchCompactionModes);
+				scratch.clearCloseout();
+			}
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
@@ -2632,7 +2791,9 @@ export class SessionMaintenance {
 			// the plan from disk and re-injects it on the next turn (issue #1246).
 			this.#host.resetPlanReference();
 			this.#host.resetAdvisorRuntimes();
-			this.#host.syncTodoPhasesFromBranch();
+			if (!composeScratchHandoff) {
+				this.#host.syncTodoPhasesFromBranch();
+			}
 			if (codexCompaction) {
 				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
 			} else {
@@ -2781,6 +2942,31 @@ export class SessionMaintenance {
 				});
 				return COMPACTION_CHECK_NONE;
 			}
+			if (composeScratchHandoff && !composedScratchBoundaryPersisted) {
+				logger.warn("Composed scratch compaction failed; using scratch-only continuity", {
+					error: error instanceof Error ? error.message : String(error),
+					reason,
+				});
+				if (preparedScratchHandoff) {
+					await scratch.appendContext(preparedScratchHandoff, true, scratchCompactionModes);
+					scratch.rebuildLiveContext();
+				} else {
+					await scratch.compactSession(options.scratchRecentMessages, scratchCompactionModes);
+				}
+				scratch.clearCloseout();
+				await this.#host.emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
+				const continuationScheduled = reason !== "idle" && shouldAutoContinue;
+				if (continuationScheduled) {
+					this.#host.scheduleAutoContinuePrompt(generation);
+				}
+				return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#host.emitSessionEvent({
 				type: "auto_compaction_end",
@@ -2814,7 +3000,7 @@ export class SessionMaintenance {
 	 * the oversized input still gets resolved. Returns `"handled"` otherwise.
 	 */
 	async #runAutoShake(
-		reason: "overflow" | "threshold" | "idle" | "incomplete",
+		reason: AutoCompactionReason,
 		willRetry: boolean,
 		generation: number,
 		autoContinue: boolean,

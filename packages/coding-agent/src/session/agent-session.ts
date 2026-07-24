@@ -290,6 +290,18 @@ import {
 	toRestoredQueuedMessage,
 } from "./queued-messages";
 import { formatRetryFallbackSelector, type RetryFallbackSelector } from "./retry-fallback-chains";
+import {
+	buildScheduledNotification,
+	SCHEDULED_NOTIFICATION_KIND,
+	type ScheduledNotificationEntry,
+} from "./scheduled-notification";
+import {
+	assistantMessageToolCallsAreScratchSafeReads,
+	assistantToolUseCanScratchHandoff,
+	isScratchSafeReadTool,
+	ScratchHandoffController,
+	type ScratchHandoffHost,
+} from "./scratch-handoff-controller";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
@@ -302,11 +314,6 @@ import {
 	SessionMaintenance,
 	type SessionMaintenanceHost,
 } from "./session-maintenance";
-import {
-	buildScheduledNotification,
-	SCHEDULED_NOTIFICATION_KIND,
-	type ScheduledNotificationEntry,
-} from "./scheduled-notification";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
@@ -495,6 +502,13 @@ export class AgentSession {
 	#movedFromEmptySessionFile?: string;
 
 	readonly #maintenance: SessionMaintenance;
+	readonly #scratchHandoff: ScratchHandoffController;
+	/**
+	 * A mutating tool ran since the last scratch-safe stop. A scratch handoff
+	 * taken while a mutation is mid-flight would rebuild context around a
+	 * half-applied change, so it suppresses the handoff for that stop.
+	 */
+	#mutatingToolUseNeedsContinuation = false;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1360,6 +1374,8 @@ export class AgentSession {
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			scheduleCompactionContinuation: options => this.#scheduleCompactionContinuation(options),
+			scheduleAutoContinuePrompt: generation => this.#scheduleAutoContinuePrompt(generation),
+			scratchHandoff: () => this.#scratchHandoff,
 			persistTurnMessagesForMidRunCompaction: context => this.#persistTurnMessagesForMidRunCompaction(context),
 			findLastAssistantMessage: () => this.#findLastAssistantMessage(),
 			disconnectFromAgent: () => this.#disconnectFromAgent(),
@@ -1393,6 +1409,52 @@ export class AgentSession {
 			abortHandoff: () => this.abortHandoff(),
 		};
 		this.#maintenance = new SessionMaintenance(maintenanceHost);
+
+		const scratchHandoffHost: ScratchHandoffHost = {
+			agent: this.agent,
+			sessionManager: this.sessionManager,
+			settings: this.settings,
+			model: () => this.model,
+			nonMessageTokenSource: () => this,
+			getContextUsage: options => this.getContextUsage(options),
+			estimateStoredContextTokens: () => this.#maintenance.estimateStoredContextTokens(),
+			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
+			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
+			resetPlanReference: () => {
+				this.#planReferenceSent = false;
+			},
+			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
+			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
+			resetTurnStateForScratchBoundary: () => {
+				this.#pendingNextTurnMessages = [];
+				this.#scheduledHiddenNextTurnGeneration = undefined;
+				this.#todo.resetReminders();
+				this.setTodoPhases([]);
+			},
+			waitForIdle: () => this.waitForIdle(),
+			promptCustomMessage: message => this.promptCustomMessage(message),
+			queueCustomMessage: (message, deliverAs, queueChipText) =>
+				this.#queueCustomMessage(message, deliverAs, queueChipText),
+			forceWriteToolChoiceNow: label => {
+				this.#toolChoiceQueue.pushOnce({ type: "tool", name: "write" }, { label, now: true });
+			},
+			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
+				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
+			messageEndPersistenceTail: () => this.#messageEndPersistenceTail,
+			withPlanProtection: config => this.#maintenance.withPlanProtection(config),
+			shakeElidePlaceholder: (region, index, artifactId) =>
+				this.#maintenance.shakeElidePlaceholder(region, index, artifactId),
+			applyShakeRegions: (mode, regions, requireArtifact) =>
+				this.#maintenance.applyShakeRegions(mode, regions, requireArtifact),
+		};
+		this.#scratchHandoff = new ScratchHandoffController(scratchHandoffHost, {
+			displayPath: config.scratchHandoffDisplayPath,
+			rootCwd: config.scratchHandoffRootCwd,
+			parentDisplayPath: config.parentScratchHandoffDisplayPath,
+		});
+		this.agent.addBeforeModelContextBuild(context => this.#scratchHandoff.prepareBeforeProviderContext(context));
+		this.agent.setBeforeModelCall(context => this.#scratchHandoff.stopBeforeOversizedRequest(context));
 
 		const handoffHost: SessionHandoffHost = {
 			agent: this.agent,
@@ -1462,6 +1524,24 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	/** Scratch continuity file for this session, if scratch handoff is active. */
+	getScratchHandoffDisplayPath(): string | undefined {
+		return this.#scratchHandoff.displayPath;
+	}
+
+	/** Base directory child sessions resolve their inherited scratch paths against. */
+	get scratchHandoffRootCwd(): string | undefined {
+		return this.#scratchHandoff.rootCwd;
+	}
+
+	/**
+	 * Run one bounded pencils-down turn when the current context still leaves
+	 * room for the handoff prompt. Returns whether a closeout was requested.
+	 */
+	async requestScratchHandoffCloseoutForBudgetStop(triggerContextTokens?: number): Promise<boolean> {
+		return await this.#scratchHandoff.requestCloseoutForBudgetStop(triggerContextTokens);
 	}
 
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
@@ -2259,6 +2339,13 @@ export class AgentSession {
 
 		const messageEndPersistence =
 			event.type === "message_end" ? this.#createMessageEndPersistenceSlot(event.message) : undefined;
+		if (
+			event.type === "message_end" &&
+			event.message.role === "toolResult" &&
+			!isScratchSafeReadTool(event.message.toolName, undefined)
+		) {
+			this.#mutatingToolUseNeedsContinuation = true;
+		}
 
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
 		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
@@ -2286,6 +2373,7 @@ export class AgentSession {
 		}
 
 		if (event.type === "tool_execution_start") {
+			this.#scratchHandoff.recordToolExecutionStart(event.toolCallId, event.args);
 			this.#recordToolExecutionStart(event);
 		}
 
@@ -2316,10 +2404,14 @@ export class AgentSession {
 			}
 		}
 		if (event.type === "tool_execution_end") {
+			this.#scratchHandoff.recordToolExecutionEnd(event.toolCallId, event.toolName, event.isError === true);
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
 				await this.#goalRuntime.onToolCompleted(event.toolName);
+			}
+			if (!isScratchSafeReadTool(event.toolName, undefined)) {
+				this.#mutatingToolUseNeedsContinuation = true;
 			}
 			this.#planModeReminderAwaitingProgress = false;
 			if (
@@ -2520,6 +2612,7 @@ export class AgentSession {
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) {
+				this.#scratchHandoff.takePreProviderStop();
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				logger.debug("agent_end maintenance routing", {
 					reason: "no-assistant-message",
@@ -2577,6 +2670,34 @@ export class AgentSession {
 			}
 
 			const activeGoal = this.#goalModeState?.enabled === true && this.#goalModeState.goal.status === "active";
+			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
+			const toolUseCanScratchHandoff = hasToolCalls
+				? assistantToolUseCanScratchHandoff(msg, settledMessages, this.#mutatingToolUseNeedsContinuation)
+				: true;
+			const toolUseIsScratchSafeReadOnly = hasToolCalls ? assistantMessageToolCallsAreScratchSafeReads(msg) : false;
+			const preProviderScratchStop = this.#scratchHandoff.takePreProviderStop();
+			if (preProviderScratchStop) {
+				maintenanceRoute("pre-provider-scratch-handoff-stop", {
+					contextTokens: preProviderScratchStop.contextTokens,
+					contextWindow: preProviderScratchStop.contextWindow,
+					promptBudget: preProviderScratchStop.promptBudget,
+					thresholdTokens: preProviderScratchStop.thresholdTokens,
+					scratchPath: preProviderScratchStop.scratchPath,
+					toolUseCanScratchHandoff,
+				});
+				const compactionTask = this.#maintenance.runAutoCompaction("threshold", false, false, true, {
+					suppressHandoff: !toolUseCanScratchHandoff,
+					triggerContextTokens: preProviderScratchStop.contextTokens,
+				});
+				this.#trackPostPromptTask(compactionTask);
+				await compactionTask;
+				this.#recovery.resolveRetry();
+				await emitAgentEndNotification();
+				if (toolUseIsScratchSafeReadOnly) {
+					this.#mutatingToolUseNeedsContinuation = false;
+				}
+				return;
+			}
 			// A successful `yield` in this run is terminal for execution purposes.
 			// Suppress empty-stop retry, unexpected-stop retry, queued-message drain,
 			// and compaction-driven continuations for the rest of this prompt cycle:
@@ -2591,7 +2712,9 @@ export class AgentSession {
 							? "successful-yield-active-goal-checkCompaction"
 							: "post-yield-trailing-stop-active-goal-checkCompaction",
 					);
-					const compactionTask = this.#maintenance.checkCompaction(successfulYieldMessage);
+					const compactionTask = this.#maintenance.checkCompaction(successfulYieldMessage, true, true, true, {
+						suppressHandoff: !toolUseCanScratchHandoff,
+					});
 					this.#trackPostPromptTask(compactionTask);
 					await compactionTask;
 				} else if (successfulYieldMessage) {
@@ -2719,8 +2842,10 @@ export class AgentSession {
 			this.#recovery.resolveRetry();
 
 			if (!checkedCompaction) {
-				maintenanceRoute("bottom-checkCompaction");
-				const compactionTask = this.#maintenance.checkCompaction(msg);
+				maintenanceRoute("bottom-checkCompaction", { toolUseCanScratchHandoff });
+				const compactionTask = this.#maintenance.checkCompaction(msg, true, true, true, {
+					suppressHandoff: !toolUseCanScratchHandoff,
+				});
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
 			}
@@ -2730,9 +2855,11 @@ export class AgentSession {
 			// reminder so we don't pile a follow-up onto an already in-flight turn.
 			// Mid-run sync is handled separately via #takeMidRunTodoNudge so a long
 			// tool-use loop still gets prodded to keep the live HUD honest (issue #3651).
-			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
 				await emitAgentEndNotification();
+				if (toolUseIsScratchSafeReadOnly) {
+					this.#mutatingToolUseNeedsContinuation = false;
+				}
 				return;
 			}
 			// When compaction queued recovery or hit a deliberate dead-end, skip the
