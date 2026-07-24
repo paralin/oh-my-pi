@@ -1656,7 +1656,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	});
 	await cronManager.load();
 
-
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =

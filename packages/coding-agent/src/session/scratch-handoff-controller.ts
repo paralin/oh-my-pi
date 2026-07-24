@@ -228,6 +228,19 @@ export interface ScratchHandoffControllerOptions {
  * closeout turn, and the scratch-anchored context rebuild that replaces an
  * LLM-authored handoff when a scratch document is active.
  */
+/**
+ * Named progress points a scratch pass reports to its owner. The controller does
+ * not know about trace identity; the maintenance owner correlates these.
+ */
+export type ScratchHandoffPhase =
+	| "scratch-target-resolved"
+	| "scratch-read-injected"
+	| "scratch-session-compacted"
+	| "scratch-session-rebuilt";
+
+/** Reports a phase as it completes; supplied by the owner running the pass. */
+export type ScratchHandoffPhaseReporter = (phase: ScratchHandoffPhase) => Promise<void>;
+
 export class ScratchHandoffController {
 	readonly #host: ScratchHandoffHost;
 	#displayPath: string | undefined;
@@ -593,7 +606,10 @@ export class ScratchHandoffController {
 	 * an `unusable` document needs the model to rebuild the TODO, and only that
 	 * case is worth the operator's attention.
 	 */
-	async prepareContext(pendingMessages: readonly AgentMessage[] = []): Promise<PreparedScratchHandoffContext> {
+	async prepareContext(
+		pendingMessages: readonly AgentMessage[] = [],
+		reportPhase?: ScratchHandoffPhaseReporter,
+	): Promise<PreparedScratchHandoffContext> {
 		const scratch = await this.#messageContent(pendingMessages);
 		let content = scratch.content;
 		if (scratch.state === "unusable") {
@@ -606,6 +622,7 @@ export class ScratchHandoffController {
 			];
 		}
 		const tokensBefore = this.#host.getContextUsage()?.tokens ?? 0;
+		await reportPhase?.("scratch-target-resolved");
 		await this.#host.sessionManager.flush();
 		return { content, tokensBefore, state: scratch.state };
 	}
@@ -614,6 +631,7 @@ export class ScratchHandoffController {
 		scratch: { content: CustomMessage["content"]; tokensBefore: number },
 		createCompactionBoundary: boolean,
 		scratchCompaction: ScratchCompactionModes,
+		reportPhase?: ScratchHandoffPhaseReporter,
 	): Promise<void> {
 		const scratchEntryId = this.#host.sessionManager.appendCustomMessageEntry(
 			SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
@@ -646,16 +664,20 @@ export class ScratchHandoffController {
 		}
 		await this.#host.sessionManager.ensureOnDisk();
 		this.#host.resetTurnStateForScratchBoundary();
+		await reportPhase?.("scratch-read-injected");
+		await reportPhase?.("scratch-session-compacted");
 	}
 
 	async compactSession(
 		pendingMessages: readonly AgentMessage[] = [],
 		scratchCompaction: ScratchCompactionModes = { native: false, standard: false },
 		prepared?: { content: CustomMessage["content"]; tokensBefore: number },
+		reportPhase?: ScratchHandoffPhaseReporter,
 	): Promise<void> {
-		const scratch = prepared ?? (await this.prepareContext(pendingMessages));
-		await this.appendContext(scratch, true, scratchCompaction);
+		const scratch = prepared ?? (await this.prepareContext(pendingMessages, reportPhase));
+		await this.appendContext(scratch, true, scratchCompaction, reportPhase);
 		this.rebuildLiveContext();
+		await reportPhase?.("scratch-session-rebuilt");
 	}
 
 	/** Replay the rebuilt branch into the agent and drop context caches it invalidates. */

@@ -56,7 +56,15 @@ import type { Settings } from "../config/settings";
 import { getDefault } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
-import type { AutoCompactionAction, AutoCompactionReason } from "../extensibility/shared-events";
+import type {
+	AutoCompactionAction,
+	AutoCompactionReason,
+	MaintenanceTraceDeltaContent,
+	MaintenanceTraceFallbackCause,
+	MaintenanceTracePhase,
+	MaintenanceTraceStartEvent,
+	MaintenanceTraceTerminalResult,
+} from "../extensibility/shared-events";
 import type { GoalModeState } from "../goals/state";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
@@ -74,7 +82,11 @@ import {
 	resolveContextPromotionConfiguredTarget,
 	resolveRoleModelFull,
 } from "./role-models";
-import type { PreparedScratchHandoffContext, ScratchHandoffController } from "./scratch-handoff-controller";
+import type {
+	PreparedScratchHandoffContext,
+	ScratchHandoffController,
+	ScratchHandoffPhase,
+} from "./scratch-handoff-controller";
 import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry } from "./session-context";
 import type { CompactionEntry, ScratchCompactionModes, SessionEntry } from "./session-entries";
@@ -288,7 +300,115 @@ export interface SessionMaintenanceHost {
 }
 
 /** Owns compaction, pruning, shake, promotion, and automatic context maintenance. */
+/**
+ * Why a pass ended up on a different action than the configured strategy asked
+ * for. Only a context-full fallback has a cause worth naming.
+ */
+function resolveMaintenanceTraceFallbackCause(input: {
+	strategy: CompactionSettings["strategy"];
+	reason: AutoCompactionReason;
+	suppressHandoff: boolean;
+	action: AutoCompactionAction;
+}): MaintenanceTraceFallbackCause | undefined {
+	if (input.action !== "context-full") return undefined;
+	if (input.strategy === "snapcompact") return "snapcompact-fallback";
+	if (input.reason === "overflow") return "overflow";
+	if (input.reason === "idle") return "idle";
+	if (input.reason === "incomplete") return "incomplete-response";
+	if (input.strategy === "handoff" && input.suppressHandoff) return "mid-turn-handoff-suppressed";
+	return undefined;
+}
+
+/** In-flight identity for one context-maintenance pass, used to correlate its events. */
+interface MaintenanceTraceState {
+	traceId: string;
+	reason: AutoCompactionReason;
+	action: AutoCompactionAction;
+	fallbackCause?: MaintenanceTraceFallbackCause;
+	targetPath?: string;
+}
+
 export class SessionMaintenance {
+	#maintenanceTraceSequence = 0;
+
+	/** Open a trace identity for one maintenance pass. */
+	#createMaintenanceTrace(
+		action: AutoCompactionAction,
+		reason: AutoCompactionReason,
+		fallbackCause: MaintenanceTraceFallbackCause | undefined,
+		targetPath?: string,
+	): MaintenanceTraceState {
+		const trace: MaintenanceTraceState = {
+			traceId: `${this.#host.sessionId()}:maintenance:${++this.#maintenanceTraceSequence}`,
+			reason,
+			action,
+		};
+		if (fallbackCause !== undefined) trace.fallbackCause = fallbackCause;
+		if (targetPath !== undefined) trace.targetPath = targetPath;
+		return trace;
+	}
+
+	#maintenanceTraceBase(trace: MaintenanceTraceState): Omit<MaintenanceTraceStartEvent, "type" | "phase"> {
+		const event: Omit<MaintenanceTraceStartEvent, "type" | "phase"> = {
+			traceId: trace.traceId,
+			reason: trace.reason,
+			action: trace.action,
+			visibility: "ui-only",
+		};
+		if (trace.fallbackCause !== undefined) event.fallbackCause = trace.fallbackCause;
+		if (trace.targetPath !== undefined) event.targetPath = trace.targetPath;
+		return event;
+	}
+
+	async #emitMaintenanceTraceStart(trace: MaintenanceTraceState): Promise<void> {
+		await this.#host.emitSessionEvent({
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_start",
+			phase: "start",
+		});
+	}
+
+	async #emitMaintenanceTracePhase(
+		trace: MaintenanceTraceState,
+		phase: Exclude<MaintenanceTracePhase, "start" | "stream" | "terminal">,
+	): Promise<void> {
+		await this.#host.emitSessionEvent({
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_phase",
+			phase,
+		});
+	}
+
+	async #emitMaintenanceTraceDelta(
+		trace: MaintenanceTraceState,
+		content: MaintenanceTraceDeltaContent,
+		delta: string,
+	): Promise<void> {
+		if (delta.length === 0) return;
+		await this.#host.emitSessionEvent({
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_delta",
+			phase: "stream",
+			content,
+			delta,
+		});
+	}
+
+	async #emitMaintenanceTraceEnd(
+		trace: MaintenanceTraceState,
+		terminalResult: MaintenanceTraceTerminalResult,
+		options: { errorMessage?: string; willRetry?: boolean } = {},
+	): Promise<void> {
+		await this.#host.emitSessionEvent({
+			...this.#maintenanceTraceBase(trace),
+			type: "maintenance_trace_end",
+			phase: "terminal",
+			terminalResult,
+			willRetry: options.willRetry === true,
+			...(options.errorMessage !== undefined ? { errorMessage: options.errorMessage } : {}),
+		});
+	}
+
 	#compactionAbortController: AbortController | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
 	/**
@@ -2294,15 +2414,32 @@ export class SessionMaintenance {
 		const autoCompactionAbortController = new AbortController();
 		this.#autoCompactionAbortController = autoCompactionAbortController;
 		const autoCompactionSignal = autoCompactionAbortController.signal;
+		const fallbackCause = resolveMaintenanceTraceFallbackCause({
+			strategy: compactionSettings.strategy,
+			reason,
+			suppressHandoff,
+			action,
+		});
+		const reportScratchPhase = async (phase: ScratchHandoffPhase): Promise<void> => {
+			await this.#emitMaintenanceTracePhase(trace, phase);
+		};
+		const trace = this.#createMaintenanceTrace(
+			action,
+			reason,
+			fallbackCause,
+			action === "scratch-handoff" ? scratch?.displayPath : undefined,
+		);
 
 		try {
 			// Emit start AFTER the controller is installed so isCompacting is already true
 			// for any listener — and for input routed during this emit's event-loop yield:
 			// a message typed as the compaction loader appears must land in the compaction
 			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
+			await this.#emitMaintenanceTraceStart(trace);
+			await this.#emitMaintenanceTraceDelta(trace, "activity", `Started ${action} maintenance for ${reason}.`);
 			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (composeScratchHandoff) {
-				preparedScratchHandoff = await scratch.prepareContext(options.scratchRecentMessages);
+				preparedScratchHandoff = await scratch.prepareContext(options.scratchRecentMessages, reportScratchPhase);
 				if (preparedScratchHandoff.state !== "verified") {
 					// Composed native or standard history hangs beneath the scratch
 					// boundary, so it needs a document that already covers the delta.
@@ -2318,7 +2455,12 @@ export class SessionMaintenance {
 				}
 			}
 			if (action === "scratch-handoff" && !composeScratchHandoff) {
-				await scratch.compactSession(options.scratchRecentMessages, scratchCompactionModes, preparedScratchHandoff);
+				await scratch.compactSession(
+					options.scratchRecentMessages,
+					scratchCompactionModes,
+					preparedScratchHandoff,
+					reportScratchPhase,
+				);
 				scratch.clearCloseout();
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
@@ -2327,6 +2469,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
 				const continuationScheduled = !autoCompactionSignal.aborted && reason !== "idle" && shouldAutoContinue;
 				if (continuationScheduled) {
 					this.#host.scheduleAutoContinuePrompt(generation);
@@ -2354,6 +2497,7 @@ export class SessionMaintenance {
 							aborted: true,
 							willRetry: false,
 						});
+						await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 						return COMPACTION_CHECK_NONE;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
@@ -2369,6 +2513,7 @@ export class SessionMaintenance {
 						aborted: false,
 						willRetry: false,
 					});
+					await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
 					const continuationScheduled =
 						!autoCompactionSignal.aborted &&
 						this.#host.scheduleCompactionContinuation({
@@ -2393,6 +2538,7 @@ export class SessionMaintenance {
 					willRetry: false,
 					skipped: true,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "skipped", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 
@@ -2409,6 +2555,7 @@ export class SessionMaintenance {
 					willRetry: false,
 					skipped: true,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "skipped", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 
@@ -2506,6 +2653,7 @@ export class SessionMaintenance {
 						willRetry: false,
 						skipped: frameRescueResult === undefined,
 					});
+					await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
 					let continuationScheduled = false;
 					if (frameRescueCreatedHeadroom) {
 						continuationScheduled = this.#host.scheduleCompactionContinuation({
@@ -2560,6 +2708,7 @@ export class SessionMaintenance {
 						aborted: true,
 						willRetry: false,
 					});
+					await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 					return COMPACTION_CHECK_NONE;
 				}
 
@@ -2859,6 +3008,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 
@@ -3038,6 +3188,7 @@ export class SessionMaintenance {
 					aborted: true,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "cancelled", { willRetry: false });
 				return COMPACTION_CHECK_NONE;
 			}
 			if (composeScratchHandoff && !composedScratchBoundaryPersisted) {
@@ -3046,7 +3197,7 @@ export class SessionMaintenance {
 					reason,
 				});
 				if (preparedScratchHandoff) {
-					await scratch.appendContext(preparedScratchHandoff, true, scratchCompactionModes);
+					await scratch.appendContext(preparedScratchHandoff, true, scratchCompactionModes, reportScratchPhase);
 					scratch.rebuildLiveContext();
 				} else {
 					await scratch.compactSession(options.scratchRecentMessages, scratchCompactionModes);
@@ -3059,6 +3210,7 @@ export class SessionMaintenance {
 					aborted: false,
 					willRetry: false,
 				});
+				await this.#emitMaintenanceTraceEnd(trace, "done", { willRetry: false });
 				const continuationScheduled = reason !== "idle" && shouldAutoContinue;
 				if (continuationScheduled) {
 					this.#host.scheduleAutoContinuePrompt(generation);
@@ -3079,6 +3231,7 @@ export class SessionMaintenance {
 							? `Incomplete response recovery failed: ${errorMessage}`
 							: `Auto-compaction failed: ${errorMessage}`,
 			});
+			await this.#emitMaintenanceTraceEnd(trace, "failed", { willRetry: false });
 		} finally {
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
