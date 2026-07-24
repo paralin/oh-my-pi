@@ -30,7 +30,7 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { Theme } from "../../modes/theme/theme";
 import type { ReadonlySessionManager } from "../../session/session-manager";
 import type { TodoItem } from "../../tools/todo";
-import type { RecoveredRetryError } from "../shared-events";
+import type { AutoCompactionAction, AutoCompactionReason, RecoveredRetryError } from "../shared-events";
 
 /** Alias for clarity */
 export type CustomToolUIContext = HookUIContext;
@@ -115,12 +115,12 @@ export type CustomToolSessionEvent =
 	  }
 	| {
 			reason: "auto_compaction_start";
-			trigger: "threshold" | "overflow" | "idle" | "incomplete";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			trigger: AutoCompactionReason;
+			action: AutoCompactionAction;
 	  }
 	| {
 			reason: "auto_compaction_end";
-			action: "context-full" | "handoff" | "shake" | "snapcompact";
+			action: AutoCompactionAction;
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
