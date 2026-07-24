@@ -118,6 +118,10 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	...agentEventTypes,
 	"auto_compaction_start",
 	"auto_compaction_end",
+	"maintenance_trace_start",
+	"maintenance_trace_phase",
+	"maintenance_trace_delta",
+	"maintenance_trace_end",
 	"auto_retry_start",
 	"auto_retry_end",
 	"retry_fallback_applied",
@@ -129,6 +133,7 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"notice",
 	"thinking_level_changed",
 	"goal_updated",
+	"steering_received",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
