@@ -31,6 +31,7 @@
  */
 
 import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
+import { isScratchCompactionMethod, SCRATCH_COMPACTION_METHOD_VALUES } from "../config/scratch-compaction-method";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";
@@ -159,6 +160,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			);
 		}
 		result.serviceTier = value;
+	},
+	"--compaction-method": (result, value) => {
+		if (!isScratchCompactionMethod(value)) {
+			throw new CliUsageError(
+				`Invalid --compaction-method value: ${JSON.stringify(value)}. Expected one of: ${SCRATCH_COMPACTION_METHOD_VALUES.join(", ")}.`,
+			);
+		}
+		result.compactionMethod = value;
 	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;

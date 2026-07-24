@@ -92,6 +92,12 @@ export class TodoTracker {
 		return this.#clonePhases(phases);
 	}
 
+	/** Resets only the stop-time reminder budget, leaving mutation/nudge counters. */
+	resetReminders(): void {
+		this.#reminderCount = 0;
+		this.#reminderAwaitingProgress = false;
+	}
+
 	/** Resets per-prompt reminder and mutation budgets. */
 	resetCycle(): void {
 		this.#reminderCount = 0;

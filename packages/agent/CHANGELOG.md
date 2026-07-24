@@ -70,6 +70,9 @@
 ### Fixed
 
 - Provider-native compaction failures now surface their transport error instead of silently switching to generic summarization; streaming V2 still falls back to native V1 when available.
+### Changed
+
+- Added `scratch-handoff` to the shared compaction strategy type so hosts can expose checkpoint-backed context maintenance explicitly instead of overloading new-session handoff.
 
 ## [17.1.7] - 2026-07-27
 

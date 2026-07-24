@@ -164,7 +164,7 @@ export interface CompactionResult<T = unknown> {
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	strategy?: "context-full" | "handoff" | "scratch-handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
 	midTurnEnabled?: boolean;
@@ -818,6 +818,13 @@ export interface SummaryOptions {
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
+	/**
+	 * Controls local plaintext summarization around provider-native compaction.
+	 * `fallback` preserves the default native-first behavior, `always` also
+	 * generates a portable summary, and `never` fails when native compaction is
+	 * unavailable.
+	 */
+	localSummaryMode?: "fallback" | "always" | "never";
 	/**
 	 * Optional completion transport override for host-level request wrappers
 	 * (e.g. the coding-agent provider-concurrency limiter). When provided,
@@ -1588,26 +1595,25 @@ export async function compact(
 		}
 	}
 
+	const localSummaryMode = options?.localSummaryMode ?? "fallback";
 	if (!usedRemoteCompaction && nativeCompactionError !== undefined && !summaryOptions.remoteEndpoint) {
 		throw new NativeCompactionError(nativeCompactionError);
 	}
+	if (!usedRemoteCompaction && localSummaryMode === "never") {
+		throw new Error("Provider-native compaction is unavailable.");
+	}
+	const generateLocalSummary = !usedRemoteCompaction || localSummaryMode === "always";
 
-	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
-
-	if (usedRemoteCompaction) {
-		// Remote compaction (V2 or V1) already compacted remotely; the durable
-		// history lives in the provider replay payload (preserveData). Skip local
-		// summarization so a successful remote compaction never pays for a second,
-		// redundant LLM round. If a LATER compaction cannot reuse this payload,
-		// prepareCompaction re-expands the original messages and summarizes them
-		// locally then (see remotePreserveReusable).
+	if (!generateLocalSummary) {
+		// Remote compaction already compacted remotely; the durable history lives
+		// in preserveData. A later incompatible compaction re-expands the original
+		// messages before generating a local summary.
 		const usedTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
 		summary =
 			"Remote compaction preserved provider-native history for this session." +
 			(usedTokens > 0 ? ` Retained ${usedTokens} tokens in the provider replay payload.` : "");
 	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
-		// Generate both summaries in parallel
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0 || previousSummaryForCompaction
 				? generateSummary(
@@ -1623,10 +1629,8 @@ export async function compact(
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(turnPrefixMessages, model, reserveTokens, apiKey, signal, summaryOptions),
 		]);
-		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else if (messagesToSummarize.length > 0) {
-		// Generate history summary from messages to summarize
 		summary = await generateSummary(
 			messagesToSummarize,
 			model,
@@ -1638,20 +1642,19 @@ export async function compact(
 			summaryOptions,
 		);
 	} else if (previousSummaryForCompaction) {
-		// No new messages to summarize, preserve previous summary
 		summary = previousSummaryForCompaction;
 	} else {
-		// No messages and no previous summary
 		summary = "No prior history.";
 	}
 
-	const shortSummary = usedRemoteCompaction
-		? "Remote compaction"
-		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {
-				...summaryOptions,
-				extraContext: options?.extraContext,
-				thinkingLevel: options?.thinkingLevel,
-			});
+	const shortSummary =
+		usedRemoteCompaction && !generateLocalSummary
+			? "Remote compaction"
+			: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {
+					...summaryOptions,
+					extraContext: options?.extraContext,
+					thinkingLevel: options?.thinkingLevel,
+				});
 
 	// Compute file lists and append to summary
 	const { readFiles, modifiedFiles } = computeFileLists(fileOps);

@@ -43,6 +43,7 @@ import {
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { serviceTierSettingToTier } from "./config/service-tier";
+import { resolveScratchCompactionOverrides } from "./config/scratch-compaction-method";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -1303,6 +1304,14 @@ export async function runRootCommand(
 
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+	const scratchCompactionOverrides =
+		parsedArgs.compactionMethod !== undefined
+			? resolveScratchCompactionOverrides(parsedArgs.compactionMethod)
+			: undefined;
+	if (scratchCompactionOverrides) {
+		settingsInstance.override("compaction.remoteEnabled", scratchCompactionOverrides.remoteEnabled);
+		settingsInstance.override("scratchHandoff.standardCompactionEnabled", scratchCompactionOverrides.standardEnabled);
+	}
 	if (parsedArgs.approvalMode) {
 		// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 		// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.

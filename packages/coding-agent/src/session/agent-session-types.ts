@@ -237,6 +237,12 @@ export interface AgentSessionConfig {
 	agentId?: string;
 	/** Whether this is a top-level or subagent session. */
 	agentKind?: "main" | "sub";
+	/** Current session scratch handoff file, if scratch handoff is enabled. */
+	scratchHandoffDisplayPath?: string;
+	/** Base directory for relative scratch handoff paths inherited by child sessions. */
+	scratchHandoffRootCwd?: string;
+	/** Parent scratch handoff file linked from this session's scratch file. */
+	parentScratchHandoffDisplayPath?: string;
 	/** Provider-facing session ID override. */
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */

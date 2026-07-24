@@ -257,6 +257,8 @@ export class EventController {
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
+			llm_usage: async () => {},
+			compaction_measurement: async () => {},
 			maintenance_trace_start: async e => this.#handleMaintenanceTraceStart(e),
 			maintenance_trace_phase: async e => this.#handleMaintenanceTracePhase(e),
 			maintenance_trace_delta: async e => this.#handleMaintenanceTraceDelta(e),
