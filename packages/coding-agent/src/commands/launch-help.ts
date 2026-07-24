@@ -1,6 +1,7 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { CLI_THINKING_LEVELS } from "../cli/thinking-levels";
+import { SCRATCH_COMPACTION_METHOD_VALUES } from "../config/scratch-compaction-method";
 
 export const launchHelp = {
 	description: "AI coding assistant",
@@ -49,6 +50,11 @@ export const launchHelp = {
 		"add-dir": Flags.string({
 			description: "Add a workspace directory beyond the working directory (repeatable)",
 			multiple: true,
+		}),
+		"compaction-method": Flags.string({
+			description:
+				"Scratch compaction for this process: configured keeps current settings (default); native, standard, both, or scratch-only override them",
+			options: [...SCRATCH_COMPACTION_METHOD_VALUES],
 		}),
 		print: Flags.boolean({ char: "p", description: "Non-interactive mode: process prompt and exit" }),
 		continue: Flags.boolean({ char: "c", description: "Continue previous session" }),
