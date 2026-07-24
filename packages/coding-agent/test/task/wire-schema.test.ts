@@ -118,15 +118,17 @@ describe("task approval details surface the dispatch", () => {
 		} as unknown as ToolSession);
 	}
 
-	it("surfaces agent, name, and task for a flat spawn", async () => {
+	it("surfaces agent, name, model, and task for a flat spawn", async () => {
 		const tool = await makeTool();
 		const lines = tool.formatApprovalDetails({
 			agent: "reviewer",
 			name: "ReviewAuth",
+			model: "openai-codex/gpt-5.6-sol:high",
 			task: "audit the auth module",
 		});
 		expect(lines).toContain("Agent: reviewer");
 		expect(lines).toContain("Name: ReviewAuth");
+		expect(lines).toContain("Model: openai-codex/gpt-5.6-sol:high");
 		expect(lines).toContain("Task:\naudit the auth module");
 	});
 
@@ -134,11 +136,20 @@ describe("task approval details surface the dispatch", () => {
 		const tool = await makeTool();
 		const lines = tool.formatApprovalDetails({
 			context: "shared background",
-			tasks: [{ name: "DbMigrator", agent: "sonic", task: "migrate the schema" }, { task: "second item" }],
+			tasks: [
+				{
+					name: "DbMigrator",
+					agent: "sonic",
+					model: ["anthropic/claude-sonnet-4", "openai/gpt-5"],
+					task: "migrate the schema",
+				},
+				{ task: "second item" },
+			],
 		});
 		expect(lines).toContain("Context:\nshared background");
 		expect(lines).toContain("Name: DbMigrator");
 		expect(lines).toContain("Agent: sonic");
+		expect(lines).toContain("Model: anthropic/claude-sonnet-4 → openai/gpt-5");
 		expect(lines).toContain("Task:\nmigrate the schema");
 		expect(lines).toContain("+1 more task");
 	});

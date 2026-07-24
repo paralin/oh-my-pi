@@ -10,6 +10,7 @@ import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
 import { type ActiveRepoContext, resolveActiveRepoContextSync } from "../../../utils/active-repo-context";
 import * as git from "../../../utils/git";
+import * as jj from "../../../utils/jj";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
@@ -25,6 +26,8 @@ import type {
 	StatusLineSegmentOptions,
 	StatusLineSettings,
 } from "./types";
+
+const JJ_REFRESH_TTL_MS = 5000;
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Context-usage memo
@@ -292,6 +295,21 @@ export class StatusLineComponent implements Component {
 	#cachedGitStatusCwd: string | undefined = undefined;
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlightCwd: string | undefined = undefined;
+	#jjRoot: string | null | undefined = undefined;
+	#jjRootCwd: string | undefined = undefined;
+	#cachedJjBranch: string | null = null;
+	#jjBranchLastFetch = 0;
+	#jjBranchInFlight = false;
+	#cachedJjStatus: { staged: number; unstaged: number; untracked: number } | null = null;
+	#jjStatusLastFetch = 0;
+	#jjStatusInFlight = false;
+	// Bumped on every jj-cache reset — a cwd switch (#jjRootFor) or a HEAD /
+	// bookmark move (#invalidateGitCaches). An in-flight jj query captures this
+	// at launch; a mismatch on resolve means the caches were reset underneath it
+	// (including a reset that re-resolves to the SAME root, which a root-equality
+	// check cannot detect), so the result is stale and must be dropped rather
+	// than poison the fresh cache or advance its throttle.
+	#jjCacheGeneration = 0;
 
 	// PR lookup caching (invalidated on branch/repo context changes)
 	#cachedPr: { number: number; url: string } | null | undefined = undefined;
@@ -609,6 +627,16 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedBranchCwd = undefined;
 		this.#cachedPrContext = undefined;
+		// jj label/status share the git segment's lifecycle: a HEAD move (e.g. a
+		// colocated `jj new`/bookmark move) must drop the throttled jj caches too,
+		// mirroring #jjRootFor's per-cwd reset so the next render refetches.
+		this.#jjRoot = undefined;
+		this.#jjRootCwd = undefined;
+		this.#cachedJjBranch = null;
+		this.#jjBranchLastFetch = 0;
+		this.#cachedJjStatus = null;
+		this.#jjStatusLastFetch = 0;
+		this.#jjCacheGeneration++;
 	}
 	#getCurrentBranch(effectiveGitCwd?: string): string | null {
 		if (!this.#gitEnabled()) return null;
@@ -676,15 +704,96 @@ export class StatusLineComponent implements Component {
 				nextStatus = null;
 			} finally {
 				if (this.#gitStatusInFlightCwd === gitCwd) {
+					const prev = this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 					this.#cachedGitStatus = nextStatus;
 					this.#cachedGitStatusCwd = gitCwd;
 					this.#gitStatusLastFetch = Date.now();
 					this.#gitStatusInFlightCwd = undefined;
+					if (!this.#disposed && this.#onBranchChange && JSON.stringify(prev) !== JSON.stringify(nextStatus)) {
+						this.#onBranchChange();
+					}
 				}
 			}
 		})();
 
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
+	}
+
+	// Resolve (and cache per cwd) the jj workspace root, resetting both jj caches
+	// on a cwd change so a directory switch refetches label + status.
+	#jjRootFor(cwd: string): string | null {
+		if (this.#jjRoot === undefined || this.#jjRootCwd !== cwd) {
+			this.#jjRootCwd = cwd;
+			this.#jjRoot = jj.repo.rootSync(cwd);
+			this.#cachedJjBranch = null;
+			this.#jjBranchLastFetch = 0;
+			this.#cachedJjStatus = null;
+			this.#jjStatusLastFetch = 0;
+			this.#jjCacheGeneration++;
+		}
+		return this.#jjRoot;
+	}
+
+	// jj working-copy bookmark label (nearest bookmark, change-id fallback), shown
+	// in the `git` segment where git HEAD is detached/absent under jj. Throttled,
+	// cached, and repaints on resolve.
+	#getJjBranch(effectiveGitCwd?: string): string | null {
+		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const root = this.#jjRootFor(cwd);
+		if (!root) return null;
+		if (this.#jjBranchInFlight || Date.now() - this.#jjBranchLastFetch < JJ_REFRESH_TTL_MS) {
+			return this.#cachedJjBranch;
+		}
+		this.#jjBranchInFlight = true;
+		const generation = this.#jjCacheGeneration;
+		(async () => {
+			let next: string | null = null;
+			try {
+				next = await jj.workingCopy.label(root);
+			} finally {
+				this.#jjBranchInFlight = false;
+				// Advance the throttle only if no reset raced this query; a reset
+				// leaves LastFetch at 0 so the current root refetches instead of
+				// being throttled on a superseded result.
+				if (this.#jjCacheGeneration === generation) this.#jjBranchLastFetch = Date.now();
+			}
+			// Drop a result whose caches were reset mid-flight — a repo switch OR a
+			// same-root HEAD/bookmark move — so a superseded label never lands in
+			// the live cache.
+			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+			const changed = next !== this.#cachedJjBranch;
+			this.#cachedJjBranch = next;
+			if (changed && this.#onBranchChange) this.#onBranchChange();
+		})();
+		return this.#cachedJjBranch;
+	}
+
+	// jj working-copy status counts (`@` vs its parent), used in place of git
+	// status in a jj repo where `git status` has no `.git` to read. Throttled,
+	// cached, and repaints on resolve like #getJjBranch.
+	#getJjStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
+		const cwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
+		const root = this.#jjRootFor(cwd);
+		if (!root) return null;
+		if (this.#jjStatusInFlight || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
+			return this.#cachedJjStatus;
+		}
+		this.#jjStatusInFlight = true;
+		const generation = this.#jjCacheGeneration;
+		(async () => {
+			let next: { staged: number; unstaged: number; untracked: number } | null = null;
+			try {
+				next = await jj.status.summary(root);
+			} finally {
+				this.#jjStatusInFlight = false;
+				if (this.#jjCacheGeneration === generation) this.#jjStatusLastFetch = Date.now();
+			}
+			if (this.#jjCacheGeneration !== generation || this.#disposed) return;
+			const prev = this.#cachedJjStatus;
+			this.#cachedJjStatus = next;
+			if (this.#onBranchChange && JSON.stringify(prev) !== JSON.stringify(next)) this.#onBranchChange();
+		})();
+		return this.#cachedJjStatus;
 	}
 
 	#lookupPr(effectiveGitCwd?: string): { number: number; url: string } | null {
@@ -1102,8 +1211,20 @@ export class StatusLineComponent implements Component {
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
 			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
-		const gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
-		const gitStatus = includeGit ? this.#getGitStatus(activeRepoCache.effectiveGitCwd) : null;
+		let gitBranch = includeGit || includePr ? this.#getCurrentBranch(activeRepoCache.effectiveGitCwd) : null;
+		// A jj repo has no git branch to read: git HEAD is detached (colocated) or
+		// absent. Gate BOTH the jj branch label and the jj status counts on that
+		// same condition, captured before the label overlay rewrites gitBranch, so
+		// a nested ordinary git checkout under a parent jj workspace keeps its own
+		// git branch AND its own git status instead of the ancestor jj status.
+		const gitHeadIsJjLike = gitBranch === "detached" || gitBranch === null;
+		if (includeGit && gitHeadIsJjLike) {
+			gitBranch = this.#getJjBranch(activeRepoCache.effectiveGitCwd) ?? gitBranch;
+		}
+		const gitStatus = includeGit
+			? ((gitHeadIsJjLike ? this.#getJjStatus(activeRepoCache.effectiveGitCwd) : null) ??
+				this.#getGitStatus(activeRepoCache.effectiveGitCwd))
+			: null;
 		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
 		return {
 			session: this.session,

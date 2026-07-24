@@ -7,7 +7,7 @@
 import { afterAll, afterEach, describe, expect, it } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import { logProviderTurnError } from "./agent-session";
+import { logProviderTurnError } from "./messages";
 
 function makeMessage(overrides: Partial<AssistantMessage>): AssistantMessage {
 	return {

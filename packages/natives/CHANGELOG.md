@@ -20,6 +20,7 @@
 ### Removed
 
 - Removed unused `similar` crate dependency and dev-dependency on npm `diff`.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

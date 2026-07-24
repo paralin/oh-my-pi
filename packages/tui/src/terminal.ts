@@ -312,6 +312,7 @@ export function emergencyTerminalRestore(): void {
 			process.stdout.write(
 				"\x1b[?2026l" + // End synchronized output
 					"\x1b[?7h" + // Restore autowrap
+					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
 					"\x1b[?2004l" + // Disable bracketed paste
 					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
 					"\x1b[?2048l" + // Disable in-band resize notifications
@@ -624,6 +625,15 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
+
+		// Force normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
+		// `rmkx` = "\x1b[?1l\x1b>"). omp decodes both CSI ("\x1b[A") and SS3
+		// ("\x1bOA") arrow encodings, so it never enables application mode
+		// itself — but a prior program that left the TTY in application-cursor-
+		// keys mode makes arrows arrive as SS3. Normalizing on entry keeps input
+		// in the predictable default state; stop() restores the same on exit.
+		// See #6374.
+		this.#safeWrite("\x1b[?1l\x1b>");
 
 		// Set up resize handler immediately. The OS refreshes process.stdout
 		// dimensions before firing `resize`, so it is authoritative for geometry:
@@ -1375,6 +1385,13 @@ export class ProcessTerminal implements Terminal {
 		// Leave paint-time terminal modes even if the process exits between the
 		// begin/end halves of a frame. Safe no-ops on terminals that ignored them.
 		this.#safeWrite("\x1b[?2026l\x1b[?7h");
+
+		// Restore normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
+		// `rmkx`). Symmetric with the normalize in start(): a TTY-sharing child
+		// can leave the terminal in application-cursor-keys mode, and without
+		// this reset the parent shell inherits SS3 arrows so Up/Down history
+		// navigation stays broken after omp exits (#6374).
+		this.#safeWrite("\x1b[?1l\x1b>");
 
 		// Disable bracketed paste mode
 		this.#safeWrite("\x1b[?2004l");

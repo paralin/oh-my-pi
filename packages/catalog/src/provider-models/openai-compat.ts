@@ -2961,6 +2961,50 @@ export function coreWeaveModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 15.75 Meta Model API
+// ---------------------------------------------------------------------------
+
+const META_MODEL_API_BASE_URL = "https://api.meta.ai/v1";
+const META_MUSE_SPARK_COST = { input: 1.25, output: 4.25, cacheRead: 0.15, cacheWrite: 0 } as const;
+const META_MUSE_SPARK_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+};
+
+export const META_MUSE_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	{
+		id: "muse-spark-1.1",
+		name: "Muse Spark 1.1",
+		api: "openai-responses",
+		provider: "meta",
+		baseUrl: META_MODEL_API_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: META_MUSE_SPARK_COST,
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		thinking: META_MUSE_SPARK_THINKING,
+		compat: {
+			supportsReasoningEffort: true,
+			includeEncryptedReasoning: true,
+		},
+	},
+];
+
+export interface MetaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function metaModelManagerOptions(config?: MetaModelManagerConfig): ModelManagerOptions<"openai-responses"> {
+	return {
+		...createSimpleOpenAIResponsesOptions("meta", META_MODEL_API_BASE_URL, config),
+		staticModels: META_MUSE_STATIC_MODELS,
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 16. Moonshot
 // ---------------------------------------------------------------------------
 

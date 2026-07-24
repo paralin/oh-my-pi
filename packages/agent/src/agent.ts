@@ -1106,6 +1106,22 @@ export class Agent {
 
 		const messages = this.#state.messages;
 		if (messages.length === 0) {
+			// An empty transcript has nothing to resume, but a queued steer/follow-up
+			// must still be delivered as the opening turn — mirroring the assistant-tail
+			// branch below. Throwing here leaves the message undeliverable, and idle-drain
+			// callers (AgentSession#scheduleQueuedMessageDrain) re-arm continue() on every
+			// microtask because hasQueuedMessages() never clears, spinning an unbounded
+			// allocation loop until OOM (issue #6344).
+			const queuedSteering = this.#dequeueSteeringMessages();
+			if (queuedSteering.length > 0) {
+				await this.#runLoop(queuedSteering, { skipInitialSteeringPoll: true });
+				return;
+			}
+			const queuedFollowUp = this.#dequeueFollowUpMessages();
+			if (queuedFollowUp.length > 0) {
+				await this.#runLoop(queuedFollowUp);
+				return;
+			}
 			throw new Error("No messages to continue from");
 		}
 		if (messages[messages.length - 1].role === "assistant") {

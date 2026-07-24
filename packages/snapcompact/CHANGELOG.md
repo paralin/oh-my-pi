@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an `includeThinking` serialize option (default `true`) so callers can exclude assistant reasoning (`¶think:` sections) from archived transcripts; used to keep reproduced reasoning out of frames replayed to Anthropic-dialect models ([#6093](https://github.com/can1357/oh-my-pi/issues/6093)).
+
 ## [16.5.0] - 2026-07-13
 
 ### Changed

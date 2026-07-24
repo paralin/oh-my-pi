@@ -5,6 +5,7 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
 	normalizeCustomMessagePayload,
 } from "./messages";
@@ -197,10 +198,13 @@ export function buildSessionContext(
 		};
 	}
 
-	// Walk from leaf to root, collecting path
+	// Walk from leaf to root, collecting path. Corrupt/pre-fix files can contain
+	// parent cycles; stop at the first repeat so session load is bounded.
 	const path: SessionEntry[] = [];
+	const seenPathIds = new Set<string>();
 	let current: SessionEntry | undefined = leaf;
-	while (current) {
+	while (current && !seenPathIds.has(current.id)) {
+		seenPathIds.add(current.id);
 		path.push(current);
 		current = current.parentId ? byId.get(current.parentId) : undefined;
 	}
@@ -494,6 +498,41 @@ export function buildSessionContext(
 					(rewritten as AgentMessage & StrippedToolCallsMarker).strippedToolCalls = strippedToolCalls;
 				}
 				messages[i] = rewritten;
+			}
+		}
+	}
+
+	// Error/abort assistant turns are transcript events, not safe assistant
+	// turns to replay into the next provider request. Drop them even when a
+	// later user message follows through non-context entries (`session_exit`,
+	// labels, etc.); otherwise a resumed session replays a dead partial turn
+	// and can spend minutes reprocessing old context before the new prompt.
+	// Keep the interrupted-thinking continuity pair: convertToLlm strips the
+	// unsafe trailing thinking from that assistant and sends the hidden
+	// continuity note instead.
+	if (!options?.transcript) {
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message?.role !== "assistant") continue;
+			if (message.stopReason !== "aborted" && message.stopReason !== "error") continue;
+			const next = messages[i + 1];
+			if (next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) continue;
+			// A failed turn that emitted tool calls persists paired synthetic
+			// tool_result placeholders after it. Dropping only the assistant would
+			// strand those results with no preceding tool_use — a shape providers
+			// reject — so remove the paired results alongside the turn.
+			const droppedToolCallIds = new Set<string>();
+			for (const block of message.content) {
+				if (block.type === "toolCall") droppedToolCallIds.add(block.id);
+			}
+			messages.splice(i, 1);
+			if (droppedToolCallIds.size > 0) {
+				for (let j = messages.length - 1; j >= i; j--) {
+					const candidate = messages[j];
+					if (candidate?.role === "toolResult" && droppedToolCallIds.has(candidate.toolCallId)) {
+						messages.splice(j, 1);
+					}
+				}
 			}
 		}
 	}

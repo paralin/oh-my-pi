@@ -9,7 +9,9 @@
  * Request handlers read fields — they never detect, parse ids, or allocate
  * compat per request.
  */
+
 import { buildAnthropicCompat } from "./compat/anthropic";
+import { buildBedrockCompat } from "./compat/bedrock";
 import { buildDevinCompat } from "./compat/devin";
 import { buildOpenAICompat, buildOpenAIResponsesCompat, buildOpenRouterCompat } from "./compat/openai";
 import { resolveModelThinking } from "./model-thinking";
@@ -39,6 +41,8 @@ export function buildCompat(spec: ModelSpec<Api>): CompatOf<Api> {
 			return buildOpenAIResponsesCompat(spec as ModelSpec<"openai-responses">);
 		case "anthropic-messages":
 			return buildAnthropicCompat(spec as ModelSpec<"anthropic-messages">);
+		case "bedrock-converse-stream":
+			return buildBedrockCompat(spec as ModelSpec<"bedrock-converse-stream">);
 		case "devin-agent":
 			return buildDevinCompat(spec as ModelSpec<"devin-agent">);
 		default:

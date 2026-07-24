@@ -4,10 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	applyDirenvPreflight,
 	buildMinimizerOptions,
 	executeBash,
 	isPersistentShellCdCommand,
 } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
@@ -167,6 +169,37 @@ describe("executeBash", () => {
 	it("honors cwd", async () => {
 		const result = await executeBash("pwd", { cwd: tempDir, timeout: 5000 });
 		expect(result.output.trim()).toBe(tempDir);
+	});
+
+	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {
+		// A disabled command deadline (`timeout: 0`) must NOT collapse the direnv
+		// export window to 0 ms — that would make AbortSignal.timeout(0) abort the
+		// load instantly, silently dropping the repo's direnv env. The load keeps
+		// its full `bash.direnvLoadTimeoutMs` budget. Spying on loadDirenvEnv both
+		// captures the timeoutMs and short-circuits real direnv (null diff = no-op).
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await executeBash("true", { cwd: tempDir, timeout: 0 });
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(budget);
+		expect(spy.mock.calls[0][1]?.timeoutMs).not.toBe(0);
+	});
+
+	it("clamps the direnv-load budget to a positive command timeout smaller than it", async () => {
+		// A positive caller timeout below the budget DOES clamp the direnv window,
+		// proving the fix only relaxes the `timeout: 0` case and did not disable
+		// clamping wholesale. Setting and options.timeout are both milliseconds.
+		const budget = (await Settings.init()).get("bash.direnvLoadTimeoutMs");
+		const callerTimeout = 5;
+		expect(callerTimeout).toBeLessThan(budget);
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await executeBash("true", { cwd: tempDir, timeout: callerTimeout });
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(Math.min(budget, callerTimeout));
 	});
 
 	it("honors symlinked cwd requests in persistent shells", async () => {
@@ -1339,4 +1372,67 @@ describe("executeBash :async: background retention", () => {
 			}
 		},
 	);
+});
+
+describe("applyDirenvPreflight direnv-load clamp", () => {
+	let tempDir: string;
+
+	beforeEach(() => {
+		tempDir = makeTempDir();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		if (fs.existsSync(tempDir)) removeSyncWithRetries(tempDir);
+	});
+
+	it("clamps the direnv load to a positive caller timeout below the full budget", async () => {
+		// The clamp lives INSIDE the helper, so every backend that routes through
+		// applyDirenvPreflight (executeBash, ACP terminal, PTY) inherits it. A
+		// positive callerTimeoutMs smaller than the full load budget must win, so a
+		// short-timeout command can't hand a cold `.envrc` the full 30s window.
+		// Reverting the clamp to executeBash-only leaves the ACP/PTY backend
+		// passing the full budget here, reddening this assertion.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+			callerTimeoutMs: 5,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(5);
+	});
+
+	it("keeps the full direnv-load budget when the caller deadline is disabled (callerTimeoutMs: 0)", async () => {
+		// A disabled command deadline (`0`) is NOT a 0 ms load — it means "no caller
+		// clamp", so the load keeps its full `timeoutMs` budget. Collapsing it to 0
+		// would make AbortSignal.timeout(0) abort instantly and silently drop the
+		// repo's direnv env.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+			callerTimeoutMs: 0,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
+	});
+
+	it("keeps the full direnv-load budget when no caller deadline is supplied (callerTimeoutMs: undefined)", async () => {
+		// An omitted caller deadline behaves like a disabled one: no clamp, full
+		// budget. Guards the `!== undefined` half of the clamp condition.
+		const spy = vi.spyOn(direnvModule, "loadDirenvEnv").mockResolvedValue(null);
+
+		await applyDirenvPreflight("true", tempDir, {
+			direnvSetting: "auto",
+			timeoutMs: 30_000,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(1);
+		expect(spy.mock.calls[0][1]?.timeoutMs).toBe(30_000);
+	});
 });

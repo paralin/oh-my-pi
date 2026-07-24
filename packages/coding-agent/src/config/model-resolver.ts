@@ -809,7 +809,6 @@ function parseModelPatternWithContext(
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
 ): ParsedModelResult {
 	// Exact match on the full pattern first (no fuzzy): a literal id that
-	// contains a colon (`coding-router:max`) wins over any suffix split.
 	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
 	if (exactMatch) {
 		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };

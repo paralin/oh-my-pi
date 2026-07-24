@@ -34656,6 +34656,42 @@
 			}
 		}
 	},
+	"meta": {
+		"muse-spark-1.1": {
+			"id": "muse-spark-1.1",
+			"name": "Muse Spark 1.1",
+			"api": "openai-responses",
+			"provider": "meta",
+			"baseUrl": "https://api.meta.ai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 1.25,
+				"output": 4.25,
+				"cacheRead": 0.15,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsReasoningEffort": true,
+				"includeEncryptedReasoning": true
+			}
+		}
+	},
 	"minimax": {
 		"MiniMax-M2": {
 			"id": "MiniMax-M2",
@@ -53078,6 +53114,33 @@
 				]
 			}
 		},
+		"xiaomi/mimo-v2.5-pro-crof": {
+			"id": "xiaomi/mimo-v2.5-pro-crof",
+			"name": "xiaomi/mimo-v2.5-pro-crof",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": null,
+			"maxTokens": null,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high"
+				]
+			}
+		},
 		"xiaomi/mimo-v2.5-pro-ultraspeed": {
 			"id": "xiaomi/mimo-v2.5-pro-ultraspeed",
 			"name": "xiaomi/mimo-v2.5-pro-ultraspeed",
@@ -68443,13 +68506,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.07,
-				"output": 0.33999999999999997,
-				"cacheRead": 0.04,
+				"input": 0.12,
+				"output": 0.35,
+				"cacheRead": 0.049999999999999996,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 16384,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -69138,8 +69201,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.255,
-				"output": 1.02,
+				"input": 0.3,
+				"output": 1.2,
 				"cacheRead": 0.03,
 				"cacheWrite": 0
 			},
@@ -70420,9 +70483,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.6,
-				"output": 3.5999999999999996,
-				"cacheRead": 0.19999999999999998,
+				"input": 0.5,
+				"output": 2.2,
+				"cacheRead": 0.09999999999999999,
 				"cacheWrite": 0
 			},
 			"contextWindow": 512288,
@@ -73378,8 +73441,8 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.09999999999999999,
-				"output": 1.1,
+				"input": 0.15,
+				"output": 1.2,
 				"cacheRead": 0.07,
 				"cacheWrite": 0
 			},
@@ -73496,13 +73559,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.13,
-				"output": 0.52,
+				"input": 0.15,
+				"output": 0.6,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 32768
+			"maxTokens": 16384
 		},
 		"qwen/qwen3-vl-30b-a3b-thinking": {
 			"id": "qwen/qwen3-vl-30b-a3b-thinking",
@@ -73848,13 +73911,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.44999999999999996,
-				"output": 2.7,
-				"cacheRead": 0.15,
+				"input": 0.6,
+				"output": 3.5999999999999996,
+				"cacheRead": 0.12,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 65536,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -75377,13 +75440,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.060500000000000005,
+				"input": 0.06,
 				"output": 0.39999999999999997,
 				"cacheRead": 0.01,
 				"cacheWrite": 0
 			},
 			"contextWindow": 202752,
-			"maxTokens": 131072,
+			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -75480,9 +75543,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.7756000000000001,
-				"output": 2.4376,
-				"cacheRead": 0.14404,
+				"input": 0.7798,
+				"output": 2.4508,
+				"cacheRead": 0.14482,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,

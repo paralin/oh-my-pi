@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed malformed persisted content blocks aborting stats ingestion before later projects and settled pending full-session migrations after successful backfills ([#6373](https://github.com/can1357/oh-my-pi/issues/6373)).
+
 ## [17.0.6] - 2026-07-20
 
 ### Changed

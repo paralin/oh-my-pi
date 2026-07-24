@@ -36,6 +36,7 @@ import {
 	clampKimiK27CodeMaxTokens,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
+	META_MUSE_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	projectOpenAIProReasoningAliases,
@@ -521,6 +522,9 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
+	// Seed Meta's documented Muse model so first-run selection does not depend on
+	// credentials or live discovery.
+	allModels.push(...META_MUSE_STATIC_MODELS);
 	// Seed Sakana's documented Fugu models so the provider is usable when
 	// catalog generation has no live API key. If live `/v1/models` succeeds,
 	// Sakana is authoritative and stale seed IDs must stay out.

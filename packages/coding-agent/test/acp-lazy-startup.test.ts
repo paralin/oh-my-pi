@@ -251,6 +251,7 @@ describe("ACP lazy startup", () => {
 
 		const explicit = {
 			"task.isolation.mode": "rcopy",
+			"task.isolation.apply": false,
 			"task.isolation.merge": "branch",
 			"task.isolation.commits": "ai",
 			"task.eager": "always",

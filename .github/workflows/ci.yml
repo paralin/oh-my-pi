@@ -3,14 +3,12 @@ name: CI
 on:
    push:
       branches: [main]
-      # Vouch bookkeeping commits (mitchellh/vouch writes VOUCHED.td back to
-      # main on !vouch/!denounce/!unvouch) only edit the vouch list and need no
-      # build. Skip CI when a main push changes nothing but the vouch file; a
-      # push that also touches anything else still runs the full matrix.
-      paths-ignore:
-         - .github/VOUCHED.td
+      paths:
+         - "packages/**"
    pull_request:
       branches: [main]
+      paths:
+         - "packages/**"
    workflow_dispatch:
       inputs:
          skip_npm:
@@ -687,9 +685,11 @@ jobs:
          # Windows binary is cross-built on Linux, so we have no Windows runner
          # to smoke it on. Cross-build correctness is verified via the napi
          # entry-point exports (see build-native action) and the bun
-         # `--compile --target=bun-windows-x64-*` cross-compile.
+         # `--compile --target=bun-windows-x64-*` cross-compile. Musl binaries
+         # need the musl loader, which glibc runners lack — they are smoked in
+         # the Alpine container step below instead.
          - name: Smoke release binary
-           if: matrix.platform != 'win32'
+           if: matrix.platform != 'win32' && matrix.libc != 'musl'
            run: |
               runtime_dir="$(mktemp -d)"
               HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
@@ -698,7 +698,10 @@ jobs:
            if: matrix.libc == 'musl'
            run: |
               binary="$(realpath "${{ matrix.binary_path }}")"
-              docker run --rm -v "$binary:/usr/local/bin/omp:ro" alpine:3.22 sh -c '
+              # Bun's musl-target binaries link libstdc++/libgcc dynamically;
+              # Alpine users install them alongside the binary (same as bun itself).
+              docker run --rm -v "$binary:/usr/local/bin/omp:ro" alpine:3.22 sh -ec '
+                apk add --no-cache libstdc++ libgcc >/dev/null
                 runtime_dir="$(mktemp -d)"
                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --version
                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --smoke-test

@@ -1079,28 +1079,23 @@ function backfillPriorityPremiumRequests(database: Database): void {
 		.run(PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
-export function markPriorityPremiumRequestsBackfillComplete(): void {
+/**
+ * Settle every full-session backfill after a successful sync pass.
+ */
+export function markSessionBackfillsComplete(): void {
 	if (!db) return;
-	db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(
-		PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
-		BACKFILL_COMPLETE,
-	);
-}
-
-export function markUserMessagesBackfillComplete(): void {
-	if (!db) return;
-	db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(
-		USER_MESSAGES_BACKFILL_KEY,
-		BACKFILL_COMPLETE,
-	);
-}
-
-export function markUserMessageLinksRepairComplete(): void {
-	if (!db) return;
-	db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(
-		USER_MESSAGE_LINKS_REPAIR_KEY,
-		BACKFILL_COMPLETE,
-	);
+	const markComplete = db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)");
+	const apply = db.transaction(() => {
+		for (const key of [
+			USER_MESSAGES_BACKFILL_KEY,
+			TOOL_CALLS_BACKFILL_KEY,
+			USER_MESSAGE_LINKS_REPAIR_KEY,
+			PRIORITY_PREMIUM_REQUESTS_BACKFILL_KEY,
+		]) {
+			markComplete.run(key, BACKFILL_COMPLETE);
+		}
+	});
+	apply();
 }
 
 /**

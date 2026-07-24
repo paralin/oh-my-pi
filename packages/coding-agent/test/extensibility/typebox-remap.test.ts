@@ -73,4 +73,16 @@ describe("legacy-pi TypeBox remap", () => {
 			required: ["path"],
 		});
 	});
+
+	it("redirects minified bare typebox imports without whitespace around from", async () => {
+		const entry = await writeFixtureExtension(
+			'import{Type}from"typebox";export const schema=Type.Object({name:Type.String()});',
+		);
+
+		const loaded = (await loadLegacyPiModule(entry)) as {
+			schema: { safeParse: (input: unknown) => { success: boolean } };
+		};
+		expect(loaded.schema.safeParse({ name: "ok" }).success).toBe(true);
+		expect(loaded.schema.safeParse({}).success).toBe(false);
+	});
 });

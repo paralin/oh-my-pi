@@ -1822,12 +1822,18 @@ async function executeToolCalls(
 	const steeringAbortController = new AbortController();
 	const notificationAbortController = new AbortController();
 	const ircAbortController = new AbortController();
-	// System notifications interrupt only tools that explicitly opt into
-	// interruption. User steering keeps its established shared abort semantics;
-	// an IRC-only interrupt remains limited to interruptible tools.
-	const nonInterruptibleSignal: AbortSignal = signal
-		? AbortSignal.any([signal, steeringAbortController.signal])
-		: steeringAbortController.signal;
+	// Cooperative channel: aborted when queued steering (or an interrupting
+	// peer IRC) is detected mid-batch. Tools receive it via tool context
+	// (`ctx.steeringSignal`) and MAY react — e.g. an auto-backgroundable bash
+	// backgrounds itself so the message injects promptly — but it never kills
+	// anything; ignoring it is always safe.
+	const steeringSoftController = new AbortController();
+	// Interruptible tools (pure waits: hub wait, vibe) observe steering +
+	// external + IRC aborts. Every other tool sees ONLY the external signal:
+	// neither queued steering nor a peer IRC ever hard-kills a partially
+	// side-effecting foreground tool (e.g. `bash`) — those get the cooperative
+	// `steeringSignal` above, and the message injects at the next boundary.
+	const nonInterruptibleSignal: AbortSignal = signal ?? new AbortController().signal;
 	const interruptibleSignal: AbortSignal = signal
 		? AbortSignal.any([
 				signal,
@@ -1902,12 +1908,20 @@ async function executeToolCalls(
 			}
 		}
 		if (steeringQueued) {
-			interruptState.triggered = true;
-			interruptState.source = steeringSource ?? "unknown";
-			if (steeringSource === "system") {
-				notificationAbortController.abort();
-			} else {
-				steeringAbortController.abort();
+			// Queued steering hard-aborts only interruptible waits and raises the
+			// cooperative soft signal for everything else: the boundary dequeue
+			// below injects the message as soon as running tools finish (or
+			// background themselves), and not-yet-started tools are skipped.
+			// Idempotent — a second steer poll after the abort is a no-op.
+			if (!steeringAbortController.signal.aborted) {
+				interruptState.triggered = true;
+				interruptState.source = steeringSource ?? "unknown";
+				if (steeringSource === "system") {
+					notificationAbortController.abort();
+				} else {
+					steeringAbortController.abort();
+					steeringSoftController.abort();
+				}
 			}
 			return;
 		}
@@ -1915,11 +1929,13 @@ async function executeToolCalls(
 		// must not re-abort, and (unlike steering above) never re-consume a queue.
 		if (interruptState.triggered) return;
 		if (hasIrcInterrupts && (await hasIrcInterrupts())) {
-			// Peer IRC only aborts interruptible waits: a foreground bash / write
-			// mid-execution keeps running so we never leave partial side effects.
+			// Peer IRC hard-aborts interruptible waits only; foreground tools keep
+			// running (no partial side effects) but get the cooperative soft
+			// signal so backgroundable work can step aside for the peer message.
 			interruptState.triggered = true;
 			interruptState.source = "irc";
 			ircAbortController.abort();
+			steeringSoftController.abort();
 		}
 	};
 
@@ -2102,12 +2118,17 @@ async function executeToolCalls(
 					: effectiveArgs;
 				record.args = executionArgs;
 
+				// The cooperative steering signal rides the loop-owned
+				// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`):
+				// AgentToolContext itself is app-built via declaration merging, so
+				// the loop cannot construct or extend one structurally.
 				const toolContext = getToolContext
 					? getToolContext({
 							batchId,
 							index,
 							total: toolCalls.length,
 							toolCalls: toolCallInfos,
+							steeringSignal: steeringSoftController.signal,
 						})
 					: undefined;
 				const rawResult = await tool.execute(
@@ -2249,15 +2270,14 @@ async function executeToolCalls(
 		}
 	}
 
-	// While an interruptible tool call is in flight (e.g. a `hub` wait blocking
-	// on external work), queued steering or interrupting IRC would otherwise
-	// wait out the tool's own window. Prefer the event-driven steering wake when
-	// the host provides it; retain the timer fallback for direct loop consumers
-	// that only expose the legacy peek callbacks.
+	// While tool calls are in flight, queued steering or interrupting IRC would
+	// otherwise wait out the tools' own window. Poll only non-consuming queues:
+	// detection hard-aborts interruptible waits, soft-signals cooperative tools
+	// (auto-background bash), and skips not-yet-started tools, so the boundary
+	// dequeue below injects the message promptly. Gated on immediate-interrupt
+	// mode; checkSteering is idempotent (no-op once triggered).
 	const watchSteeringWhileRunning =
-		shouldInterruptImmediately &&
-		(hasSteeringMessages !== undefined || hasIrcInterrupts !== undefined) &&
-		records.some(record => record.interruptible);
+		shouldInterruptImmediately && (hasSteeringMessages !== undefined || hasIrcInterrupts !== undefined);
 	const eventDrivenSteeringWatch =
 		watchSteeringWhileRunning && config.waitForSteeringMessages !== undefined && hasSteeringMessages !== undefined;
 	const steeringWatchAbortController = new AbortController();

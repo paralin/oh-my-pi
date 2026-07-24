@@ -2,11 +2,23 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Queued steering no longer hard-aborts non-interruptible tools (e.g. `bash`): it aborts interruptible waits only and raises a cooperative steering signal (`ToolCallContext.steeringSignal`) that long-running tools may observe to finish early or background themselves. The mid-batch steering/IRC watch now runs for every tool batch instead of only batches containing an interruptible tool.
+
+### Fixed
+
+- Fixed an unbounded allocation loop when a steer (or follow-up) was queued on a session with an empty transcript: `Agent.continue()` now delivers the queued message as the opening turn instead of throwing, so idle-drain callers no longer respin `continue()` on every microtask until OOM ([#6344](https://github.com/can1357/oh-my-pi/issues/6344)).
+- Fixed provider-switched sessions being stranded without their remotely-compacted history: compaction now judges whether a prior OpenAI remote-compaction replay payload can be reused against the active model rather than the whole candidate set, so switching to a model that cannot replay the payload re-expands the originals into a portable local summary instead of leaving the model with only a placeholder ([#6343](https://github.com/can1357/oh-my-pi/issues/6343)).
+
 ## [17.0.8] - 2026-07-22
 
 ### Fixed
 
 - Improved resilience against transient stream JSON parse failures by recovering completed tool calls while safely preventing incomplete, unknown, refused, or sensitive calls from executing.
+### Fixed
+
+- Fixed compaction/summarization serializing prior assistant reasoning back to Claude as text (rendered verbatim inside `<thinking>` tags for the `anthropic` dialect), which tripped Anthropic's `reasoning_extraction` refusal and blocked compaction on Fable 5 sessions; `serializeConversation` now drops `thinking` blocks for Anthropic-dialect summary targets while other dialects (e.g. Harmony) keep their native reasoning ([#6093](https://github.com/can1357/oh-my-pi/issues/6093)).
 
 ## [17.0.5] - 2026-07-18
 

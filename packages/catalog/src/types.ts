@@ -460,6 +460,29 @@ export interface AnthropicCompat {
 }
 
 /**
+ * Compatibility settings for Bedrock Converse prompt caching. Cache pricing is
+ * deliberately not used to infer these request-shape capabilities.
+ */
+export interface BedrockCompat {
+	/** Whether this endpoint accepts no checkpoints, automatic caching, or explicit cachePoint blocks. */
+	promptCacheMode?: "none" | "automatic" | "explicit";
+	/** Whether explicit cachePoint blocks accept `ttl: "1h"`; omitted TTL means Bedrock's 5-minute default. */
+	supportsLongPromptCacheRetention?: boolean;
+	/** Minimum prompt-prefix tokens required for an effective checkpoint. Zero means no explicit checkpoints. */
+	promptCacheMinimumTokens?: number;
+	/** Maximum explicit cache checkpoints accepted in one request. Zero means no explicit checkpoints. */
+	promptCacheMaximumCheckpoints?: number;
+}
+
+/** Fully-resolved Bedrock Converse prompt-cache capabilities, materialized once by `buildModel`. */
+export interface ResolvedBedrockCompat {
+	promptCacheMode: NonNullable<BedrockCompat["promptCacheMode"]>;
+	supportsLongPromptCacheRetention: boolean;
+	promptCacheMinimumTokens: number;
+	promptCacheMaximumCheckpoints: number;
+}
+
+/**
  * OpenRouter provider routing preferences.
  * Controls which upstream providers OpenRouter routes requests to.
  * @see https://openrouter.ai/docs/provider-routing
@@ -681,9 +704,11 @@ export type CompatConfigOf<TApi extends Api> = TApi extends
 	? OpenAICompat
 	: TApi extends "anthropic-messages"
 		? AnthropicCompat
-		: TApi extends "devin-agent"
-			? DevinCompat
-			: undefined;
+		: TApi extends "bedrock-converse-stream"
+			? BedrockCompat
+			: TApi extends "devin-agent"
+				? DevinCompat
+				: undefined;
 
 /** Resolved compat for a given API: complete record, materialized once by `buildModel`. */
 export type CompatOf<TApi extends Api> = TApi extends "openrouter"
@@ -694,9 +719,11 @@ export type CompatOf<TApi extends Api> = TApi extends "openrouter"
 			? ResolvedOpenAIResponsesCompat
 			: TApi extends "anthropic-messages"
 				? ResolvedAnthropicCompat
-				: TApi extends "devin-agent"
-					? ResolvedDevinCompat
-					: undefined;
+				: TApi extends "bedrock-converse-stream"
+					? ResolvedBedrockCompat
+					: TApi extends "devin-agent"
+						? ResolvedDevinCompat
+						: undefined;
 
 /** Provider-native compaction endpoint configuration for one model. */
 export interface RemoteCompactionConfig<TApi extends Api = Api> {

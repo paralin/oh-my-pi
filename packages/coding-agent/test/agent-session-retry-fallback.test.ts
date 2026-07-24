@@ -11,6 +11,11 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { parseModelPattern, parseModelString } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
+import { SessionObserverRegistry } from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -81,6 +86,7 @@ describe("AgentSession retry fallback", () => {
 	// mutable retry-fallback cooldown state between tests.
 	beforeAll(async () => {
 		tempDir = TempDir.createSync("@pi-retry-fallback-");
+		await initTheme();
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
 		authStorage.setRuntimeApiKey("openai", "openai-test-key");
@@ -219,6 +225,28 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+		const registry = new AgentRegistry();
+		registry.register({
+			id: "fallback-agent",
+			displayName: "Fallback Agent",
+			kind: "sub",
+			session,
+		});
+		const hub = new AgentHubOverlayComponent({
+			observers: new SessionObserverRegistry(),
+			hubKeys: [],
+			onDone: () => {},
+			requestRender: () => {},
+			registry,
+			irc: new IrcBus(registry),
+		});
+		try {
+			expect(Bun.stripANSI(hub.render(120).join("\n"))).toContain(
+				`fallback → ${secondFallback.provider}/${secondFallback.id}`,
+			);
+		} finally {
+			hub.dispose();
+		}
 	});
 
 	it("continues a startup-owned role fallback chain from the active fallback", async () => {
@@ -1359,6 +1387,87 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("emits auto_retry_end when a mid-saga classifier refusal has no fallback to switch to", async () => {
+		// Regression: `#handleRetryableError`'s classifier-refusal branch used to
+		// return `false` without emitting `auto_retry_end` whenever no fallback
+		// model was available to switch to. A saga that already announced
+		// `auto_retry_start` on an earlier (non-refusal) attempt would then never
+		// get a matching `auto_retry_end` — leaving any subscriber tracking
+		// "retry outstanding" state (e.g. suppressing a duplicate error toast)
+		// latched open forever. With `retry.maxRetries: 2` and no fallback chain
+		// configured, the second attempt's classifier refusal hits that branch
+		// while `retryAttempt (2) <= maxRetries (2)`, so it can't fall through
+		// the pre-existing maxRetries-exceeded path (which already emits
+		// `auto_retry_end`) — isolating the branch this regression covers.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) {
+			throw new Error("Expected bundled test model to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const refusalMessage = "Refusal (cyber): Classifier declined this retried turn.";
+		const mock = createMockModel();
+		let calls = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				calls += 1;
+				if (calls === 1) {
+					mock.push({ throw: "overloaded_error: provider returned error 503" });
+				} else if (calls === 2) {
+					mock.push({
+						stopReason: "error",
+						stopDetails: { type: "refusal", category: "cyber", explanation: "Classifier declined." },
+						errorMessage: refusalMessage,
+					});
+				} else {
+					throw new Error(`Unexpected model call after the classifier refusal settled: call ${calls}`);
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 2,
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+
+		await session.prompt("Retry once, then hit a classifier refusal with no fallback");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+		]);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryStartEvents[0]?.attempt).toBe(1);
+		expect(retryEndEvents).toEqual([
+			{
+				type: "auto_retry_end",
+				success: false,
+				attempt: 1,
+				finalError: refusalMessage,
+			},
+		]);
+	});
+
 	it("uses Google retry hints in quota errors before quota backoff", async () => {
 		const model = getBundledModel("google", "gemini-1.5-flash");
 		if (!model) {
@@ -1971,6 +2080,54 @@ describe("AgentSession retry fallback", () => {
 		const lastAssistant = getLastAssistantMessage(session);
 		expect(lastAssistant.stopReason).toBe("error");
 		expect(lastAssistant.errorMessage).toBe(envelopeError);
+	});
+
+	it("closes the retry lifecycle when a retried turn ends with a non-retryable error", async () => {
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		if (!model) throw new Error("Expected bundled OpenAI test model to exist");
+
+		const retryableError = "rate limit exceeded retry-after-ms=5";
+		const terminalError = "invalid request: schema violation";
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				mock.push({ throw: requestedModels.length === 1 ? retryableError : terminalError });
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const { retryStartEvents, retryEndEvents } = trackRetryEvents(session);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Retry once, then surface a terminal validation failure");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${model.provider}/${model.id}`, `${model.provider}/${model.id}`]);
+		expect(retryStartEvents).toHaveLength(1);
+		expect(retryEndEvents).toEqual([
+			expect.objectContaining({ success: false, attempt: 1, finalError: terminalError }),
+		]);
+		expect(session.retryAttempt).toBe(0);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
 	});
 
 	it("auto-retries a bare Request was aborted error-stop turn (issue #5375)", async () => {

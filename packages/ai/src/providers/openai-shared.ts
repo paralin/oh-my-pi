@@ -1069,6 +1069,20 @@ export function resolveOpenAICompletionsOutputClamp(
 }
 
 /**
+ * Provider-specific Responses API output clamp.
+ *
+ * Meta documents a 131,072-token output limit for Muse Spark 1.1, so native
+ * Meta requests may use the model's full advertised cap instead of the
+ * conservative 64k OpenAI-compatible default.
+ */
+export function resolveOpenAIResponsesOutputClamp(model: Pick<Model, "provider" | "maxTokens">): number | undefined {
+	if (model.provider === "meta") {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	return undefined;
+}
+
+/**
  * Enable `tool_stream` for Z.AI/GLM-5.2 reasoning models when tools are present
  * (GLM-5.2 streams tool-call arguments incrementally and needs the flag to do so).
  */
@@ -2501,6 +2515,7 @@ export async function processResponsesStream<TApi extends Api>(
 			const entry = lookupOpenToolCallAlias(event, "custom_tool_call");
 			if (entry?.item.type === "custom_tool_call" && entry.block.type === "toolCall") {
 				finalizeCustomToolCallInputDone(entry.block, event.input);
+				entry.block[kStreamingArgumentsDone] = true;
 			}
 		} else if (event.type === "response.output_item.done") {
 			const item = structuredCloneJSON(event.item);
@@ -2620,6 +2635,10 @@ export async function processResponsesStream<TApi extends Api>(
 			}
 		} else if (terminalEvent) {
 			const response = terminalEvent.response;
+			const shouldPromoteIncompleteToolUse =
+				response?.status === "incomplete" &&
+				response.incomplete_details?.reason === "max_output_tokens" &&
+				hasExecutableIncompleteResponsesToolCalls(output);
 			finalizePendingResponsesToolCalls(output);
 			if (response?.id) {
 				output.responseId = response.id;
@@ -2656,7 +2675,11 @@ export async function processResponsesStream<TApi extends Api>(
 					kind: "content-blocked",
 				});
 			}
-			promoteResponsesToolUseStopReason(output, (response as { end_turn?: boolean } | undefined)?.end_turn);
+			promoteResponsesToolUseStopReason(
+				output,
+				(response as { end_turn?: boolean } | undefined)?.end_turn,
+				shouldPromoteIncompleteToolUse,
+			);
 			options?.onCompleted?.();
 			// `response.completed`/`response.incomplete`/`response.done` is the last event of a
 			// Responses stream. Stop pulling instead of waiting for the server to
@@ -2712,6 +2735,28 @@ export function mapOpenAIResponsesStopReason(status: ResponseStatus | undefined)
 	}
 }
 
+function hasExecutableIncompleteResponsesToolCalls(output: AssistantMessage): boolean {
+	let hasToolCall = false;
+	for (const block of output.content) {
+		if (block.type !== "toolCall") continue;
+		hasToolCall = true;
+		const pending = block as ToolCall & {
+			[kStreamingPartialJson]?: string;
+			[kStreamingArgumentsDone]?: boolean;
+		};
+		const rawArguments = pending[kStreamingPartialJson];
+		// `output_item.done` is not positive completion proof: our Responses
+		// compatibility encoder force-closes still-open calls before forwarding an
+		// upstream `length` stop. Only an explicit arguments/input-done event sets
+		// this marker; an open ordinary call can instead prove completion with its
+		// retained strict-complete JSON.
+		if (pending[kStreamingArgumentsDone]) continue;
+		if (pending.customWireName !== undefined || rawArguments === undefined) return false;
+		if (classifyJsonPrefix(rawArguments) !== "complete") return false;
+	}
+	return hasToolCall;
+}
+
 /**
  * Finalize any streamed toolCall block whose `output_item.done` never arrived
  * (lossy proxy, or a terminal event that raced the per-item done): parse the
@@ -2745,8 +2790,15 @@ export function finalizePendingResponsesToolCalls(output: AssistantMessage): voi
  * re-samples instead of ending. Callers set `output.stopReason` from the wire
  * status first via {@link mapOpenAIResponsesStopReason}.
  */
-export function promoteResponsesToolUseStopReason(output: AssistantMessage, endTurn: boolean | undefined): void {
-	if (output.content.some(block => block.type === "toolCall") && output.stopReason === "stop") {
+export function promoteResponsesToolUseStopReason(
+	output: AssistantMessage,
+	endTurn: boolean | undefined,
+	promoteIncompleteToolUse = false,
+): void {
+	if (
+		output.content.some(block => block.type === "toolCall") &&
+		(output.stopReason === "stop" || (promoteIncompleteToolUse && output.stopReason === "length"))
+	) {
 		output.stopReason = "toolUse";
 	}
 	if (endTurn === false && output.stopReason === "stop") {
@@ -2811,7 +2863,7 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 		params.max_output_tokens = Math.min(
 			options.maxTokens,
 			model.maxTokens ?? Number.POSITIVE_INFINITY,
-			OPENAI_MAX_OUTPUT_TOKENS,
+			resolveOpenAIResponsesOutputClamp(model) ?? OPENAI_MAX_OUTPUT_TOKENS,
 		);
 	}
 	// OpenAI proprietary reasoning models (o-series, gpt-5+) reject explicit

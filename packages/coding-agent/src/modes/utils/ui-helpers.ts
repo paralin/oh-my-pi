@@ -114,16 +114,19 @@ export class UiHelpers {
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
 		const useDim = options?.dim ?? true;
-		const rendered = useDim ? theme.fg("dim", message) : message;
+		// Resolve the dim color lazily so a later theme change re-shapes the line
+		// instead of leaving the palette that was active when it was presented.
+		const styleFn = useDim ? (t: string) => theme.fg("dim", t) : undefined;
 
 		if (last && secondLast && last === this.ctx.lastStatusText && secondLast === this.ctx.lastStatusSpacer) {
-			this.ctx.lastStatusText.setText(rendered);
+			this.ctx.lastStatusText.setStyleFn(styleFn);
+			this.ctx.lastStatusText.setText(message);
 			this.ctx.ui.requestRender();
 			return;
 		}
 
 		const spacer = new Spacer(1);
-		const text = new Text(rendered, 1, 0);
+		const text = new Text(message, 1, 0).setStyleFn(styleFn);
 		this.ctx.present([spacer, text]);
 		this.ctx.lastStatusSpacer = spacer;
 		this.ctx.lastStatusText = text;
@@ -714,11 +717,13 @@ export class UiHelpers {
 	}
 
 	showError(errorMessage: string): void {
-		this.ctx.present([new Spacer(1), new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0)]);
+		const text = new Text(`Error: ${errorMessage}`, 1, 0).setStyleFn(t => theme.fg("error", t));
+		this.ctx.present([new Spacer(1), text]);
 	}
 
 	showWarning(warningMessage: string): void {
-		this.ctx.present([new Spacer(1), new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0)]);
+		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
+		this.ctx.present([new Spacer(1), text]);
 	}
 
 	showNewVersionNotification(newVersion: string): void {

@@ -16,6 +16,8 @@ import {
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
+import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
+import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import * as fileLock from "../src/config/file-lock";
@@ -163,7 +165,7 @@ describe("Settings", () => {
 
 			expect(settings.get("setupVersion")).toBe(0);
 			expect(settings.get("modelRoles")).toEqual({});
-			expect(settings.get("providers.webSearch")).toBe("auto");
+			expect(settings.get("providers.webSearchOrder")).toEqual([]);
 			expect(settings.get("providers.codexHomes")).toEqual([]);
 		});
 
@@ -519,7 +521,6 @@ describe("Settings", () => {
 			const withFileLock = fileLock.withFileLock;
 			vi.spyOn(fileLock, "withFileLock").mockImplementation(async (filePath, fn, options) => {
 				firstSaveEntered.resolve();
-				await releaseFirstSave.promise;
 				const result = await withFileLock(filePath, fn, options);
 				firstSaveFinished.resolve();
 				return result;
@@ -645,6 +646,46 @@ describe("Settings", () => {
 
 			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBeNull();
 			expect(settings.getEditVariantForModel("openai/gpt-5.2-codex")).toBe("apply_patch");
+		});
+	});
+
+	describe("provider preference migration", () => {
+		it("expands a legacy providers.webSearch choice into the head of webSearchOrder", async () => {
+			await writeSettings({ providers: { webSearch: "exa" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.webSearchOrder")).toEqual([
+				"exa",
+				...SEARCH_PROVIDER_ORDER.filter(id => id !== "exa"),
+			]);
+		});
+
+		it("drops legacy providers.webSearch auto without seeding an order", async () => {
+			await writeSettings({ providers: { webSearch: "auto" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.webSearchOrder")).toEqual([]);
+		});
+
+		it("keeps an explicit webSearchOrder over the legacy webSearch preference", async () => {
+			await writeSettings({ providers: { webSearch: "exa", webSearchOrder: ["gemini"] } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.webSearchOrder")).toEqual(["gemini"]);
+		});
+
+		it("expands a legacy providers.image choice into the head of imageOrder", async () => {
+			await writeSettings({ providers: { image: "xai" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("providers.imageOrder")).toEqual([
+				"xai",
+				...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== "xai"),
+			]);
 		});
 	});
 
@@ -825,7 +866,7 @@ describe("Settings", () => {
 			expect(settings.get("grep.enabled")).toBe(true);
 		});
 
-		it("migrates nested dev.autoqa.consent and todo.reminders.max without enabling parents", async () => {
+		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {
 			await writeSettings({
 				dev: { autoqa: { consent: "granted" } },
 				todo: { reminders: { max: 5 } },
@@ -834,7 +875,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.get("dev.autoqaConsent")).toBe("granted");
-			expect(settings.get("dev.autoqa")).toBe(false);
+			expect(settings.get("dev.autoqa")).toBe(true);
 			expect(settings.isConfigured("dev.autoqa")).toBe(false);
 			expect(settings.get("todo.remindersMax")).toBe(5);
 			expect(settings.get("todo.reminders")).toBe(true);
@@ -847,7 +888,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.get("dev.autoqaConsent")).toBe("denied");
-			expect(settings.get("dev.autoqa")).toBe(false);
+			expect(settings.isConfigured("dev.autoqa")).toBe(false);
 			expect(settings.get("todo.remindersMax")).toBe(2);
 			expect(settings.get("todo.reminders")).toBe(true);
 		});
@@ -861,7 +902,7 @@ describe("Settings", () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
 			expect(settings.get("dev.autoqaConsent")).toBe("granted");
-			expect(settings.get("dev.autoqa")).toBe(false);
+			expect(settings.isConfigured("dev.autoqa")).toBe(false);
 			expect(settings.get("todo.remindersMax")).toBe(9);
 			expect(settings.get("todo.reminders")).toBe(true);
 		});
@@ -886,7 +927,7 @@ describe("Settings", () => {
 					"dev.autoqa.consent": consent,
 				} as Partial<Record<SettingPath, unknown>>);
 				expect(settings.get("dev.autoqaConsent")).toBe(consent);
-				expect(settings.get("dev.autoqa")).toBe(false);
+				expect(settings.isConfigured("dev.autoqa")).toBe(false);
 			}
 		});
 
@@ -916,7 +957,7 @@ describe("Settings", () => {
 
 			const reloaded = await Settings.loadIsolated({ cwd: projectDir, agentDir });
 			expect(reloaded.get("dev.autoqaConsent")).toBe("denied");
-			expect(reloaded.get("dev.autoqa")).toBe(false);
+			expect(reloaded.isConfigured("dev.autoqa")).toBe(false);
 			expect(reloaded.get("todo.remindersMax")).toBe(1);
 			expect(reloaded.get("todo.reminders")).toBe(true);
 		});

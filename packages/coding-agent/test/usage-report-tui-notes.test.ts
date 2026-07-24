@@ -107,6 +107,61 @@ describe("renderUsageReports (#3268 TUI aggregate)", () => {
 
 		expect(text).toContain("rae@example.com (Team Org)");
 	});
+
+	it("renders used-only absolute amounts with neutral status and no account summary", () => {
+		const reports: UsageReport[] = [
+			report("anthropic", "spend@example.test", [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 123.45, unit: "usd" },
+				},
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(text).toContain(theme.status.info);
+		expect(text).not.toContain(theme.status.pending);
+		expect(text).toContain("$123.45 used");
+		expect(text).not.toContain("1 accts");
+	});
+
+	it("preserves capped aggregate status when a group mixes capped and used-only amounts", () => {
+		const reports: UsageReport[] = [
+			report("anthropic", "capped@example.test", [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: {
+						used: 50,
+						limit: 100,
+						remaining: 50,
+						usedFraction: 0.5,
+						remainingFraction: 0.5,
+						unit: "usd",
+					},
+					status: "ok",
+				},
+			]),
+			report("anthropic", "spend@example.test", [
+				{
+					id: "anthropic:extra",
+					label: "Claude Extra Usage",
+					scope: { provider: "anthropic", windowId: "extra" },
+					amount: { used: 123.45, unit: "usd" },
+				},
+			]),
+		];
+
+		const text = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 160));
+
+		expect(text).toContain(theme.status.success);
+		expect(text).toContain("$123.45 used");
+		expect(text).toContain("2 accts");
+	});
 });
 
 describe("renderUsageReports session marker (#5691 org-qualified identity)", () => {

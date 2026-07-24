@@ -221,6 +221,7 @@ import {
 import { disposeRubyKernelSessionsByOwner } from "../eval/rb/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import { exportSessionToHtml } from "../export/html";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
@@ -401,6 +402,7 @@ import {
 	type InterruptedThinkingDetails,
 	isEmptyErrorTurn,
 	isUserInterruptAbort,
+	logProviderTurnError,
 	normalizeCustomMessagePayload,
 	type PythonExecutionMessage,
 	readQueueChipText,
@@ -835,7 +837,8 @@ function toolWriteTargetPaths(toolName: string, args: unknown): string[] {
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
-	| AgentEvent
+	| Exclude<AgentEvent, { type: "agent_end" }>
+	| (Extract<AgentEvent, { type: "agent_end" }> & { isTerminal?: boolean })
 	| {
 			type: "auto_compaction_start";
 			reason: AutoCompactionReason;
@@ -1120,6 +1123,12 @@ export interface AgentSessionConfig {
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Agent directory used when changing memory backends in a live session. */
+	memoryAgentDir?: string;
+	/** Recursion depth used to suppress live backend replacement in subagents. */
+	memoryTaskDepth?: number;
+	/** Creates built-in memory tools for the current backend. */
+	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
@@ -1903,25 +1912,6 @@ function isAdvisorCard(message: AgentMessage): message is CustomMessage {
 	return message.role === "custom" && message.customType === "advisor";
 }
 
-/**
- * Emit a warn-level log for a turn that ended in a provider error so recurring
- * stream failures are diagnosable from the main log alone. The `agent_end`
- * routing trace is debug-only and omits the error fields; without this a
- * session dying on provider errors leaves only `stopReason:"error"` debug lines
- * and the real cause lives solely in the session transcript (issue #6177).
- * No-op for any non-error stop reason.
- */
-export function logProviderTurnError(msg: AssistantMessage): void {
-	if (msg.stopReason !== "error") return;
-	logger.warn("agent turn ended with provider error", {
-		provider: msg.provider,
-		model: msg.model,
-		errorMessage: msg.errorMessage,
-		errorStatus: msg.errorStatus,
-		errorId: msg.errorId,
-	});
-}
-
 function isTerminalTextAssistantAnswer(message: AgentMessage | undefined): message is AssistantMessage {
 	if (message?.role !== "assistant" || message.stopReason !== "stop") return false;
 	let hasText = false;
@@ -2302,6 +2292,7 @@ export class AgentSession {
 	#inheritedProviderPromptCacheKey: string | undefined;
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
+	#localMemoryStartupAbort: AbortController | undefined;
 	#isDisposed = false;
 	#onIdle?: () => void;
 	#onDispose?: () => void;
@@ -4084,11 +4075,7 @@ export class AgentSession {
 			this.sessionId,
 			advisor.slug,
 		);
-		const preparation = prepareCompaction(
-			pathEntries,
-			compactionSettings,
-			await this.#runnableCompactionCandidates(candidates, advisorProviderSessionId),
-		);
+		const preparation = prepareCompaction(pathEntries, compactionSettings, advisorModel);
 		if (!preparation) {
 			// Cannot prepare compaction, fallback to re-prime
 			return true;
@@ -4178,6 +4165,55 @@ export class AgentSession {
 
 	getAgentId(): string | undefined {
 		return this.#agentId;
+	}
+
+	/** Resolved selector while retry fallback routing owns the current model. */
+	get retryFallbackModel(): string | undefined {
+		if (!this.#activeRetryFallback || !this.model) return undefined;
+		return formatRetryFallbackSelector(this.model, this.thinkingLevel);
+	}
+
+	/** Whether owner-scoped asynchronous work can still re-wake this session. */
+	hasPendingAsyncWork(): boolean {
+		return this.#hasPendingAsyncWake();
+	}
+
+	/** Wait for this session's jobs to settle and route their pending deliveries. */
+	async settleAsyncWork(): Promise<void> {
+		const manager = this.#asyncJobManager;
+		if (!manager) return;
+		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		if (this.#agentId) {
+			await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+		} else {
+			await manager.waitForAll();
+		}
+		await manager.drainDeliveries({ filter: ownerFilter });
+	}
+
+	/** Start a new local rollout-memory generation and cancel its predecessor. */
+	beginLocalMemoryStartup(): AbortSignal {
+		this.#localMemoryStartupAbort?.abort();
+		const controller = new AbortController();
+		this.#localMemoryStartupAbort = controller;
+		return controller.signal;
+	}
+
+	/** Release the local rollout-memory startup slot if this signal still owns it. */
+	endLocalMemoryStartup(signal: AbortSignal): void {
+		if (this.#localMemoryStartupAbort?.signal === signal) this.#localMemoryStartupAbort = undefined;
+	}
+
+	/** Refresh the memory-dependent system prompt after a settings transition. */
+	async applyMemoryBackend(): Promise<void> {
+		if (this.#isDisposed) return;
+		await this.refreshBaseSystemPrompt();
+	}
+
+	/** Remove transient vibe tools without restoring a source-session snapshot. */
+	async removeVibeToolsPreservingActive(): Promise<void> {
+		const removed = new Set(this.#installedVibeToolNames);
+		await this.deactivateVibeTools(this.getActiveToolNames().filter(name => !removed.has(name)));
 	}
 
 	getScratchHandoffDisplayPath(): string | undefined {
@@ -4422,10 +4458,15 @@ export class AgentSession {
 		this.#planProposalHandler = handler ?? undefined;
 	}
 
+	#sessionBeforeSwitchReconciler: (() => Promise<void>) | undefined;
 	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	setSessionBeforeSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -11791,11 +11832,7 @@ export class AgentSession {
 				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
 			}
 			const pathEntries = this.sessionManager.getBranch();
-			const preparation = prepareCompaction(
-				pathEntries,
-				effectiveSettings,
-				await this.#runnableCompactionCandidates(compactionCandidates, this.sessionId),
-			);
+			const preparation = prepareCompaction(pathEntries, effectiveSettings, this.model);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -14748,10 +14785,6 @@ export class AgentSession {
 	 * Re-expansion reusability (prepareCompaction) must judge remote-preserve
 	 * reuse against these, not against candidates the loop would skip at runtime.
 	 */
-	async #runnableCompactionCandidates(candidates: readonly Model[], sessionId: string | undefined): Promise<Model[]> {
-		const keys = await Promise.all(candidates.map(model => this.#modelRegistry.getApiKey(model, sessionId)));
-		return candidates.filter((_, index) => keys[index] !== undefined);
-	}
 
 	#resolveCompactionModelCandidates(
 		preferredModel: Model | null | undefined,
@@ -15462,12 +15495,8 @@ export class AgentSession {
 
 			const pathEntries = this.sessionManager.getBranch();
 
-			const autoCompactionCandidates = await this.#runnableCompactionCandidates(
-				this.#getCompactionModelCandidates(availableModels),
-				this.sessionId,
-			);
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, autoCompactionCandidates);
+			let preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.model);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -15494,11 +15523,7 @@ export class AgentSession {
 							// branch has been rewritten either way.
 							rescueRewroteHistory = true;
 							pathEntriesForCompaction = this.sessionManager.getBranch();
-							preparation = prepareCompaction(
-								pathEntriesForCompaction,
-								compactionSettings,
-								autoCompactionCandidates,
-							);
+							preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.model);
 							return preparation !== undefined;
 						},
 					});
@@ -18295,10 +18320,31 @@ export class AgentSession {
 	}
 
 	/**
+	 * Move the active session and its artifacts to a new working directory.
+	 *
+	 * The caller updates process-level cwd and UI state after this completes;
+	 * this method owns the session transition and prompt refresh.
+	 */
+	async moveSession(newCwd: string): Promise<void> {
+		await this.#sessionBeforeSwitchReconciler?.();
+		this.#disconnectFromAgent();
+		try {
+			await this.abort({ goalReason: "internal" });
+			await this.#flushPendingBashMessages();
+			await this.sessionManager.flush();
+			await this.sessionManager.moveTo(newCwd);
+			await this.refreshBaseSystemPrompt();
+		} finally {
+			this.#reconnectToAgent();
+		}
+	}
+
+	/**
 	 * Switch to a different session file.
 	 * Aborts current operation, loads messages, restores model/thinking.
 	 * Listeners are preserved and will continue receiving events.
 	 * @returns true if switch completed, false if cancelled by hook
+
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
@@ -18318,6 +18364,7 @@ export class AgentSession {
 			}
 		}
 
+		await this.#sessionBeforeSwitchReconciler?.();
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
 
@@ -19599,15 +19646,14 @@ export class AgentSession {
 	/**
 	 * Export session to HTML.
 	 * @param outputPath Optional output path (defaults to session directory)
+	 * @param useUserThemes Whether to use the configured user theme palette
 	 * @returns Path to exported file
 	 */
-	async exportToHtml(outputPath?: string): Promise<string> {
-		// Public HTML export ships in the omp brand palette (collab-web
-		// pink/purple), matching my.omp.sh — not the host's terminal theme.
-		// Callers who want a themed export can pass `palette: "theme"` with
-		// `themeName` directly to `exportSessionToHtml`.
-		const { exportSessionToHtml } = await import("../export/html");
-		return exportSessionToHtml(this.sessionManager, this.state, { outputPath, palette: "web" });
+	async exportToHtml(outputPath?: string, useUserThemes = false): Promise<string> {
+		return exportSessionToHtml(this.sessionManager, this.state, {
+			outputPath,
+			palette: useUserThemes ? "theme" : "web",
+		});
 	}
 
 	// =========================================================================
