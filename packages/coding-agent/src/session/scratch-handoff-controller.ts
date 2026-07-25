@@ -183,6 +183,7 @@ export interface ScratchHandoffHost {
 	resetPlanReference(): void;
 	resetAdvisorRuntimes(): void;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
+	markPrefixReset(): void;
 	/** Clear per-turn asides, scheduled hidden turns, and todo reminder state at a scratch boundary. */
 	resetTurnStateForScratchBoundary(): void;
 	waitForIdle(): Promise<void>;
@@ -687,6 +688,7 @@ export class ScratchHandoffController {
 		this.#host.resetPlanReference();
 		this.#host.resetAdvisorRuntimes();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+		this.#host.markPrefixReset();
 	}
 
 	#estimateLiveRequestContextTokens(context: AgentContext, contextWindow: number): number {
