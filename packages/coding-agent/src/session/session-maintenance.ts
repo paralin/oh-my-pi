@@ -73,6 +73,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
+import { buildCompactionMeasurement } from "./measurement-events";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -404,6 +405,20 @@ export class SessionMaintenance {
 			willRetry: options.willRetry === true,
 			...(options.errorMessage !== undefined ? { errorMessage: options.errorMessage } : {}),
 		});
+	}
+	async #emitCompactionMeasurement(
+		action: AutoCompactionAction,
+		triggerTokens: number | undefined,
+		tokensFreed: number,
+	): Promise<void> {
+		await this.#host.emitSessionEvent(
+			buildCompactionMeasurement({
+				triggerTokens,
+				floorTokens: this.#host.settings.getGroup("compaction").keepRecentTokens,
+				mode: action,
+				tokensFreed: Math.max(0, tokensFreed),
+			}),
+		);
 	}
 
 	#compactionAbortController: AbortController | undefined;
@@ -2394,6 +2409,7 @@ export class SessionMaintenance {
 					reportScratchPhase,
 				);
 				scratch.clearCloseout();
+				await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -2422,6 +2438,7 @@ export class SessionMaintenance {
 				if (!handoffResult) {
 					const aborted = autoCompactionSignal.aborted || handoffSwitchCancelled;
 					if (aborted) {
+						await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 						await this.#host.emitSessionEvent({
 							type: "auto_compaction_end",
 							action,
@@ -2438,6 +2455,7 @@ export class SessionMaintenance {
 					action = "context-full";
 				}
 				if (handoffResult) {
+					await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 					await this.#host.emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -2462,6 +2480,7 @@ export class SessionMaintenance {
 			}
 
 			if (!this.#model) {
+				await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -2479,6 +2498,7 @@ export class SessionMaintenance {
 				throw new Error("Compaction failed: no available model");
 			}
 			if (availableModels.length === 0) {
+				await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -2577,6 +2597,11 @@ export class SessionMaintenance {
 					// compaction entry — surface it as a real (non-skipped) result so
 					// the TUI rebuilds the transcript instead of treating the pass as
 					// a benign no-op.
+					await this.#emitCompactionMeasurement(
+						action,
+						options.triggerContextTokens ?? frameRescueResult?.tokensBefore,
+						frameRescueResult?.tokensBefore ?? 0,
+					);
 					await this.#host.emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -2633,6 +2658,7 @@ export class SessionMaintenance {
 				})) as SessionBeforeCompactResult | undefined;
 
 				if (hookResult?.cancel) {
+					await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 					await this.#host.emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -2903,6 +2929,7 @@ export class SessionMaintenance {
 			}
 
 			if (autoCompactionSignal.aborted) {
+				await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3062,6 +3089,13 @@ export class SessionMaintenance {
 				}
 			}
 
+			await this.#emitCompactionMeasurement(
+				action,
+				options.triggerContextTokens ?? result.tokensBefore,
+				result.tokensBefore -
+					(this.#host.getContextUsage({ contextWindow: this.#model?.contextWindow ?? 0 })?.tokens ??
+						result.tokensBefore),
+			);
 			await this.#host.emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
 			if (retryFits) {
@@ -3083,6 +3117,7 @@ export class SessionMaintenance {
 			return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 		} catch (error) {
 			if (autoCompactionSignal.aborted) {
+				await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3105,6 +3140,7 @@ export class SessionMaintenance {
 					await scratch.compactSession(options.scratchRecentMessages, scratchCompactionModes);
 				}
 				scratch.clearCloseout();
+				await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3120,6 +3156,7 @@ export class SessionMaintenance {
 				return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			await this.#emitCompactionMeasurement(action, options.triggerContextTokens, 0);
 			await this.#host.emitSessionEvent({
 				type: "auto_compaction_end",
 				action,
@@ -3170,6 +3207,7 @@ export class SessionMaintenance {
 			await this.#host.emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			if (signal.aborted) {
+				await this.#emitCompactionMeasurement(action, triggerContextTokens, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3219,6 +3257,7 @@ export class SessionMaintenance {
 				const errorMessage = reclaimed
 					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; falling back to context-full compaction.`
 					: "Auto-shake found nothing eligible to drop; falling back to context-full compaction.";
+				await this.#emitCompactionMeasurement(action, triggerContextTokens, result.tokensFreed);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3230,6 +3269,7 @@ export class SessionMaintenance {
 				});
 				return "fallback";
 			}
+			await this.#emitCompactionMeasurement(action, triggerContextTokens, result.tokensFreed);
 			await this.#host.emitSessionEvent({
 				type: "auto_compaction_end",
 				action,
@@ -3276,6 +3316,7 @@ export class SessionMaintenance {
 			};
 		} catch (error) {
 			if (signal.aborted) {
+				await this.#emitCompactionMeasurement(action, undefined, 0);
 				await this.#host.emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -3286,6 +3327,7 @@ export class SessionMaintenance {
 				return COMPACTION_CHECK_NONE;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
+			await this.#emitCompactionMeasurement(action, undefined, 0);
 			await this.#host.emitSessionEvent({
 				type: "auto_compaction_end",
 				action,
