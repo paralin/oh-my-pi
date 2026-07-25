@@ -260,6 +260,7 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
+import { buildLlmUsageEvent } from "./measurement-events";
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
@@ -439,6 +440,8 @@ export class AgentSession {
 	#unsubscribeModelRoles?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
+	#lastLlmUsagePrefixHash: string | undefined;
+	#deliberatePrefixResetPending = false;
 	#eventListeners: AgentSessionEventListener[] = [];
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 
@@ -1368,9 +1371,12 @@ export class AgentSession {
 			resetPlanReference: () => {
 				this.#planReferenceSent = false;
 			},
+			rebaseAfterCompaction: () => {
+				this.#stats.rebaseAfterCompaction();
+				this.#markPrefixReset();
+			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
-			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -1404,6 +1410,7 @@ export class AgentSession {
 			},
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
+			markPrefixReset: () => this.#markPrefixReset(),
 			resetTurnStateForScratchBoundary: () => {
 				this.#pendingNextTurnMessages = [];
 				this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -2262,7 +2269,26 @@ export class AgentSession {
 		for (const index of plan.toPersist) {
 			this.#persistSessionMessageIfMissing(turnMessages[index]);
 		}
+
 		return true;
+	}
+	#markPrefixReset(): void {
+		this.agent.appendOnlyContext?.invalidate();
+		this.#deliberatePrefixResetPending = true;
+	}
+
+	async #emitLlmUsage(message: AssistantMessage): Promise<void> {
+		const prefix = this.agent.appendOnlyContext?.prefix;
+		if (!prefix) return;
+		const event = buildLlmUsageEvent(
+			message,
+			{ fingerprint: prefix.fingerprint, version: prefix.version },
+			this.#lastLlmUsagePrefixHash,
+			this.#deliberatePrefixResetPending,
+		);
+		await this.#emitSessionEvent(event);
+		this.#lastLlmUsagePrefixHash = event.stablePrefixHash;
+		this.#deliberatePrefixResetPending = false;
 	}
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
@@ -2377,6 +2403,9 @@ export class AgentSession {
 				messageEndPersistence?.release();
 				throw error;
 			}
+		}
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			await this.#emitLlmUsage(event.message);
 		}
 
 		if (event.type === "turn_start") {
@@ -6172,6 +6201,7 @@ export class AgentSession {
 		this.#freshProviderSessionId = undefined;
 		this.#clearInheritedProviderPromptCacheKey();
 		this.#syncAgentSessionId();
+		this.#markPrefixReset();
 		this.#memory.rekeyForCurrentSessionId();
 		await this.#memory.resetContextForNewTranscript();
 		this.#pendingNextTurnMessages = [];
@@ -6250,6 +6280,7 @@ export class AgentSession {
 		}
 		this.#bash.markSessionTransition(bashTransition);
 		this.#bash.finishSessionTransition(bashTransition, true);
+		this.#markPrefixReset();
 
 		// Copy artifacts directory if it exists
 		const oldArtifactDir = forkResult.oldSessionFile.slice(0, -6);
@@ -7221,6 +7252,7 @@ export class AgentSession {
 			}
 
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#markPrefixReset();
 			this.#advisors.resetSessionState({ preserveCost: true });
 			this.#todo.syncFromBranch();
 			if (switchingToDifferentSession) {
@@ -7462,6 +7494,7 @@ export class AgentSession {
 		if (!skipConversationRestore) {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#advisors.resetSessionState();
+			this.#markPrefixReset();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 		}
 
@@ -7565,6 +7598,7 @@ export class AgentSession {
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#advisors.resetSessionState();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
+		this.#markPrefixReset();
 
 		return { cancelled: false, sessionFile: this.sessionFile };
 	}

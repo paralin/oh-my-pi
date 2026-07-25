@@ -424,6 +424,7 @@ export class Agent {
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
 	#beforeModelCall?: AgentBeforeModelCall;
 	#additionalBeforeModelCalls = new Set<AgentBeforeModelCall>();
+	#beforeModelContextBuild = new Set<(context: AgentContext) => Promise<void> | void>();
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
@@ -810,6 +811,17 @@ export class Agent {
 			| undefined,
 	): void {
 		this.#onTurnEnd = fn;
+	}
+
+	/**
+	 * Add work that must update the mutable agent context before provider
+	 * conversion and pre-model gates.
+	 */
+	addBeforeModelContextBuild(fn: (context: AgentContext) => Promise<void> | void): () => void {
+		this.#beforeModelContextBuild.add(fn);
+		return () => {
+			this.#beforeModelContextBuild.delete(fn);
+		};
 	}
 
 	/**
@@ -1324,6 +1336,9 @@ export class Agent {
 				}
 				context.systemPrompt = this.#state.systemPrompt;
 				context.tools = this.#toolsForModel(this.#state.model ?? model);
+				for (const callback of this.#beforeModelContextBuild) {
+					await callback(context);
+				}
 			},
 			beforeModelCall:
 				this.#beforeModelCall || this.#additionalBeforeModelCalls.size > 0
