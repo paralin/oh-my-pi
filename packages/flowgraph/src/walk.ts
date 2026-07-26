@@ -13,7 +13,7 @@
  * now lives in the question, where change is cheap and expected.
  */
 import { Agent, type AgentEvent, type AgentMessage, TERMINAL_TOOL_RESULT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
-import { type Model, streamSimple } from "@oh-my-pi/pi-ai";
+import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import Handlebars from "handlebars";
 import { type AnswerInput, type AnswerVerdict, createAnswerTool } from "./answer";
 import { emptyArtifact, type GoArtifact, writeArtifact } from "./artifact";
@@ -48,6 +48,8 @@ export interface WalkOptions {
 	trajectory: TrajectoryWriter;
 	/** How much of the walk's past each node's request carries. */
 	context?: ContextMode;
+	/** Reasoning effort forwarded unchanged to each provider request. */
+	reasoning?: SimpleStreamOptions["reasoning"];
 	/** Per-request output cap, kept low so one runaway node cannot burn the budget. */
 	maxTokens?: number;
 	/** Hard ceiling on node entries, which bounds cyclic graphs. */
@@ -238,7 +240,8 @@ export async function walk(options: WalkOptions): Promise<WalkResult> {
 	});
 
 	agent = new Agent({
-		streamFn: (model, context, streamOptions) => streamSimple(model, context, { ...streamOptions, maxTokens }),
+		streamFn: (model, context, streamOptions) =>
+			streamSimple(model, context, { ...streamOptions, maxTokens, reasoning: options.reasoning }),
 		initialState: {
 			systemPrompt: [graph.systemPrompt, graph.orientation],
 			model: options.model,

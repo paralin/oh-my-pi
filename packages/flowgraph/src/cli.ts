@@ -12,9 +12,9 @@ import { resolveModel } from "./model";
 import { formatReport, reportWalk } from "./report";
 import { TrajectoryWriter } from "./trajectory";
 import { serveView } from "./view";
-import { type ContextMode, walk } from "./walk";
+import { type ContextMode, type WalkOptions, walk } from "./walk";
 
-const usage = `flowgraph run  --graph <file> --task "<goal>" --dir <target> [--model <provider:id>] [--trajectory <file>] [--context session|ledger|stateless]
+const usage = `flowgraph run  --graph <file> --task "<goal>" --dir <target> [--model <provider:id>] [--reasoning <effort>] [--trajectory <file>] [--context session|ledger|stateless]
 flowgraph view --graph <file> --trajectory <file> [--port <n>]
 flowgraph report --trajectory <file>`;
 
@@ -27,6 +27,7 @@ async function runCommand(argv: string[]): Promise<number> {
 			dir: { type: "string" },
 			model: { type: "string", default: "openrouter:anthropic/claude-sonnet-4.5" },
 			trajectory: { type: "string" },
+			reasoning: { type: "string" },
 			"max-tokens": { type: "string" },
 			context: { type: "string", default: "session" },
 		},
@@ -61,6 +62,7 @@ async function runCommand(argv: string[]): Promise<number> {
 		model,
 		trajectory,
 		context: values.context as ContextMode,
+		reasoning: values.reasoning as WalkOptions["reasoning"],
 		maxTokens: values["max-tokens"] ? Number(values["max-tokens"]) : undefined,
 		onProgress: line => process.stdout.write(`${line}\n`),
 	});

@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { indexGraph } from "../src/graph";
 import { TrajectoryWriter } from "../src/trajectory";
-import { walk } from "../src/walk";
+import { type WalkOptions, walk } from "../src/walk";
 
 registerMockApi();
 
@@ -30,7 +30,10 @@ function testGraph() {
 	});
 }
 
-async function runWalk(responses: Parameters<typeof createMockModel>[0]["responses"]) {
+async function runWalk(
+	responses: Parameters<typeof createMockModel>[0]["responses"],
+	options: Pick<WalkOptions, "reasoning"> = {},
+) {
 	const dir = await mkdtemp(path.join(os.tmpdir(), "flowgraph-walk-"));
 	const trajectory = new TrajectoryWriter(path.join(dir, "walk.jsonl"));
 	const model = createMockModel({ responses });
@@ -42,6 +45,7 @@ async function runWalk(responses: Parameters<typeof createMockModel>[0]["respons
 			task: "finish the task",
 			model,
 			trajectory,
+			...options,
 		});
 		await trajectory.flush();
 		return { model, result };
@@ -78,5 +82,15 @@ describe("flowgraph walk answer termination", () => {
 
 		expect(result.status).toBe("done");
 		expect(model.calls).toHaveLength(2);
+	});
+	it("forwards the requested reasoning effort to every provider request", async () => {
+		const { model, result } = await runWalk(
+			[{ content: [{ type: "toolCall", name: "answer", arguments: { option: "finish", why: "Done." } }] }],
+			{ reasoning: "xhigh" },
+		);
+
+		expect(result.status).toBe("done");
+		expect(model.calls).toHaveLength(1);
+		expect(model.calls[0]?.options?.reasoning).toBe("xhigh");
 	});
 });
