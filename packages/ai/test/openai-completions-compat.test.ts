@@ -2229,6 +2229,31 @@ describe("anthropic cache control for OpenAI-compatible chat completions", () =>
 		expect(textPart?.cache_control).toEqual({ type: "ephemeral" });
 	});
 
+	it("marks the stable system and tool prefix separately from the current message", async () => {
+		const payload = await captureOpenAICompletionsPayload(claudeProxyModel({ cacheControlFormat: "anthropic" }), {
+			systemPrompt: ["stable system prompt"],
+			messages: [{ role: "user", content: "current prompt", timestamp: 0 }],
+			tools: [
+				{
+					name: "answer",
+					description: "answer the step",
+					parameters: { type: "object", properties: {} },
+				},
+			],
+		});
+		const messages = getPayloadMessages(payload);
+		const system = messages.find(message => message.role === "system");
+		const current = messages.find(message => message.role === "user");
+		const tools = toObject(payload)?.tools;
+
+		expect(system?.content).toBe("stable system prompt");
+		expect(tools).toMatchObject([{ cache_control: { type: "ephemeral" } }]);
+		expect(getLastTextPart(current?.content)).toMatchObject({
+			text: "current prompt",
+			cache_control: { type: "ephemeral" },
+		});
+	});
+
 	it("preserves OpenRouter Anthropic cache_control detection", async () => {
 		const model = getBundledModel("openrouter", "anthropic/claude-sonnet-4") as Model<"openai-completions">;
 		const payload = await captureOpenAICompletionsPayload(model, cacheContext());

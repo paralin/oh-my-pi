@@ -1659,7 +1659,7 @@ function buildParams(
 	});
 	const compat = finalPolicy.compat as ResolvedOpenAICompat;
 	const messages = convertMessages(model, context, compat);
-	maybeAddAnthropicCacheControl(compat, messages);
+	maybeAddAnthropicCacheControl(compat, messages, params.tools);
 	params.messages = messages;
 	const outputToken = resolveOpenAIOutputTokenParam({
 		field: compat.maxTokensField,
@@ -1737,8 +1737,17 @@ export function parseChunkUsage(
 	return usage;
 }
 
-function maybeAddAnthropicCacheControl(compat: ResolvedOpenAICompat, messages: ChatCompletionMessageParam[]): void {
+function maybeAddAnthropicCacheControl(
+	compat: ResolvedOpenAICompat,
+	messages: ChatCompletionMessageParam[],
+	tools?: ChatCompletionTool[],
+): void {
 	if (compat.cacheControlFormat !== "anthropic") return;
+
+	if (tools && tools.length > 0) {
+		Object.assign(tools[tools.length - 1], { cache_control: { type: "ephemeral" } });
+	}
+
 	// Anthropic-style caching requires cache_control on a text part. Add a breakpoint
 	// on the last user/assistant message (walking backwards until we find text content).
 	for (let i = messages.length - 1; i >= 0; i--) {

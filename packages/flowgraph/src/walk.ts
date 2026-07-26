@@ -12,7 +12,7 @@
  * user messages vary. Per-node variation that used to live in a tool allowlist
  * now lives in the question, where change is cheap and expected.
  */
-import { Agent, type AgentEvent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentEvent, type AgentMessage, TERMINAL_TOOL_RESULT_ABORT_REASON } from "@oh-my-pi/pi-agent-core";
 import { type Model, streamSimple } from "@oh-my-pi/pi-ai";
 import Handlebars from "handlebars";
 import { type AnswerInput, type AnswerVerdict, createAnswerTool } from "./answer";
@@ -194,6 +194,7 @@ export async function walk(options: WalkOptions): Promise<WalkResult> {
 	// is built once and never rebuilt, so its serialized schema cannot drift.
 	let node: FlowNode = nodes.get(graph.entry) as FlowNode;
 	let decision: NodeDecision | undefined;
+	let agent: Agent;
 
 	const answerTool = createAnswerTool(async (input: AnswerInput): Promise<AnswerVerdict> => {
 		if (decision) return { ok: false, message: "this step is already answered; wait for the next step" };
@@ -207,6 +208,7 @@ export async function walk(options: WalkOptions): Promise<WalkResult> {
 		}
 		if (input.option === ESCAPE_OPTION) {
 			decision = { option: ESCAPE_OPTION, why: input.why, applied: "left the graph" };
+			agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 			return { ok: true, message: "leaving the graph" };
 		}
 
@@ -231,10 +233,11 @@ export async function walk(options: WalkOptions): Promise<WalkResult> {
 		}
 
 		decision = { option: input.option, why: input.why, payload: input.payload, applied: applied.summary };
+		agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		return { ok: true, message: `${applied.summary}; advancing via ${input.option}` };
 	});
 
-	const agent = new Agent({
+	agent = new Agent({
 		streamFn: (model, context, streamOptions) => streamSimple(model, context, { ...streamOptions, maxTokens }),
 		initialState: {
 			systemPrompt: [graph.systemPrompt, graph.orientation],
