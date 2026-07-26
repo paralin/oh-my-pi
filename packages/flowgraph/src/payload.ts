@@ -52,6 +52,19 @@ const schemas = {
 		/** Plan steps worth keeping as comments. Everything else is dropped. */
 		keepPlan: z.array(z.string()).default([]),
 	}),
+	/** Replace the whole test set of the artifact's test file. */
+	tests: z.object({
+		imports: z.array(z.string().min(1)).default([]),
+		tests: z
+			.array(
+				z.object({
+					name: z.string().regex(/^Test[A-Z_]\w*$/, "Go test function name starting with Test"),
+					doc: z.string().min(1),
+					code: z.string().min(1),
+				}),
+			)
+			.min(1),
+	}),
 } as const;
 
 /** Name of a payload kind a node may declare. */
@@ -141,6 +154,22 @@ export function applyPayload(
 			fn.plan = value.keepPlan;
 			fn.body = value.code;
 			return { ok: true, summary: `implemented ${value.func}` };
+		}
+
+		case "tests": {
+			const value = parsed.data as z.infer<(typeof schemas)["tests"]>;
+			if (!artifact.file) return { ok: false, reason: "no artifact file has been named yet" };
+			const names = new Set<string>();
+			for (const test of value.tests) {
+				if (names.has(test.name)) return { ok: false, reason: `duplicate test: ${test.name}` };
+				names.add(test.name);
+			}
+			// The engine writes the `t *testing.T` signature, so the import it
+			// implies is the engine's to add rather than a thing a payload can
+			// forget.
+			artifact.testImports = ["testing", ...value.imports];
+			artifact.tests = value.tests;
+			return { ok: true, summary: `wrote ${value.tests.length} test(s)` };
 		}
 	}
 }

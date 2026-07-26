@@ -26,7 +26,7 @@ export const DONE_NODE = "__done";
 export const ESCAPE_OPTION = "escape";
 
 /** Observations the engine may gather and paste into a node's question. */
-export const CONTEXT_KINDS = ["package_doc", "sources", "artifact", "build", "vet", "todo"] as const;
+export const CONTEXT_KINDS = ["package_doc", "sources", "artifact", "build", "vet", "tests", "todo"] as const;
 
 /** One kind of observation a node can request. */
 export type ContextKind = (typeof CONTEXT_KINDS)[number];

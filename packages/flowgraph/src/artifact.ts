@@ -39,7 +39,17 @@ export interface GoFunc {
 	body?: string;
 }
 
-/** The whole file the walk is constructing. */
+/** One test function: a name, what it establishes, and its body. */
+export interface GoTest {
+	/** Go test function name, such as `TestAllowConsumesBurst`. */
+	name: string;
+	/** Comment above the test, saying what behaviour it pins down. */
+	doc: string;
+	/** Body source, without the `func` line or the closing brace. */
+	code: string;
+}
+
+/** The two files the walk is constructing: the implementation and its test. */
 export interface GoArtifact {
 	/** File name relative to the workspace root. */
 	file: string;
@@ -47,11 +57,21 @@ export interface GoArtifact {
 	imports: string[];
 	structs: GoStruct[];
 	funcs: GoFunc[];
+	/** Imports of the test file, kept apart so `testing` never reaches the implementation. */
+	testImports: string[];
+	/** Test functions, rendered to the `_test.go` beside the artifact. */
+	tests: GoTest[];
 }
 
 /** Start an empty artifact for a package. */
 export function emptyArtifact(file: string, packageName: string): GoArtifact {
-	return { file, packageName, imports: [], structs: [], funcs: [] };
+	return { file, packageName, imports: [], structs: [], funcs: [], testImports: [], tests: [] };
+}
+
+/** Name of the test file beside the artifact, or empty before the file is named. */
+export function testFileName(artifact: GoArtifact): string {
+	if (!artifact.file) return "";
+	return `${artifact.file.replace(/\.go$/, "")}_test.go`;
 }
 
 function renderDoc(doc: string, indent: string): string {
@@ -77,19 +97,36 @@ function renderFunc(fn: GoFunc): string {
 	);
 }
 
+function renderImports(imports: readonly string[]): string[] {
+	if (imports.length === 0) return [];
+	const sorted = [...new Set(imports)].sort();
+	return [
+		sorted.length === 1
+			? `import ${JSON.stringify(sorted[0])}`
+			: `import (\n${sorted.map(i => `\t${JSON.stringify(i)}`).join("\n")}\n)`,
+	];
+}
+
 /** Render the artifact to Go source. Deterministic: the same model always emits the same bytes. */
 export function renderArtifact(artifact: GoArtifact): string {
-	const sections = [`package ${artifact.packageName}`];
-	if (artifact.imports.length > 0) {
-		const sorted = [...new Set(artifact.imports)].sort();
-		sections.push(
-			sorted.length === 1
-				? `import ${JSON.stringify(sorted[0])}`
-				: `import (\n${sorted.map(i => `\t${JSON.stringify(i)}`).join("\n")}\n)`,
-		);
-	}
+	const sections = [`package ${artifact.packageName}`, ...renderImports(artifact.imports)];
 	for (const struct of artifact.structs) sections.push(renderStruct(struct));
 	for (const fn of artifact.funcs) sections.push(renderFunc(fn));
+	return `${sections.join("\n\n")}\n`;
+}
+
+/**
+ * Render the test file. Same grain as the implementation: the model hands back
+ * named bodies and the engine owns the package clause, the imports and the
+ * `func` lines, so a test cannot be misformatted and cannot silently land in
+ * the wrong package.
+ */
+export function renderTests(artifact: GoArtifact): string {
+	const sections = [`package ${artifact.packageName}`, ...renderImports(artifact.testImports)];
+	for (const test of artifact.tests) {
+		const body = test.code.split("\n").map(line => (line ? `\t${line}` : ""));
+		sections.push([renderDoc(test.doc, ""), `func ${test.name}(t *testing.T) {`, ...body, "}"].join("\n"));
+	}
 	return `${sections.join("\n\n")}\n`;
 }
 
@@ -101,9 +138,14 @@ export function renderArtifact(artifact: GoArtifact): string {
  * attention on layout.
  */
 export async function writeArtifact(root: string, artifact: GoArtifact): Promise<void> {
-	const target = path.join(root, artifact.file);
-	await Bun.write(target, renderArtifact(artifact));
-	await Bun.spawn(["gofmt", "-w", artifact.file], { cwd: root, stdout: "ignore", stderr: "ignore" }).exited;
+	const written = [artifact.file];
+	await Bun.write(path.join(root, artifact.file), renderArtifact(artifact));
+	const testFile = testFileName(artifact);
+	if (testFile && artifact.tests.length > 0) {
+		await Bun.write(path.join(root, testFile), renderTests(artifact));
+		written.push(testFile);
+	}
+	await Bun.spawn(["gofmt", "-w", ...written], { cwd: root, stdout: "ignore", stderr: "ignore" }).exited;
 }
 
 /** Names of functions still carrying no body, in declaration order. */

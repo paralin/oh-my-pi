@@ -1,6 +1,6 @@
 {
 	"id": "go-ladder",
-	"description": "Write new Go surface as a ladder: read the package, declare the struct, settle its fields, stub the functions, plan the bodies, then fill them one at a time and pass the vet gate.",
+	"description": "Write new Go surface as a ladder: read the package, declare the struct, settle its fields, stub the functions, plan the bodies, fill them one at a time, test what the signatures do not promise, then pass the vet gate.",
 	"systemPrompt": "You are writing Go inside a fixed process. You do not choose the order of work and you do not write files: each step asks one question, and you answer it. Do only what the current step asks, even when you can already see the next step's work. When a step asks why, answer concretely about this code, not in generalities. Every exported identifier carries a godoc comment starting with its name. No package-level mutable state.",
 	"orientation": "How a walk works. You have exactly one tool, `answer`, for every step of this walk. A step gives you what you need to see, tells you what to decide, names the payload it collects, and lists the options you may choose between. You call `answer` once with the option you chose, why you chose it, and that step's payload. The engine applies the payload to the file and runs the step's checks; you never write the file yourself, and you never need to think about formatting. If a payload is rejected or a check fails you stay in the step and answer again with a correction. Every step also offers `escape`, which ends the walk when no option fits the work the objective actually needs. Prose outside an `answer` call moves nothing.",
 	"packageName": "scratchpkg",
@@ -97,7 +97,7 @@
 				},
 				{
 					"option": "implemented",
-					"to": "final_gate",
+					"to": "write_tests",
 					"description": "Every stub is implemented and the package builds."
 				},
 				{
@@ -113,9 +113,24 @@
 			]
 		},
 		{
+			"id": "write_tests",
+			"prompt": "Objective: {{task}}\n\nStep 7: pin the behaviour down. Write the tests for what you just built, in the test file beside the artifact. Give each test a name starting with `Test`, a comment saying what it establishes, and its body without the `func` line or the closing brace; `t` is the `*testing.T` and the engine adds the `testing` import, so list only the other imports you use.\n\nTest what a reader would doubt, not what a signature already promises: the boundaries, the error paths, and anything concurrent. Your payload replaces the whole test set, so include every test you want, not only the ones you are adding.\n\nThe gate runs the tests, so you cannot leave this step until they pass.",
+			"context": ["artifact"],
+			"payload": "tests",
+			"why": "What could break in this code that a signature does not already rule out, and which of those does each test pin down?",
+			"gate": { "command": ["go", "test", "./..."] },
+			"edges": [
+				{
+					"option": "tested",
+					"to": "final_gate",
+					"description": "The tests pass and cover what the signatures do not promise."
+				}
+			]
+		},
+		{
 			"id": "final_gate",
-			"prompt": "Objective: {{task}}\n\nStep 7: the deterministic gate. Below are the finished artifact and what `go vet` says about it. Answer `clean` only if the code is finished, every exported identifier carries a godoc comment starting with its name, and nothing introduces package-level mutable state. Otherwise escape and say what is wrong: this step collects no payload, so it cannot repair anything.",
-			"context": ["artifact", "vet"],
+			"prompt": "Objective: {{task}}\n\nStep 8: the deterministic gate. Below are the finished artifact, its tests, and what `go vet` says about it. Answer `clean` only if the code is finished, every exported identifier carries a godoc comment starting with its name, and nothing introduces package-level mutable state. Otherwise escape and say what is wrong: this step collects no payload, so it cannot repair anything.",
+			"context": ["artifact", "vet", "tests"],
 			"why": "What did the gate catch, and which step of the ladder should have caught it instead?",
 			"gate": { "command": ["go", "vet", "./..."] },
 			"edges": [

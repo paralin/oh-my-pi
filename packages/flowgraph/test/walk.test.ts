@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { emptyArtifact } from "../src/artifact";
+import { emptyArtifact, renderArtifact, renderTests, testFileName } from "../src/artifact";
 import { indexGraph, loadGraph } from "../src/graph";
 import { applyPayload } from "../src/payload";
 import { TrajectoryWriter } from "../src/trajectory";
@@ -116,6 +116,36 @@ describe("flowgraph artifact invariants", () => {
 
 		expect(result.ok).toBe(true);
 		expect(artifact.funcs.map(fn => fn.receiver)).toEqual(["", "b *Budget", "b *Budget"]);
+	});
+
+	it("renders the test set into its own file with the testing import supplied", () => {
+		const artifact = emptyArtifact("budget.go", "scratchpkg");
+
+		const result = applyPayload(
+			"tests",
+			{
+				imports: ["time"],
+				tests: [{ name: "TestSpend", doc: "TestSpend covers the boundary.", code: "_ = time.Now()" }],
+			},
+			artifact,
+		);
+
+		expect(result.ok).toBe(true);
+		expect(testFileName(artifact)).toBe("budget_test.go");
+		// The engine writes the signature, so it owns the import that signature needs.
+		expect(artifact.testImports).toEqual(["testing", "time"]);
+		expect(renderTests(artifact)).toContain("func TestSpend(t *testing.T) {");
+		// The test file is separate, so `testing` never reaches the implementation.
+		expect(renderArtifact(artifact)).not.toContain("testing");
+	});
+
+	it("rejects a test set that names the same test twice", () => {
+		const artifact = emptyArtifact("budget.go", "scratchpkg");
+		const duplicate = { name: "TestSpend", doc: "TestSpend covers spending.", code: "t.Fail()" };
+
+		const result = applyPayload("tests", { tests: [duplicate, duplicate] }, artifact);
+
+		expect(result).toEqual({ ok: false, reason: "duplicate test: TestSpend" });
 	});
 
 	it("keeps the ladder repair edge from body filling to stub declaration", async () => {
