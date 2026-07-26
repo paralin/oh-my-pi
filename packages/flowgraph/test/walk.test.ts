@@ -3,7 +3,9 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { indexGraph } from "../src/graph";
+import { emptyArtifact } from "../src/artifact";
+import { indexGraph, loadGraph } from "../src/graph";
+import { applyPayload } from "../src/payload";
 import { TrajectoryWriter } from "../src/trajectory";
 import { type WalkOptions, walk } from "../src/walk";
 
@@ -92,5 +94,38 @@ describe("flowgraph walk answer termination", () => {
 		expect(result.status).toBe("done");
 		expect(model.calls).toHaveLength(1);
 		expect(model.calls[0]?.options?.reasoning).toBe("xhigh");
+	});
+});
+
+describe("flowgraph artifact invariants", () => {
+	it("normalizes every method stub to a deterministic receiver name", () => {
+		const artifact = emptyArtifact("budget.go", "scratchpkg");
+		artifact.structs.push({ name: "Budget", doc: "Budget tracks spending.", fields: [] });
+
+		const result = applyPayload(
+			"stubs",
+			{
+				funcs: [
+					{ name: "NewBudget", receiver: "", params: "", results: "", doc: "NewBudget creates a budget." },
+					{ name: "Spend", receiver: "*Budget", params: "amount int", results: "bool", doc: "Spend deducts." },
+					{ name: "Balance", receiver: "ignored *Budget", params: "", results: "int", doc: "Balance reports." },
+				],
+			},
+			artifact,
+		);
+
+		expect(result.ok).toBe(true);
+		expect(artifact.funcs.map(fn => fn.receiver)).toEqual(["", "b *Budget", "b *Budget"]);
+	});
+
+	it("keeps the ladder repair edge from body filling to stub declaration", async () => {
+		const graph = await loadGraph(new URL("../graphs/go-ladder.json", import.meta.url).pathname);
+		const fillBody = graph.nodes.get("fill_body");
+
+		expect(fillBody?.edges).toContainEqual({
+			option: "revise_stubs",
+			to: "declare_stubs",
+			description: "A structural signature mistake needs correction before bodies can be filled.",
+		});
 	});
 });

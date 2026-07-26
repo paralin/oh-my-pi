@@ -101,6 +101,11 @@
 					"description": "Every stub is implemented and the package builds."
 				},
 				{
+					"option": "revise_stubs",
+					"to": "declare_stubs",
+					"description": "A structural signature mistake needs correction before bodies can be filled."
+				},
+				{
 					"option": "another_struct",
 					"to": "declare_struct",
 					"description": "Implementation showed a second type is required."

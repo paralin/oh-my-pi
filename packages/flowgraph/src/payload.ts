@@ -72,6 +72,14 @@ export function describePayload(kind: PayloadKind): string {
  * as a tool error, which keeps the model in the node with a concrete correction
  * rather than advancing on a malformed answer.
  */
+function normalizeReceiver(receiver: string): string {
+	if (!receiver.trim()) return "";
+	const typeExpression = receiver.trim().split(/\s+/).at(-1) ?? "";
+	const typeName = typeExpression.replace(/^\*+/, "").split(".")[0]?.split("[")[0] ?? "";
+	if (!typeName) return receiver;
+	return `${typeName[0]?.toLowerCase()} ${typeExpression}`;
+}
+
 export function applyPayload(
 	kind: PayloadKind,
 	raw: unknown,
@@ -110,7 +118,7 @@ export function applyPayload(
 		case "stubs": {
 			const value = parsed.data as z.infer<(typeof schemas)["stubs"]>;
 			artifact.imports.push(...value.imports);
-			artifact.funcs = value.funcs.map(fn => ({ ...fn, plan: [] }));
+			artifact.funcs = value.funcs.map(fn => ({ ...fn, receiver: normalizeReceiver(fn.receiver), plan: [] }));
 			return { ok: true, summary: `declared ${value.funcs.length} stub(s)` };
 		}
 
