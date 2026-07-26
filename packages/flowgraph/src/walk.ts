@@ -16,7 +16,7 @@ import { Agent, type AgentEvent, type AgentMessage, TERMINAL_TOOL_RESULT_ABORT_R
 import { type Model, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import Handlebars from "handlebars";
 import { type AnswerInput, type AnswerVerdict, createAnswerTool } from "./answer";
-import { emptyArtifact, type GoArtifact, writeArtifact } from "./artifact";
+import { emptyArtifact, type GoArtifact, resolvePackageName, writeArtifact } from "./artifact";
 import { DONE_NODE, ESCAPE_OPTION, type FlowNode, type IndexedGraph } from "./graph";
 import { observe, runGate } from "./observe";
 import { applyPayload, describePayload, type PayloadKind } from "./payload";
@@ -199,7 +199,7 @@ export async function walk(options: WalkOptions): Promise<WalkResult> {
 	const maxTokens = options.maxTokens ?? DEFAULT_MAX_TOKENS;
 	const maxNodeEntries = options.maxNodeEntries ?? DEFAULT_MAX_NODE_ENTRIES;
 	const usage = emptyUsage();
-	const artifact = emptyArtifact("", graph.packageName);
+	const artifact = emptyArtifact("", await resolvePackageName(options.dir, graph.packageName));
 
 	// Mutable walk position the tool's judge closes over. The tool object itself
 	// is built once and never rebuilt, so its serialized schema cannot drift.

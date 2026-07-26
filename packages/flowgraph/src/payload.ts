@@ -123,9 +123,13 @@ export function applyPayload(
 			if (artifact.structs.some(s => s.name === value.name)) {
 				return { ok: false, reason: `struct ${value.name} already exists` };
 			}
-			artifact.file = value.file;
+			// The artifact is one file, so only the first struct names it. A later
+			// struct that asks for a second file would move every declaration the
+			// walk already has into it and leave the first file behind as a
+			// duplicate the build rejects.
+			artifact.file ||= value.file;
 			artifact.structs.push({ name: value.name, doc: value.doc, fields: [] });
-			return { ok: true, summary: `declared struct ${value.name} in ${value.file}` };
+			return { ok: true, summary: `declared struct ${value.name} in ${artifact.file}` };
 		}
 
 		case "fields": {

@@ -7,6 +7,7 @@
  * body, because the only thing it can hand back is a field list, and formatting
  * defects cannot occur at all because no model ever writes the layout.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 /** One struct field with its godoc comment. */
@@ -68,6 +69,30 @@ export function emptyArtifact(file: string, packageName: string): GoArtifact {
 	return { file, packageName, imports: [], structs: [], funcs: [], testImports: [], tests: [] };
 }
 
+/**
+ * Package clause the artifact must carry to compile inside `dir`.
+ *
+ * A directory that already holds Go source owns its package name, and a second
+ * clause in the same directory is a build error no payload in the graph can
+ * repair, so the walk adopts the name it finds and falls back to the graph's
+ * only when the directory is empty of Go.
+ */
+export async function resolvePackageName(dir: string, fallback: string): Promise<string> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(dir);
+	} catch {
+		return fallback;
+	}
+	for (const entry of entries.sort()) {
+		if (!entry.endsWith(".go")) continue;
+		const source = await fs.readFile(path.join(dir, entry), "utf8").catch(() => "");
+		const clause = source.match(/^package\s+([A-Za-z_]\w*)/m);
+		if (clause) return clause[1] as string;
+	}
+	return fallback;
+}
+
 /** Name of the test file beside the artifact, or empty before the file is named. */
 export function testFileName(artifact: GoArtifact): string {
 	if (!artifact.file) return "";
@@ -97,6 +122,24 @@ function renderFunc(fn: GoFunc): string {
 	);
 }
 
+/**
+ * Imports the rendered declarations actually mention.
+ *
+ * Go rejects an unused import, and a step that names the imports its bodies
+ * will need runs before those bodies exist, so the stub file would never build.
+ * The engine owns the import block, so it also owns keeping it honest: an
+ * import returns to the file the moment a body names it. Comments are stripped
+ * first, since a plan step that mentions a package does not use it.
+ */
+function usedImports(imports: readonly string[], declarations: string): string[] {
+	const code = declarations.replace(/\/\/[^\n]*/g, "");
+	return imports.filter(entry => {
+		const spec = entry.trim().split(/\s+/);
+		const name = spec.length > 1 ? (spec[0] as string) : (spec[0] as string).split("/").pop();
+		return name === "_" || name === "." || new RegExp(`\\b${name}\\s*\\.`).test(code);
+	});
+}
+
 function renderImports(imports: readonly string[]): string[] {
 	if (imports.length === 0) return [];
 	const sorted = [...new Set(imports)].sort();
@@ -109,9 +152,15 @@ function renderImports(imports: readonly string[]): string[] {
 
 /** Render the artifact to Go source. Deterministic: the same model always emits the same bytes. */
 export function renderArtifact(artifact: GoArtifact): string {
-	const sections = [`package ${artifact.packageName}`, ...renderImports(artifact.imports)];
-	for (const struct of artifact.structs) sections.push(renderStruct(struct));
-	for (const fn of artifact.funcs) sections.push(renderFunc(fn));
+	const declarations = [
+		...artifact.structs.map(renderStruct),
+		...artifact.funcs.map(renderFunc),
+	];
+	const sections = [
+		`package ${artifact.packageName}`,
+		...renderImports(usedImports(artifact.imports, declarations.join("\n\n"))),
+		...declarations,
+	];
 	return `${sections.join("\n\n")}\n`;
 }
 
@@ -122,11 +171,15 @@ export function renderArtifact(artifact: GoArtifact): string {
  * the wrong package.
  */
 export function renderTests(artifact: GoArtifact): string {
-	const sections = [`package ${artifact.packageName}`, ...renderImports(artifact.testImports)];
-	for (const test of artifact.tests) {
+	const declarations = artifact.tests.map(test => {
 		const body = test.code.split("\n").map(line => (line ? `\t${line}` : ""));
-		sections.push([renderDoc(test.doc, ""), `func ${test.name}(t *testing.T) {`, ...body, "}"].join("\n"));
-	}
+		return [renderDoc(test.doc, ""), `func ${test.name}(t *testing.T) {`, ...body, "}"].join("\n");
+	});
+	const sections = [
+		`package ${artifact.packageName}`,
+		...renderImports(usedImports(artifact.testImports, declarations.join("\n\n"))),
+		...declarations,
+	];
 	return `${sections.join("\n\n")}\n`;
 }
 

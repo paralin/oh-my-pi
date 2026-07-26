@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { emptyArtifact, renderArtifact, renderTests, testFileName } from "../src/artifact";
+import { emptyArtifact, renderArtifact, renderTests, resolvePackageName, testFileName } from "../src/artifact";
 import { indexGraph, loadGraph } from "../src/graph";
 import { applyPayload } from "../src/payload";
 import { TrajectoryWriter } from "../src/trajectory";
@@ -403,5 +403,55 @@ describe("flowgraph artifact invariants", () => {
 		// A terminal gate whose only options are `clean` and `escape` forces a
 		// walk that is one defect from done to either lie or abandon the work.
 		expect(finalGate?.edges.map(edge => edge.to)).toEqual(["__done", "repair_body", "write_tests"]);
+	});
+
+	it("holds back an import until a body names it", () => {
+		const artifact = emptyArtifact("cache.go", "scratchpkg");
+		applyPayload(
+			"stubs",
+			{ imports: ["errors"], funcs: [{ name: "New", results: "error", doc: "New builds a cache." }] },
+			artifact,
+		);
+
+		// Stub bodies panic, so an import the bodies will need is unused and the
+		// stub file would not build.
+		expect(renderArtifact(artifact)).not.toContain('"errors"');
+
+		applyPayload("body", { func: "New", code: 'return errors.New("nope")' }, artifact);
+
+		expect(renderArtifact(artifact)).toContain('import "errors"');
+	});
+
+	it("keeps a second struct in the file the artifact already occupies", () => {
+		const artifact = emptyArtifact("", "scratchpkg");
+		applyPayload("struct", { file: "cache.go", name: "Cache", doc: "Cache caches." }, artifact);
+
+		const result = applyPayload("struct", { file: "entry.go", name: "entry", doc: "entry is one item." }, artifact);
+
+		// A second file would carry a second copy of Cache, which the build rejects.
+		expect(result).toEqual({ ok: true, summary: "declared struct entry in cache.go" });
+		expect(artifact.file).toBe("cache.go");
+	});
+
+	it("takes the package clause from the directory the walk writes into", async () => {
+		const dir = await mkdtemp(path.join(os.tmpdir(), "flowgraph-pkg-"));
+		try {
+			await Bun.write(path.join(dir, "doc.go"), "// Package ttlcache caches.\npackage ttlcache\n");
+
+			// The graph's name would put a second package clause in a directory that
+			// already has one, which no payload in the graph can repair.
+			expect(await resolvePackageName(dir, "scratchpkg")).toBe("ttlcache");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("falls back to the graph's package name in a directory with no Go", async () => {
+		const dir = await mkdtemp(path.join(os.tmpdir(), "flowgraph-pkg-"));
+		try {
+			expect(await resolvePackageName(dir, "scratchpkg")).toBe("scratchpkg");
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
 	});
 });
