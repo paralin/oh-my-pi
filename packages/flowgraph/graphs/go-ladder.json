@@ -98,7 +98,8 @@
 				{
 					"option": "implemented",
 					"to": "write_tests",
-					"description": "Every stub is implemented and the package builds."
+					"description": "Every stub is implemented and the package builds.",
+					"payload": "none"
 				},
 				{
 					"option": "revise_stubs",

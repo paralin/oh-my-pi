@@ -19,7 +19,7 @@ import { type AnswerInput, type AnswerVerdict, createAnswerTool } from "./answer
 import { emptyArtifact, type GoArtifact, writeArtifact } from "./artifact";
 import { DONE_NODE, ESCAPE_OPTION, type FlowNode, type IndexedGraph } from "./graph";
 import { observe, runGate } from "./observe";
-import { applyPayload, describePayload } from "./payload";
+import { applyPayload, describePayload, type PayloadKind } from "./payload";
 import answerRequiredPrompt from "./prompts/answer-required.md" with { type: "text" };
 import type { TrajectoryWriter, WalkUsage } from "./trajectory";
 
@@ -86,9 +86,9 @@ function emptyUsage(): WalkUsage {
 }
 
 /** The options a node offers, always including the escape. */
-function nodeOptions(node: FlowNode): { option: string; description: string }[] {
+function nodeOptions(node: FlowNode): { option: string; description: string; payload?: PayloadKind }[] {
 	return [
-		...node.edges.map(edge => ({ option: edge.option, description: edge.description })),
+		...node.edges.map(edge => ({ option: edge.option, description: edge.description, payload: edge.payload })),
 		{ option: ESCAPE_OPTION, description: "No option above fits the work this task actually needs." },
 	];
 }
@@ -136,8 +136,17 @@ async function composeQuestion(
 	}
 	if (node.why) sections.push(`## Why\nYour \`why\` must answer: ${node.why}`);
 
+	// An option that collects something other than the node's blank says so
+	// beside itself, so choosing it never means inventing a payload for it.
 	const options_ = nodeOptions(node)
-		.map(entry => `- ${entry.option}: ${entry.description}`)
+		.map(entry => {
+			if (entry.payload === undefined || entry.payload === node.payload) return `- ${entry.option}: ${entry.description}`;
+			const blank =
+				entry.payload === "none"
+					? "may be answered with no payload at all"
+					: `may be answered with a \`${entry.payload}\` payload instead`;
+			return `- ${entry.option}: ${entry.description} (${blank})`;
+		})
 		.join("\n");
 	sections.push(`## Options\nCall \`answer\` with exactly one of:\n${options_}`);
 
@@ -217,7 +226,12 @@ export async function walk(options: WalkOptions): Promise<WalkResult> {
 		// Snapshot before applying, so a failed gate leaves neither the artifact
 		// nor the file carrying a half-accepted answer.
 		const before = structuredClone(artifact);
-		const applied = applyPayload(node.payload, input.payload, artifact);
+		// An edge's kind is an alternative to the node's, not a replacement for
+		// it: a fill-body loop can carry the last body out on the exit edge, and
+		// can also leave empty-handed once nothing is left to carry.
+		const taken = node.edges.find(e => e.option === input.option);
+		const filled = input.payload !== undefined && Object.keys(input.payload).length > 0;
+		const applied = applyPayload(filled ? node.payload : (taken?.payload ?? node.payload), input.payload, artifact);
 		if (!applied.ok) {
 			return { ok: false, message: `payload rejected, answer again with a corrected payload: ${applied.reason}` };
 		}

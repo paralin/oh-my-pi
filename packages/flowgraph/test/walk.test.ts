@@ -222,6 +222,94 @@ describe("flowgraph walk repair", () => {
 	});
 });
 
+describe("flowgraph loop exits", () => {
+	/** A loop that collects a body, with an exit that may also collect nothing. */
+	function loopGraph() {
+		return indexGraph({
+			id: "loop",
+			description: "test graph",
+			systemPrompt: "Answer the step.",
+			orientation: "Use the answer tool.",
+			packageName: "scratchpkg",
+			entry: "declare",
+			nodes: [
+				{
+					id: "declare",
+					prompt: "Declare the struct.",
+					payload: "struct",
+					edges: [{ option: "declared", to: "stubs", description: "declared" }],
+					maxTurns: 2,
+				},
+				{
+					id: "stubs",
+					prompt: "Declare the stubs.",
+					payload: "stubs",
+					edges: [{ option: "stubbed", to: "loop", description: "stubbed" }],
+					maxTurns: 2,
+				},
+				{
+					id: "loop",
+					prompt: "Implement one body, or leave if none are left.",
+					payload: "body",
+					edges: [
+						{ option: "next", to: "loop", description: "more to do" },
+						{ option: "done", to: "__done", description: "nothing left", payload: "none" },
+					],
+					maxTurns: 2,
+				},
+			],
+		});
+	}
+
+	function answers(...calls: { option: string; payload?: unknown }[]) {
+		return calls.map(call => ({
+			content: [
+				{ type: "toolCall" as const, name: "answer", arguments: { option: call.option, why: "Because.", ...call } },
+			],
+		}));
+	}
+
+	/** The two setup answers every loop test shares, before the exit under test. */
+	const setup = answers(
+		{ option: "declared", payload: { file: "budget.go", name: "Budget", doc: "Budget tracks spending." } },
+		{ option: "stubbed", payload: { funcs: [{ name: "Spend", results: "int", doc: "Spend deducts." }] } },
+	);
+
+	async function runLoop(responses: Parameters<typeof createMockModel>[0]["responses"]) {
+		const dir = await mkdtemp(path.join(os.tmpdir(), "flowgraph-loop-"));
+		const trajectory = new TrajectoryWriter(path.join(dir, "walk.jsonl"));
+		try {
+			const result = await walk({
+				graph: loopGraph(),
+				walkId: "loop-walk",
+				dir,
+				task: "fill the bodies",
+				model: createMockModel({ responses: [...setup, ...responses] }),
+				trajectory,
+			});
+			await trajectory.flush();
+			return result;
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	}
+
+	// Two walks in the archived corpus escaped here: every body was filled, so
+	// the loop had nothing left to collect, and the only exit still demanded the
+	// payload the loop collects. No legal answer existed.
+	it("lets an exhausted loop leave without the payload it repeats", async () => {
+		const result = await runLoop(answers({ option: "done" }));
+
+		expect(result.status).toBe("done");
+	});
+
+	it("still lets the exit carry the last payload out", async () => {
+		const result = await runLoop(answers({ option: "done", payload: { func: "Spend", code: "return 1" } }));
+
+		expect(result.status).toBe("done");
+	});
+});
+
 describe("flowgraph artifact invariants", () => {
 	it("normalizes every method stub to a deterministic receiver name", () => {
 		const artifact = emptyArtifact("budget.go", "scratchpkg");

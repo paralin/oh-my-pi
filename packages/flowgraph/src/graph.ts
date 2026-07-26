@@ -38,6 +38,18 @@ const edgeSchema = z.object({
 	to: z.string().min(1),
 	/** Shown to the model beside the option so the choice is informed. */
 	description: z.string().min(1),
+	/**
+	 * Payload this edge collects instead of the node's own kind.
+	 *
+	 * A node's blank is the right one for the work it repeats, but not always
+	 * for the way it is left. An edge that can also just exit, such as a
+	 * fill-body loop reporting that nothing is left to fill, sets `none` here.
+	 * The kinds are alternatives: an answer that fills the node's blank still
+	 * uses the node's kind, and one that fills nothing uses the edge's, so the
+	 * last body can leave on the exit edge and an exhausted loop can leave
+	 * empty-handed.
+	 */
+	payload: z.enum(PAYLOAD_KINDS as [PayloadKind, ...PayloadKind[]]).optional(),
 });
 
 const gateSchema = z.object({
