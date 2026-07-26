@@ -97,6 +97,131 @@ describe("flowgraph walk answer termination", () => {
 	});
 });
 
+describe("flowgraph walk repair", () => {
+	/** A ladder in miniature: implement one body, then get a chance to replace it. */
+	function repairGraph() {
+		return indexGraph({
+			id: "repair",
+			description: "test graph",
+			systemPrompt: "Answer the step.",
+			orientation: "Use the answer tool.",
+			packageName: "scratchpkg",
+			entry: "stub",
+			nodes: [
+				{
+					id: "stub",
+					prompt: "Declare the struct.",
+					payload: "struct",
+					edges: [{ option: "declared", to: "stubs", description: "declared" }],
+					maxTurns: 2,
+				},
+				{
+					id: "stubs",
+					prompt: "Declare the stubs.",
+					payload: "stubs",
+					edges: [{ option: "stubbed", to: "fill", description: "stubbed" }],
+					maxTurns: 2,
+				},
+				{
+					id: "fill",
+					prompt: "Implement the body.",
+					payload: "body",
+					edges: [{ option: "filled", to: "repair", description: "implemented" }],
+					maxTurns: 2,
+				},
+				{
+					id: "repair",
+					prompt: "Replace the body if it is wrong.",
+					payload: "revision",
+					edges: [{ option: "repaired", to: "__done", description: "repaired" }],
+					maxTurns: 2,
+				},
+			],
+		});
+	}
+
+	it("replaces a body a later node found defective and records the defect", async () => {
+		const dir = await mkdtemp(path.join(os.tmpdir(), "flowgraph-repair-"));
+		const trajectory = new TrajectoryWriter(path.join(dir, "walk.jsonl"));
+		const model = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "answer",
+							arguments: {
+								option: "declared",
+								why: "Budget owns the spend.",
+								payload: { file: "budget.go", name: "Budget", doc: "Budget tracks spending." },
+							},
+						},
+					],
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "answer",
+							arguments: {
+								option: "stubbed",
+								why: "One method is enough.",
+								payload: { funcs: [{ name: "Spend", results: "int", doc: "Spend deducts." }] },
+							},
+						},
+					],
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "answer",
+							arguments: { option: "filled", why: "Filled.", payload: { func: "Spend", code: "return 1" } },
+						},
+					],
+				},
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "answer",
+							arguments: {
+								option: "repaired",
+								why: "The body was off by one.",
+								payload: { func: "Spend", code: "return 2", defect: "off by one" },
+							},
+						},
+					],
+				},
+			],
+		});
+
+		try {
+			const result = await walk({
+				graph: repairGraph(),
+				walkId: "repair-walk",
+				dir,
+				task: "repair the body",
+				model,
+				trajectory,
+			});
+			await trajectory.flush();
+
+			expect(result.status).toBe("done");
+			expect(await Bun.file(path.join(dir, "budget.go")).text()).toContain("return 2");
+			const records = (await Bun.file(path.join(dir, "walk.jsonl")).text())
+				.trim()
+				.split("\n")
+				.map(line => JSON.parse(line));
+			expect(records.find(r => r.nodeId === "repair" && r.type === "answer")?.applied).toBe(
+				"revised Spend: off by one",
+			);
+		} finally {
+			await rm(dir, { recursive: true, force: true });
+		}
+	});
+});
+
 describe("flowgraph artifact invariants", () => {
 	it("normalizes every method stub to a deterministic receiver name", () => {
 		const artifact = emptyArtifact("budget.go", "scratchpkg");
@@ -157,5 +282,38 @@ describe("flowgraph artifact invariants", () => {
 			to: "declare_stubs",
 			description: "A structural signature mistake needs correction before bodies can be filled.",
 		});
+	});
+
+	it("replaces an implemented body without disturbing the rest of the artifact", () => {
+		const artifact = emptyArtifact("budget.go", "scratchpkg");
+		applyPayload("stubs", { funcs: [{ name: "Spend", doc: "Spend deducts." }] }, artifact);
+		applyPayload("body", { func: "Spend", code: "return 1" }, artifact);
+
+		const result = applyPayload(
+			"revision",
+			{ func: "Spend", code: "return 2", defect: "off by one" },
+			artifact,
+		);
+
+		expect(result).toEqual({ ok: true, summary: "revised Spend: off by one" });
+		expect(artifact.funcs[0]?.body).toBe("return 2");
+	});
+
+	it("refuses to revise a body that was never implemented", () => {
+		const artifact = emptyArtifact("budget.go", "scratchpkg");
+		applyPayload("stubs", { funcs: [{ name: "Spend", doc: "Spend deducts." }] }, artifact);
+
+		const result = applyPayload("revision", { func: "Spend", code: "return 2", defect: "wrong" }, artifact);
+
+		expect(result).toEqual({ ok: false, reason: "Spend is not implemented yet" });
+	});
+
+	it("leaves the final gate a way back to every step that can repair", async () => {
+		const graph = await loadGraph(new URL("../graphs/go-ladder.json", import.meta.url).pathname);
+		const finalGate = graph.nodes.get("final_gate");
+
+		// A terminal gate whose only options are `clean` and `escape` forces a
+		// walk that is one defect from done to either lie or abandon the work.
+		expect(finalGate?.edges.map(edge => edge.to)).toEqual(["__done", "repair_body", "write_tests"]);
 	});
 });

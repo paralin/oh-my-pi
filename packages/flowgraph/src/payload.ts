@@ -52,6 +52,14 @@ const schemas = {
 		/** Plan steps worth keeping as comments. Everything else is dropped. */
 		keepPlan: z.array(z.string()).default([]),
 	}),
+	/** Replace one body that is already implemented and turned out to be wrong. */
+	revision: z.object({
+		func: z.string().min(1),
+		imports: z.array(z.string().min(1)).default([]),
+		code: z.string().min(1),
+		/** What was wrong with the body being replaced, kept in the record. */
+		defect: z.string().min(1),
+	}),
 	/** Replace the whole test set of the artifact's test file. */
 	tests: z.object({
 		imports: z.array(z.string().min(1)).default([]),
@@ -154,6 +162,19 @@ export function applyPayload(
 			fn.plan = value.keepPlan;
 			fn.body = value.code;
 			return { ok: true, summary: `implemented ${value.func}` };
+		}
+
+		case "revision": {
+			const value = parsed.data as z.infer<(typeof schemas)["revision"]>;
+			const fn = artifact.funcs.find(f => f.name === value.func);
+			if (!fn) return { ok: false, reason: `unknown function: ${value.func}` };
+			// The mirror of the `body` guard: `body` refuses to overwrite, this
+			// refuses to write a body that does not exist yet, so neither kind can
+			// stand in for the other and the record says which one happened.
+			if (fn.body === undefined) return { ok: false, reason: `${value.func} is not implemented yet` };
+			artifact.imports.push(...value.imports);
+			fn.body = value.code;
+			return { ok: true, summary: `revised ${value.func}: ${value.defect}` };
 		}
 
 		case "tests": {

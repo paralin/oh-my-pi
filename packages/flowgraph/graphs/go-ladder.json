@@ -124,12 +124,37 @@
 					"option": "tested",
 					"to": "final_gate",
 					"description": "The tests pass and cover what the signatures do not promise."
+				},
+				{
+					"option": "fix_code",
+					"to": "repair_body",
+					"description": "A test you would defend is failing, so the body it tests is the thing that is wrong."
+				}
+			]
+		},
+		{
+			"id": "repair_body",
+			"prompt": "Objective: {{task}}\n\nRepair step: one body that is already implemented is wrong. Name that function, say what is wrong with the body being replaced, and give the corrected code without the `func` line or the closing brace. Your code replaces that body entirely.\n\nRepair exactly one body. If a second body is also wrong, choose `next_repair` and take it next. This step cannot change a signature or a field: if the defect is structural, escape and say so.",
+			"context": ["artifact", "build", "tests"],
+			"payload": "revision",
+			"why": "What is the defect in the body being replaced, which step of the ladder should have caught it, and why does the replacement not have it?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "repaired",
+					"to": "write_tests",
+					"description": "The body is corrected; re-run the tests over it."
+				},
+				{
+					"option": "next_repair",
+					"to": "repair_body",
+					"description": "Another implemented body is also wrong."
 				}
 			]
 		},
 		{
 			"id": "final_gate",
-			"prompt": "Objective: {{task}}\n\nStep 8: the deterministic gate. Below are the finished artifact, its tests, and what `go vet` says about it. Answer `clean` only if the code is finished, every exported identifier carries a godoc comment starting with its name, and nothing introduces package-level mutable state. Otherwise escape and say what is wrong: this step collects no payload, so it cannot repair anything.",
+			"prompt": "Objective: {{task}}\n\nStep 8: the deterministic gate. Below are the finished artifact, its tests, and what `go vet` says about it. Answer `clean` only if the code is finished, every exported identifier carries a godoc comment starting with its name, and nothing introduces package-level mutable state.\n\nThis step collects no payload, so it cannot repair anything itself. If something is wrong, send the walk back to the step that can fix it: `repair_body` for a wrong body, `more_tests` for a behaviour nothing pins down yet. Escape only when the defect is structural and neither step can reach it.",
 			"context": ["artifact", "vet", "tests"],
 			"why": "What did the gate catch, and which step of the ladder should have caught it instead?",
 			"gate": { "command": ["go", "vet", "./..."] },
@@ -138,6 +163,16 @@
 					"option": "clean",
 					"to": "__done",
 					"description": "The gate passes and the code is finished."
+				},
+				{
+					"option": "repair_body",
+					"to": "repair_body",
+					"description": "An implemented body is wrong and must be replaced before the walk can finish."
+				},
+				{
+					"option": "more_tests",
+					"to": "write_tests",
+					"description": "The code is right but something it does is pinned down by no test."
 				}
 			]
 		}
