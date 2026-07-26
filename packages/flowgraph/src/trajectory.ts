@@ -26,13 +26,15 @@ export interface WalkStartRecord extends TrajectoryBase {
 	model: string;
 }
 
-/** The model entered a node: this prompt was injected and these tools exposed. */
+/** The model entered a node: this question was injected and these options offered. */
 export interface NodeEnterRecord extends TrajectoryBase {
 	type: "node_enter";
 	nodeId: string;
 	visit: number;
 	prompt: string;
-	tools: string[];
+	/** Payload kind the node collects, so a reader knows the shape of its answer. */
+	payload: string;
+	options: string[];
 }
 
 /** A deterministic gate ran. A failed gate keeps the model inside the node. */
@@ -44,30 +46,29 @@ export interface GateResultRecord extends TrajectoryBase {
 	output: string;
 }
 
-/** The recorded rationale for a structural transition. */
-export interface WhyAnswerRecord extends TrajectoryBase {
-	type: "why_answer";
+/**
+ * One accepted `answer` call: the whole of what happened at a node.
+ *
+ * Nothing here is reconstructed from tool events. The model's single call
+ * carries the edge, the rationale, and the typed payload together, so the call
+ * is the record and a reader can bind a line of code to the question that
+ * produced it without interpreting a transcript.
+ */
+export interface AnswerRecord extends TrajectoryBase {
+	type: "answer";
 	nodeId: string;
-	question: string;
-	answer: string;
-	/** Files the node touched before answering, so rationale binds to artifacts. */
-	artifacts: string[];
-}
-
-/** The model chose an edge and the walk advanced. */
-export interface NodeExitRecord extends TrajectoryBase {
-	type: "node_exit";
-	nodeId: string;
+	visit: number;
 	option: string;
-	nextNodeId: string;
-	artifacts: string[];
+	why: string;
+	payload: Record<string, unknown>;
+	/** What the engine did to the artifact when it applied the payload. */
+	applied: string;
 }
 
-/** The model declared the graph wrong for the work and left legally. */
-export interface EscapeRecord extends TrajectoryBase {
-	type: "escape";
+/** One provider request, so the per-node token distribution is visible. */
+export interface RequestRecord extends TrajectoryBase, WalkUsage {
+	type: "request";
 	nodeId: string;
-	reason: string;
 }
 
 /** Closes the file with the outcome and the aggregate cost of the walk. */
@@ -102,9 +103,8 @@ export type TrajectoryRecord =
 	| WalkStartRecord
 	| NodeEnterRecord
 	| GateResultRecord
-	| WhyAnswerRecord
-	| NodeExitRecord
-	| EscapeRecord
+	| AnswerRecord
+	| RequestRecord
 	| WalkEndRecord;
 
 /**

@@ -9,12 +9,14 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { loadGraph } from "./graph";
 import { resolveModel } from "./model";
+import { formatReport, reportWalk } from "./report";
 import { TrajectoryWriter } from "./trajectory";
 import { serveView } from "./view";
-import { walk } from "./walk";
+import { type ContextMode, walk } from "./walk";
 
-const usage = `flowgraph run  --graph <file> --task "<goal>" --dir <target> [--model <provider:id>] [--trajectory <file>]
-flowgraph view --graph <file> --trajectory <file> [--port <n>]`;
+const usage = `flowgraph run  --graph <file> --task "<goal>" --dir <target> [--model <provider:id>] [--trajectory <file>] [--context session|ledger|stateless]
+flowgraph view --graph <file> --trajectory <file> [--port <n>]
+flowgraph report --trajectory <file>`;
 
 async function runCommand(argv: string[]): Promise<number> {
 	const { values } = parseArgs({
@@ -26,6 +28,7 @@ async function runCommand(argv: string[]): Promise<number> {
 			model: { type: "string", default: "openrouter:anthropic/claude-sonnet-4.5" },
 			trajectory: { type: "string" },
 			"max-tokens": { type: "string" },
+			context: { type: "string", default: "session" },
 		},
 	});
 	if (!values.graph || !values.task || !values.dir) {
@@ -57,6 +60,7 @@ async function runCommand(argv: string[]): Promise<number> {
 		task: values.task,
 		model,
 		trajectory,
+		context: values.context as ContextMode,
 		maxTokens: values["max-tokens"] ? Number(values["max-tokens"]) : undefined,
 		onProgress: line => process.stdout.write(`${line}\n`),
 	});
@@ -92,6 +96,16 @@ async function viewCommand(argv: string[]): Promise<number> {
 	return 0;
 }
 
+async function reportCommand(argv: string[]): Promise<number> {
+	const { values } = parseArgs({ args: argv, options: { trajectory: { type: "string" } } });
+	if (!values.trajectory) {
+		process.stderr.write(`${usage}\n`);
+		return 2;
+	}
+	process.stdout.write(`${formatReport(await reportWalk(path.resolve(values.trajectory)))}\n`);
+	return 0;
+}
+
 const [command, ...rest] = process.argv.slice(2);
 switch (command) {
 	case "run":
@@ -99,6 +113,9 @@ switch (command) {
 		break;
 	case "view":
 		process.exit(await viewCommand(rest));
+		break;
+	case "report":
+		process.exit(await reportCommand(rest));
 		break;
 	default:
 		process.stderr.write(`${usage}\n`);

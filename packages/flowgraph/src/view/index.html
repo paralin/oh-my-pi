@@ -60,7 +60,8 @@
 
 				const el = document.createElement("div");
 				const failed = rec.type === "gate_result" && !rec.ok;
-				el.className = `rec ${rec.type === "why_answer" ? "why" : ""} ${failed ? "gate-fail" : ""} ${rec.type === "escape" ? "escape" : ""}`;
+				const escaped = rec.type === "answer" && rec.option === "escape";
+				el.className = `rec ${rec.type === "answer" ? "why" : ""} ${failed ? "gate-fail" : ""} ${escaped ? "escape" : ""}`;
 				const kind = document.createElement("div");
 				kind.className = "kind";
 				kind.textContent = `${rec.seq} ${rec.type}${rec.nodeId ? ` · ${rec.nodeId}` : ""}`;
@@ -75,11 +76,10 @@
 			function summarize(rec) {
 				switch (rec.type) {
 					case "walk_start": return `${rec.task}\n${rec.model}`;
-					case "node_enter": return `tools: ${rec.tools.join(", ")}`;
+					case "node_enter": return `payload: ${rec.payload} · options: ${rec.options.join(", ")}`;
 					case "gate_result": return `${rec.command.join(" ")} → ${rec.ok ? "pass" : "FAIL"}\n${rec.output}`;
-					case "why_answer": return `${rec.question}\n${rec.answer}`;
-					case "node_exit": return `${rec.option} → ${rec.nextNodeId}${rec.artifacts.length ? `\n${rec.artifacts.join(", ")}` : ""}`;
-					case "escape": return rec.reason;
+					case "answer": return `${rec.option} · ${rec.applied}\n${rec.why}`;
+					case "request": return `${rec.totalTokens} tokens · cacheRead ${rec.cacheRead} · in ${rec.input} · out ${rec.output}`;
 					case "walk_end": return `${rec.status} after ${rec.nodesEntered} nodes · ${rec.usage.totalTokens} tokens${rec.error ? `\n${rec.error}` : ""}`;
 					default: return "";
 				}

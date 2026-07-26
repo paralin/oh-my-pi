@@ -3,7 +3,7 @@
 	"name": "@oh-my-pi/pi-flowgraph",
 	"version": "17.1.3",
 	"private": true,
-	"description": "Prototype: drive an LLM session through an authored flow graph with per-node tool allowlists and a typed trajectory record",
+	"description": "Prototype: drive an LLM session through an authored flow graph with one constant answer tool and a typed trajectory record",
 	"homepage": "https://omp.sh",
 	"license": "MIT",
 	"repository": {

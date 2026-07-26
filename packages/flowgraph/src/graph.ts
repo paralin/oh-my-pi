@@ -1,13 +1,19 @@
 /**
  * Flow-graph definition format.
  *
- * A graph is authored data, never code: nodes carry a prompt template, a tool
- * allowlist, an optional deterministic gate, an optional why-question, and the
+ * A graph is authored data, never code: nodes carry a prompt template, the
+ * context the engine gathers for that question, the typed blank the node
+ * collects, an optional deterministic gate, an optional why-question, and the
  * outgoing edges the model may choose between. The walk engine
  * ({@link ../walk}) is the only thing that interprets it, so improving agent
  * behaviour is a data edit rather than a harness change.
+ *
+ * A node carries no tool list. The walk has exactly one tool for its whole
+ * length ({@link ../answer}); what varies per node is the question, not the
+ * surface.
  */
 import { z } from "@oh-my-pi/pi-ai";
+import { PAYLOAD_KINDS, type PayloadKind } from "./payload";
 
 /** Reserved edge target that ends the walk successfully. */
 export const DONE_NODE = "__done";
@@ -17,10 +23,16 @@ export const DONE_NODE = "__done";
  * wrong for the work, which ends the walk with a recorded reason instead of
  * forcing a bad trajectory.
  */
-export const ESCAPE_OPTION = "__escape";
+export const ESCAPE_OPTION = "escape";
+
+/** Observations the engine may gather and paste into a node's question. */
+export const CONTEXT_KINDS = ["package_doc", "sources", "artifact", "build", "vet", "todo"] as const;
+
+/** One kind of observation a node can request. */
+export type ContextKind = (typeof CONTEXT_KINDS)[number];
 
 const edgeSchema = z.object({
-	/** Value the model passes to `advance` to take this edge. */
+	/** Value the model passes to `answer` to take this edge. */
 	option: z.string().min(1),
 	/** Target node id, or {@link DONE_NODE}. */
 	to: z.string().min(1),
@@ -45,8 +57,10 @@ const nodeSchema = z.object({
 	id: z.string().min(1),
 	/** Handlebars template appended to the session as a user message on entry. */
 	prompt: z.string().min(1),
-	/** Names of workspace tools this node exposes, from {@link ../tools}. */
-	tools: z.array(z.string().min(1)).default([]),
+	/** Observations the engine gathers and pastes into this node's question. */
+	context: z.array(z.enum(CONTEXT_KINDS)).default([]),
+	/** The typed blank this node collects, from {@link ../payload}. */
+	payload: z.enum(PAYLOAD_KINDS as [PayloadKind, ...PayloadKind[]]).default("none"),
 	/** Question answered as typed data on every exit from this node. */
 	why: z.string().min(1).optional(),
 	/** Deterministic check the node cannot exit without passing. */
@@ -59,8 +73,18 @@ const nodeSchema = z.object({
 const graphSchema = z.object({
 	id: z.string().min(1),
 	description: z.string().min(1),
-	/** System prompt for the whole walk. Node prompts carry the per-step task. */
+	/**
+	 * System prompt for the whole walk. Part of the stable cached prefix, so it
+	 * is set once at session construction and never touched again.
+	 */
 	systemPrompt: z.string().min(1),
+	/**
+	 * Orientation appended once after the system prompt: how a walk works, read
+	 * before the first question. Also prefix, also never re-sent.
+	 */
+	orientation: z.string().min(1),
+	/** Package the walk builds into, used when the artifact is first created. */
+	packageName: z.string().min(1),
 	entry: z.string().min(1),
 	nodes: z.array(nodeSchema).min(1),
 });

@@ -1,104 +1,116 @@
 {
 	"id": "go-ladder",
-	"description": "Write new Go surface as a ladder: read the package, add the struct, settle its fields, stub the functions, pseudocode the bodies, then fill them and pass the style gate.",
-	"systemPrompt": "You are writing Go inside a fixed process. You do not choose the order of work: each step tells you exactly what to do, gives you only the tools that step needs, and ends when you call `advance` with one of its options. Do only what the current step asks, even when you can already see the next step's work. When a step asks why, answer concretely about this code, not in generalities. Every exported identifier carries a godoc comment starting with its name. No package-level mutable state.",
-	"entry": "read_godoc",
+	"description": "Write new Go surface as a ladder: read the package, declare the struct, settle its fields, stub the functions, plan the bodies, then fill them one at a time and pass the vet gate.",
+	"systemPrompt": "You are writing Go inside a fixed process. You do not choose the order of work and you do not write files: each step asks one question, and you answer it. Do only what the current step asks, even when you can already see the next step's work. When a step asks why, answer concretely about this code, not in generalities. Every exported identifier carries a godoc comment starting with its name. No package-level mutable state.",
+	"orientation": "How a walk works. You have exactly one tool, `answer`, for every step of this walk. A step gives you what you need to see, tells you what to decide, names the payload it collects, and lists the options you may choose between. You call `answer` once with the option you chose, why you chose it, and that step's payload. The engine applies the payload to the file and runs the step's checks; you never write the file yourself, and you never need to think about formatting. If a payload is rejected or a check fails you stay in the step and answer again with a correction. Every step also offers `escape`, which ends the walk when no option fits the work the objective actually needs. Prose outside an `answer` call moves nothing.",
+	"packageName": "scratchpkg",
+	"entry": "orient",
 	"nodes": [
 		{
-			"id": "read_godoc",
-			"prompt": "Objective: {{task}}\n\nStep 1 of the ladder: orient. List the workspace, read the existing Go sources, and run `go doc` on the package you will extend. Learn the package's name, what it already owns, and the naming and comment conventions its existing code follows. Write nothing yet.\n\nWhen you can name the package, its existing types, and the convention you will match, call `advance`.",
-			"tools": ["list_dir", "read_file", "go_doc"],
+			"id": "orient",
+			"prompt": "Objective: {{task}}\n\nStep 1 of the ladder: orient. Below are the package's documentation and its existing sources. Learn what the package already owns and the naming and comment conventions its code follows. Decide nothing else yet.",
+			"context": ["package_doc", "sources"],
+			"why": "What does this package already own, and which convention will the new code match?",
 			"edges": [
 				{
 					"option": "oriented",
-					"to": "add_struct",
+					"to": "declare_struct",
 					"description": "You know the package, its existing types, and its conventions."
 				}
 			]
 		},
 		{
-			"id": "add_struct",
-			"prompt": "Step 2: add exactly one struct for the objective, in its own file, with a godoc comment on the type. Declare the struct with no fields yet, or with only the fields you are certain of. Do not add methods, constructors, or bodies: later steps own those.\n\nObjective: {{task}}",
-			"tools": ["list_dir", "read_file", "write_file"],
+			"id": "declare_struct",
+			"prompt": "Objective: {{task}}\n\nStep 2: declare exactly one struct for the objective, in its own file, with a godoc comment on the type. Name the file and the type only. Fields, methods, and bodies belong to later steps.",
+			"context": ["artifact"],
+			"payload": "struct",
 			"why": "Why does this struct need to exist, what does it own that no existing type owns, and why is this the right file for it?",
 			"edges": [
 				{
 					"option": "declared",
-					"to": "iterate_fields",
+					"to": "settle_fields",
 					"description": "The struct type exists with its godoc comment."
 				}
 			]
 		},
 		{
-			"id": "iterate_fields",
-			"prompt": "Step 3: settle the field set. Read the struct as it stands and decide whether its fields are complete and correctly typed for the objective. Add, remove, or retype fields, then judge again.\n\nChoose `revise` if you changed anything and want another pass. Choose `confirmed` only when you would defend this exact field set as final.\n\nObjective: {{task}}",
-			"tools": ["read_file", "write_file"],
+			"id": "settle_fields",
+			"prompt": "Objective: {{task}}\n\nStep 3: settle the field set. Answer with the complete field list you would defend as final, each with its type and its godoc comment. Your payload replaces the whole field set, so include every field you want, not only the ones you are adding.\n\nChoose `revise` if you want to see the result and judge it again. Choose `confirmed` only when the set is final.",
+			"context": ["artifact"],
+			"payload": "fields",
 			"why": "Why is each field required, and why is this set complete rather than one field larger or smaller?",
-			"gate": { "command": ["gofmt", "-l", "."], "emptyOutput": true },
 			"edges": [
 				{
 					"option": "revise",
-					"to": "iterate_fields",
-					"description": "You changed the field set and want to judge it again."
+					"to": "settle_fields",
+					"description": "You want to see the field set rendered and judge it once more."
 				},
 				{
 					"option": "confirmed",
-					"to": "add_stubs",
+					"to": "declare_stubs",
 					"description": "The field set is final."
 				}
 			]
 		},
 		{
-			"id": "add_stubs",
-			"prompt": "Step 4: add the function and method stubs this type needs, each with its godoc comment and its final signature, and each body containing only `panic(\"not implemented\")`. Include the constructor. Write no logic.\n\nObjective: {{task}}",
-			"tools": ["read_file", "write_file", "go_build"],
+			"id": "declare_stubs",
+			"prompt": "Objective: {{task}}\n\nStep 4: declare the functions and methods this type needs, each with its godoc comment and its final signature. Include the constructor. The engine writes the bodies as `panic(\"not implemented\")`; you write no logic here.",
+			"context": ["artifact"],
+			"payload": "stubs",
 			"why": "Why is this the right function set and these the right signatures, and what did you deliberately leave out?",
 			"gate": { "command": ["go", "build", "./..."] },
 			"edges": [
 				{
 					"option": "stubbed",
-					"to": "pseudocode",
+					"to": "plan_bodies",
 					"description": "Every stub compiles with its godoc comment and final signature."
 				}
 			]
 		},
 		{
-			"id": "pseudocode",
-			"prompt": "Step 5: replace each stub body with the plan for that body, written as ordinary Go line comments, one comment line per step the body will take, keeping the `panic(\"not implemented\")` beneath them. Design here: this is the last step where changing your mind costs a sentence.\n\nObjective: {{task}}",
-			"tools": ["read_file", "write_file", "go_build"],
+			"id": "plan_bodies",
+			"prompt": "Objective: {{task}}\n\nStep 5: plan every body. For each function, give the steps its body will take, one entry per step, in order. Design here: this is the last step where changing your mind costs a sentence.",
+			"context": ["artifact"],
+			"payload": "plans",
 			"why": "For each body, why does it take these steps in this order, and where can it fail?",
 			"gate": { "command": ["go", "build", "./..."] },
 			"edges": [
 				{
 					"option": "planned",
-					"to": "fill_bodies",
-					"description": "Every body carries its plan as comments."
+					"to": "fill_body",
+					"description": "Every body carries its plan."
 				}
 			]
 		},
 		{
-			"id": "fill_bodies",
-			"prompt": "Step 6: implement the bodies, one function at a time, following the comment plan already written. Keep the plan comments only where they still explain something a reader could not see; delete the rest. Remove every `panic(\"not implemented\")` you implement.\n\nChoose `another_struct` only if implementing revealed that a second type is genuinely required; that returns you to step 2 for that type.\n\nObjective: {{task}}",
-			"tools": ["read_file", "write_file", "go_build"],
-			"why": "Which body did each edit implement, and where did the implementation depart from its plan?",
+			"id": "fill_body",
+			"prompt": "Objective: {{task}}\n\nStep 6: implement exactly one body, following the plan already written for it. Name the function, give its code without the `func` line or the closing brace, and keep only the plan steps that still explain something a reader could not see.\n\nChoose `next_body` while functions remain unimplemented, `implemented` when none do, and `another_struct` only if implementing revealed that a second type is genuinely required.",
+			"context": ["artifact", "todo"],
+			"payload": "body",
+			"why": "Which body did this implement, and where did the implementation depart from its plan?",
 			"gate": { "command": ["go", "build", "./..."] },
 			"edges": [
 				{
+					"option": "next_body",
+					"to": "fill_body",
+					"description": "Functions remain unimplemented; take the next one."
+				},
+				{
 					"option": "implemented",
-					"to": "style_gate",
+					"to": "final_gate",
 					"description": "Every stub is implemented and the package builds."
 				},
 				{
 					"option": "another_struct",
-					"to": "add_struct",
+					"to": "declare_struct",
 					"description": "Implementation showed a second type is required."
 				}
 			]
 		},
 		{
-			"id": "style_gate",
-			"prompt": "Step 7: the deterministic gate. Run the build, re-read every file you wrote, and fix anything that fails `gofmt` or `go vet`, that leaves an exported identifier without a godoc comment starting with its name, or that introduces package-level mutable state. You cannot leave this step until the gate passes.",
-			"tools": ["read_file", "write_file", "go_build", "go_vet"],
+			"id": "final_gate",
+			"prompt": "Objective: {{task}}\n\nStep 7: the deterministic gate. Below are the finished artifact and what `go vet` says about it. Answer `clean` only if the code is finished, every exported identifier carries a godoc comment starting with its name, and nothing introduces package-level mutable state. Otherwise escape and say what is wrong: this step collects no payload, so it cannot repair anything.",
+			"context": ["artifact", "vet"],
 			"why": "What did the gate catch, and which step of the ladder should have caught it instead?",
 			"gate": { "command": ["go", "vet", "./..."] },
 			"edges": [

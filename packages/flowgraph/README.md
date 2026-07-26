@@ -9,11 +9,20 @@ discipline of software engineering in its head at once. This package inverts
 that control. The system asks the session a question, the session answers, and
 the system decides where to go next.
 
-Entering a node appends that node's prompt as a user message and narrows the
-tool surface to that node's allowlist plus two control tools. The node is left
-only when the model calls `advance` with an option the graph drew, and only
-after the node's deterministic gate has passed. The model still supplies
-judgment; it supplies it among the edges we authored.
+A node is a form, not a session state. It shows the observations the engine
+gathered on the model's behalf, states what to decide, names the typed blank it
+collects, and lists the options it will accept. The model has exactly one tool,
+`answer`, for the whole walk. It calls that tool once with the option it chose,
+why it chose it, and the payload the step asked for; the engine validates the
+option against the node's edges, applies the payload to the artifact itself, and
+runs the node's gate before moving on.
+
+Two consequences follow. Off-graph actions stop being expressible, because there
+is no tool that writes a file, so a fill-body step cannot quietly re-emit the
+type it was not asked about. And the cached prompt prefix stops moving: system
+prompt, orientation, and the `answer` schema are identical from the first node to
+the last, so per-node variation rides in appended user messages rather than in a
+swapped tool set.
 
 ## Run
 
@@ -28,6 +37,11 @@ The walk writes a JSONL trajectory. `--model` takes `provider:model-id` and
 resolves against the bundled catalog, defaulting to
 `openrouter:anthropic/claude-sonnet-4.5`; the provider's environment key must be
 present.
+
+`--context` selects how much of the walk's past each request carries: `session`
+(default) keeps one growing conversation, `ledger` replaces each finished node's
+turn with its typed answer, and `stateless` sends the constant prefix plus this
+node's question alone. See Cost before reaching for the last two.
 
 ## Watch
 
@@ -49,27 +63,41 @@ change to prose the model may or may not honour. Each node carries:
 | Field | Meaning |
 | --- | --- |
 | `prompt` | Handlebars template injected as a user message on entry. `{{task}}` is the parent objective. |
-| `tools` | Names from the workspace tool table. Everything else is invisible at this node. |
-| `why` | Question answered as typed data on every exit, recorded beside the files the node touched. |
-| `gate` | Command that must pass before the node may exit. `emptyOutput` also requires empty output, for reporters like `gofmt -l` that exit zero while complaining. |
+| `context` | Observations the engine gathers for this question: package docs, existing sources, the artifact so far, a build, a vet, the unimplemented list. |
+| `payload` | The typed blank this node collects. The engine applies it, so the grain of an edit belongs to the graph rather than to the model's restraint. |
+| `why` | Question the answer's `why` must address, recorded beside the payload it explains. |
+| `gate` | Command that must pass before the node may exit. A failed gate rolls the payload back and keeps the model in the node. `emptyOutput` also requires empty output, for reporters like `gofmt -l` that exit zero while complaining. |
 | `edges` | The options the model chooses between. The chosen option selects the edge, so flow out of a node differs by answer. |
 
-Every node also offers `escape_graph`: the legal exit when the graph is wrong
-for the work, which ends the walk with a recorded reason instead of forcing a
-bad trajectory.
+Every node also offers `escape`: the legal answer when the graph is wrong for the
+work, which ends the walk with a recorded reason instead of forcing a bad
+trajectory.
 
 ## Trajectory
 
-The trajectory is the product, not a debugging aid. `walk_start`, `node_enter`,
-`gate_result`, `why_answer`, `node_exit`, `escape`, and `walk_end` records make
-the walk a causal trace: every line in the final diff was produced at a known
-node, in answer to a known question, with a recorded rationale.
+The trajectory is the product, not a debugging aid, and it is no longer
+reconstructed from tool events. Each `answer` record is the model's own call:
+node, option, `why`, and typed payload, beside what the engine did with it. With
+`walk_start`, `node_enter`, `gate_result`, `request`, and `walk_end` around it,
+every line in the final diff is traceable to the question that produced it.
+
+## Cost
+
+```bash
+bun packages/flowgraph/src/cli.ts report --trajectory <trajectory.jsonl>
+```
+
+Prints one row per provider request. The headline total hides the question that
+decides whether the design works, which is where the tokens land: a walk whose
+prefix stays stable pays cache-read rates for nearly all of its traffic, and a
+walk that rewrites its own history pays cache-write rates instead. The recorded
+trials are in `testdata/runs/`.
 
 ## Sample graph
 
-`graphs/go-ladder.json` encodes the Go ladder: read the package's godoc, add one
-struct, iterate its fields until confirmed, add stubs with no bodies, pseudocode
-each body as comments, fill the bodies one function at a time, then pass a
-`go vet` gate. The why-question is asked at struct, field-set, and function
-grain. `fill_bodies` carries a back edge to `add_struct` for when implementation
-reveals a second type is genuinely needed.
+`graphs/go-ladder.json` encodes the Go ladder: read the package, declare one
+struct, settle its fields, declare stubs with final signatures, plan every body,
+fill the bodies one at a time, then pass a `go vet` gate. The why-question is
+asked at struct, field-set, signature, plan, and body grain. `fill_body` carries
+a self edge for the next body and a back edge to `declare_struct` for when
+implementation reveals a second type is genuinely needed.
