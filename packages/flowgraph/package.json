@@ -1,0 +1,57 @@
+{
+	"type": "module",
+	"name": "@oh-my-pi/pi-flowgraph",
+	"version": "17.1.3",
+	"private": true,
+	"description": "Prototype: drive an LLM session through an authored flow graph with per-node tool allowlists and a typed trajectory record",
+	"homepage": "https://omp.sh",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/can1357/oh-my-pi.git",
+		"directory": "packages/flowgraph"
+	},
+	"bugs": {
+		"url": "https://github.com/can1357/oh-my-pi/issues"
+	},
+	"keywords": [
+		"agent",
+		"flow-graph",
+		"trajectory",
+		"llm"
+	],
+	"main": "./src/index.ts",
+	"types": "./src/index.ts",
+	"bin": {
+		"flowgraph": "./src/cli.ts"
+	},
+	"scripts": {
+		"check": "biome check . && bun run check:types",
+		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"lint": "biome lint .",
+		"fix": "biome check --write --unsafe .",
+		"fmt": "biome format --write ."
+	},
+	"dependencies": {
+		"@oh-my-pi/pi-agent-core": "catalog:",
+		"@oh-my-pi/pi-ai": "catalog:",
+		"@oh-my-pi/pi-catalog": "catalog:",
+		"handlebars": "catalog:"
+	},
+	"devDependencies": {
+		"@types/bun": "catalog:"
+	},
+	"engines": {
+		"bun": ">=1.3.14"
+	},
+	"exports": {
+		".": {
+			"types": "./src/index.ts",
+			"import": "./src/index.ts"
+		},
+		"./*": {
+			"types": "./src/*.ts",
+			"import": "./src/*.ts"
+		}
+	}
+}

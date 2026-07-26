@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<title>flowgraph</title>
+		<style>
+			:root { color-scheme: dark; }
+			body { background: #14161a; color: #d7dae0; font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; display: flex; height: 100vh; }
+			#graph { flex: 0 0 380px; overflow-y: auto; padding: 16px; border-right: 1px solid #262a31; }
+			#log { flex: 1; overflow-y: auto; padding: 16px; }
+			h1 { font-size: 13px; font-weight: 600; margin: 0 0 12px; color: #8b93a1; text-transform: uppercase; letter-spacing: .08em; }
+			.node { border: 1px solid #262a31; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
+			.node.visited { border-color: #3a4a5c; }
+			.node.current { border-color: #7aa2f7; background: #1b2230; box-shadow: 0 0 0 1px #7aa2f7 inset; }
+			.node .id { font-weight: 600; }
+			.node .visits { float: right; color: #8b93a1; }
+			.edges { color: #6b7280; font-size: 12px; margin-top: 4px; }
+			.rec { border-left: 2px solid #262a31; padding: 2px 0 8px 10px; margin-bottom: 2px; }
+			.rec .kind { color: #7aa2f7; }
+			.rec.why .kind { color: #e0af68; }
+			.rec.gate-fail .kind { color: #f7768e; }
+			.rec.escape .kind { color: #f7768e; }
+			.rec .body { white-space: pre-wrap; color: #a9b1c0; }
+		</style>
+	</head>
+	<body>
+		<section id="graph"><h1>graph</h1><div id="nodes"></div></section>
+		<section id="log"><h1>trajectory</h1><div id="records"></div></section>
+		<script type="module">
+			const graph = await (await fetch("/graph")).json();
+			const nodesEl = document.getElementById("nodes");
+			const recordsEl = document.getElementById("records");
+			const cards = new Map();
+
+			for (const node of graph.nodes) {
+				const el = document.createElement("div");
+				el.className = "node";
+				const edges = node.edges.map(e => `${e.option} → ${e.to}`).join("\n");
+				el.innerHTML = `<span class="visits"></span><span class="id"></span><div class="edges"></div>`;
+				el.querySelector(".id").textContent = node.id;
+				el.querySelector(".edges").textContent = edges;
+				nodesEl.appendChild(el);
+				cards.set(node.id, el);
+			}
+
+			const visits = new Map();
+			let current = null;
+
+			function apply(rec) {
+				if (rec.type === "node_enter") {
+					if (current) cards.get(current)?.classList.remove("current");
+					current = rec.nodeId;
+					visits.set(rec.nodeId, rec.visit);
+					const card = cards.get(rec.nodeId);
+					card?.classList.add("current", "visited");
+					if (card) card.querySelector(".visits").textContent = `×${rec.visit}`;
+					card?.scrollIntoView({ block: "nearest" });
+				}
+				if (rec.type === "walk_end" && current) cards.get(current)?.classList.remove("current");
+
+				const el = document.createElement("div");
+				const failed = rec.type === "gate_result" && !rec.ok;
+				el.className = `rec ${rec.type === "why_answer" ? "why" : ""} ${failed ? "gate-fail" : ""} ${rec.type === "escape" ? "escape" : ""}`;
+				const kind = document.createElement("div");
+				kind.className = "kind";
+				kind.textContent = `${rec.seq} ${rec.type}${rec.nodeId ? ` · ${rec.nodeId}` : ""}`;
+				const body = document.createElement("div");
+				body.className = "body";
+				body.textContent = summarize(rec);
+				el.append(kind, body);
+				recordsEl.appendChild(el);
+				el.scrollIntoView({ block: "nearest" });
+			}
+
+			function summarize(rec) {
+				switch (rec.type) {
+					case "walk_start": return `${rec.task}\n${rec.model}`;
+					case "node_enter": return `tools: ${rec.tools.join(", ")}`;
+					case "gate_result": return `${rec.command.join(" ")} → ${rec.ok ? "pass" : "FAIL"}\n${rec.output}`;
+					case "why_answer": return `${rec.question}\n${rec.answer}`;
+					case "node_exit": return `${rec.option} → ${rec.nextNodeId}${rec.artifacts.length ? `\n${rec.artifacts.join(", ")}` : ""}`;
+					case "escape": return rec.reason;
+					case "walk_end": return `${rec.status} after ${rec.nodesEntered} nodes · ${rec.usage.totalTokens} tokens${rec.error ? `\n${rec.error}` : ""}`;
+					default: return "";
+				}
+			}
+
+			new EventSource("/trajectory").addEventListener("record", e => apply(JSON.parse(e.data)));
+		</script>
+	</body>
+</html>

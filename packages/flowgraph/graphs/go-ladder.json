@@ -1,0 +1,113 @@
+{
+	"id": "go-ladder",
+	"description": "Write new Go surface as a ladder: read the package, add the struct, settle its fields, stub the functions, pseudocode the bodies, then fill them and pass the style gate.",
+	"systemPrompt": "You are writing Go inside a fixed process. You do not choose the order of work: each step tells you exactly what to do, gives you only the tools that step needs, and ends when you call `advance` with one of its options. Do only what the current step asks, even when you can already see the next step's work. When a step asks why, answer concretely about this code, not in generalities. Every exported identifier carries a godoc comment starting with its name. No package-level mutable state.",
+	"entry": "read_godoc",
+	"nodes": [
+		{
+			"id": "read_godoc",
+			"prompt": "Objective: {{task}}\n\nStep 1 of the ladder: orient. List the workspace, read the existing Go sources, and run `go doc` on the package you will extend. Learn the package's name, what it already owns, and the naming and comment conventions its existing code follows. Write nothing yet.\n\nWhen you can name the package, its existing types, and the convention you will match, call `advance`.",
+			"tools": ["list_dir", "read_file", "go_doc"],
+			"edges": [
+				{
+					"option": "oriented",
+					"to": "add_struct",
+					"description": "You know the package, its existing types, and its conventions."
+				}
+			]
+		},
+		{
+			"id": "add_struct",
+			"prompt": "Step 2: add exactly one struct for the objective, in its own file, with a godoc comment on the type. Declare the struct with no fields yet, or with only the fields you are certain of. Do not add methods, constructors, or bodies: later steps own those.\n\nObjective: {{task}}",
+			"tools": ["list_dir", "read_file", "write_file"],
+			"why": "Why does this struct need to exist, what does it own that no existing type owns, and why is this the right file for it?",
+			"edges": [
+				{
+					"option": "declared",
+					"to": "iterate_fields",
+					"description": "The struct type exists with its godoc comment."
+				}
+			]
+		},
+		{
+			"id": "iterate_fields",
+			"prompt": "Step 3: settle the field set. Read the struct as it stands and decide whether its fields are complete and correctly typed for the objective. Add, remove, or retype fields, then judge again.\n\nChoose `revise` if you changed anything and want another pass. Choose `confirmed` only when you would defend this exact field set as final.\n\nObjective: {{task}}",
+			"tools": ["read_file", "write_file"],
+			"why": "Why is each field required, and why is this set complete rather than one field larger or smaller?",
+			"gate": { "command": ["gofmt", "-l", "."], "emptyOutput": true },
+			"edges": [
+				{
+					"option": "revise",
+					"to": "iterate_fields",
+					"description": "You changed the field set and want to judge it again."
+				},
+				{
+					"option": "confirmed",
+					"to": "add_stubs",
+					"description": "The field set is final."
+				}
+			]
+		},
+		{
+			"id": "add_stubs",
+			"prompt": "Step 4: add the function and method stubs this type needs, each with its godoc comment and its final signature, and each body containing only `panic(\"not implemented\")`. Include the constructor. Write no logic.\n\nObjective: {{task}}",
+			"tools": ["read_file", "write_file", "go_build"],
+			"why": "Why is this the right function set and these the right signatures, and what did you deliberately leave out?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "stubbed",
+					"to": "pseudocode",
+					"description": "Every stub compiles with its godoc comment and final signature."
+				}
+			]
+		},
+		{
+			"id": "pseudocode",
+			"prompt": "Step 5: replace each stub body with the plan for that body, written as ordinary Go line comments, one comment line per step the body will take, keeping the `panic(\"not implemented\")` beneath them. Design here: this is the last step where changing your mind costs a sentence.\n\nObjective: {{task}}",
+			"tools": ["read_file", "write_file", "go_build"],
+			"why": "For each body, why does it take these steps in this order, and where can it fail?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "planned",
+					"to": "fill_bodies",
+					"description": "Every body carries its plan as comments."
+				}
+			]
+		},
+		{
+			"id": "fill_bodies",
+			"prompt": "Step 6: implement the bodies, one function at a time, following the comment plan already written. Keep the plan comments only where they still explain something a reader could not see; delete the rest. Remove every `panic(\"not implemented\")` you implement.\n\nChoose `another_struct` only if implementing revealed that a second type is genuinely required; that returns you to step 2 for that type.\n\nObjective: {{task}}",
+			"tools": ["read_file", "write_file", "go_build"],
+			"why": "Which body did each edit implement, and where did the implementation depart from its plan?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "implemented",
+					"to": "style_gate",
+					"description": "Every stub is implemented and the package builds."
+				},
+				{
+					"option": "another_struct",
+					"to": "add_struct",
+					"description": "Implementation showed a second type is required."
+				}
+			]
+		},
+		{
+			"id": "style_gate",
+			"prompt": "Step 7: the deterministic gate. Run the build, re-read every file you wrote, and fix anything that fails `gofmt` or `go vet`, that leaves an exported identifier without a godoc comment starting with its name, or that introduces package-level mutable state. You cannot leave this step until the gate passes.",
+			"tools": ["read_file", "write_file", "go_build", "go_vet"],
+			"why": "What did the gate catch, and which step of the ladder should have caught it instead?",
+			"gate": { "command": ["go", "vet", "./..."] },
+			"edges": [
+				{
+					"option": "clean",
+					"to": "__done",
+					"description": "The gate passes and the code is finished."
+				}
+			]
+		}
+	]
+}

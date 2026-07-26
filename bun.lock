@@ -142,6 +142,22 @@
         "@types/react-dom": "catalog:",
       },
     },
+    "packages/flowgraph": {
+      "name": "@oh-my-pi/pi-flowgraph",
+      "version": "17.1.3",
+      "bin": {
+        "flowgraph": "./src/cli.ts",
+      },
+      "dependencies": {
+        "@oh-my-pi/pi-agent-core": "catalog:",
+        "@oh-my-pi/pi-ai": "catalog:",
+        "@oh-my-pi/pi-catalog": "catalog:",
+        "handlebars": "catalog:",
+      },
+      "devDependencies": {
+        "@types/bun": "catalog:",
+      },
+    },
     "packages/hashline": {
       "name": "@oh-my-pi/hashline",
       "version": "17.1.3",
@@ -786,6 +802,8 @@
     "@oh-my-pi/pi-catalog": ["@oh-my-pi/pi-catalog@workspace:packages/catalog"],
 
     "@oh-my-pi/pi-coding-agent": ["@oh-my-pi/pi-coding-agent@workspace:packages/coding-agent"],
+
+    "@oh-my-pi/pi-flowgraph": ["@oh-my-pi/pi-flowgraph@workspace:packages/flowgraph"],
 
     "@oh-my-pi/pi-metaharness": ["@oh-my-pi/pi-metaharness@workspace:packages/metaharness"],
 
