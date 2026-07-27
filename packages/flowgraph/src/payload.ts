@@ -60,6 +60,26 @@ const schemas = {
 		/** What was wrong with the body being replaced, kept in the record. */
 		defect: z.string().min(1),
 	}),
+	/**
+	 * Declaration-only kinds, for a walk whose session writes the files itself.
+	 *
+	 * The rendered kinds above carry code because the engine is what puts the
+	 * code in the file. When the session has hands, repeating a body inside an
+	 * answer would pay for the same tokens twice and buy nothing the diff does
+	 * not already hold, so these collect the part a diff cannot state: which
+	 * thing was done, and what it cost or departed from.
+	 */
+	implemented: z.object({
+		func: z.string().min(1),
+		/** Where the body as written departs from the plan it was given. */
+		departure: z.string().min(1),
+	}),
+	/** Report one repaired body: the defect, not the replacement code. */
+	repaired: z.object({ func: z.string().min(1), defect: z.string().min(1) }),
+	/** Report the test set that now exists, one entry per test. */
+	test_set: z.object({
+		tests: z.array(z.object({ name: z.string().regex(/^Test[A-Z_]\w*$/), establishes: z.string().min(1) })).min(1),
+	}),
 	/** Replace the whole test set of the artifact's test file. */
 	tests: z.object({
 		imports: z.array(z.string().min(1)).default([]),
@@ -99,6 +119,31 @@ function normalizeReceiver(receiver: string): string {
 	const typeName = typeExpression.replace(/^\*+/, "").split(".")[0]?.split("[")[0] ?? "";
 	if (!typeName) return receiver;
 	return `${typeName[0]?.toLowerCase()} ${typeExpression}`;
+}
+
+/**
+ * Validate a payload without applying it.
+ *
+ * A tool-driven walk hands the session real file tools, so the engine no longer
+ * renders the artifact from the payload and has nothing to apply it to. The
+ * payload becomes a typed declaration of what the session made true on disk, and
+ * the node's gate is what checks the claim. Parsing it is still worth doing: a
+ * declaration that will not parse is one the trajectory could not carry, and a
+ * declaration that disagrees with the tree is visible afterwards precisely
+ * because both were recorded.
+ */
+export function validatePayload(
+	kind: PayloadKind,
+	raw: unknown,
+): { ok: true; summary: string } | { ok: false; reason: string } {
+	const parsed = schemas[kind].safeParse(raw ?? {});
+	if (!parsed.success) {
+		return {
+			ok: false,
+			reason: parsed.error.issues.map(i => `${i.path.join(".") || "payload"}: ${i.message}`).join("; "),
+		};
+	}
+	return { ok: true, summary: kind === "none" ? "no payload" : `recorded ${kind} payload` };
 }
 
 export function applyPayload(
@@ -180,6 +225,13 @@ export function applyPayload(
 			fn.body = value.code;
 			return { ok: true, summary: `revised ${value.func}: ${value.defect}` };
 		}
+
+		// Declaration-only kinds describe a file the engine did not write, so there
+		// is nothing here to apply them to.
+		case "implemented":
+		case "repaired":
+		case "test_set":
+			return { ok: false, reason: `${kind} is a declaration-only payload and has no rendered form` };
 
 		case "tests": {
 			const value = parsed.data as z.infer<(typeof schemas)["tests"]>;

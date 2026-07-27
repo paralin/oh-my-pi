@@ -1,0 +1,161 @@
+{
+	"id": "go-ladder-tool",
+	"description": "The Go ladder for a session with hands: the same steps, the same gates, and the same typed record, but the session writes the files itself and the graph only decides where it may go next.",
+	"systemPrompt": "You are writing Go inside a fixed process. You have ordinary tools and you write the files yourself, but you do not choose the order of work: each step asks one question, and you answer it with `next_node`. Do only what the current step asks, even when you can already see the next step's work. When a step asks why, answer concretely about this code, not in generalities. Every exported identifier carries a godoc comment starting with its name. No package-level mutable state. Keep the code gofmt-clean.",
+	"orientation": "How a walk works. You hold a checklist you cannot skip. A step tells you what to decide, names the payload it collects, lists the options you may choose between, and names the command it will run before you may leave. Do the step's work with your ordinary tools, run that command yourself so you arrive with a passing tree, then call `next_node` with the option you chose, why you chose it, and the step's payload. The payload is a declaration of what you made true on disk, not a copy of the code: never paste a body or a test into it. The result of that call is the next step. If your payload is rejected or the gate fails you stay in the step: fix it and answer again. Every step also offers `escape`, which ends the walk when no option fits the work the objective actually needs. When a step comes back with `checkpointRequired`, your next call must carry `state`: your context window is nearly full, and what you write there is the only thing that survives into the session that continues this walk.",
+	"packageName": "scratchpkg",
+	"entry": "orient",
+	"nodes": [
+		{
+			"id": "orient",
+			"prompt": "Objective: {{task}}\n\nStep 1 of the ladder: orient. Read the package as it stands and learn what it already owns and the naming and comment conventions its code follows. Write nothing yet and decide nothing else yet.",
+			"context": ["package_doc", "sources"],
+			"why": "What does this package already own, and which convention will the new code match?",
+			"edges": [
+				{
+					"option": "oriented",
+					"to": "declare_struct",
+					"description": "You know the package, its existing types, and its conventions."
+				}
+			]
+		},
+		{
+			"id": "declare_struct",
+			"prompt": "Objective: {{task}}\n\nStep 2: declare exactly one struct for the objective, in its own file, with a godoc comment on the type. Write the file. Fields, methods, and bodies belong to later steps, so the type body stays empty for now. Report the file and the type name.",
+			"payload": "struct",
+			"why": "Why does this struct need to exist, what does it own that no existing type owns, and why is this the right file for it?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "declared",
+					"to": "settle_fields",
+					"description": "The struct type exists with its godoc comment and the package builds."
+				}
+			]
+		},
+		{
+			"id": "settle_fields",
+			"prompt": "Objective: {{task}}\n\nStep 3: settle the field set. Write the complete field list you would defend as final, each with its type and its godoc comment, and report it. Report every field the struct has, not only the ones you just added.\n\nChoose `revise` if you want to look at the result and judge it again. Choose `confirmed` only when the set is final.",
+			"payload": "fields",
+			"why": "Why is each field required, and why is this set complete rather than one field larger or smaller?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "revise",
+					"to": "settle_fields",
+					"description": "You want to look at the field set once more before committing to it."
+				},
+				{ "option": "confirmed", "to": "declare_stubs", "description": "The field set is final." }
+			]
+		},
+		{
+			"id": "declare_stubs",
+			"prompt": "Objective: {{task}}\n\nStep 4: write the functions and methods this type needs, each with its godoc comment and its final signature, and every body a `panic(\"not implemented\")`. Include the constructor. Write no logic here. Report the signatures you declared.",
+			"payload": "stubs",
+			"why": "Why is this the right function set and these the right signatures, and what did you deliberately leave out?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "stubbed",
+					"to": "plan_bodies",
+					"description": "Every stub compiles with its godoc comment and final signature."
+				}
+			]
+		},
+		{
+			"id": "plan_bodies",
+			"prompt": "Objective: {{task}}\n\nStep 5: plan every body. For each function, give the steps its body will take, one entry per step, in order. This is design, not code: write no bodies in this step. It is the last step where changing your mind costs a sentence.",
+			"payload": "plans",
+			"why": "For each body, why does it take these steps in this order, and where can it fail?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [{ "option": "planned", "to": "fill_body", "description": "Every body has its plan." }]
+		},
+		{
+			"id": "fill_body",
+			"prompt": "Objective: {{task}}\n\nStep 6: implement exactly one body, following the plan you wrote for it. One body per step: leave the others panicking. Report which function you implemented and where the implementation departed from its plan. Do not paste the code into the payload.\n\nChoose `next_body` while functions remain unimplemented, `implemented` when none do, and `another_struct` only if implementing revealed that a second type is genuinely required.",
+			"context": ["build"],
+			"payload": "implemented",
+			"why": "Which body did this implement, and where did the implementation depart from its plan?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "next_body",
+					"to": "fill_body",
+					"description": "Functions remain unimplemented; take the next one."
+				},
+				{
+					"option": "implemented",
+					"to": "write_tests",
+					"description": "Every stub is implemented and the package builds.",
+					"payload": "none"
+				},
+				{
+					"option": "revise_stubs",
+					"to": "declare_stubs",
+					"description": "A structural signature mistake needs correction before bodies can be filled."
+				},
+				{
+					"option": "another_struct",
+					"to": "declare_struct",
+					"description": "Implementation showed a second type is required."
+				}
+			]
+		},
+		{
+			"id": "write_tests",
+			"prompt": "Objective: {{task}}\n\nStep 7: pin the behaviour down. Write the tests for what you just built, in the test file beside the code. Test what a reader would doubt, not what a signature already promises: the boundaries, the error paths, and anything concurrent. Every test runs without sleeping.\n\nReport one entry per test that now exists, each with what it establishes. Do not paste test code into the payload. The gate runs the tests, so you cannot leave this step until they pass.",
+			"context": ["tests"],
+			"payload": "test_set",
+			"why": "What could break in this code that a signature does not already rule out, and which of those does each test pin down?",
+			"gate": { "command": ["go", "test", "./..."] },
+			"edges": [
+				{
+					"option": "tested",
+					"to": "final_gate",
+					"description": "The tests pass and cover what the signatures do not promise."
+				},
+				{
+					"option": "fix_code",
+					"to": "repair_body",
+					"description": "A test you would defend is failing, so the body it tests is the thing that is wrong."
+				}
+			]
+		},
+		{
+			"id": "repair_body",
+			"prompt": "Objective: {{task}}\n\nRepair step: one body that is already implemented is wrong. Fix that one body and report which function it was and what was wrong with it. Repair exactly one body: if a second is also wrong, choose `next_repair` and take it next. This step cannot change a signature or a field, so if the defect is structural, escape and say so.",
+			"context": ["build", "tests"],
+			"payload": "repaired",
+			"why": "What was the defect, which step of the ladder should have caught it, and why does the replacement not have it?",
+			"gate": { "command": ["go", "build", "./..."] },
+			"edges": [
+				{
+					"option": "repaired",
+					"to": "write_tests",
+					"description": "The body is corrected; re-run the tests over it."
+				},
+				{ "option": "next_repair", "to": "repair_body", "description": "Another implemented body is also wrong." }
+			]
+		},
+		{
+			"id": "final_gate",
+			"prompt": "Objective: {{task}}\n\nStep 8: the deterministic gate. Read the finished code and its tests once more. Answer `clean` only if the code is finished, every exported identifier carries a godoc comment starting with its name, the package documentation describes what the package actually is, and nothing introduces package-level mutable state.\n\nThis step collects no payload. If something is wrong, send the walk back to the step that can fix it: `repair_body` for a wrong body, `more_tests` for a behaviour nothing pins down yet. Escape only when the defect is structural and neither step can reach it.",
+			"context": ["vet", "tests"],
+			"why": "What did the gate catch, and which step of the ladder should have caught it instead?",
+			"gate": { "command": ["go", "vet", "./..."] },
+			"edges": [
+				{ "option": "clean", "to": "__done", "description": "The gate passes and the code is finished." },
+				{
+					"option": "repair_body",
+					"to": "repair_body",
+					"description": "An implemented body is wrong and must be replaced before the walk can finish."
+				},
+				{
+					"option": "more_tests",
+					"to": "write_tests",
+					"description": "The code is right but something it does is pinned down by no test."
+				}
+			]
+		}
+	]
+}

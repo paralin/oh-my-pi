@@ -9,14 +9,30 @@ import * as path from "node:path";
 import { parseArgs } from "node:util";
 import { loadGraph } from "./graph";
 import { resolveModel } from "./model";
+import type { WipState } from "./next-node";
 import { formatReport, reportWalk } from "./report";
-import { TrajectoryWriter } from "./trajectory";
+import { toolWalk } from "./toolwalk";
+import { readTrajectory, TrajectoryWriter } from "./trajectory";
 import { serveView } from "./view";
 import { type ContextMode, type WalkOptions, walk } from "./walk";
 
-const usage = `flowgraph run  --graph <file> --task "<goal>" --dir <target> [--model <provider:id>] [--reasoning <effort>] [--trajectory <file>] [--context session|ledger|stateless]
+const usage = `flowgraph run  --graph <file> --task "<goal>" --dir <target> [--model <provider:id>] [--reasoning <effort>] [--trajectory <file>] [--mode answer|tool] [--context session|ledger|stateless] [--resume <trajectory>]
 flowgraph view --graph <file> --trajectory <file> [--port <n>]
 flowgraph report --trajectory <file>`;
+
+/**
+ * Recover a tool-driven walk's position from the trajectory it wrote.
+ *
+ * The walk record is the continuity owner, so resuming reads the last state a
+ * session dumped and the node it dumped it into. Nothing else about the previous
+ * session is needed, and nothing else survives.
+ */
+async function readResumePoint(path: string): Promise<{ nodeId: string; state: WipState }> {
+	const records = await readTrajectory(path);
+	const checkpoint = [...records].reverse().find(record => record.type === "checkpoint");
+	if (!checkpoint) throw new Error(`no checkpoint to resume from in ${path}`);
+	return { nodeId: checkpoint.nodeId, state: checkpoint.state };
+}
 
 async function runCommand(argv: string[]): Promise<number> {
 	const { values } = parseArgs({
@@ -30,6 +46,9 @@ async function runCommand(argv: string[]): Promise<number> {
 			reasoning: { type: "string" },
 			"max-tokens": { type: "string" },
 			context: { type: "string", default: "session" },
+			mode: { type: "string", default: "answer" },
+			resume: { type: "string" },
+			"checkpoint-at": { type: "string" },
 		},
 	});
 	if (!values.graph || !values.task || !values.dir) {
@@ -54,18 +73,25 @@ async function runCommand(argv: string[]): Promise<number> {
 	});
 	process.stdout.write(`walk ${walkId} -> ${trajectoryPath}\n`);
 
-	const result = await walk({
+	const common = {
 		graph: indexed,
 		walkId,
 		dir,
 		task: values.task,
 		model,
 		trajectory,
-		context: values.context as ContextMode,
 		reasoning: values.reasoning as WalkOptions["reasoning"],
 		maxTokens: values["max-tokens"] ? Number(values["max-tokens"]) : undefined,
-		onProgress: line => process.stdout.write(`${line}\n`),
-	});
+		onProgress: (line: string) => process.stdout.write(`${line}\n`),
+	};
+	const result =
+		values.mode === "tool"
+			? await toolWalk({
+					...common,
+					checkpointAt: values["checkpoint-at"] ? Number(values["checkpoint-at"]) : undefined,
+					resume: values.resume ? await readResumePoint(path.resolve(values.resume)) : undefined,
+				})
+			: await walk({ ...common, context: values.context as ContextMode });
 	await trajectory.flush();
 
 	process.stdout.write(

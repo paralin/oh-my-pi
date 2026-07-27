@@ -43,6 +43,40 @@ present.
 turn with its typed answer, and `stateless` sends the constant prefix plus this
 node's question alone. See Cost before reaching for the last two.
 
+## Two modes
+
+`--mode answer` (default) is the walk described above: the model has one tool,
+writes nothing, and the engine renders every line from typed payloads.
+
+`--mode tool` keeps the graph and gives the hands back. The session holds
+ordinary read, write, edit, list, and bash tools plus `next_node`, which answers
+the step it occupies and returns the step it moved to, so the state machine runs
+inside one turn loop instead of around it. The payload becomes a declaration of
+what the session made true on disk and the node's gate is what checks the claim,
+which is why a tool-mode graph asks for a function name and a departure from the
+plan rather than a body. `graphs/go-ladder-tool.json` is the Go ladder in that
+form.
+
+The trade is explicit. Nothing physically prevents a tool-mode session from
+editing what the current step did not ask about, so the mode keeps the record
+and the gate and gives up the grain enforcement. What it buys is one warm prefix
+for the whole walk, no per-node session setup, and a session that can run its
+own gate before answering.
+
+## Compaction
+
+In `--mode tool` the same tool carries the walk across a context boundary. When
+a request's prompt passes `--checkpoint-at` (default 0.75) of the model's
+window, the next step comes back with `checkpointRequired`, and the session must
+call `next_node` with `state`: what is true now, the open threads, the facts
+worth keeping, and the next action. The engine records that as a `checkpoint`,
+clears the session, and primes a fresh one from the dump against the identical
+cached prefix.
+
+`--resume <trajectory>` does the same across processes, reading the last
+checkpoint back out of the trajectory. The walk record is the continuity owner:
+no scratch file, and nothing summarized from a transcript.
+
 ## Watch
 
 ```bash

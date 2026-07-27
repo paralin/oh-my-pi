@@ -65,6 +65,24 @@ export interface AnswerRecord extends TrajectoryBase {
 	applied: string;
 }
 
+/**
+ * A node's work-in-progress state, dumped by the session at a context boundary.
+ *
+ * This is the walk's continuity surface. A session near the end of its window
+ * writes what it knows into the node it occupies, and the next session is primed
+ * from this record rather than from a compacted transcript or a scratch file, so
+ * the trajectory is the only thing that has to survive.
+ */
+export interface CheckpointRecord extends TrajectoryBase {
+	type: "checkpoint";
+	nodeId: string;
+	visit: number;
+	/** Prompt tokens on the request that triggered the dump, beside the window it was measured against. */
+	promptTokens: number;
+	contextWindow: number;
+	state: { progress: string; open: string[]; facts: string[]; next: string };
+}
+
 /** One provider request, so the per-node token distribution is visible. */
 export interface RequestRecord extends TrajectoryBase, WalkUsage {
 	type: "request";
@@ -104,6 +122,7 @@ export type TrajectoryRecord =
 	| NodeEnterRecord
 	| GateResultRecord
 	| AnswerRecord
+	| CheckpointRecord
 	| RequestRecord
 	| WalkEndRecord;
 
