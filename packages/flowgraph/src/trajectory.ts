@@ -80,6 +80,8 @@ export interface CheckpointRecord extends TrajectoryBase {
 	/** Prompt tokens on the request that triggered the dump, beside the window it was measured against. */
 	promptTokens: number;
 	contextWindow: number;
+	/** True when the window forced this dump, which is what separates a real compaction from a voluntary note. */
+	forced: boolean;
 	state: { progress: string; open: string[]; facts: string[]; next: string };
 }
 

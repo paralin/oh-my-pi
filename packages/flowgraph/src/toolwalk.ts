@@ -131,6 +131,8 @@ export async function toolWalk(options: ToolWalkOptions): Promise<WalkResult> {
 	/** Set once a dump lands: the outer loop restarts the session from it. */
 	let resumeFrom: WipState | undefined;
 	let lastPromptTokens = 0;
+	/** Prompt size the live session opened at, which is where a checkpoint returns it. */
+	let sessionBaselineTokens = 0;
 	const visits = new Map<string, number>();
 	const nodeState = new Map<string, WipState>(options.resume ? [[options.resume.nodeId, options.resume.state]] : []);
 
@@ -192,6 +194,7 @@ export async function toolWalk(options: ToolWalkOptions): Promise<WalkResult> {
 		// full, because the session that notices it is running out is the one that
 		// still knows what mattered.
 		if (input.state) {
+			const forced = checkpointRequired;
 			const visit = visits.get(node.id) ?? 1;
 			nodeState.set(node.id, input.state);
 			options.trajectory.write({
@@ -200,14 +203,25 @@ export async function toolWalk(options: ToolWalkOptions): Promise<WalkResult> {
 				visit,
 				promptTokens: lastPromptTokens,
 				contextWindow,
+				forced,
 				state: input.state,
 			});
-			options.onProgress?.(`   ${node.id} checkpoint: ${input.state.next}`);
+			options.onProgress?.(`   ${node.id} checkpoint${forced ? " (forced)" : ""}: ${input.state.next}`);
 			checkpointRequired = false;
-			if (!input.option) {
+			// A required dump is the compaction boundary itself, so an answer riding
+			// along with it does not pass. Applying it would carry the full window
+			// into the next step and the boundary the dump exists to cross would
+			// never be crossed: the walk would collect state it never resumes from.
+			// The state is what survives, and the fresh session answers this step.
+			if (!input.option || forced) {
 				resumeFrom = input.state;
 				agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
-				return { ok: true, message: "state recorded; the walk continues from it" };
+				return {
+					ok: true,
+					message: input.option
+						? "state recorded; the window was full, so this answer was not applied. A fresh session continues from your state and answers this step."
+						: "state recorded; the walk continues from it",
+				};
 			}
 		}
 
@@ -331,7 +345,13 @@ export async function toolWalk(options: ToolWalkOptions): Promise<WalkResult> {
 		// Prompt size, not turn count, is what decides a checkpoint: a graph that
 		// reads large files fills its window early and a terse one may never.
 		lastPromptTokens = messageUsage.input + messageUsage.cacheRead + messageUsage.cacheWrite;
-		if (lastPromptTokens >= contextWindow * checkpointAt) checkpointRequired = true;
+		if (!sessionBaselineTokens) sessionBaselineTokens = lastPromptTokens;
+		// Growth since this session opened is the second condition, and it is what
+		// keeps a threshold set below the constant prefix from demanding a dump the
+		// moment a fresh session speaks. A session sitting at its own baseline has
+		// nothing a restart could reclaim.
+		if (lastPromptTokens >= contextWindow * checkpointAt && lastPromptTokens > sessionBaselineTokens)
+			checkpointRequired = true;
 		options.trajectory.write({
 			type: "request",
 			nodeId: node.id,
@@ -364,6 +384,7 @@ export async function toolWalk(options: ToolWalkOptions): Promise<WalkResult> {
 				agent.clearMessages();
 				message = renderResume(options.task, resumeFrom, await describeCurrent("resumed from your own state dump"));
 				resumeFrom = undefined;
+				sessionBaselineTokens = 0;
 				silentTurns = 0;
 				continue;
 			}

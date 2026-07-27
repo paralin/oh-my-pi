@@ -55,7 +55,12 @@ export interface StepView {
 	gate: string[] | null;
 	/** State dumped into this step by an earlier session, on resume. */
 	state: WipState | null;
-	/** The next answer must carry `state`: the context window is nearly full. */
+	/**
+	 * The context window is nearly full, so the next call must be a state dump.
+	 *
+	 * An option sent with that dump is not applied: the dump is the compaction
+	 * boundary, and a fresh session primed from the state answers this step.
+	 */
 	checkpointRequired: boolean;
 }
 
@@ -94,7 +99,11 @@ export function createNextNodeTool(judge: (input: NextNodeInput) => Promise<Step
 				.record(z.string(), z.any())
 				.optional()
 				.describe("The step's typed payload. Omit when the step asks for no payload."),
-			state: stateSchema.optional().describe("Work-in-progress dump. Required only when the step asks for it."),
+			state: stateSchema
+				.optional()
+				.describe(
+					"Work-in-progress dump. Required when the step says checkpointRequired, and then it must be sent alone: an option sent with it is not applied, because a fresh session primed from this state answers the step instead.",
+				),
 		}),
 		execute: async (_id, params: NextNodeInput) => {
 			const verdict = await judge(params);
