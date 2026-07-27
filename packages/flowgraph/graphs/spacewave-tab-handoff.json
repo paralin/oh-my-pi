@@ -1,0 +1,82 @@
+{
+  "id": "spacewave-tab-handoff-ep4",
+  "description": "Preserve Spacewave tab content across the grid-mode transition without hoisting resource ownership.",
+  "systemPrompt": "You are driving a real multi-file frontend fix through a flow graph. Work in the target product worktree with ordinary tools. Preserve the existing UI resource ownership invariant: components keep their own handles, and the backend deduplicates equivalent mounts. Do not add caches or resource graphs. The flex-layout repository is read-only. Do not add tests. Commit and push the product branch once the tree builds, then continue with the real entry-point check. Keep the work grounded in source and record concrete evidence in your answers.",
+  "orientation": "At each step, do the work with tools before calling next_node. The graph is allowed to branch when source evidence changes the implementation shape. A gate must pass before its step can advance. If the real UI cannot run, preserve the exact blocker and continue to the commit/report step rather than claiming success.",
+  "packageName": "spacewave-tab-handoff",
+  "entry": "source-check",
+  "nodes": [
+    {
+      "id": "source-check",
+      "prompt": "Inspect the provided diagnosis anchors in {{dir}} and the read-only OptimizedLayout source. Confirm the stable tab IDs and identify the smallest owner-level change that lets one OptimizedLayout survive the mode transition. Do not edit yet. Look for any model or routing assumptions that the diagnosis did not settle.",
+      "context": ["sources"],
+      "payload": "none",
+      "why": "State the source facts that determine whether a single OptimizedLayout can reuse TabInfo and what must remain stable.",
+      "edges": [
+        {"option": "single-layout", "to": "shape-decision", "description": "The existing OptimizedLayout can preserve content when the model changes and tab IDs remain stable."},
+        {"option": "needs-layout-change", "to": "shape-decision", "description": "The source reveals a limitation that requires a spacewave-side layout usage change, without editing flex-layout."}
+      ],
+      "maxTurns": 10
+    },
+    {
+      "id": "shape-decision",
+      "prompt": "Decide the implementation shape from the source evidence. Compare one persistent OptimizedLayout with a swapped model against any content-host alternative. The operator prefers one persistent instance and rejects hoisted resource ownership. Trace the active providers, model ownership, renderTab contract, URL routing, and upload-manager lifecycle before editing. Choose the minimum coherent shape and name every file it must touch.",
+      "context": ["sources"],
+      "payload": "none",
+      "why": "Explain why the chosen shape preserves DOM identity and component-owned handles across both modes, including what happens to syncAppPath and state namespace.",
+      "edges": [
+        {"option": "implement-persistent-layout", "to": "implement", "description": "Use one persistent layout owner and swap only its model and placement while keeping stable tab content."},
+        {"option": "investigate-model-boundary", "to": "source-check", "description": "A remaining model-boundary uncertainty needs another focused source read before editing."}
+      ],
+      "maxTurns": 12
+    },
+    {
+      "id": "implement",
+      "prompt": "Implement the chosen spacewave-side fix in {{dir}}. Keep one OptimizedLayout mounted across the grid-mode transition, preserve stable tab IDs, unify the per-tab state namespace, and preserve correct path synchronization. Do not edit repos/flex-layout, add tests, or introduce any resource cache. Ensure both normal and grid interactions still have the callbacks and routing they need. Inspect the diff, then run the declared typecheck script.",
+      "context": ["sources"],
+      "payload": "none",
+      "why": "Describe the concrete component ownership and model handoff after editing, and state why the old tree replacement no longer occurs.",
+      "gate": {"command": ["bun", "run", "typecheck"], "cwd": ".", "emptyOutput": false},
+      "edges": [
+        {"option": "tree-builds", "to": "manual-entry", "description": "The product typecheck passes and the persistent layout change is ready for a real browser flow."},
+        {"option": "repair-typecheck", "to": "implement", "description": "The typecheck exposes an implementation error that must be repaired in the product worktree."}
+      ],
+      "maxTurns": 24
+    },
+    {
+      "id": "manual-entry",
+      "prompt": "Exercise the real product entry point in {{dir}}. Start the declared web app command, open a real tab, split it into grid mode, and observe the transition. Use browser tools or the repository's supported browser runner. Check for the Loading session screen, DOM identity for the tab content, URL/model transition, and whether an in-flight upload remains active rather than being cancelled. Do not substitute a typecheck or a source assertion for this run. If infrastructure blocks it, capture the exact command and error.",
+      "context": ["build"],
+      "payload": "none",
+      "why": "Report what the user-visible flow actually showed, including DOM identity and upload cancellation evidence or the precise blocker.",
+      "edges": [
+        {"option": "flow-observed", "to": "checkpoint-commit", "description": "The real UI flow ran and provided evidence about content survival and upload behavior."},
+        {"option": "flow-blocked", "to": "checkpoint-commit", "description": "The real UI flow was blocked by a concrete environment or startup failure that must be recorded."}
+      ],
+      "maxTurns": 18
+    },
+    {
+      "id": "checkpoint-commit",
+      "prompt": "Inspect the final product diff and commit the working fix on the named branch with git commit -s using a kernel-style body. Push the product branch to its configured origin. Do not open a pull request or merge. Record the commit hash, push result, focused checks, and the manual-flow evidence or blocker. Then call next_node.",
+      "context": ["sources"],
+      "payload": "none",
+      "why": "State the exact product commit and push evidence, and distinguish observed UI behavior from unverified claims.",
+      "edges": [
+        {"option": "product-pushed", "to": "walk-closeout", "description": "The product fix is committed and pushed on the required branch."},
+        {"option": "commit-blocked", "to": "walk-closeout", "description": "A concrete custody or remote error prevented commit or push and must be reported."}
+      ],
+      "maxTurns": 12
+    },
+    {
+      "id": "walk-closeout",
+      "prompt": "Close the implementation walk with a concise evidence ledger: list nodes visited and edges taken, any revisits or skips, the source-backed design decision, the product commit/push state, and unresolved risks. Include whether a context checkpoint actually fired and, if so, exactly what WipState was stored and how the resumed session recovered. Do not edit the product further unless a prior gate left it broken.",
+      "context": ["sources"],
+      "payload": "none",
+      "why": "Give the durable facts needed to evaluate whether the tool-walk helped, hindered, or was neutral on this real task.",
+      "edges": [
+        {"option": "walk-complete", "to": "__done", "description": "The trajectory evidence and open question are recorded for the parent report."}
+      ],
+      "maxTurns": 8
+    }
+  ]
+}
