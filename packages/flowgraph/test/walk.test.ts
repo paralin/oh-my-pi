@@ -377,11 +377,7 @@ describe("flowgraph artifact invariants", () => {
 		applyPayload("stubs", { funcs: [{ name: "Spend", doc: "Spend deducts." }] }, artifact);
 		applyPayload("body", { func: "Spend", code: "return 1" }, artifact);
 
-		const result = applyPayload(
-			"revision",
-			{ func: "Spend", code: "return 2", defect: "off by one" },
-			artifact,
-		);
+		const result = applyPayload("revision", { func: "Spend", code: "return 2", defect: "off by one" }, artifact);
 
 		expect(result).toEqual({ ok: true, summary: "revised Spend: off by one" });
 		expect(artifact.funcs[0]?.body).toBe("return 2");

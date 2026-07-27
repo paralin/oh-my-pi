@@ -140,7 +140,8 @@ async function composeQuestion(
 	// beside itself, so choosing it never means inventing a payload for it.
 	const options_ = nodeOptions(node)
 		.map(entry => {
-			if (entry.payload === undefined || entry.payload === node.payload) return `- ${entry.option}: ${entry.description}`;
+			if (entry.payload === undefined || entry.payload === node.payload)
+				return `- ${entry.option}: ${entry.description}`;
 			const blank =
 				entry.payload === "none"
 					? "may be answered with no payload at all"

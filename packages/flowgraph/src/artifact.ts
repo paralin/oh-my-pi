@@ -152,10 +152,7 @@ function renderImports(imports: readonly string[]): string[] {
 
 /** Render the artifact to Go source. Deterministic: the same model always emits the same bytes. */
 export function renderArtifact(artifact: GoArtifact): string {
-	const declarations = [
-		...artifact.structs.map(renderStruct),
-		...artifact.funcs.map(renderFunc),
-	];
+	const declarations = [...artifact.structs.map(renderStruct), ...artifact.funcs.map(renderFunc)];
 	const sections = [
 		`package ${artifact.packageName}`,
 		...renderImports(usedImports(artifact.imports, declarations.join("\n\n"))),
