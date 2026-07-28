@@ -11,18 +11,21 @@ import {
 	latestPersistedScratchHandoffPathSelection,
 	renderScratchHandoffCloseoutMessage,
 	renderScratchHandoffResumeMessage,
+	renderScratchHandoffSyntheticRead,
 	resolveScratchContinuityState,
 	resolveScratchHandoffPathSelection,
 	SCRATCH_HANDOFF_READ_CUSTOM_TYPE,
 	SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS,
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
+	scratchHandoffBodyPreview,
 	scratchHandoffIsComplete,
 	scratchHandoffRecentContextBudget,
 } from "./scratch-handoff";
 import type { SessionEntry } from "./session-entries";
+import { resolveAutoCompactionAction } from "./session-maintenance";
 
 describe("scratchHandoffIsComplete", () => {
-	it("requires an open TODO, objective, and next action", () => {
+	it("requires one root TODO with its own objective and next action", () => {
 		expect(
 			scratchHandoffIsComplete(
 				"* TODO Resume implementation\n- Objective: Finish compaction\n- Next action:\n  1. Run focused tests\n",
@@ -30,6 +33,45 @@ describe("scratchHandoffIsComplete", () => {
 		).toBe(true);
 		expect(scratchHandoffIsComplete("- Objective: Missing TODO\n- Next action: Continue\n")).toBe(false);
 		expect(scratchHandoffIsComplete("* TODO Missing next action\n- Objective: Continue\n")).toBe(false);
+		expect(
+			scratchHandoffIsComplete(
+				"* TODO Empty current task\n- Objective: \n- Next action: \n* DONE Historical task\n- Objective: Old objective\n- Next action: Old action\n",
+			),
+		).toBe(false);
+		expect(
+			scratchHandoffIsComplete(
+				"* TODO First task\n- Objective: First\n- Next action: Continue\n* TODO Ambiguous task\n- Objective: Second\n- Next action: Continue\n",
+			),
+		).toBe(false);
+	});
+});
+
+describe("scratch handoff strategy", () => {
+	it("is explicit and no longer changes ordinary handoff semantics", () => {
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "scratch-handoff",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: true,
+			}),
+		).toBe("scratch-handoff");
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "handoff",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: true,
+			}),
+		).toBe("handoff");
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "scratch-handoff",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: false,
+			}),
+		).toBe("context-full");
 	});
 });
 
@@ -265,7 +307,7 @@ describe("scratch handoff path selection", () => {
 });
 
 describe("scratch handoff prompt", () => {
-	it("keeps scratch maintenance internal and skips org wrapping", async () => {
+	it("keeps scratch lazy and supplies concise maintenance rules", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
 		try {
 			const context = await buildScratchHandoffContext({
@@ -275,26 +317,22 @@ describe("scratch handoff prompt", () => {
 				date: new Date("2026-06-30T00:00:00.000Z"),
 			});
 
-			expect(context?.scratchText).toContain("- Skill stack: ");
-			expect(context?.prompt).toContain("minimal continuation dependency list, not session history");
-			expect(context?.prompt).toContain("current open TODO or next concrete action");
-			expect(context?.prompt).toContain("Leave it empty when no skill is currently required");
-			expect(context?.prompt).toContain("NEVER mechanically replay the full field");
-			expect(context?.prompt).not.toContain("load exactly the recorded `Skill stack:`");
-			expect(context?.prompt).toContain("Org wrapping the scratch document is unnecessary");
-			expect(context?.prompt).toContain("do not run a formatter solely for scratch-handoff text");
-			expect(context?.prompt).toContain("Scratch continuity is internal maintenance, not task evidence.");
-			expect(context?.prompt).toContain("do not report scratch state to the user");
-			expect(context?.prompt).toContain("Do not update the scratch document during ordinary work.");
-			expect(context?.prompt).toContain("unless the significant-work exception applies");
-			expect(context?.prompt).toContain("trivial lookups, small edits, and routine status changes do not qualify");
-			expect(context?.prompt).not.toContain("After orientation, write the first useful scratch delta");
-			expect(context?.prompt).not.toContain("report one sentence saying it was already current");
-			expect(context?.prompt).not.toContain("In the final response, mention whether the scratch file was updated");
+			expect(context?.exists).toBe(false);
+			expect(context?.scratchText).toBe("");
+			expect(await Bun.file(path.join(cwd, "agent/20260630/Main-session.org")).exists()).toBe(false);
+			expect(context?.prompt).toContain("File not created yet");
+			expect(context?.prompt).toContain("Scratch = bounded current-state checkpoint");
+			expect(context?.prompt).toContain("exactly one root `* TODO`");
+			expect(context?.prompt).toContain("NEVER replay full stack");
+			expect(context?.prompt).toContain("do not duplicate it in todo tool");
+			expect(context?.prompt).toContain("No update needed? Leave unchanged");
+			const synthetic = renderScratchHandoffSyntheticRead(context!);
+			expect(synthetic).toContain("No scratch checkpoint exists yet");
+			expect(synthetic).not.toContain("<scratch-handoff-context>");
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
-	});
+	}, 15_000);
 
 	it("preserves an existing scratch document instead of resetting it", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
@@ -310,32 +348,27 @@ describe("scratch handoff prompt", () => {
 				settings: { enabled: true, rootDir: "agent" },
 			});
 
+			expect(context?.exists).toBe(true);
 			expect(context?.scratchText).toContain("Objective: keep me");
 			expect(await fs.readFile(scratchFile, "utf8")).toBe("* TODO Existing work\n- Objective: keep me\n");
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
+	}, 15_000);
+
+	it("forces edit for existing checkpoints and write only for lazy creation", () => {
+		const editPrompt = renderScratchHandoffCloseoutMessage("agent/current.org");
+		const createPrompt = renderScratchHandoffCloseoutMessage("agent/current.org", true);
+
+		expect(editPrompt).toContain("PENCILS DOWN");
+		expect(editPrompt).toContain("edit `agent/current.org` using the `edit` tool");
+		expect(editPrompt).toContain("NEVER clear, recreate, rename, or replace");
+		expect(editPrompt).toContain("exactly one active `* TODO`");
+		expect(editPrompt).toContain("Remove completed-history subtrees");
+		expect(editPrompt).toContain("END TURN immediately");
+		expect(createPrompt).toContain("create `agent/current.org` using the `write` tool");
 	});
 
-	it("puts pencils down after a complete threshold closeout snapshot", () => {
-		const prompt = renderScratchHandoffCloseoutMessage("agent/current.org");
-
-		expect(prompt).toContain("PENCILS DOWN");
-		expect(prompt).toContain("scratch-handoff maintenance only");
-		expect(prompt).toContain("completely and accurately");
-		expect(prompt).toContain("full, comprehensive snapshot");
-		expect(prompt).toContain("only skills required by the current open TODO or next concrete action");
-		expect(prompt).toContain("skill stack is not session history");
-		expect(prompt).toContain("leave it empty when none are required");
-		expect(prompt).toContain("little to no warm-up");
-		expect(prompt).toContain("Org-link artifacts");
-		expect(prompt).toContain("Do not clear, recreate, truncate, rename, or replace");
-		expect(prompt).toContain("END THE TURN immediately");
-		expect(prompt).toContain("NEVER start or continue task work");
-		expect(prompt).toContain("The next turn or agent resumes from the scratch");
-		expect(prompt).toContain("do not reread or separately verify the file");
-		expect(prompt).not.toContain("stop with a brief note");
-	});
 	it("resumes with judgment instead of replaying historical skills", () => {
 		const message = renderScratchHandoffResumeMessage({
 			displayPath: "agent/current.org",
@@ -343,19 +376,31 @@ describe("scratch handoff prompt", () => {
 				"- Skill stack: orient -> investigate-issue -> write-review -> investigate-issue\n- Next action: fix parser",
 		});
 
-		expect(message).toContain("current open TODO and next action");
-		expect(message).toContain("Load only relevant entries");
-		expect(message).toContain("Skip clearly irrelevant, stale, historical, or duplicate entries");
-		expect(message).toContain("apply normal skill matching");
-		expect(message).toContain("NEVER mechanically replay the full field");
-		expect(message).not.toContain("Before any other work");
-		expect(message).toContain("supplied continuation state");
+		expect(message).toContain("Choose skills from active TODO + next action");
+		expect(message).toContain("skip stale, historical, duplicate entries");
+		expect(message).toContain("normal matching");
+		expect(message).toContain("NEVER replay full stack");
+		expect(message).toContain("continuation state");
 		expect(message).toContain("first executable step");
-		expect(message).toContain("defer skills for later steps");
-		expect(message).toContain("execute it in the same turn");
-		expect(message).toContain("do not repeat repair or orientation");
-		expect(message).not.toContain("load exactly");
+		expect(message).toContain("execute in same turn");
+		expect(message).toContain("Do not repeat startup repair");
 		expect(message).toContain("- Skill stack: orient -> investigate-issue -> write-review -> investigate-issue");
+	});
+
+	it("injects a token-bounded checkpoint beginning and directs conditional full reads", () => {
+		const scratchText = `* TODO Current\n- Objective: preserve beginning\n${"history ".repeat(20_000)}`;
+		const preview = scratchHandoffBodyPreview(scratchText, 256);
+		const message = renderScratchHandoffResumeMessage({
+			displayPath: "agent/current.org",
+			scratchText: preview.text,
+			scratchTruncated: preview.truncated,
+		});
+
+		expect(preview.truncated).toBe(true);
+		expect(countTokens(preview.text)).toBeLessThanOrEqual(256);
+		expect(preview.text).toContain("preserve beginning");
+		expect(message).toContain("Only checkpoint beginning is injected");
+		expect(message).toContain("Read `agent/current.org` only if");
 	});
 });
 
@@ -468,11 +513,11 @@ describe("scratch handoff recent context", () => {
 
 		// Inline text is re-billed on every request of the next segment, so it takes
 		// the budget and says what it dropped.
-		expect(context?.bounded).toContain("Older session context was dropped");
-		expect(context?.bounded).toContain("re-derive it from the workspace");
+		expect(context?.bounded).toContain("Older session context dropped");
+		expect(context?.bounded).toContain("Re-derive missing detail");
 		expect(context?.bounded).toContain("request 39");
 		expect(context?.bounded).not.toContain("request 0 ");
-		expect(countTokens(context?.bounded ?? "")).toBeLessThan(1_024);
+		expect(countTokens(context?.bounded ?? "")).toBeLessThanOrEqual(512);
 		// SnapCompact frames carry their own bound and cost a fraction of the same
 		// work, so the full delta stays available to them.
 		expect(context?.text).toContain("request 0 ");
@@ -488,7 +533,7 @@ describe("scratch handoff recent context", () => {
 
 		expect(context?.bounded).toContain("tail marker");
 		expect(context?.bounded).not.toContain("head marker");
-		expect(countTokens(context?.bounded ?? "")).toBeLessThan(512);
+		expect(countTokens(context?.bounded ?? "")).toBeLessThanOrEqual(256);
 		expect(context?.text).toContain("head marker");
 	});
 
