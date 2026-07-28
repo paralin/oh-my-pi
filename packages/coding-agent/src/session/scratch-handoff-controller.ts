@@ -46,6 +46,7 @@ import {
 	SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE,
 	type ScratchContinuityState,
 	type ScratchHandoffDelta,
+	scratchHandoffBodyPreview,
 	scratchHandoffRecentContextBudget,
 } from "./scratch-handoff";
 import type { SessionContext } from "./session-context";
@@ -195,7 +196,7 @@ export interface ScratchHandoffHost {
 		deliverAs: "steer" | "followUp",
 		queueChipText?: string,
 	): Promise<void>;
-	forceWriteToolChoiceNow(label: string): void;
+	forceScratchToolChoiceNow(toolName: "edit" | "write", label: string): void;
 	runAutoCompaction(
 		reason: AutoCompactionReason,
 		willRetry: boolean,
@@ -298,6 +299,14 @@ export class ScratchHandoffController {
 	/** Discard the staged closeout after a maintenance pass consumed it. */
 	clearCloseout(): void {
 		this.#closeout = undefined;
+	}
+
+	#scratchExists(scratchPath: string): boolean {
+		try {
+			return fs.existsSync(resolveToCwd(scratchPath, this.#host.sessionManager.getCwd()));
+		} catch {
+			return false;
+		}
 	}
 
 	/**
@@ -416,15 +425,17 @@ export class ScratchHandoffController {
 			if (runImmediately) await this.#host.waitForIdle();
 			return true;
 		}
+		const create = !this.#scratchExists(scratchPath);
+		const toolName = create ? "write" : "edit";
 		const message = {
 			customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
-			content: renderScratchHandoffCloseoutMessage(scratchPath),
+			content: renderScratchHandoffCloseoutMessage(scratchPath, create),
 			display: true,
 			attribution: "agent" as const,
 			details: { path: scratchPath, triggerContextTokens },
 		};
 		if (runImmediately) {
-			this.#host.forceWriteToolChoiceNow("scratch-handoff-closeout");
+			this.#host.forceScratchToolChoiceNow(toolName, "scratch-handoff-closeout");
 			await this.#host.promptCustomMessage(message);
 		} else {
 			await this.#host.queueCustomMessage(message, "steer", `scratch handoff: update ${scratchPath}`);
@@ -473,8 +484,18 @@ export class ScratchHandoffController {
 			throw new Error("Scratch handoff is not active for this session.");
 		}
 		const tokensBefore = this.#host.getContextUsage()?.tokens ?? 0;
-		await this.requestCloseout(tokensBefore, true, "manual");
-		await this.#host.waitForIdle();
+		if (this.#scratchExists(scratchPath)) {
+			const prepared = await this.prepareContext();
+			if (prepared.state === "verified") {
+				await this.compactSession([], { native: false, standard: false }, prepared);
+			} else {
+				await this.requestCloseout(tokensBefore, true, "manual");
+				await this.#host.waitForIdle();
+			}
+		} else {
+			await this.requestCloseout(tokensBefore, true, "manual");
+			await this.#host.waitForIdle();
+		}
 		const compactionEntry = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		if (!compactionEntry) {
 			throw new Error("Scratch handoff compaction did not complete.");
@@ -495,6 +516,7 @@ export class ScratchHandoffController {
 			try {
 				const scratchPath = resolveToCwd(this.#displayPath, this.#host.sessionManager.getCwd());
 				const scratchText = fs.readFileSync(scratchPath, "utf8").trim();
+				const scratchPreview = scratchHandoffBodyPreview(scratchText);
 				const delta = this.#recentContext(pendingMessages);
 				const state = resolveScratchContinuityState({
 					scratchText,
@@ -537,7 +559,8 @@ export class ScratchHandoffController {
 										text: renderScratchHandoffResumeMessage({
 											displayPath: this.#displayPath,
 											parentDisplayPath: this.#parentDisplayPath,
-											scratchText,
+											scratchText: scratchPreview.text,
+											scratchTruncated: scratchPreview.truncated,
 											recentContextSnapcompactFrames: archive.frames.length,
 										}),
 									},
@@ -566,7 +589,8 @@ export class ScratchHandoffController {
 							text: renderScratchHandoffResumeMessage({
 								displayPath: this.#displayPath,
 								parentDisplayPath: this.#parentDisplayPath,
-								scratchText,
+								scratchText: scratchPreview.text,
+								scratchTruncated: scratchPreview.truncated,
 								recentContextText: delta?.bounded,
 							}),
 						},
@@ -657,7 +681,7 @@ export class ScratchHandoffController {
 		if (closeout && !closeout.writeCompleted) {
 			this.#host.sessionManager.appendCustomMessageEntry(
 				SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
-				renderScratchHandoffCloseoutMessage(closeout.scratchPath),
+				renderScratchHandoffCloseoutMessage(closeout.scratchPath, !this.#scratchExists(closeout.scratchPath)),
 				true,
 				{ path: closeout.scratchPath, triggerContextTokens: closeout.triggerContextTokens },
 				"agent",
@@ -712,7 +736,7 @@ export class ScratchHandoffController {
 		const promptBudget = Math.max(0, contextWindow - effectiveReserveTokens(contextWindow, compactionSettings));
 		if (promptBudget <= 0) return 0;
 		const closeoutTokens = Math.max(
-			countTokens(renderScratchHandoffCloseoutMessage(scratchPath)),
+			countTokens(renderScratchHandoffCloseoutMessage(scratchPath, !this.#scratchExists(scratchPath))),
 			SCRATCH_HANDOFF_CLOSEOUT_MIN_HEADROOM_TOKENS,
 		);
 		return Math.max(0, promptBudget - closeoutTokens);
@@ -812,7 +836,7 @@ export class ScratchHandoffController {
 		if (contextWindow <= 0) return;
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (!compactionSettings.enabled || compactionSettings.strategy !== "handoff") return;
+		if (!compactionSettings.enabled || compactionSettings.strategy !== "scratch-handoff") return;
 		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
 		const promptBudget = Math.max(0, contextWindow - reserveTokens);
 		if (promptBudget <= 0) return;

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added `scratch-handoff` to the shared compaction strategy type so hosts can expose checkpoint-backed context maintenance explicitly instead of overloading new-session handoff.
+
 ## [17.1.7] - 2026-07-27
 
 ### Changed

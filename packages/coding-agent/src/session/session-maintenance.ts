@@ -188,7 +188,7 @@ export function resolveAutoCompactionAction(input: {
 	hasScratchHandoff: boolean;
 }): AutoCompactionAction {
 	if (input.strategy === "snapcompact") return "snapcompact";
-	if (input.strategy === "handoff" && input.hasScratchHandoff) return "scratch-handoff";
+	if (input.strategy === "scratch-handoff" && input.hasScratchHandoff) return "scratch-handoff";
 	if (input.strategy === "handoff" && input.reason !== "overflow" && !input.suppressHandoff) return "handoff";
 	return "context-full";
 }
@@ -1232,7 +1232,7 @@ export class SessionMaintenance {
 		const scratchPath = scratch.displayPath;
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
 		const shouldScratchHandoffCloseout =
-			compactionSettings.strategy === "handoff" &&
+			compactionSettings.strategy === "scratch-handoff" &&
 			scratchPath !== undefined &&
 			scratch.shouldRequestCloseout(contextTokens, contextWindow, compactionSettings, scratchPath);
 		if (!shouldThresholdCompact && !shouldScratchHandoffCloseout) return;
@@ -1251,7 +1251,7 @@ export class SessionMaintenance {
 			});
 			return;
 		}
-		if (compactionSettings.strategy === "handoff" && scratchPath) {
+		if (compactionSettings.strategy === "scratch-handoff" && scratchPath) {
 			logger.debug("Mid-run scratch-handoff queued closeout steer", {
 				contextTokens,
 				contextWindow,
@@ -1498,7 +1498,7 @@ export class SessionMaintenance {
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
 		const scratchPath = scratch.displayPath;
 		const shouldScratchHandoffCloseout =
-			compactionSettings.strategy === "handoff" &&
+			compactionSettings.strategy === "scratch-handoff" &&
 			scratchPath !== undefined &&
 			!options.suppressHandoff &&
 			scratch.shouldRequestCloseout(postMaintenanceContextTokens, contextWindow, compactionSettings, scratchPath);
@@ -1524,7 +1524,11 @@ export class SessionMaintenance {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
-				if (compactionSettings.strategy === "handoff" && scratchPath !== undefined && !options.suppressHandoff) {
+				if (
+					compactionSettings.strategy === "scratch-handoff" &&
+					scratchPath !== undefined &&
+					!options.suppressHandoff
+				) {
 					await scratch.requestCloseout(postMaintenanceContextTokens);
 					return COMPACTION_CHECK_CONTINUATION;
 				}
