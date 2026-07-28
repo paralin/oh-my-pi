@@ -248,6 +248,9 @@
 - Fixed omp worktree clear prematurely deleting active task-isolation sandboxes owned by running subagents.
 - Fixed /vibe mode preventing the director from completing parent tasks after verifying worker results by keeping the built-in todo tool active.
 - Fixed numeric GitHub issue and pull request autocomplete being suppressed inside skill slash-command arguments.
+### Changed
+
+- Scratch handoff is now an explicit compaction strategy. Checkpoints are created lazily, existing checkpoints close out through targeted edits, verified no-delta checkpoints compact without a redundant model turn, oversized checkpoint bodies inject only a token-bounded beginning, and recent-session text is bounded with exact token counts. Resume validation now requires one root TODO containing its own objective and next action, while compact static prompts direct completed history and large evidence into linked artifacts.
 
 ## [17.1.7] - 2026-07-27
 

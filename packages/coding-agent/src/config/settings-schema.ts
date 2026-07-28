@@ -2156,14 +2156,14 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.strategy": {
 		type: "enum",
-		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
+		values: ["context-full", "handoff", "scratch-handoff", "shake", "snapcompact", "off"] as const,
 		default: "snapcompact",
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Compaction Strategy",
 			description:
-				"Choose in-place context-full maintenance, auto-handoff, surgical shake (drop heavy content), snapcompact (archive history as dense images), or disable auto maintenance (off)",
+				"Choose in-place context-full maintenance, new-session handoff, scratch-checkpoint rebuild, surgical shake, snapcompact image archive, or disable auto maintenance",
 			options: [
 				{
 					value: "context-full",
@@ -2171,6 +2171,11 @@ export const SETTINGS_SCHEMA = {
 					description: "Summarize in-place and keep the current session",
 				},
 				{ value: "handoff", label: "Handoff", description: "Generate handoff and continue in a new session" },
+				{
+					value: "scratch-handoff",
+					label: "Scratch handoff",
+					description: "Checkpoint current state to scratch and rebuild this session around it",
+				},
 				{
 					value: "shake",
 					label: "Shake",
@@ -2198,7 +2203,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Scratch Handoff",
 			label: "Scratch Handoff",
 			description:
-				"Create a per-session scratch handoff file and inject continuity instructions into the system prompt",
+				"Enable lazy per-session scratch checkpoints and inject continuity instructions into the system prompt",
 		},
 	},
 
@@ -2220,7 +2225,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "Scratch Handoff",
 			label: "Scratch Handoff Directory",
-			description: "Directory where per-session scratch handoff org files are created",
+			description: "Directory where checkpoint files are created on first closeout",
 		},
 	},
 
@@ -5710,7 +5715,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	strategy: "context-full" | "handoff" | "scratch-handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number | undefined;

@@ -1498,8 +1498,8 @@ export class AgentSession {
 			promptCustomMessage: message => this.promptCustomMessage(message),
 			queueCustomMessage: (message, deliverAs, queueChipText) =>
 				this.#queueCustomMessage(message, deliverAs, queueChipText),
-			forceWriteToolChoiceNow: label => {
-				this.#toolChoiceQueue.pushOnce({ type: "tool", name: "write" }, { label, now: true });
+			forceScratchToolChoiceNow: (toolName, label) => {
+				this.#toolChoiceQueue.pushOnce({ type: "tool", name: toolName }, { label, now: true });
 			},
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
