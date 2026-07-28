@@ -3,7 +3,11 @@ import * as path from "node:path";
 
 import { type AgentMessage, countTokens } from "@oh-my-pi/pi-agent-core";
 import type { Message } from "@oh-my-pi/pi-ai";
+import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import scratchHandoffTemplate from "../prompts/system/scratch-handoff.md" with { type: "text" };
+import scratchHandoffCloseoutTemplate from "../prompts/system/scratch-handoff-closeout.md" with { type: "text" };
+import scratchHandoffResumeTemplate from "../prompts/system/scratch-handoff-resume.md" with { type: "text" };
 
 import { resolveToCwd } from "../tools/path-utils";
 
@@ -28,6 +32,8 @@ export interface ScratchHandoffContext {
 	prompt: string;
 	/** Current scratch file body provided as continuation state. */
 	scratchText: string;
+	/** Whether the scratch file already exists. */
+	exists: boolean;
 	/** Parent session scratch file, linked from subagent scratch files. */
 	parentDisplayPath?: string;
 }
@@ -70,20 +76,58 @@ export function resolveScratchHandoffPath(input: {
 	return { displayPath, absolutePath };
 }
 
-/** True when a scratch document contains at least one populated continuity field. */
-export function scratchHandoffHasContent(text: string): boolean {
-	const fieldPattern =
-		/^-\s+(?:Objective|Skill stack|Work completed|Files changed|Verification|Blockers or risks|Next action|Source refs):[ \t]*(\S.*)$/gm;
-	return fieldPattern.test(text);
+interface ScratchTodoSubtree {
+	objective: string;
+	nextAction: string;
 }
-/** True when a scratch document has the minimum state needed for an autonomous resume. */
+
+function fieldValue(lines: readonly string[], label: string): string {
+	const prefix = `- ${label}:`;
+	const index = lines.findIndex(line => line.startsWith(prefix));
+	if (index < 0) return "";
+	const values = [lines[index].slice(prefix.length).trim()];
+	for (let cursor = index + 1; cursor < lines.length; cursor++) {
+		const line = lines[cursor];
+		if (/^-\s+\S[^:]*:/.test(line)) break;
+		if (/^\s+(?:[-+*]|\d+\.)\s+\S/.test(line)) values.push(line.trim());
+		else if (line.trim()) break;
+	}
+	return values.filter(Boolean).join("\n");
+}
+
+/** Parse one unambiguous root TODO and its direct field body. */
+function activeScratchTodo(text: string): ScratchTodoSubtree | undefined {
+	const lines = text.split(/\r?\n/);
+	const roots: number[] = [];
+	for (let index = 0; index < lines.length; index++) {
+		if (/^\*\s+TODO\s+\S/.test(lines[index])) roots.push(index);
+	}
+	if (roots.length !== 1) return undefined;
+	const start = roots[0] + 1;
+	let end = lines.length;
+	for (let index = start; index < lines.length; index++) {
+		if (/^\*+\s+(?:TODO|DONE)\s+\S/.test(lines[index])) {
+			end = index;
+			break;
+		}
+	}
+	const body = lines.slice(start, end);
+	return {
+		objective: fieldValue(body, "Objective"),
+		nextAction: fieldValue(body, "Next action"),
+	};
+}
+
+/** True when the active root TODO contains resumable state. */
+export function scratchHandoffHasContent(text: string): boolean {
+	const todo = activeScratchTodo(text);
+	return todo !== undefined && (todo.objective.length > 0 || todo.nextAction.length > 0);
+}
+
+/** True when one active root TODO has its own objective and next action. */
 export function scratchHandoffIsComplete(text: string): boolean {
-	const hasOpenTodo = /^\*+\s+TODO\s+\S/m.test(text);
-	const hasObjective = /^-\s+Objective:[ \t]*\S/m.test(text);
-	const hasNextAction =
-		/^-\s+Next action:[ \t]*\S/m.test(text) ||
-		/^-\s+Next action:[ \t]*\n(?:[ \t]+(?:[-+*]|\d+\.)[ \t]+\S.*\n?)+/m.test(text);
-	return hasOpenTodo && hasObjective && hasNextAction;
+	const todo = activeScratchTodo(text);
+	return todo !== undefined && todo.objective.length > 0 && todo.nextAction.length > 0;
 }
 
 /**
@@ -178,6 +222,40 @@ function sessionEntryMessage(entry: SessionEntry): AgentMessage | undefined {
 export const SCRATCH_HANDOFF_RECENT_CONTEXT_MIN_TOKENS = 2_048;
 /** Share of the context window an inline delta may consume. */
 export const SCRATCH_HANDOFF_RECENT_CONTEXT_WINDOW_FRACTION = 0.1;
+/** Maximum scratch-body prefix injected after compaction or resume. */
+export const SCRATCH_HANDOFF_BODY_MAX_TOKENS = 2_048;
+
+export interface ScratchHandoffBodyPreview {
+	text: string;
+	truncated: boolean;
+}
+
+/** Keep a token-safe beginning; detailed history remains readable from disk. */
+export function scratchHandoffBodyPreview(
+	text: string,
+	maxTokens = SCRATCH_HANDOFF_BODY_MAX_TOKENS,
+): ScratchHandoffBodyPreview {
+	if (countTokens(text) <= maxTokens) return { text, truncated: false };
+	const lines = text.split(/(?<=\n)/);
+	let low = 0;
+	let high = lines.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (countTokens(lines.slice(0, middle).join("")) <= maxTokens) low = middle;
+		else high = middle - 1;
+	}
+	if (low > 0) return { text: lines.slice(0, low).join("").trimEnd(), truncated: true };
+
+	const codepoints = Array.from(text);
+	low = 0;
+	high = codepoints.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		if (countTokens(codepoints.slice(0, middle).join("")) <= maxTokens) low = middle;
+		else high = middle - 1;
+	}
+	return { text: codepoints.slice(0, low).join(""), truncated: true };
+}
 
 /**
  * scratchHandoffRecentContextBudget sizes the inline delta carried past a
@@ -239,19 +317,41 @@ export interface ScratchHandoffDelta {
 	bounded: string;
 }
 
-/** Keep the newest messages that fit the budget; the oldest are dropped first. */
+/** Keep the newest complete messages whose serialized conversation fits. */
 function trimDeltaToBudget(messages: Message[], maxTokens: number): { kept: Message[]; dropped: number } {
 	if (!Number.isFinite(maxTokens) || maxTokens <= 0) return { kept: messages, dropped: 0 };
-	let total = 0;
 	let start = messages.length;
 	for (let index = messages.length - 1; index >= 0; index--) {
-		const cost = countTokens(snapcompact.serializeConversation([messages[index]]));
-		if (start < messages.length && total + cost > maxTokens) break;
-		total += cost;
+		const candidate = messages.slice(index);
+		if (countTokens(snapcompact.serializeConversation(candidate)) > maxTokens) break;
 		start = index;
-		if (total >= maxTokens) break;
 	}
 	return { kept: messages.slice(start), dropped: start };
+}
+
+function tailWithinTokenBudget(text: string, maxTokens: number, prefix: string): string {
+	if (countTokens(`${prefix}${text}`) <= maxTokens) return `${prefix}${text}`;
+	if (countTokens(prefix) > maxTokens) {
+		const prefixCodepoints = Array.from(prefix);
+		let prefixLow = 0;
+		let prefixHigh = prefixCodepoints.length;
+		while (prefixLow < prefixHigh) {
+			const middle = Math.ceil((prefixLow + prefixHigh) / 2);
+			if (countTokens(prefixCodepoints.slice(0, middle).join("")) <= maxTokens) prefixLow = middle;
+			else prefixHigh = middle - 1;
+		}
+		return prefixCodepoints.slice(0, prefixLow).join("");
+	}
+	const codepoints = Array.from(text);
+	let low = 0;
+	let high = codepoints.length;
+	while (low < high) {
+		const middle = Math.ceil((low + high) / 2);
+		const candidate = `${prefix}${codepoints.slice(codepoints.length - middle).join("")}`;
+		if (countTokens(candidate) <= maxTokens) low = middle;
+		else high = middle - 1;
+	}
+	return `${prefix}${codepoints.slice(codepoints.length - low).join("")}`;
 }
 
 export function buildScratchHandoffRecentContext(input: {
@@ -273,23 +373,23 @@ export function buildScratchHandoffRecentContext(input: {
 	const text = snapcompact.serializeConversation(messages).trim();
 	if (text.length === 0) return undefined;
 	const maxTokens = input.maxTokens ?? Number.POSITIVE_INFINITY;
-	const { kept, dropped } = trimDeltaToBudget(messages, maxTokens);
-	let bounded = dropped === 0 ? text : snapcompact.serializeConversation(kept).trim();
-	// A single oversized message survives the message-level trim, so clamp the
-	// serialized tail too: the inline budget is a hard bound, not a target.
-	const maxChars = Number.isFinite(maxTokens) ? maxTokens * 4 : Number.POSITIVE_INFINITY;
-	const omitted: string[] = [];
-	if (dropped > 0) omitted.push(`${dropped} older message${dropped === 1 ? "" : "s"}`);
-	if (bounded.length > maxChars) {
-		bounded = bounded.slice(bounded.length - maxChars);
-		omitted.push("an oversized head");
+	let { kept, dropped } = trimDeltaToBudget(messages, maxTokens);
+	if (dropped === 0) return { text, bounded: text };
+
+	let serializedKept = snapcompact.serializeConversation(kept).trim();
+	let prefix = "";
+	while (true) {
+		const omitted =
+			kept.length === 0
+				? `${dropped} message${dropped === 1 ? "" : "s"}; newest message exceeded the inline budget`
+				: `${dropped} older message${dropped === 1 ? "" : "s"}`;
+		prefix = `[Older session context dropped: ${omitted} omitted. Re-derive missing detail from workspace or linked artifacts; never assume it.]\n\n`;
+		if (kept.length === 0 || countTokens(`${prefix}${serializedKept}`) <= maxTokens) break;
+		kept = kept.slice(1);
+		dropped++;
+		serializedKept = snapcompact.serializeConversation(kept).trim();
 	}
-	if (omitted.length > 0) {
-		// Do not point at the scratch document here: this delta exists precisely
-		// because the document does not cover it yet. Re-deriving is correct and
-		// cheaper than acting on a guess.
-		bounded = `[Older session context was dropped to keep this resume small: ${omitted.join(" and ")} omitted. If continuing needs detail from that span, re-derive it from the workspace (re-read files, re-run commands) instead of assuming it.]\n\n${bounded}`;
-	}
+	const bounded = kept.length > 0 ? `${prefix}${serializedKept}` : tailWithinTokenBudget(text, maxTokens, prefix);
 	return { text, bounded };
 }
 
@@ -313,118 +413,35 @@ export async function buildScratchHandoffContext(input: {
 		scratchFile: input.scratchFile,
 		date: input.date,
 	});
-	await ensureScratchHandoffFile({
-		absolutePath,
-		displayPath,
-		sessionId: input.sessionId,
-		parentScratchDisplayPath: input.parentScratchDisplayPath,
-		date: input.date,
-	});
-	const scratchText = (await fs.readFile(absolutePath, "utf8").catch(() => "")).trim();
+	let scratchText = "";
+	let exists = true;
+	try {
+		scratchText = (await fs.readFile(absolutePath, "utf8")).trim();
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		exists = false;
+	}
 	return {
 		displayPath,
 		absolutePath,
 		parentDisplayPath: input.parentScratchDisplayPath,
-		prompt: renderScratchHandoffPrompt(displayPath, input.parentScratchDisplayPath),
+		prompt: prompt.render(scratchHandoffTemplate, {
+			displayPath,
+			sessionId: input.sessionId,
+			parentDisplayPath: input.parentScratchDisplayPath,
+			exists,
+		}),
 		scratchText,
+		exists,
 	};
 }
 
-async function ensureScratchHandoffFile(input: {
-	absolutePath: string;
-	displayPath: string;
-	sessionId: string;
-	parentScratchDisplayPath?: string;
-	date?: Date;
-}): Promise<void> {
-	await fs.mkdir(path.dirname(input.absolutePath), { recursive: true });
-	try {
-		await fs.stat(input.absolutePath);
-		return;
-	} catch (error) {
-		const code =
-			typeof error === "object" && error && "code" in error ? (error as NodeJS.ErrnoException).code : undefined;
-		if (code !== "ENOENT") throw error;
-	}
-	await fs.writeFile(input.absolutePath, initialScratchHandoffDocument(input), "utf8");
-}
-
-function initialScratchHandoffDocument(input: {
-	displayPath: string;
-	sessionId: string;
-	parentScratchDisplayPath?: string;
-	date?: Date;
-}): string {
-	const isoDate = (input.date ?? new Date()).toISOString();
-	const lines = [
-		"#+TITLE: Current agent work",
-		`#+DATE: ${isoDate}`,
-		`#+SESSION: ${input.sessionId}`,
-		`#+PATH: ${input.displayPath}`,
-	];
-	if (input.parentScratchDisplayPath) {
-		lines.push(`#+PARENT_SCRATCH: [[file:${input.parentScratchDisplayPath}][Parent scratch handoff]]`);
-	}
-	lines.push(
-		"",
-		"* TODO Current work",
-		"- Objective: ",
-		"- Skill stack: ",
-		"- Work completed: ",
-		"- Files changed: ",
-		"- Verification: ",
-		"- Blockers or risks: ",
-		"- Next action: ",
-		"- Source refs: ",
-	);
-	return `${lines.join("\n")}\n`;
-}
-
-function renderScratchHandoffPrompt(displayPath: string, parentScratchDisplayPath: string | undefined): string {
-	const lines = [
-		"Scratch continuity protocol:",
-		`- Existing scratch org file: ${displayPath}. Its current contents are already in context as continuation state; inspect or update the file only when live state diverges.`,
-		"- Continue exactly as if no context reset, compaction, or handoff occurred. Do not mention, log, summarize, or count scratch loading, scratch updates, scratch reset, or compaction as work completed, evidence, progress, or a user-visible event unless the user explicitly asks about scratch mechanics.",
-		"- Treat `Skill stack:` as a minimal continuation dependency list, not session history. Record only skills required by the current open TODO or next concrete action, preserving original relative load order. Remove completed-phase, one-shot orientation/planning/review, stale, superseded, duplicate, and merely historical skills. Leave it empty when no skill is currently required.",
-		"- Keep `#+TITLE` as a one-line summary of the agent's current purpose when a scratch update is warranted.",
-		"- Keep scratch metadata in root org keywords such as `#+SESSION`, `#+PATH`, and optional `#+PARENT_SCRATCH`; do not add a wrapper heading above the work tree.",
-		"- On resume, use the current open TODO and next action to select skills. Load only recorded entries the immediate work requires, preserving their recorded order. Skip clearly irrelevant, stale, historical, or duplicate entries; apply normal skill matching to newly relevant skills. NEVER mechanically replay the full field or restart completed orientation/capture steps.",
-		"- Treat the scratch file as the durable continuity packet for context pressure, compaction, and process resume, not a progress log for trivial turns.",
-		"- When updating scratch, track work inside the file with org GTD TODO/DONE subheadings. Keep the current work under an active `* TODO ...` heading, record state as bullets under that heading, and add future work as child `** TODO ...` subheadings.",
-		"- A child TODO blocks closing its parent heading. Before marking the parent DONE, complete each child TODO or defer it explicitly with owner, blocker, next action, return condition, and source refs.",
-		"- Keep verification as current proof and residual risk, not a transcript of intermediate skill steps. Record commands only when continuation needs the exact invocation, output, blocker, or falsifier.",
-		"- Do not use the separate todo tool/list for scratch-owned work; scratch org TODO headings are the task tracker in this setup.",
-	];
-	if (parentScratchDisplayPath) {
-		lines.push(
-			`- Parent scratch org file: ${parentScratchDisplayPath}. Link to it as [[file:${parentScratchDisplayPath}][Parent scratch handoff]] when you need parent context; do not write your subagent state into the parent file.`,
-		);
-	}
-	lines.push(
-		"- Do not update the scratch document during ordinary work. Update it only when a handoff or closeout instruction explicitly asks you to, unless the significant-work exception applies.",
-		"- Significant-work exception: if a significant amount of non-trivial work has already been done and completing it is projected to require significant further work after a likely handoff, update scratch before that handoff risk; trivial lookups, small edits, and routine status changes do not qualify.",
-		"- When an update is warranted, refine the same org heading instead of appending duplicate status blocks; add a new TODO subheading only for real child work.",
-		"- Do not rewrite or re-output the whole summary when the file is already current.",
-		"- The scratch file must be a full, comprehensive snapshot of current work so another agent can resume with little to no warm-up: current objective, minimal current/next-task skill dependencies in relative load order, open org TODO subheadings, completed work, touched files, current proof, blockers, next action, and source refs needed to continue.",
-		"- Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch; the scratch document is the resumption index and current-state snapshot, not an artifact dump.",
-		"- Treat any automatic handoff or context-budget reserve as last-resort space for a concise final delta; if scratch is stale because an update was warranted, update it into the comprehensive snapshot before handoff.",
-		"- If no update is needed, leave the file unchanged; do not report scratch state to the user.",
-		"- Org wrapping the scratch document is unnecessary; keep the org structure valid and readable, but do not run a formatter solely for scratch-handoff text.",
-		"- In final responses, do not mention whether the scratch file was updated, unchanged, or where it lives unless the user explicitly asks about scratch mechanics. Scratch continuity is internal maintenance, not task evidence.",
-	);
-	return lines.join("\n");
-}
-
-export function renderScratchHandoffCloseoutMessage(displayPath: string): string {
-	return [
-		"Context maintenance threshold reached. PENCILS DOWN.",
-		`This turn is now scratch-handoff maintenance only. Before any more task work, update the existing scratch org file at ${displayPath}.`,
-		"Do not clear, recreate, truncate, rename, or replace the scratch file with a fresh template.",
-		"Update the current TODO heading completely and accurately as a full, comprehensive snapshot so another agent can resume with little to no warm-up: objective; only skills required by the current open TODO or next concrete action, in original relative load order; completed work; touched files; current proof; blockers or risks; next action; and source refs. The skill stack is not session history: remove completed-phase, one-shot, stale, superseded, duplicate, and merely historical skills; leave it empty when none are required.",
-		"Org-link artifacts, issues, plans, logs, traces, or large evidence instead of copying their bodies into scratch. Use the edit or write tool against that exact scratch path.",
-		"After a successful scratch write, do not reread or separately verify the file. The next turn owns resume validation.",
-		"After the scratch write succeeds, END THE TURN immediately. NEVER start or continue task work, invoke another task tool, emit a user-facing scratch status, or name the scratch path. The next turn or agent resumes from the scratch; the runtime observes the write directly.",
-	].join("\n");
+export function renderScratchHandoffCloseoutMessage(displayPath: string, create = false): string {
+	return prompt.render(scratchHandoffCloseoutTemplate, {
+		displayPath,
+		create,
+		toolName: create ? "write" : "edit",
+	});
 }
 
 /**
@@ -438,41 +455,22 @@ export function renderScratchHandoffResumeMessage(input: {
 	parentDisplayPath?: string;
 	recentContextText?: string;
 	recentContextSnapcompactFrames?: number;
+	scratchTruncated?: boolean;
+	scratchMissing?: boolean;
 }): string {
-	const parentLine = input.parentDisplayPath ? `Parent scratch: ${input.parentDisplayPath}\n` : "";
-	const scratchContext = [
-		`${parentLine}<scratch-handoff-context>`,
-		`Path: ${input.displayPath}`,
-		"",
-		input.scratchText,
-		"</scratch-handoff-context>",
-	].join("\n");
-	const recentContext = input.recentContextText?.trim();
-	const snapcompactFrames = input.recentContextSnapcompactFrames ?? 0;
-	const recentContextBlock =
-		snapcompactFrames > 0
-			? `<recent-session-context>\nThe complete session delta after the most recent successful scratch write is preserved in ${snapcompactFrames} attached SnapCompact frames. Read those frames before continuing so tool results, decisions, and verification newer than the scratch file remain authoritative.\n</recent-session-context>`
-			: recentContext
-				? `<recent-session-context>\nSession context newer than the scratch file follows.\n\n${recentContext}\n</recent-session-context>`
-				: "";
-	return [
-		"Resume this session from the scratch handoff below.",
-		"Use the scratch file's current open TODO and next action to choose skills for immediate work. Load only relevant entries from its `Skill stack:` field, preserving their recorded order. Skip clearly irrelevant, stale, historical, or duplicate entries; apply normal skill matching if immediate work needs an unrecorded skill. NEVER mechanically replay the full field. Then resume the work already in progress.",
-		"Do not restart the workflow from its orientation or initial-capture step, and do not treat this handoff as a new task.",
-		"Treat the injected scratch and any recent-session delta as supplied continuation state. Do not reread the scratch file, summarize it, reconstruct completed work, or rerun stable checks unless a newer event invalidates a specific fact.",
-		"Load only the skill needed for the first executable step of a multi-step next action; defer skills for later steps until execution reaches them. Then batch the live checks required by that step and execute it in the same turn. A preceding repair-only turn completed startup; do not repeat repair or orientation.",
-		"",
-		scratchContext,
-		recentContextBlock ? `\n${recentContextBlock}` : "",
-	]
-		.filter(Boolean)
-		.join("\n");
+	return prompt.render(scratchHandoffResumeTemplate, {
+		...input,
+		recentContextText: input.recentContextText?.trim(),
+	});
 }
 
 export function renderScratchHandoffSyntheticRead(context: ScratchHandoffContext): string {
+	const preview = scratchHandoffBodyPreview(context.scratchText);
 	return renderScratchHandoffResumeMessage({
 		displayPath: context.displayPath,
-		scratchText: context.scratchText,
+		scratchMissing: !context.exists,
+		scratchText: preview.text,
+		scratchTruncated: preview.truncated,
 		parentDisplayPath: context.parentDisplayPath,
 	});
 }
