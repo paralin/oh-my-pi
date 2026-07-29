@@ -97,6 +97,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig, AdvisorRuntimeStatus } from "../advisor";
 import { type AsyncJob, AsyncJobManager } from "../async";
+import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import { type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
@@ -300,6 +301,11 @@ import {
 	SCHEDULED_NOTIFICATION_KIND,
 	type ScheduledNotificationEntry,
 } from "./scheduled-notification";
+import {
+	buildLaunchCompletionBatchMessage,
+	LAUNCH_COMPLETION_MESSAGE_TYPE,
+	type LaunchCompletionEntry,
+} from "./launch-completion";
 import {
 	assistantMessageToolCallsAreScratchSafeReads,
 	assistantToolUseCanScratchHandoff,
@@ -1091,6 +1097,10 @@ export class AgentSession {
 		this.yieldQueue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, {
 			build: buildScheduledNotification,
 			interruptStreaming: true,
+		});
+		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+			isStale: entry => this.#isDisposed || entry.owner !== this.sessionManager.getSessionId(),
+			build: buildLaunchCompletionBatchMessage,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -5580,6 +5590,11 @@ export class AgentSession {
 
 	queueDeferredMessage(message: CustomMessage): void {
 		this.#queueHiddenNextTurnMessage(message, true);
+	}
+
+	queueLaunchCompletion(notification: DaemonCompletionNotification): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, notification);
 	}
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {

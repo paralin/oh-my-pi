@@ -326,11 +326,25 @@ export async function executeLaunch(
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<LaunchToolDetails>> {
 	const client = await daemonClientForProject(session.cwd);
-	const result = await client.request(operationFor(params, session), signal);
-	return {
-		content: [{ type: "text", text: replaceTabs(toolContent(result, params)) }],
-		details: await toolDetails(result, params),
-	};
+	const operation = operationFor(params, session);
+	const owner = operation.op === "start" ? operation.owner : undefined;
+	const unregister =
+		owner && session.queueLaunchCompletion
+			? client.onCompletion(owner, notification => {
+					if (session.isDisposed?.() || session.getSessionId?.() !== owner) return;
+					session.queueLaunchCompletion?.(notification);
+				})
+			: undefined;
+	try {
+		const result = await client.request(operation, signal);
+		return {
+			content: [{ type: "text", text: replaceTabs(toolContent(result, params)) }],
+			details: await toolDetails(result, params),
+		};
+	} catch (error) {
+		unregister?.();
+		throw error;
+	}
 }
 
 // =============================================================================
