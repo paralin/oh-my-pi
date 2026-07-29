@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--service-tier` to override the OpenAI service tier for a session.
+
 ## [17.1.8] - 2026-07-28
 
 ### Breaking Changes
