@@ -343,6 +343,7 @@ class DaemonBroker {
 	readonly #idleGraceMs: number;
 	readonly #records = new Map<string, ManagedDaemon>();
 	readonly #clients = new Set<net.Socket>();
+	readonly #ownerSockets = new Map<string, net.Socket>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
 	#server: net.Server | undefined;
@@ -384,6 +385,7 @@ class DaemonBroker {
 			await record.log?.close();
 			await record.persistQueue;
 		}
+		this.#ownerSockets.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -430,6 +432,9 @@ class DaemonBroker {
 			if (!authenticated) return;
 			this.#clients.delete(socket);
 			this.#scheduleIdleShutdown();
+			for (const [owner, ownerSocket] of this.#ownerSockets) {
+				if (ownerSocket === socket) this.#ownerSockets.delete(owner);
+			}
 		});
 	}
 
@@ -441,6 +446,9 @@ class DaemonBroker {
 			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
+			if (request.operation.op === "start" && request.operation.owner) {
+				this.#ownerSockets.set(request.operation.owner, socket);
+			}
 			const result = await this.#dispatch(request.operation);
 			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
@@ -794,6 +802,14 @@ class DaemonBroker {
 		return this.#settle(record, generation, result.exitCode, result.timedOut ? "timed out" : undefined);
 	}
 
+	#notifyCompletion(record: ManagedDaemon): void {
+		const owner = record.snapshot.owner;
+		if (!owner) return;
+		const socket = this.#ownerSockets.get(owner);
+		if (!socket || socket.destroyed) return;
+		socket.write(`${JSON.stringify({ event: "daemon-completed", owner, daemon: record.snapshot })}\n`);
+	}
+
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {
 		// `restarting` is a settled state (child exited, relaunch timer armed). Any op that
 		// runs #refreshDetached on such a record must not re-settle it: re-entry double-counts
@@ -840,6 +856,8 @@ class DaemonBroker {
 		this.#persist(record);
 		await record.log?.close();
 		record.log = undefined;
+		await record.persistQueue;
+		this.#notifyCompletion(record);
 	}
 
 	async #logs(operation: Extract<DaemonOperation, { op: "logs" }>): Promise<DaemonRpcResult> {

@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
 import { registerDaemonProjectPresence } from "../../src/launch/presence";
-import type { DaemonOperation, DaemonSpec } from "../../src/launch/protocol";
+import type { DaemonOperation, DaemonSnapshot, DaemonSpec } from "../../src/launch/protocol";
 
 const cleanupDirs: string[] = [];
 
@@ -704,4 +704,74 @@ esac
 			await shutdown(client);
 		}
 	}, 30_000);
+	it("delivers one owner completion for final exits and none for restart transitions", async () => {
+		const projectDir = await tempDir("omp-daemon-completion-project-");
+		const runtimeDir = await tempDir("omp-daemon-completion-runtime-");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const owner = "completion-owner";
+		const completions: DaemonSnapshot[] = [];
+		let resolveNext: ((daemon: DaemonSnapshot) => void) | undefined;
+		const nextCompletion = (): Promise<DaemonSnapshot> => {
+			const { promise, resolve } = Promise.withResolvers<DaemonSnapshot>();
+			resolveNext = resolve;
+			return promise;
+		};
+		const unregister = client.onCompletion(owner, notification => {
+			completions.push(notification.daemon);
+			resolveNext?.(notification.daemon);
+			resolveNext = undefined;
+		});
+		const startSpec = (name: string, command: string, restart: DaemonSpec["restart"]): DaemonSpec => ({
+			name,
+			application: "/bin/sh",
+			args: ["-c", command],
+			env: {},
+			cwd: projectDir,
+			pty: false,
+			restart,
+			persist: false,
+			detached: false,
+		});
+		try {
+			const successPending = nextCompletion();
+			await client.request({
+				op: "start",
+				spec: startSpec("success", "exit 0", "no"),
+				owner,
+			});
+			const success = await successPending;
+			expect(success.state).toBe("exited");
+			expect(success.exitCode).toBe(0);
+			await client.request({ op: "list" });
+			expect(completions).toHaveLength(1);
+			const failurePending = nextCompletion();
+			await client.request({
+				op: "start",
+				spec: startSpec("failure", "exit 7", "no"),
+				owner,
+			});
+			const failure = await failurePending;
+			expect(failure.state).toBe("failed");
+			expect(failure.exitCode).toBe(7);
+
+			const beforeRestart = completions.length;
+			await client.request({
+				op: "start",
+				spec: startSpec("restart", "exit 0", "always"),
+				owner,
+			});
+			const restarting = await waitUntil(async () => {
+				const listed = await client.request({ op: "list" });
+				if (listed.op !== "list") return false;
+				return listed.daemons.find(daemon => daemon.name === "restart")?.state === "restarting";
+			}, 3_000);
+			expect(restarting).toBeTrue();
+			expect(completions).toHaveLength(beforeRestart);
+			await client.request({ op: "stop", name: "restart", timeoutMs: 2_000 });
+			expect(completions).toHaveLength(beforeRestart);
+		} finally {
+			unregister();
+			await shutdown(client);
+		}
+	}, 9_000);
 });
