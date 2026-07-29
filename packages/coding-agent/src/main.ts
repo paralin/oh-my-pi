@@ -43,6 +43,7 @@ import {
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
 import { resolveScratchCompactionOverrides } from "./config/scratch-compaction-method";
+import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -865,6 +866,9 @@ export async function buildSessionOptions(
 		autoApprove: parsed.autoApprove ?? false,
 	};
 	const restoringSession = Boolean(parsed.continue || parsed.resume || isForeignSessionImport(parsed));
+	if (parsed.serviceTier !== undefined) {
+		options.openAIServiceTier = serviceTierSettingToTier(parsed.serviceTier) ?? null;
+	}
 	const cliDirs = parsed.addDir ?? [];
 	const settingsDirs = activeSettings.get("workspace.additionalDirectories");
 	if (cliDirs.length > 0 || settingsDirs.length > 0) {

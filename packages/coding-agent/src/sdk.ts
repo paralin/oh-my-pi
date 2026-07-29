@@ -17,6 +17,7 @@ import type {
 	Model,
 	ModelUsageHealth,
 	ProviderSessionState,
+	ServiceTier,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
@@ -382,6 +383,8 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: Effort;
+	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
+	openAIServiceTier?: ServiceTier | null;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -3161,13 +3164,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-		const initialServiceTierByFamily = hasServiceTierEntry
+		const configuredServiceTierByFamily = hasServiceTierEntry
 			? (existingSession.serviceTier ?? {})
 			: buildServiceTierByFamily(
 					settings.get("tier.openai"),
 					settings.get("tier.anthropic"),
 					settings.get("tier.google"),
 				);
+		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
+		if (options.openAIServiceTier === null) {
+			delete initialServiceTierByFamily.openai;
+		} else if (options.openAIServiceTier !== undefined) {
+			initialServiceTierByFamily.openai = options.openAIServiceTier;
+		}
 
 		// One-shot launch-latency marker: fired the first time the loop dispatches
 		// a chat request to the provider transport. See onFirstChatDispatch.
@@ -3267,9 +3276,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
 
-		// Restore messages if session has existing data
+		// Restore messages if session has existing data.
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
+			if (options.openAIServiceTier !== undefined) {
+				sessionManager.appendServiceTierChange(
+					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+				);
+			}
 		} else {
 			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
@@ -3280,8 +3294,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (Object.keys(initialServiceTierByFamily).length > 0) {
-				sessionManager.appendServiceTierChange(initialServiceTierByFamily);
+			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
+				sessionManager.appendServiceTierChange(
+					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+				);
 			}
 		}
 
