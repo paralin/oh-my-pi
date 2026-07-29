@@ -807,9 +807,7 @@ class DaemonBroker {
 		if (!owner) return;
 		const socket = this.#ownerSockets.get(owner);
 		if (!socket || socket.destroyed) return;
-		socket.write(
-			`${JSON.stringify({ event: "daemon-completed", owner, daemon: record.snapshot })}\n`,
-		);
+		socket.write(`${JSON.stringify({ event: "daemon-completed", owner, daemon: record.snapshot })}\n`);
 	}
 
 	async #settle(record: ManagedDaemon, generation: number, exitCode?: number, error?: string): Promise<void> {

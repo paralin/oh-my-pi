@@ -97,7 +97,6 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig, AdvisorRuntimeStatus } from "../advisor";
 import { type AsyncJob, AsyncJobManager } from "../async";
-import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import { type ResolvedModelRoleValue, resolveModelOverride } from "../config/model-resolver";
@@ -143,6 +142,7 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
+import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
@@ -261,6 +261,11 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
+import {
+	buildLaunchCompletionBatchMessage,
+	LAUNCH_COMPLETION_MESSAGE_TYPE,
+	type LaunchCompletionEntry,
+} from "./launch-completion";
 import { buildLlmUsageEvent } from "./measurement-events";
 import {
 	type BashExecutionMessage,
@@ -301,11 +306,6 @@ import {
 	SCHEDULED_NOTIFICATION_KIND,
 	type ScheduledNotificationEntry,
 } from "./scheduled-notification";
-import {
-	buildLaunchCompletionBatchMessage,
-	LAUNCH_COMPLETION_MESSAGE_TYPE,
-	type LaunchCompletionEntry,
-} from "./launch-completion";
 import {
 	assistantMessageToolCallsAreScratchSafeReads,
 	assistantToolUseCanScratchHandoff,
