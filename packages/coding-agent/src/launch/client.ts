@@ -11,11 +11,12 @@ import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
+	type DaemonCompletionNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
-	type DaemonWireResponse,
+	type DaemonWireMessage,
 	parseDaemonRpcResult,
-	parseDaemonWireResponse,
+	parseDaemonWireMessage,
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 
@@ -45,6 +46,7 @@ export interface DaemonBrokerClientOptions {
 
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
+	onCompletion(owner: string, sink: (notification: DaemonCompletionNotification) => void): () => void;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
@@ -136,6 +138,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #token: string;
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
+	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => void>();
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
@@ -184,8 +187,16 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#socket?.destroy();
+		this.#completionSinks.clear();
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
+	}
+
+	onCompletion(owner: string, sink: (notification: DaemonCompletionNotification) => void): () => void {
+		this.#completionSinks.set(owner, sink);
+		return () => {
+			if (this.#completionSinks.get(owner) === sink) this.#completionSinks.delete(owner);
+		};
 	}
 
 	async #connect(): Promise<void> {
@@ -262,14 +273,25 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			const line = this.#buffer.slice(0, newline);
 			this.#buffer = this.#buffer.slice(newline + 1);
 			if (line.length === 0) continue;
-			let response: DaemonWireResponse;
+			let decoded: unknown;
 			try {
-				const decoded: unknown = JSON.parse(line);
-				response = parseDaemonWireResponse(decoded);
+				decoded = JSON.parse(line);
 			} catch (error) {
 				this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
 				continue;
 			}
+			let message: DaemonWireMessage;
+			try {
+				message = parseDaemonWireMessage(decoded);
+			} catch (error) {
+				this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
+				continue;
+			}
+			if ("event" in message) {
+				this.#completionSinks.get(message.owner)?.(message);
+				continue;
+			}
+			const response = message;
 			const pending = this.#pending.get(response.id);
 			if (!pending) continue;
 			this.#pending.delete(response.id);

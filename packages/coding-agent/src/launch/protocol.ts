@@ -128,6 +128,15 @@ export interface DaemonWireRequest {
 /** Response envelope kept raw until matched with its pending operation. */
 export type DaemonWireResponse = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: string };
 
+/** Unsolicited terminal completion sent to the socket that owns a daemon. */
+export interface DaemonCompletionNotification {
+	event: "daemon-completed";
+	owner: string;
+	daemon: DaemonSnapshot;
+}
+
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -279,6 +288,19 @@ export function parseDaemonWireResponse(value: unknown): DaemonWireResponse {
 	if (source.ok === true) return { id, ok: true, result: source.result };
 	if (source.ok === false) return { id, ok: false, error: stringValue(source.error, "response.error") };
 	throw new Error("response.ok must be a boolean");
+}
+
+/** Decode one broker response or unsolicited completion notification. */
+export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
+	const source = record(value, "daemon message");
+	if (source.event === "daemon-completed") {
+		return {
+			event: "daemon-completed",
+			owner: stringValue(source.owner, "completion.owner"),
+			daemon: parseDaemonSnapshot(source.daemon),
+		};
+	}
+	return parseDaemonWireResponse(value);
 }
 
 function parseDaemonOperation(value: unknown): DaemonOperation {
