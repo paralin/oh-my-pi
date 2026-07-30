@@ -2409,7 +2409,7 @@ export class AgentSession {
 		if (!prefix) return;
 		const observedAtMs = Date.now();
 		const model = this.model;
-		const account = this.#modelRegistry.authStorage.getOAuthAccountIdentity(message.provider, this.sessionId);
+		const account = this.#modelRegistry.authStorage?.getOAuthAccountIdentity(message.provider, this.sessionId);
 		const event = buildLlmUsageEvent(
 			message,
 			{ fingerprint: prefix.fingerprint, version: prefix.version },
