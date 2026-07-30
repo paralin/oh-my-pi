@@ -73,7 +73,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
-import { buildCompactionMeasurement } from "./measurement-events";
+import { buildCompactionMeasurement, buildPruneMeasurement } from "./measurement-events";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -154,6 +154,12 @@ export function createCodexCompactionContext(options: {
  * stale/age victims are left to compaction/shake, which rebuild the cache anyway.
  */
 const PRUNE_CACHE_WARM_SUFFIX_TOKENS = 8_000;
+
+type PruneOutcome = {
+	prunedCount: number;
+	tokensSaved: number;
+	reach: "tail-local" | "deeper";
+};
 
 /**
  * Idle gap after which the supersede pass may flush the whole sent region (the
@@ -421,6 +427,18 @@ export class SessionMaintenance {
 		);
 	}
 
+	async #emitPruneMeasurement(pass: "stale-result" | "tool-output", result: PruneOutcome): Promise<void> {
+		await this.#host.emitSessionEvent(
+			buildPruneMeasurement({
+				sessionId: this.#host.sessionId(),
+				pass,
+				reach: result.reach,
+				prunedCount: result.prunedCount,
+				tokensFreed: Math.max(0, result.tokensSaved),
+			}),
+		);
+	}
+
 	#compactionAbortController: AbortController | undefined;
 	#autoCompactionAbortController: AbortController | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
@@ -462,7 +480,7 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
-	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+	async #pruneToolOutputs(): Promise<PruneOutcome | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
 		const result = pruneToolOutputs(
@@ -486,7 +504,7 @@ export class SessionMaintenance {
 		this.#host.resetAdvisorRuntimes();
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		return result;
+		return { ...result, reach: "tail-local" };
 	}
 
 	/**
@@ -502,11 +520,15 @@ export class SessionMaintenance {
 	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
 	 * provider prompt cache.
 	 */
-	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+	async #pruneStaleToolResults(): Promise<PruneOutcome | undefined> {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const lastMessageTimestamp = [...branchEntries].reverse().find(entry => entry.type === "message")
+			?.message.timestamp;
+		const deepReach =
+			typeof lastMessageTimestamp === "number" && Date.now() - lastMessageTimestamp >= PRUNE_IDLE_FLUSH_MS;
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.withPlanProtection({
@@ -529,7 +551,7 @@ export class SessionMaintenance {
 		this.#host.resetAdvisorRuntimes();
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
-		return result;
+		return { ...result, reach: deepReach ? "deeper" : "tail-local" };
 	}
 
 	/**
@@ -1451,6 +1473,7 @@ export class SessionMaintenance {
 		// cheap (bails when no candidate) and independent of the compaction
 		// setting.
 		const supersedeResult = await this.#pruneStaleToolResults();
+		if (supersedeResult) await this.#emitPruneMeasurement("stale-result", supersedeResult);
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
@@ -1462,6 +1485,7 @@ export class SessionMaintenance {
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = await this.#pruneToolOutputs();
+		if (pruneResult) await this.#emitPruneMeasurement("tool-output", pruneResult);
 		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,

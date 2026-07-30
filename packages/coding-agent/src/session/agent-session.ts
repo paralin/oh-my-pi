@@ -37,6 +37,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	type ModelTimingEvent,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -266,7 +267,7 @@ import {
 	LAUNCH_COMPLETION_MESSAGE_TYPE,
 	type LaunchCompletionEntry,
 } from "./launch-completion";
-import { buildLlmUsageEvent } from "./measurement-events";
+import { buildLlmUsageEvent, buildTimingMeasurement, type TimingMeasurementEvent } from "./measurement-events";
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
@@ -448,6 +449,15 @@ export class AgentSession {
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#lastLlmUsagePrefixHash: string | undefined;
 	#deliberatePrefixResetPending = false;
+	#lastLlmRequestId: string | undefined;
+	#timingEnvelopeId: string | undefined;
+	#timingPhase:
+		| {
+				timingId: string;
+				state: Exclude<TimingMeasurementEvent["state"], "session_envelope">;
+				startedAtMs: number;
+		  }
+		| undefined;
 	#eventListeners: AgentSessionEventListener[] = [];
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 
@@ -652,7 +662,112 @@ export class AgentSession {
 		}
 	}
 
+	#emitTimingMeasurement(event: Omit<TimingMeasurementEvent, "type">): void {
+		void this.#emitSessionEvent(buildTimingMeasurement(event)).catch(error => {
+			logger.debug("Timing measurement emission skipped", { error: String(error) });
+		});
+	}
+
+	#startTimingPhase(
+		state: Exclude<TimingMeasurementEvent["state"], "session_envelope">,
+		timestampMs: number,
+		processState?: "active" | "idle",
+	): void {
+		const envelopeId = this.#timingEnvelopeId;
+		if (!envelopeId) return;
+		const timingId = crypto.randomUUID();
+		this.#timingPhase = { timingId, state, startedAtMs: timestampMs };
+		this.#emitTimingMeasurement({
+			scope: "phase",
+			phase: "start",
+			timingId,
+			state,
+			envelopeId,
+			sessionId: this.sessionId,
+			timestampMs,
+			...(processState ? { processState } : {}),
+		});
+	}
+
+	#closeTimingPhase(timestampMs: number): void {
+		const phase = this.#timingPhase;
+		const envelopeId = this.#timingEnvelopeId;
+		if (!phase || !envelopeId) return;
+		this.#emitTimingMeasurement({
+			scope: "phase",
+			phase: "end",
+			timingId: phase.timingId,
+			state: phase.state,
+			envelopeId,
+			sessionId: this.sessionId,
+			timestampMs,
+			durationMs: Math.max(0, timestampMs - phase.startedAtMs),
+			...(phase.state === "process_state" ? { processState: "active" as const } : {}),
+		});
+		this.#timingPhase = undefined;
+	}
+
+	#handleModelTiming(event: ModelTimingEvent): void {
+		this.#lastLlmRequestId = event.requestId;
+		if (event.phase === "provider_queue" && event.boundary === "start") {
+			this.#closeTimingPhase(event.timestampMs);
+			this.#startTimingPhase("provider_queue", event.timestampMs);
+			return;
+		}
+		if (event.phase === "provider_queue" && event.boundary === "end") {
+			this.#closeTimingPhase(event.timestampMs);
+			this.#startTimingPhase("model_generation", event.timestampMs);
+			return;
+		}
+		if (event.phase === "model_generation" && event.boundary === "start") {
+			if (this.#timingPhase?.state !== "model_generation") {
+				this.#closeTimingPhase(event.timestampMs);
+				this.#startTimingPhase("model_generation", event.timestampMs);
+			}
+			return;
+		}
+		if (event.phase === "model_generation" && event.boundary === "end") {
+			this.#closeTimingPhase(event.timestampMs);
+			this.#startTimingPhase("process_state", event.timestampMs, "active");
+		}
+	}
+
+	#startTimingEnvelope(): void {
+		if (this.#timingEnvelopeId) return;
+		const timestampMs = Date.now();
+		const envelopeId = crypto.randomUUID();
+		this.#timingEnvelopeId = envelopeId;
+		this.#emitTimingMeasurement({
+			scope: "session",
+			phase: "start",
+			timingId: envelopeId,
+			state: "session_envelope",
+			envelopeId,
+			sessionId: this.sessionId,
+			timestampMs,
+		});
+		this.#startTimingPhase("human_turn", timestampMs);
+	}
+
+	#finishTimingEnvelope(): void {
+		const envelopeId = this.#timingEnvelopeId;
+		if (!envelopeId) return;
+		const timestampMs = Date.now();
+		this.#closeTimingPhase(timestampMs);
+		this.#emitTimingMeasurement({
+			scope: "session",
+			phase: "end",
+			timingId: envelopeId,
+			state: "session_envelope",
+			envelopeId,
+			sessionId: this.sessionId,
+			timestampMs,
+		});
+		this.#timingEnvelopeId = undefined;
+	}
+
 	#beginInFlight(): void {
+		if (this.#promptInFlightCount === 0) this.#startTimingEnvelope();
 		this.#promptInFlightCount++;
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
@@ -662,6 +777,7 @@ export class AgentSession {
 	#endInFlight(): void {
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount === 0) {
+			this.#finishTimingEnvelope();
 			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
@@ -853,6 +969,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.agent.onModelTiming = event => this.#handleModelTiming(event);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
@@ -2290,11 +2407,39 @@ export class AgentSession {
 	async #emitLlmUsage(message: AssistantMessage): Promise<void> {
 		const prefix = this.agent.appendOnlyContext?.prefix;
 		if (!prefix) return;
+		const observedAtMs = Date.now();
+		const model = this.model;
+		const account = this.#modelRegistry.authStorage.getOAuthAccountIdentity(message.provider, this.sessionId);
 		const event = buildLlmUsageEvent(
 			message,
 			{ fingerprint: prefix.fingerprint, version: prefix.version },
 			this.#lastLlmUsagePrefixHash,
 			this.#deliberatePrefixResetPending,
+			{
+				sessionId: this.sessionId,
+				requestId: this.#lastLlmRequestId,
+				route: {
+					requested: model ? `${model.provider}/${model.id}` : `${message.provider}/${message.model}`,
+					effective: `${message.provider}/${message.model}`,
+					api: message.api,
+				},
+				accountIdentity: account ? { kind: "oauth", ...account } : { kind: "api-key-or-unresolved" },
+				window: {
+					id: `context:${model?.contextWindow ?? "unknown"}`,
+					contextWindow: model?.contextWindow,
+				},
+				observedAtMs,
+				inFlight: {
+					streaming: this.agent.state.isStreaming,
+					promptCount: this.#promptInFlightCount,
+					pendingToolCalls: this.agent.state.pendingToolCalls.size,
+				},
+				terminalReceipt: {
+					stopReason: message.stopReason,
+					...(message.responseId ? { responseId: message.responseId } : {}),
+					receivedAtMs: observedAtMs,
+				},
+			},
 		);
 		await this.#emitSessionEvent(event);
 		this.#lastLlmUsagePrefixHash = event.stablePrefixHash;

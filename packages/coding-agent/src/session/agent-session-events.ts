@@ -14,7 +14,12 @@ import type {
 import type { Goal, GoalModeState } from "../goals/state";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { TodoItem } from "../tools/todo";
-import type { CompactionMeasurementEvent, LlmUsageEvent } from "./measurement-events";
+import type {
+	CompactionMeasurementEvent,
+	LlmUsageEvent,
+	PruneMeasurementEvent,
+	TimingMeasurementEvent,
+} from "./measurement-events";
 import type { CustomMessage } from "./messages";
 
 /** Session-specific events that extend the core AgentEvent. */
@@ -41,6 +46,8 @@ export type AgentSessionEvent =
 	  }
 	| LlmUsageEvent
 	| CompactionMeasurementEvent
+	| TimingMeasurementEvent
+	| PruneMeasurementEvent
 	| MaintenanceTraceStartEvent
 	| MaintenanceTracePhaseEvent
 	| MaintenanceTraceDeltaEvent

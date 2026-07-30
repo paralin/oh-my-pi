@@ -5,6 +5,7 @@
 ### Added
 
 - Added `--service-tier` to override the OpenAI service tier for a session.
+- Session telemetry now records paired timing, prune reach/count, route and account identity, native usage classes, observation freshness, in-flight state, and terminal receipts.
 
 ## [17.1.8] - 2026-07-28
 

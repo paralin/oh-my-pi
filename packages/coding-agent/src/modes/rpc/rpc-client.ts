@@ -120,6 +120,8 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"auto_compaction_end",
 	"llm_usage",
 	"compaction_measurement",
+	"timing",
+	"prune_measurement",
 	"maintenance_trace_start",
 	"maintenance_trace_phase",
 	"maintenance_trace_delta",
