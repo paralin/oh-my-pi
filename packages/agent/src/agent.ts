@@ -49,6 +49,7 @@ import type {
 	AgentToolContext,
 	AgentTurnEndContext,
 	AsideMessage,
+	ModelTimingHandler,
 	StreamFn,
 	ToolCallContext,
 	ToolChoiceDirective,
@@ -322,6 +323,9 @@ export interface AgentOptions {
 	 */
 	transformAssistantMessage?: AgentLoopConfig["transformAssistantMessage"];
 
+	/** Emits paired provider queue and model generation boundaries. */
+	onModelTiming?: ModelTimingHandler;
+
 	/**
 	 * Opt-in OpenTelemetry instrumentation. Passing `{}` enables the loop's
 	 * GenAI-semantic-convention spans using the global tracer provider. See
@@ -419,6 +423,7 @@ export class Agent {
 	#onResponse?: SimpleStreamOptions["onResponse"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	#onModelTiming?: ModelTimingHandler;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
@@ -501,6 +506,7 @@ export class Agent {
 		this.#getToolChoice = opts.getToolChoice;
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
+		this.#onModelTiming = opts.onModelTiming;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
@@ -719,6 +725,10 @@ export class Agent {
 	 */
 	set maxRetryDelayMs(value: number | undefined) {
 		this.#maxRetryDelayMs = value;
+	}
+
+	set onModelTiming(value: ModelTimingHandler | undefined) {
+		this.#onModelTiming = value;
 	}
 
 	get state(): AgentState {
@@ -1369,6 +1379,7 @@ export class Agent {
 				? (message, signal) => this.transformAssistantMessage?.(message, signal)
 				: undefined,
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
+			onModelTiming: this.#onModelTiming,
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			getToolChoice,

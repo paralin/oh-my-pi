@@ -1554,6 +1554,20 @@ async function streamAssistantResponse(
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
 
 	const streamFunction = streamFn || streamSimple;
+	const requestId = crypto.randomUUID();
+	let queueEnded = false;
+	let generationStarted = false;
+	let generationEnded = false;
+	const emitTiming = (phase: "provider_queue" | "model_generation", boundary: "start" | "end"): void => {
+		config.onModelTiming?.({ requestId, phase, boundary, timestampMs: Date.now() });
+	};
+	const finishGeneration = (): void => {
+		if (generationStarted && !generationEnded) {
+			generationEnded = true;
+			emitTiming("model_generation", "end");
+		}
+	};
+	emitTiming("provider_queue", "start");
 
 	const dynamicReasoning = config.getReasoning?.();
 	const dynamicDisableReasoning = config.getDisableReasoning?.();
@@ -1631,6 +1645,7 @@ async function streamAssistantResponse(
 	};
 
 	const finishChat = async (message: AssistantMessage): Promise<void> => {
+		finishGeneration();
 		await finishChatSpan(telemetry, chatSpan, message, {
 			stepNumber: chatStepNumber,
 			serviceTier: effectiveServiceTier,
@@ -1641,19 +1656,31 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			let response = await streamFunction(model, llmContext, {
-				...config,
-				apiKey,
-				metadata: resolvedMetadata,
-				toolChoice: effectiveToolChoice,
-				reasoning: effectiveReasoning,
-				disableReasoning: effectiveDisableReasoning,
-				temperature: effectiveTemperature,
-				serviceTier: effectiveServiceTier,
-				cwd: effectiveCwd,
-				signal: finalRequestSignal,
-				onResponse: captureOnResponse,
+			let response = await Promise.resolve(
+				streamFunction(model, llmContext, {
+					...config,
+					apiKey,
+					metadata: resolvedMetadata,
+					toolChoice: effectiveToolChoice,
+					reasoning: effectiveReasoning,
+					disableReasoning: effectiveDisableReasoning,
+					temperature: effectiveTemperature,
+					serviceTier: effectiveServiceTier,
+					cwd: effectiveCwd,
+					signal: finalRequestSignal,
+					onResponse: captureOnResponse,
+				}),
+			).catch(error => {
+				if (!queueEnded) {
+					queueEnded = true;
+					emitTiming("provider_queue", "end");
+				}
+				throw error;
 			});
+			queueEnded = true;
+			emitTiming("provider_queue", "end");
+			generationStarted = true;
+			emitTiming("model_generation", "start");
 			if (promptToolWireTools && ownedDialect) {
 				// Re-materialize in-band tool-call text as native toolCall content blocks
 				// so the rest of the loop executes them unchanged. When the model starts
@@ -1870,6 +1897,7 @@ async function streamAssistantResponse(
 			return trailing;
 		});
 	} catch (err) {
+		finishGeneration();
 		failChatSpan(telemetry, chatSpan, {
 			errorObject: err,
 			responseHeaders: capturedHeaders,

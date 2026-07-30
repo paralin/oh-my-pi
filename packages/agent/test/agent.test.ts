@@ -1063,3 +1063,30 @@ describe("Agent — F3 in-place state mutation", () => {
 		expect(agent.state.pendingToolCalls).not.toBe(pendingToolCalls);
 	});
 });
+describe("Agent model timing", () => {
+	it("emits paired provider queue and generation boundaries for each request", async () => {
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const events: Array<{
+			requestId: string;
+			phase: "provider_queue" | "model_generation";
+			boundary: "start" | "end";
+			timestampMs: number;
+		}> = [];
+		const agent = new Agent({
+			streamFn: mock.stream,
+			onModelTiming: event => events.push(event),
+		});
+
+		await agent.prompt("hello");
+
+		expect(events).toHaveLength(4);
+		expect(events.map(event => `${event.phase}:${event.boundary}`)).toEqual([
+			"provider_queue:start",
+			"provider_queue:end",
+			"model_generation:start",
+			"model_generation:end",
+		]);
+		expect(new Set(events.map(event => event.requestId)).size).toBe(1);
+		expect(events.every(event => event.timestampMs >= 0)).toBe(true);
+	});
+});

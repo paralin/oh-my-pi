@@ -66,6 +66,17 @@ export type AgentBeforeModelCall = (
 	signal?: AbortSignal,
 ) => AgentPreModelCallResult | void | Promise<AgentPreModelCallResult | void>;
 
+/** A paired wall-clock boundary around one provider request phase. */
+export interface ModelTimingEvent {
+	requestId: string;
+	phase: "provider_queue" | "model_generation";
+	boundary: "start" | "end";
+	timestampMs: number;
+}
+
+/** Receives provider request timing at the agent-core owner boundary. */
+export type ModelTimingHandler = (event: ModelTimingEvent) => void;
+
 /**
  * A soft tool requirement: the host wants `toolName` called before the loop
  * runs other tools or yields, but WITHOUT paying the forced-`toolChoice` cost
@@ -317,6 +328,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * the run is canceled or its deadline expires.
 	 */
 	beforeModelCall?: AgentBeforeModelCall;
+
+	/** Emits paired provider queue and model generation boundaries. */
+	onModelTiming?: ModelTimingHandler;
 
 	/**
 	 * Optional transform applied to tool call arguments before execution.

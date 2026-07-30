@@ -5,6 +5,7 @@
 ### Changed
 
 - Added `scratch-handoff` to the shared compaction strategy type so hosts can expose checkpoint-backed context maintenance explicitly instead of overloading new-session handoff.
+- Agent model requests now expose paired provider-queue and generation timing boundaries to hosts.
 
 ## [17.1.7] - 2026-07-27
 
