@@ -50,6 +50,7 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "catalog:",
+    "@anthropic-ai/claude-agent-sdk": "catalog:",
     "@babel/parser": "catalog:",
     "@mozilla/readability": "catalog:",
     "@oh-my-pi/hashline": "catalog:",

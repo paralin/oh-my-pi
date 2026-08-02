@@ -18,6 +18,7 @@
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -36,6 +37,14 @@ export interface IrcDeliveryReceipt {
 	to: string;
 	outcome: "injected" | "woken" | "revived" | "failed";
 	error?: string;
+}
+
+/** Delivery failure that cannot succeed for a later generation of the recipient. */
+export class PermanentIrcDeliveryError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "PermanentIrcDeliveryError";
+	}
 }
 
 interface IrcWaiter {
@@ -180,11 +189,10 @@ export class IrcBus {
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
-			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
-			// the message so a later `wait`/`inbox` from the recipient can still
-			// pick it up. The receipt stays "failed" — the recipient has not
-			// seen it.
-			this.#enqueue(message);
+			// A transient live hand-off failure is buffered for a later
+			// `wait`/`inbox`. A permanent runtime capability failure cannot become
+			// deliverable when another generation later reuses the same ID.
+			if (!(error instanceof PermanentIrcDeliveryError)) this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",
@@ -360,7 +368,7 @@ export class IrcBus {
 	#relayToMainUi(message: IrcMessage): void {
 		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;
 		const mainSession = this.#registry.get(MAIN_AGENT_ID)?.session;
-		if (!mainSession) return;
+		if (!(mainSession instanceof AgentSession)) return;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:relay",

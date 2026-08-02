@@ -20,6 +20,8 @@ import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
+import { runClaudeCodeSubprocess } from "./claude-code-runtime";
+import { type ClaudeCodeSelection, resolveClaudeCodeSelection } from "./claude-code-selector";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
 import { type ExecutorOptions, runSubprocess } from "./executor";
 import {
@@ -122,6 +124,8 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string | string[];
+	/** Set when the selector set names the Claude runtime instead of Pi. */
+	claudeCode?: ClaudeCodeSelection;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
@@ -284,6 +288,25 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	});
+	// Runtime selection reads the raw selector set, before Pi model resolution:
+	// `claude-code` is a task-runtime namespace, not a provider.
+	let claudeCode: ClaudeCodeSelection | undefined;
+	try {
+		claudeCode = resolveClaudeCodeSelection(modelOverride);
+	} catch (error) {
+		throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
+			cause: error,
+		});
+	}
+	if (request.invocationKind !== "task" && claudeCode) {
+		throw new StructuredSubagentError("preflight", "The Claude Code runtime is available only for task invocations.");
+	}
+	if (planMode && claudeCode) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Plan mode is unavailable for subagents selected with a claude-code/ model.",
+		);
+	}
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && isolationMode === "none") {
@@ -292,12 +315,19 @@ export async function resolveEffectiveSubagentPolicy(
 			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
 		);
 	}
+	if (isIsolated && claudeCode) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Isolated execution is unavailable for subagents selected with a claude-code/ model.",
+		);
+	}
 	return {
 		discovery,
 		agentName,
 		agent,
 		effectiveAgent,
 		modelOverride,
+		claudeCode,
 		parentActiveModelPattern,
 		schema,
 		planMode,
@@ -560,19 +590,21 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
-		const result = !isolationContext
-			? await runSubprocess(baseOptions)
-			: await runIsolatedSubprocess({
-					baseOptions,
-					context: isolationContext,
-					preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
-					agentId: id,
-					mergeMode: policy.mergeMode,
-					artifactsDir: lease.artifactsDir,
-					description: trimToUndefined(request.identity?.label),
-					buildCommitMessage: makeIsolationCommitMessage(request.session),
-					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
-				});
+		const result = policy.claudeCode
+			? await runClaudeCodeSubprocess({ options: baseOptions, model: policy.claudeCode.model })
+			: !isolationContext
+				? await runSubprocess(baseOptions)
+				: await runIsolatedSubprocess({
+						baseOptions,
+						context: isolationContext,
+						preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
+						agentId: id,
+						mergeMode: policy.mergeMode,
+						artifactsDir: lease.artifactsDir,
+						description: trimToUndefined(request.identity?.label),
+						buildCommitMessage: makeIsolationCommitMessage(request.session),
+						buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
+					});
 		attachStructuredOutputMetadata(result, policy.schema);
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&

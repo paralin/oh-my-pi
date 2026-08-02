@@ -4,6 +4,7 @@ import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -22,8 +23,9 @@ export function memoryRootsFromRegistry(): string[] {
 	const agentDir = getAgentDir();
 	const roots: string[] = [];
 	for (const ref of AgentRegistry.global().list()) {
-		const sm = ref.session?.sessionManager;
-		if (!sm) continue;
+		const session = ref.session;
+		if (!(session instanceof AgentSession)) continue;
+		const sm = session.sessionManager;
 		const root = getMemoryRoot(agentDir, sm.getCwd());
 		if (root && !roots.includes(root)) roots.push(root);
 	}
@@ -211,7 +213,7 @@ function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
 	const states: MnemopiSessionState[] = [];
 	for (const ref of AgentRegistry.global().list()) {
 		const session = ref.session;
-		if (!session) continue;
+		if (!(session instanceof AgentSession)) continue;
 		const state = getMnemopiSessionState(session);
 		if (!state) continue;
 		const primary = state.aliasOf ?? state;
