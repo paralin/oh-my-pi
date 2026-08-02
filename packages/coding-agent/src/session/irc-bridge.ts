@@ -23,6 +23,28 @@ export interface IrcBridgeHost {
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
 }
 
+/** Build the canonical model-facing record for one incoming peer message. */
+export function buildIrcIncomingMessage(
+	msg: IrcMessage,
+	options: { autoReplied: boolean; interrupting: boolean },
+): CustomMessage & { content: string } {
+	return {
+		role: "custom",
+		customType: "irc:incoming",
+		content: prompt.render(ircIncomingTemplate, {
+			from: msg.from,
+			message: msg.body,
+			replyTo: msg.replyTo ?? "",
+			autoReplied: options.autoReplied,
+			interrupting: options.interrupting,
+		}),
+		display: true,
+		details: { id: msg.id, from: msg.from, message: msg.body, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
+		attribution: "agent",
+		timestamp: msg.ts,
+	};
+}
+
 /** Owns incoming IRC queues, injection, and side-channel auto-replies. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
@@ -109,21 +131,7 @@ export class IrcBridge {
 		const planModeIdle = !streaming && this.#host.planModeEnabled();
 		const autoReply =
 			(opts?.expectsReply ?? false) && ((streaming && !this.#host.settings.get("async.enabled")) || planModeIdle);
-		const record: CustomMessage = {
-			role: "custom",
-			customType: "irc:incoming",
-			content: prompt.render(ircIncomingTemplate, {
-				from: msg.from,
-				message: msg.body,
-				replyTo: msg.replyTo ?? "",
-				autoReplied: autoReply,
-				interrupting: streaming,
-			}),
-			display: true,
-			details: { id: msg.id, from: msg.from, message: msg.body, ...(msg.replyTo ? { replyTo: msg.replyTo } : {}) },
-			attribution: "agent",
-			timestamp: msg.ts,
-		};
+		const record = buildIrcIncomingMessage(msg, { autoReplied: autoReply, interrupting: streaming });
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
 			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;

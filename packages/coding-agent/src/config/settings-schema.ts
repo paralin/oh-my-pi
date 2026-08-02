@@ -4795,6 +4795,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.claudeCode.executable": {
+		type: "string",
+		default: "claude",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Claude Code Executable",
+			description:
+				"Executable used by subagents selected with a claude-code/ model, passed to the Claude Agent SDK as its Claude Code executable.",
+		},
+	},
+
 	"task.disabledAgents": {
 		type: "array",
 		default: [] as string[],

@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { ClaudeSessionStore } from "../src/session/claude-session-store";
+import {
+	ClaudeSessionStore,
+	claudeSessionRoot,
+	claudeTranscriptPath,
+	loadClaudeSessionMessagesReadOnly,
+} from "../src/session/claude-session-store";
 import { CodexSessionStore } from "../src/session/codex-session-store";
 import { persistForeignSession } from "../src/session/foreign-session-import";
 import type { ForeignSessionInfo } from "../src/session/foreign-session-store";
@@ -112,6 +117,18 @@ describe("ClaudeSessionStore", () => {
 			entries.some(entry => entry.type === "model_change" && entry.model === "anthropic/claude-sonnet-4-5"),
 		).toBe(true);
 		expect(messages[0]?.timestamp).toBe("2026-01-01T00:00:00.000Z");
+	});
+
+	it("normalizes one transcript read-only and honors CLAUDE_CONFIG_DIR paths", async () => {
+		const { info } = await createClaudeFixture();
+		const configuredRoot = path.join(tempRoot, "custom-claude");
+		expect(claudeSessionRoot({ CLAUDE_CONFIG_DIR: configuredRoot }, "/unused")).toBe(configuredRoot);
+		expect(claudeTranscriptPath(info.cwd, info.id, configuredRoot)).toBe(
+			path.join(configuredRoot, "projects", info.cwd.replaceAll(path.sep, "-"), `${info.id}.jsonl`),
+		);
+
+		const messages = await loadClaudeSessionMessagesReadOnly(info.path, info.cwd, info.id);
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
 	});
 
 	it("recognizes legacy history keys and .projects storage", async () => {

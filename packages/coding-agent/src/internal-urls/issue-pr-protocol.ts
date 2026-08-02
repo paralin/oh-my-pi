@@ -19,6 +19,7 @@
  */
 import type { Settings } from "../config/settings";
 import { AgentRegistry } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 import {
 	getOrFetchIssue,
 	getOrFetchPr,
@@ -221,7 +222,7 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 function resolveCwd(context: ResolveContext | undefined): string {
 	if (context?.cwd) return context.cwd;
 	for (const ref of AgentRegistry.global().list()) {
-		const cwd = ref.session?.sessionManager?.getCwd();
+		const cwd = ref.session instanceof AgentSession ? ref.session.sessionManager.getCwd() : undefined;
 		if (cwd) return cwd;
 	}
 	return process.cwd();

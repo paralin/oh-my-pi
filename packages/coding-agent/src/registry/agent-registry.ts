@@ -2,14 +2,14 @@
  * AgentRegistry - Process-global registry of agents (the main session plus
  * every subagent), keyed by stable id.
  *
- * Tracks each agent's status and (when live) its AgentSession so peers can be
+ * Tracks each agent's status and (when live) its peer session so peers can be
  * addressed by id (`hub`, `task resume`, `history://`). Sessions are
  * registered explicitly at creation; finished agents stay registered as
  * `idle` (live) or `parked` (session disposed, ref + sessionFile retained for
  * revival) and are only removed on explicit release/teardown.
  */
 
-import type { AgentSession } from "../session/agent-session";
+import type { IrcMessage } from "../irc/bus";
 import { oneLineLabel } from "../task/types";
 
 export const MAIN_AGENT_ID = "Main";
@@ -23,7 +23,7 @@ export function getAgentTombstonePath(sessionFile: string): string {
 
 /**
  * - `running`: a turn is in flight.
- * - `idle`: live AgentSession in memory, awaiting work. Finished agents are
+ * - `idle`: live peer session in memory, awaiting work. Finished agents are
  *   `idle`, not removed.
  * - `parked`: session disposed; AgentRef + sessionFile retained, revivable.
  * - `aborted`: hard-killed, terminal.
@@ -38,6 +38,23 @@ type AgentDurationKind = "active" | "span" | "unknown";
  *   agent-facing rosters (`hub`, `history://`) and not messageable/revivable.
  */
 export type AgentKind = "main" | "sub" | "advisor";
+/** Live behavior shared by every agent runtime. Object identity is the session generation token. */
+export interface AgentHistorySnapshot {
+	messages: unknown[];
+	sourcePath?: string;
+	sourceLabel?: string;
+}
+
+export interface AgentPeer {
+	readonly messages: unknown[];
+	readHistorySnapshot?(): Promise<AgentHistorySnapshot>;
+	deliverIrcMessage(
+		message: IrcMessage,
+		options?: { expectsReply?: boolean },
+	): Promise<"injected" | "queued" | "woken">;
+	abort(options?: { reason?: string }): Promise<void>;
+	dispose(): Promise<void>;
+}
 
 /** Persisted per-agent totals reconstructed from the child session transcript. */
 export interface AgentMetricsSummary {
@@ -75,7 +92,7 @@ export interface AgentRef {
 	parentId?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
-	session: AgentSession | null;
+	session: AgentPeer | null;
 	sessionFile: string | null;
 	createdAt: number;
 	lastActivity: number;
@@ -85,7 +102,7 @@ export interface AgentRef {
 	history?: AgentHistorySummary;
 }
 
-export type AgentRefExpectation = AgentRef | AgentSession;
+export type AgentRefExpectation = AgentRef | AgentPeer;
 
 export type RegistryEvent =
 	| { type: "registered"; ref: AgentRef }
@@ -100,7 +117,7 @@ export interface RegisterInput {
 	displayName: string;
 	kind: AgentKind;
 	parentId?: string;
-	session: AgentSession | null;
+	session: AgentPeer | null;
 	sessionFile?: string | null;
 	status?: AgentStatus;
 	/** Last persisted task summary, when restoring a historical agent. */
@@ -209,9 +226,9 @@ export class AgentRegistry {
 	 * intent text can neither break the roster nor smuggle terminal escapes —
 	 * every caller is safe without sanitizing at its own call site.
 	 */
-	setActivity(id: string, activity: string): void {
+	setActivity(id: string, activity: string, expected?: AgentRefExpectation): void {
 		const ref = this.#refs.get(id);
-		if (!ref) return;
+		if (!ref || !this.#matchesExpected(ref, expected)) return;
 		if (ref.status !== "running") return;
 		const gist = oneLineLabel(activity);
 		ref.lastActivity = Date.now();
@@ -219,12 +236,7 @@ export class AgentRegistry {
 		ref.activity = gist;
 	}
 
-	attachSession(
-		id: string,
-		session: AgentSession,
-		sessionFile?: string | null,
-		expected?: AgentRefExpectation,
-	): boolean {
+	attachSession(id: string, session: AgentPeer, sessionFile?: string | null, expected?: AgentRefExpectation): boolean {
 		const ref = this.#refs.get(id);
 		// Never attach a late-created session to a hard-killed tombstone. This
 		// closes the race between a parked reviver claiming the ref and finishing

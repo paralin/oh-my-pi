@@ -16,10 +16,17 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
+import { resolveConfiguredModelPatterns } from "../config/model-resolver";
 import { Settings } from "../config/settings";
 import { discoverAndLoadExtensions, ExtensionRunner, emitSessionShutdownEvent } from "../extensibility/extensions";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
+import {
+	CLAUDE_CODE_EFFORTS,
+	type ClaudeCodeSelection,
+	resolveClaudeCodeSelection,
+} from "../task/claude-code-selector";
+import { discoverAgents } from "../task/discovery";
 import { EventBus } from "../utils/event-bus";
 import { applyCodexHomeAuthToStorage } from "./codex-home";
 
@@ -75,7 +82,7 @@ interface ModelJson {
 	/** Supported thinking efforts when the model thinks, otherwise null. */
 	thinking: readonly Effort[] | null;
 	input: ("text" | "image")[];
-	cost: Model<Api>["cost"];
+	cost: Model<Api>["cost"] | null;
 }
 
 interface ModelsJson {
@@ -98,7 +105,7 @@ function formatLimit(n: number | null): string {
 	return n === null ? "-" : formatNumber(n);
 }
 
-function byProviderThenId(left: Model<Api>, right: Model<Api>): number {
+function byProviderThenId(left: ModelJson, right: ModelJson): number {
 	const providerCmp = left.provider.localeCompare(right.provider);
 	if (providerCmp !== 0) return providerCmp;
 	return left.id.localeCompare(right.id);
@@ -117,6 +124,43 @@ function toModelJson(model: Model<Api>): ModelJson {
 		input: model.input,
 		cost: model.cost,
 	};
+}
+
+function toClaudeCodeModelJson(selection: ClaudeCodeSelection): ModelJson {
+	const id = `${selection.model}${selection.effort ? `:${selection.effort}` : ""}`;
+	return {
+		provider: "claude-code",
+		id,
+		selector: `claude-code/${id}`,
+		name: `${selection.model} through Claude Code`,
+		contextWindow: null,
+		maxTokens: null,
+		reasoning: true,
+		thinking: selection.effort ? [selection.effort] : CLAUDE_CODE_EFFORTS,
+		input: ["text"],
+		cost: null,
+	};
+}
+
+async function discoverConfiguredClaudeCodeModels(settings: Settings, cwd: string): Promise<ClaudeCodeSelection[]> {
+	const configuredPatterns: (string | string[])[] = [
+		...Object.keys(settings.get("modelRoles")).map(role => `@${role}`),
+		...Object.values(settings.get("task.agentModelOverrides")),
+	];
+	const { agents } = await discoverAgents(cwd);
+	for (const agent of agents) {
+		if (agent.model) configuredPatterns.push(agent.model);
+	}
+
+	const selections = new Map<string, ClaudeCodeSelection>();
+	for (const configured of configuredPatterns) {
+		for (const pattern of resolveConfiguredModelPatterns(configured, settings)) {
+			const selection = resolveClaudeCodeSelection(pattern);
+			if (!selection) continue;
+			selections.set(`${selection.model}\0${selection.effort ?? ""}`, selection);
+		}
+	}
+	return [...selections.values()];
 }
 
 type ColumnAlign = "left" | "right";
@@ -169,11 +213,15 @@ function boxTable(columns: BoxColumn[], rows: string[][]): string[] {
 /** `omp models ls`/`find`: provider-grouped listing (one box table per provider). */
 function renderProviderModels(
 	modelRegistry: ModelRegistry,
+	taskRuntimeModels: readonly ClaudeCodeSelection[],
 	action: ModelsAction,
 	pattern: string | undefined,
 	json: boolean,
 ): void {
-	const available = modelRegistry.getAvailable();
+	const available = [
+		...modelRegistry.getAvailable().map(toModelJson),
+		...taskRuntimeModels.map(toClaudeCodeModelJson),
+	];
 	const needle = pattern?.toLowerCase();
 	let filtered = available;
 
@@ -205,7 +253,7 @@ function renderProviderModels(
 				`Warning: models.yml validation failed — custom providers disabled\n${configError.message}\n`,
 			);
 		}
-		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId).map(toModelJson) };
+		const output: ModelsJson = { models: filtered.slice().sort(byProviderThenId) };
 		writeLine(JSON.stringify(output));
 		return;
 	}
@@ -224,7 +272,7 @@ function renderProviderModels(
 	}
 
 	// One section per provider: bold heading + a box table of that provider's models.
-	const byProvider = new Map<string, Model<Api>[]>();
+	const byProvider = new Map<string, ModelJson[]>();
 	for (const model of filtered.slice().sort(byProviderThenId)) {
 		let group = byProvider.get(model.provider);
 		if (!group) {
@@ -243,7 +291,7 @@ function renderProviderModels(
 			model.id,
 			formatLimit(model.contextWindow),
 			formatLimit(model.maxTokens),
-			model.thinking ? getSupportedEfforts(model).join(",") : model.reasoning ? "yes" : "-",
+			model.thinking?.join(",") ?? (model.reasoning ? "yes" : "-"),
 			model.input.includes("image") ? "yes" : "no",
 		]);
 		for (const line of boxTable(
@@ -281,6 +329,8 @@ export interface RunModelsListingOptions {
 	disabledExtensionIds?: string[];
 	/** When true, exclude ambient factories and resolve only `additionalExtensionPaths`. */
 	disableExtensionDiscovery?: boolean;
+	/** Configured Claude Code task-runtime selectors to include beside provider models. */
+	taskRuntimeModels?: readonly ClaudeCodeSelection[];
 }
 
 export async function runModelsListing(options: RunModelsListingOptions): Promise<void> {
@@ -294,6 +344,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		settingsExtensions = [],
 		disabledExtensionIds = [],
 		disableExtensionDiscovery = false,
+		taskRuntimeModels = [],
 	} = options;
 
 	const eventBus = new EventBus();
@@ -336,7 +387,7 @@ export async function runModelsListing(options: RunModelsListingOptions): Promis
 		// Discover runtime (extension) provider catalogs now that they are registered.
 		await modelRegistry.refreshRuntimeProviders(action === "refresh" ? "online" : "online-if-uncached");
 
-		renderProviderModels(modelRegistry, action, pattern, json);
+		renderProviderModels(modelRegistry, taskRuntimeModels, action, pattern, json);
 	} finally {
 		await emitSessionShutdownEvent(extensionRunner);
 	}
@@ -372,6 +423,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 		await modelRegistry.refresh(action === "refresh" ? "online" : "online-if-uncached");
 
 		const cliExtensionPaths = command.flags.extensions ?? [];
+		const taskRuntimeModels = await discoverConfiguredClaudeCodeModels(settings, cwd);
 		await runModelsListing({
 			modelRegistry,
 			cwd,
@@ -382,6 +434,7 @@ export async function runModelsCommand(command: ModelsCommandArgs): Promise<void
 			settingsExtensions: settings.get("extensions") ?? [],
 			disabledExtensionIds: settings.get("disabledExtensions") ?? [],
 			disableExtensionDiscovery: Boolean(command.flags.noExtensions),
+			taskRuntimeModels,
 		});
 	} finally {
 		authStorage.close();

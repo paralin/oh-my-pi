@@ -25,6 +25,7 @@ import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
@@ -1043,7 +1044,7 @@ export class VibeSessionRegistry {
 
 		if (record.turn) {
 			const live = registered?.session;
-			if (live?.isStreaming) {
+			if (live instanceof AgentSession && live.isStreaming) {
 				await live.steer(message);
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
@@ -1681,7 +1682,7 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 	const registry = AgentRegistry.global();
 	for (const id of ids) {
 		const workerSession = registry.get(id)?.session;
-		if (!workerSession?.isStreaming) continue;
+		if (!(workerSession instanceof AgentSession) || !workerSession.isStreaming) continue;
 		const rate = calculateTokensPerSecond(workerSession.state.messages, true);
 		if (rate !== null) {
 			total += rate;

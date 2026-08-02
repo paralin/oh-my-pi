@@ -8,6 +8,8 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import * as claudeCodeRuntime from "@oh-my-pi/pi-coding-agent/task/claude-code-runtime";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -91,6 +93,7 @@ function mockDiscovery(agent: AgentDefinition = AGENT): void {
 afterEach(() => {
 	vi.restoreAllMocks();
 	resetRegisteredArtifactDirsForTests();
+	AgentRegistry.resetGlobalForTests();
 });
 
 describe("structured subagent primitive", () => {
@@ -272,6 +275,65 @@ describe("structured subagent primitive", () => {
 		expect(dispatched[0]?.modelRole).toBeUndefined();
 		expect(settled.result.modelRole).toBeUndefined();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects plan-mode Claude before executor, artifact, and registry work", async () => {
+		mockDiscovery();
+		const planSession = session({ planMode: true });
+		const getSessionFile = vi.fn(() => null);
+		const allocate = vi.fn(async () => "Worker");
+		Object.assign(planSession, { getSessionFile, agentOutputManager: { allocate } });
+		const claude = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess");
+		const pi = vi.spyOn(executorModule, "runSubprocess");
+		const register = vi.spyOn(AgentRegistry.global(), "register");
+
+		const error = await runStructuredSubagent(
+			request({
+				session: planSession,
+				model: "claude-code/claude-opus-5",
+			}),
+		).catch(caught => caught);
+
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect((error as StructuredSubagentError).kind).toBe("preflight");
+		expect((error as Error).message).toContain("Plan mode is unavailable");
+		expect(claude).not.toHaveBeenCalled();
+		expect(pi).not.toHaveBeenCalled();
+		expect(getSessionFile).not.toHaveBeenCalled();
+		expect(allocate).not.toHaveBeenCalled();
+		expect(register).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("rejects eval Claude before executor, artifact, id, and registry work", async () => {
+		mockDiscovery();
+		const evalSession = session();
+		const getSessionFile = vi.fn(() => {
+			throw new Error("artifact leasing reached");
+		});
+		const allocate = vi.fn(async () => "Worker");
+		Object.assign(evalSession, { getSessionFile, agentOutputManager: { allocate } });
+		const claude = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess");
+		const pi = vi.spyOn(executorModule, "runSubprocess");
+		const register = vi.spyOn(AgentRegistry.global(), "register");
+
+		const error = await runStructuredSubagent(
+			request({
+				session: evalSession,
+				invocationKind: "eval",
+				model: "claude-code/claude-opus-5",
+			}),
+		).catch(caught => caught);
+
+		expect(error).toBeInstanceOf(StructuredSubagentError);
+		expect((error as StructuredSubagentError).kind).toBe("preflight");
+		expect((error as Error).message).toContain("available only for task invocations");
+		expect(claude).not.toHaveBeenCalled();
+		expect(pi).not.toHaveBeenCalled();
+		expect(getSessionFile).not.toHaveBeenCalled();
+		expect(allocate).not.toHaveBeenCalled();
+		expect(register).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual([]);
 	});
 
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
@@ -512,6 +574,42 @@ describe("structured subagent primitive", () => {
 
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
+	});
+
+	it("runs an isolated Claude task through the shared isolation owner", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: true,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions, runSubagent }) => ({
+			...(await runSubagent({ ...baseOptions, worktree: "/tmp/isolated" })),
+			patchPath: "/tmp/Worker.patch",
+		}));
+		const claude = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess").mockResolvedValue(result());
+		const pi = vi.spyOn(executorModule, "runSubprocess");
+
+		await runStructuredSubagent(
+			request({
+				session: session({ isolationMode: "worktree" }),
+				model: "claude-code/claude-opus-5",
+				isolation: { requested: true },
+			}),
+		);
+
+		expect(claude).toHaveBeenCalledWith({
+			options: expect.objectContaining({ worktree: "/tmp/isolated" }),
+			model: "claude-opus-5",
+		});
+		expect(pi).not.toHaveBeenCalled();
+		expect(merge).toHaveBeenCalledWith({
+			result: expect.objectContaining({ patchPath: "/tmp/Worker.patch" }),
+			repoRoot: "/tmp",
+			mergeMode: "patch",
+		});
 	});
 
 	it("retains isolated failure artifacts needed for recovery", async () => {

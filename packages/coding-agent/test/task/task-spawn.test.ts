@@ -15,8 +15,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { type AgentPeer, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import * as claudeCodeRuntime from "@oh-my-pi/pi-coding-agent/task/claude-code-runtime";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
@@ -113,6 +114,19 @@ describe("task spawn routing", () => {
 		const gate = deferred();
 		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			await gate.promise;
+			const peer: AgentPeer = {
+				messages: [],
+				deliverIrcMessage: async () => "injected",
+				abort: async () => {},
+				dispose: async () => {},
+			};
+			AgentRegistry.global().register({
+				id: options.id ?? "?",
+				displayName: "task",
+				kind: "sub",
+				status: "idle",
+				session: peer,
+			});
 			return makeResult(options.id ?? "?");
 		});
 
@@ -146,6 +160,36 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+	});
+
+	it("omits follow-up capabilities for a settled Claude one-shot background task", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [{ ...taskAgent, model: ["claude-code/claude-opus-5"] }],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess").mockImplementation(async request => {
+			return makeResult(request.options.id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+		const result = await tool.execute("tc-claude", {
+			agent: "task",
+			name: "OneShot",
+			task: "Do the thing.",
+		} as TaskParams);
+		const job = manager.getJob(result.details?.async?.jobId ?? "");
+		if (!job) throw new Error("background job was not registered");
+
+		await job.promise;
+
+		expect(job.status).toBe("completed");
+		expect(job.resultText).toContain("All done.");
+		expect(job.resultText).not.toContain("is now idle");
+		expect(job.resultText).not.toContain("message it via `hub`");
+		expect(job.resultText).not.toContain("history://OneShot");
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(AgentRegistry.global().get("OneShot")).toBeUndefined();
 	});
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {

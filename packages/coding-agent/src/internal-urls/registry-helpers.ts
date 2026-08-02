@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 
 const extraArtifactsDirs = new Set<string>();
 
@@ -40,7 +41,7 @@ export function artifactsDirsFromRegistry(): string[] {
 		if (!dirs.includes(dir)) dirs.push(dir);
 	};
 	for (const ref of AgentRegistry.global().list()) {
-		addDir(ref.session?.sessionManager?.getArtifactsDir());
+		if (ref.session instanceof AgentSession) addDir(ref.session.sessionManager.getArtifactsDir());
 		if (ref.sessionFile) addDir(ref.sessionFile.slice(0, -6));
 	}
 	for (const dir of extraArtifactsDirs) addDir(dir);

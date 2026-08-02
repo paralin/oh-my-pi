@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { ClaudeCodeEffort } from "../task/claude-code-selector";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -208,6 +209,20 @@ export interface CredentialPinEntry extends SessionEntryBase {
 	hash: string;
 }
 
+/** Runtime metadata for a Claude Code child whose conversation stays in native JSONL. */
+export interface ClaudeCodeSessionRuntime {
+	kind: "claude-code";
+	sessionId: string;
+	cwd: string;
+	transcriptPath: string;
+	model: string;
+	/** Provider effort selected for the native Claude query. Older entries omit it. */
+	effort?: ClaudeCodeEffort;
+	toolPolicyVersion: number;
+}
+
+export type SessionRuntimeMetadata = ClaudeCodeSessionRuntime;
+
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
@@ -237,6 +252,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	/** Absent means the native Pi runtime for backward compatibility. */
+	runtime?: SessionRuntimeMetadata;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

@@ -90,6 +90,62 @@ function sessionFixtureJsonl(): string {
 	return `${JSON.stringify(header)}\n${JSON.stringify(userEntry)}\n${JSON.stringify(assistantEntry)}\n`;
 }
 
+function claudeTranscriptFixtureJsonl(cwd: string): string {
+	return [
+		{
+			type: "user",
+			uuid: "claude-user",
+			parentUuid: null,
+			timestamp: "2026-08-01T00:00:00.000Z",
+			cwd,
+			message: { content: "native Claude prompt" },
+		},
+		{
+			type: "assistant",
+			uuid: "claude-assistant",
+			parentUuid: "claude-user",
+			timestamp: "2026-08-01T00:00:01.000Z",
+			message: {
+				id: "msg-native",
+				model: "claude-opus-5",
+				stop_reason: "end_turn",
+				usage: { input_tokens: 1, output_tokens: 1 },
+				content: [{ type: "text", text: "native Claude reply" }],
+			},
+		},
+	]
+		.map(record => JSON.stringify(record))
+		.join("\n")
+		.concat("\n");
+}
+
+function claudeMetadataFixtureJsonl(cwd: string, transcriptPath: string): string {
+	const timestamp = new Date().toISOString();
+	return [
+		{ type: "session", version: CURRENT_SESSION_VERSION, id: "metadata", timestamp, cwd },
+		{
+			type: "session_init",
+			id: "init",
+			parentId: null,
+			timestamp,
+			systemPrompt: "Claude prompt",
+			task: "Native task",
+			tools: ["read"],
+			runtime: {
+				kind: "claude-code",
+				sessionId: "native-session",
+				cwd,
+				transcriptPath,
+				model: "claude-opus-5",
+				toolPolicyVersion: 1,
+			},
+		},
+	]
+		.map(record => JSON.stringify(record))
+		.join("\n")
+		.concat("\n");
+}
+
 describe("history:// protocol", () => {
 	beforeEach(() => {
 		AgentRegistry.resetGlobalForTests();
@@ -188,6 +244,73 @@ describe("history:// protocol", () => {
 			expect(resource.content).toContain("parked reply");
 			expect(resource.sourcePath).toBe(sessionFile);
 			expect(resource.notes?.join("\n")).toContain("read-only");
+		});
+	});
+
+	it("uses a live Claude peer's native history snapshot", async () => {
+		const transcriptPath = "/tmp/native-live.jsonl";
+		AgentRegistry.global().register({
+			id: "ClaudeLive",
+			displayName: "task",
+			kind: "sub",
+			session: {
+				messages: [{ role: "user", content: "stale in-memory prompt", timestamp: 1 }],
+				readHistorySnapshot: async () => ({
+					messages: [{ role: "user", content: "native live prompt", timestamp: 2 }],
+					sourcePath: transcriptPath,
+					sourceLabel: "native Claude transcript (read-only, live)",
+				}),
+			} as unknown as AgentSession,
+			status: "idle",
+		});
+
+		const resource = await InternalUrlRouter.instance().resolve("history://ClaudeLive");
+		expect(resource.content).toContain("native live prompt");
+		expect(resource.content).not.toContain("stale in-memory prompt");
+		expect(resource.sourcePath).toBe(transcriptPath);
+		expect(resource.notes?.join("\n")).toContain("native Claude transcript");
+	});
+
+	it("dispatches a parked Claude metadata file to its native transcript", async () => {
+		await withTempDir(async dir => {
+			const transcriptPath = path.join(dir, "native-session.jsonl");
+			const sessionFile = path.join(dir, "ClaudeParked.jsonl");
+			await Bun.write(transcriptPath, claudeTranscriptFixtureJsonl(dir));
+			await Bun.write(sessionFile, claudeMetadataFixtureJsonl(dir, transcriptPath));
+			AgentRegistry.global().register({
+				id: "ClaudeParked",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile,
+				status: "parked",
+			});
+
+			const resource = await InternalUrlRouter.instance().resolve("history://ClaudeParked");
+			expect(resource.content).toContain("native Claude prompt");
+			expect(resource.content).toContain("native Claude reply");
+			expect(resource.sourcePath).toBe(transcriptPath);
+			expect(resource.notes?.join("\n")).toContain("native Claude transcript");
+		});
+	});
+
+	it("reports a missing native Claude transcript instead of reading metadata as conversation", async () => {
+		await withTempDir(async dir => {
+			const transcriptPath = path.join(dir, "missing-native.jsonl");
+			const sessionFile = path.join(dir, "ClaudeMissing.jsonl");
+			await Bun.write(sessionFile, claudeMetadataFixtureJsonl(dir, transcriptPath));
+			AgentRegistry.global().register({
+				id: "ClaudeMissing",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile,
+				status: "parked",
+			});
+
+			await expect(InternalUrlRouter.instance().resolve("history://ClaudeMissing")).rejects.toThrow(
+				"Unable to read Claude session native-session",
+			);
 		});
 	});
 

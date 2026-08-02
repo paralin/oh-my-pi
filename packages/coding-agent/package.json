@@ -47,6 +47,7 @@
     "bench:guard": "bun scripts/bench-guard.ts"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "catalog:",
     "@babel/parser": "catalog:",
     "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",

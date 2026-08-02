@@ -1,6 +1,7 @@
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
 	AssistantMessage,
 	ImageContent,
@@ -112,6 +113,18 @@ async function readRegisteredProjects(root: string): Promise<string[]> {
 	} catch {
 		return [];
 	}
+}
+
+/** Resolve Claude's data root while honoring its supported config override. */
+export function claudeSessionRoot(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
+	const configured = env.CLAUDE_CONFIG_DIR?.trim();
+	return path.resolve(configured || path.join(home, ".claude"));
+}
+
+/** Resolve the native JSONL path for one Claude session in a working directory. */
+export function claudeTranscriptPath(cwd: string, sessionId: string, root = claudeSessionRoot()): string {
+	const encodedCwd = path.resolve(cwd).replaceAll(path.sep, "-");
+	return path.join(root, "projects", encodedCwd, `${sessionId}.jsonl`);
 }
 
 function projectCwd(encoded: string, registered: readonly string[]): string {
@@ -423,5 +436,28 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 		const title = sourceTitle ?? aiTitle ?? info.title;
 		if (title) await manager.setSessionName(title, sourceTitle ? "user" : "auto");
 		return manager;
+	}
+}
+
+/** Normalize one native Claude JSONL file without creating an OMP writer. */
+export async function loadClaudeSessionMessagesReadOnly(
+	file: string,
+	cwd: string,
+	sessionId = path.basename(file, ".jsonl"),
+): Promise<AgentMessage[]> {
+	const store = new ClaudeSessionStore();
+	const epoch = new Date(0);
+	const manager = await store.load({
+		source: "claude",
+		id: sessionId,
+		path: file,
+		cwd,
+		created: epoch,
+		modified: epoch,
+	});
+	try {
+		return manager.buildSessionContext({ transcript: true, collapseCompactedHistory: true }).messages;
+	} finally {
+		await manager.close();
 	}
 }

@@ -18,8 +18,10 @@
  */
 import type { AgentRef } from "../registry/agent-registry";
 import { AgentRegistry } from "../registry/agent-registry";
+import { loadClaudeSessionMessagesReadOnly } from "../session/claude-session-store";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
+import { SessionManager } from "../session/session-manager";
 import { sessionFilesFromDisk } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
 
@@ -93,12 +95,17 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 		const notes: string[] = [];
 		let messages: unknown[];
+		let sourcePath = ref.sessionFile ?? undefined;
 		if (ref.session) {
-			messages = ref.session.messages;
-			notes.push("Source: live session");
+			const snapshot = await ref.session.readHistorySnapshot?.();
+			messages = snapshot?.messages ?? ref.session.messages;
+			sourcePath = snapshot?.sourcePath ?? sourcePath;
+			notes.push(`Source: ${snapshot?.sourceLabel ?? "live session"}`);
 		} else if (ref.sessionFile) {
-			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
-			notes.push(`Source: session file (read-only, ${ref.status})`);
+			const persisted = await this.#loadPersistedHistory(ref.sessionFile, ref.status);
+			messages = persisted.messages;
+			sourcePath = persisted.sourcePath;
+			notes.push(`Source: ${persisted.sourceLabel}`);
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
 			// giving up, in case the transcript lingers under an artifacts dir.
@@ -113,8 +120,28 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			content,
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content, "utf-8"),
-			sourcePath: ref.sessionFile ?? undefined,
+			sourcePath,
 			notes,
+		};
+	}
+
+	async #loadPersistedHistory(
+		sessionFile: string,
+		status: string,
+	): Promise<{ messages: unknown[]; sourcePath: string; sourceLabel: string }> {
+		const peek = await SessionManager.peekSessionInit(sessionFile);
+		const runtime = peek?.init?.runtime;
+		if (runtime?.kind === "claude-code") {
+			return {
+				messages: await loadClaudeSessionMessagesReadOnly(runtime.transcriptPath, runtime.cwd, runtime.sessionId),
+				sourcePath: runtime.transcriptPath,
+				sourceLabel: `native Claude transcript (read-only, ${status})`,
+			};
+		}
+		return {
+			messages: await loadSessionMessagesReadOnly(sessionFile),
+			sourcePath: sessionFile,
+			sourceLabel: `session file (read-only, ${status})`,
 		};
 	}
 
@@ -135,15 +162,15 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			}
 		}
 		if (!matchedId || !sessionFile) return undefined;
-		const messages = await loadSessionMessagesReadOnly(sessionFile);
-		const content = formatSessionHistoryMarkdown(messages, { title: `${matchedId} (on disk)` });
+		const persisted = await this.#loadPersistedHistory(sessionFile, "unregistered");
+		const content = formatSessionHistoryMarkdown(persisted.messages, { title: `${matchedId} (on disk)` });
 		return {
 			url: "",
 			content,
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content, "utf-8"),
-			sourcePath: sessionFile,
-			notes: ["Source: session file (read-only, unregistered)"],
+			sourcePath: persisted.sourcePath,
+			notes: [`Source: ${persisted.sourceLabel}`],
 		};
 	}
 

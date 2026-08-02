@@ -34,6 +34,7 @@ import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
+import { AgentSession } from "../../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { shortenPath, truncateToWidth } from "../../tools/render-utils";
 import { formatLocalDateTimeWithOffset } from "../../utils/local-date";

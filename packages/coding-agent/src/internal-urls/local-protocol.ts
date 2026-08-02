@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -473,8 +474,9 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		const main = AgentRegistry.global()
 			.list()
 			.find(ref => ref.kind === "main");
-		const sessionManager = main?.session?.sessionManager;
-		if (!sessionManager) return undefined;
+		const session = main?.session;
+		if (!(session instanceof AgentSession)) return undefined;
+		const sessionManager = session.sessionManager;
 		return {
 			getArtifactsDir: () => sessionManager.getArtifactsDir(),
 			getSessionId: () => sessionManager.getSessionId(),

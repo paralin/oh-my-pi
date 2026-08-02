@@ -306,12 +306,15 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
 			const mnemopiStates = mnemopiSessionStatesFromRegistry();
-			const hindsightActive =
-				backend === "hindsight" ||
-				(mnemopiStates.length === 0 &&
-					AgentRegistry.global()
-						.list()
-						.some(ref => ref.session?.getHindsightSessionState?.()));
+			const registryHasHindsight = AgentRegistry.global()
+				.list()
+				.some(ref => {
+					const session = ref.session;
+					if (!session || !("getHindsightSessionState" in session)) return false;
+					const getState = session.getHindsightSessionState;
+					return typeof getState === "function" && getState.call(session) !== undefined;
+				});
+			const hindsightActive = backend === "hindsight" || (mnemopiStates.length === 0 && registryHasHindsight);
 			if (hindsightActive) {
 				// Hindsight keeps memories server-side and exposes no
 				// `memory://<id>` addressing, yet the shared `recall` tool

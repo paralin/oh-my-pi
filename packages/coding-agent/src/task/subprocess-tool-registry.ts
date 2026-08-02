@@ -8,6 +8,7 @@
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import type { Theme } from "../modes/theme/theme";
+import type { YieldItem } from "./types";
 
 /** Event from subprocess tool execution (parsed from JSONL) */
 export interface SubprocessToolEvent {
@@ -58,11 +59,12 @@ class SubprocessToolRegistryImpl {
 	register<T>(toolName: string, handler: SubprocessToolHandler<T>): void {
 		this.#handlers.set(toolName, handler as SubprocessToolHandler);
 	}
-
 	/**
 	 * Get the handler for a tool, if registered.
 	 */
-	getHandler(toolName: string): SubprocessToolHandler | undefined {
+	getHandler(toolName: "yield"): SubprocessToolHandler<YieldItem> | undefined;
+	getHandler(toolName: string): SubprocessToolHandler | undefined;
+	getHandler(toolName: string): SubprocessToolHandler<YieldItem> | SubprocessToolHandler | undefined {
 		return this.#handlers.get(toolName);
 	}
 

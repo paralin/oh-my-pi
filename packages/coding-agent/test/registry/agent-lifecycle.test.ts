@@ -1,33 +1,36 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { type AgentPeer, AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
+type Assert<T extends true> = T;
+export type PiSessionSatisfiesPeer = Assert<AgentSession extends AgentPeer ? true : false>;
+
 interface SessionStub {
-	session: AgentSession;
+	session: AgentPeer;
 	disposeCalls: () => number;
 }
 
-/** Minimal session: the lifecycle manager only ever calls dispose() on it. */
+/** Minimal peer implementing the lifecycle contract. */
 function makeSessionStub(dispose?: () => Promise<void>): SessionStub {
 	let calls = 0;
-	const stub = {
+	const session: AgentPeer = {
+		messages: [],
+		deliverIrcMessage: async () => "injected",
+		abort: async () => {},
 		dispose: async () => {
 			calls++;
 			await dispose?.();
 		},
 	};
-	return { session: stub as unknown as AgentSession, disposeCalls: () => calls };
+	return { session, disposeCalls: () => calls };
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
-	let resolve!: () => void;
-	const promise = new Promise<void>(r => {
-		resolve = r;
-	});
+	const { promise, resolve } = Promise.withResolvers<void>();
 	return { promise, resolve };
 }
 
@@ -55,7 +58,7 @@ describe("AgentLifecycleManager", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	function registerIdleSub(id: string, session: AgentSession | null, sessionFile: string | null = `/tmp/${id}.jsonl`) {
+	function registerIdleSub(id: string, session: AgentPeer | null, sessionFile: string | null = `/tmp/${id}.jsonl`) {
 		return registry.register({ id, displayName: "task", kind: "sub", session, sessionFile, status: "idle" });
 	}
 
@@ -121,6 +124,30 @@ describe("AgentLifecycleManager", () => {
 		vi.advanceTimersByTime(TTL);
 		await flushAsync();
 		expect(registry.get("2-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+	});
+
+	it("adopts a running agent without parking it until its first idle boundary", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		const ref = registry.register({
+			id: "Busy-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: stub.session,
+			status: "running",
+		});
+		lifecycle.adopt("Busy-Sub", { idleTtlMs: TTL }, ref);
+
+		vi.advanceTimersByTime(TTL * 10);
+		await flushAsync();
+		expect(registry.get("Busy-Sub")?.status).toBe("running");
+		expect(stub.disposeCalls()).toBe(0);
+
+		registry.setStatus("Busy-Sub", "idle", ref);
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(registry.get("Busy-Sub")?.status).toBe("parked");
 		expect(stub.disposeCalls()).toBe(1);
 	});
 
@@ -586,7 +613,10 @@ describe("AgentLifecycleManager", () => {
 		// unless it is already terminal (parked/aborted). This is what defeated the
 		// naive fix — the ref must be marked `aborted` *before* dispose runs.
 		let disposeCalls = 0;
-		const session = {
+		const session: AgentPeer = {
+			messages: [],
+			deliverIrcMessage: async () => "injected",
+			abort: async () => {},
 			dispose: async () => {
 				disposeCalls++;
 				const live = registry.get(workerId);
@@ -594,7 +624,7 @@ describe("AgentLifecycleManager", () => {
 					registry.unregister(workerId, live);
 				}
 			},
-		} as unknown as AgentSession;
+		};
 		const ref = registry.register({
 			id: workerId,
 			displayName: "task",

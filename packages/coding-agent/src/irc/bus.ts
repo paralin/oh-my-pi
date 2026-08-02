@@ -2,11 +2,11 @@
  * IrcBus - Process-global mailbox bus for agent-to-agent messaging.
  *
  * Replaces the old auto-reply model: a `send` never blocks on the recipient
- * generating anything. Delivery resolves the recipient via the global
- * AgentRegistry — parked agents are revived through the
- * AgentLifecycleManager, idle agents are woken with a real turn, and busy
- * agents receive the message as a non-interrupting aside at the next step
- * boundary (see AgentSession.deliverIrcMessage). Replies are real turns by
+ * generating anything. Delivery resolves the recipient through the global
+ * AgentRegistry. Parked agents are revived through AgentLifecycleManager.
+ * Idle agents wake with a real turn. Busy sessions either accept a
+ * non-interrupting aside at the next step boundary or queue the message at
+ * their next input boundary. Replies are real turns by
  * the recipient, observed via `wait` — with one exception: when the sender
  * awaits a reply and the recipient cannot run a real reply turn in time
  * (mid-turn with async execution disabled — possibly blocked in a
@@ -18,6 +18,7 @@
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentSession } from "../session/agent-session";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -34,8 +35,16 @@ export interface IrcMessage {
 
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "queued" | "woken" | "revived" | "failed";
 	error?: string;
+}
+
+/** Delivery failure that cannot succeed for a later generation of the recipient. */
+export class PermanentIrcDeliveryError extends Error {
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options);
+		this.name = "PermanentIrcDeliveryError";
+	}
 }
 
 interface IrcWaiter {
@@ -76,9 +85,9 @@ export class IrcBus {
 
 	/**
 	 * Fire-and-forget delivery. Never blocks on the recipient generating
-	 * anything: the receipt reports how the message reached the recipient
-	 * (waiter/aside = "injected", idle wake = "woken", park revival =
-	 * "revived"), not what they did with it.
+	 * anything. The receipt reports how the message reached the recipient:
+	 * waiter/aside = "injected", busy input = "queued", idle wake = "woken",
+	 * and park revival = "revived".
 	 *
 	 * Mailbox semantics: a successfully delivered message never lingers in
 	 * the recipient's mailbox — injection/wake puts the full body into their
@@ -180,11 +189,10 @@ export class IrcBus {
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
 			return { to: message.to, outcome: revived ? "revived" : delivery };
 		} catch (error) {
-			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
-			// the message so a later `wait`/`inbox` from the recipient can still
-			// pick it up. The receipt stays "failed" — the recipient has not
-			// seen it.
-			this.#enqueue(message);
+			// A transient live hand-off failure is buffered for a later
+			// `wait`/`inbox`. A permanent runtime capability failure cannot become
+			// deliverable when another generation later reuses the same ID.
+			if (!(error instanceof PermanentIrcDeliveryError)) this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",
@@ -360,7 +368,7 @@ export class IrcBus {
 	#relayToMainUi(message: IrcMessage): void {
 		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;
 		const mainSession = this.#registry.get(MAIN_AGENT_ID)?.session;
-		if (!mainSession) return;
+		if (!(mainSession instanceof AgentSession)) return;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:relay",

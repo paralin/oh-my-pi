@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { RpcSubagentRegistry } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-subagents";
 import type { RpcSubagentFrame } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-types";
@@ -13,6 +16,12 @@ import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type {
+	ClaudeCodeEvent,
+	ClaudeCodeQueryRequest,
+	StartClaudeCodeQuery,
+} from "@oh-my-pi/pi-coding-agent/task/claude-code-sdk";
+import type { ClaudeCodeEffort } from "@oh-my-pi/pi-coding-agent/task/claude-code-selector";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -101,7 +110,51 @@ async function createPersistedSession(
 	return sessionFile;
 }
 
-function createFactory(cwd: string, eventBus?: EventBus) {
+async function createClaudePersistedSession(
+	cwd: string,
+	options: { transcript?: boolean; toolPolicyVersion?: number; runtimeCwd?: string; effort?: ClaudeCodeEffort } = {},
+): Promise<{ sessionFile: string; transcriptPath: string }> {
+	const sessionId = "native-session";
+	const runtimeCwd = options.runtimeCwd ?? cwd;
+	const transcriptPath = path.join(cwd, `${sessionId}.jsonl`);
+	if (options.transcript !== false) {
+		await Bun.write(
+			transcriptPath,
+			`${JSON.stringify({
+				type: "user",
+				uuid: "native-user",
+				parentUuid: null,
+				timestamp: "2026-08-01T00:00:00.000Z",
+				cwd: runtimeCwd,
+				message: { content: "original native prompt" },
+			})}\n`,
+		);
+	}
+	const sessionFile = path.join(cwd, "persisted-restricted.jsonl");
+	const manager = await SessionManager.open(sessionFile, undefined, undefined, {
+		initialCwd: cwd,
+		suppressBreadcrumb: true,
+	});
+	manager.appendSessionInit({
+		systemPrompt: "persisted Claude prompt",
+		task: "persisted Claude task",
+		tools: ["read"],
+		spawns: "",
+		runtime: {
+			kind: "claude-code",
+			sessionId,
+			cwd: runtimeCwd,
+			transcriptPath,
+			model: "claude-opus-5",
+			...(options.effort ? { effort: options.effort } : {}),
+			toolPolicyVersion: options.toolPolicyVersion ?? 1,
+		},
+	});
+	await manager.close();
+	return { sessionFile, transcriptPath };
+}
+
+function createFactory(cwd: string, eventBus?: EventBus, startClaudeCodeQuery?: StartClaudeCodeQuery) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -118,12 +171,15 @@ function createFactory(cwd: string, eventBus?: EventBus) {
 		settings: Settings.isolated(),
 		enableLsp: true,
 		eventBus,
+		startClaudeCodeQuery,
 	});
 }
 
 afterEach(async () => {
 	vi.restoreAllMocks();
 	MCPManager.resetForTests();
+	AgentLifecycleManager.resetGlobalForTests();
+	AgentRegistry.resetGlobalForTests();
 	await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 });
 
@@ -308,5 +364,144 @@ describe("persisted subagent revival", () => {
 		rpcRegistry.dispose();
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
+	});
+	it("cold-revives Claude by session id and routes the next IRC turn into the resumed query", async () => {
+		const cwd = makeTempDir("@pi-claude-revive-");
+		const { sessionFile, transcriptPath } = await createClaudePersistedSession(cwd, { effort: Effort.XHigh });
+		await fs.stat(transcriptPath);
+		const promptReceived = Promise.withResolvers<string>();
+		const emitResult = Promise.withResolvers<void>();
+		const resultHandled = Promise.withResolvers<void>();
+		const streamClosed = Promise.withResolvers<void>();
+		let capturedRequest: ClaudeCodeQueryRequest | undefined;
+		const startQuery: StartClaudeCodeQuery = async request => {
+			capturedRequest = request;
+			if (typeof request.prompt === "string") throw new Error("Expected streaming Claude input");
+			const input = request.prompt;
+			void (async () => {
+				const next = await input[Symbol.asyncIterator]().next();
+				if (!next.done) promptReceived.resolve(next.value);
+			})();
+			async function* events(): AsyncGenerator<ClaudeCodeEvent> {
+				yield {
+					kind: "init",
+					sessionId: "native-session",
+					model: "claude-opus-5",
+					tools: ["Read", "mcp__omp__task", "mcp__omp__hub", "mcp__omp__yield"],
+					version: "2.1.220",
+				};
+				await emitResult.promise;
+				yield { kind: "result", isError: false, text: "continued native reply", tokens: 1, requests: 1 };
+				resultHandled.resolve();
+				await streamClosed.promise;
+			}
+			return {
+				events: events(),
+				close: () => streamClosed.resolve(),
+			};
+		};
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			id: "persisted-restricted",
+			displayName: "Persisted Restricted",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.setPersistedSubagentReviverFactory(createFactory(cwd, undefined, startQuery), 0);
+
+		const receipt = await new IrcBus(registry, lifecycle).send({
+			from: "Main",
+			to: ref.id,
+			body: "continue the native task",
+		});
+		expect(receipt).toEqual({ to: ref.id, outcome: "revived" });
+		expect(ref.session).not.toBeNull();
+		expect(capturedRequest).toMatchObject({
+			resume: "native-session",
+			cwd,
+			model: "claude-opus-5",
+			effort: Effort.XHigh,
+		});
+		expect(await promptReceived.promise).toContain("continue the native task");
+		emitResult.resolve();
+		await resultHandled.promise;
+		expect(registry.get(ref.id)?.status).toBe("idle");
+		await lifecycle.release(ref.id);
+	});
+
+	it("fails Claude revival truthfully when the native transcript is missing", async () => {
+		const cwd = makeTempDir("@pi-claude-missing-");
+		const { sessionFile, transcriptPath } = await createClaudePersistedSession(cwd, { transcript: false });
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			id: "persisted-restricted",
+			displayName: "Persisted Restricted",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.setPersistedSubagentReviverFactory(createFactory(cwd), 0);
+
+		await expect(lifecycle.ensureLive(ref.id)).rejects.toThrow(
+			`cannot be revived because transcript "${transcriptPath}" is unavailable`,
+		);
+		expect(registry.get(ref.id)).toBe(ref);
+	});
+
+	it("fails Claude revival truthfully when the recorded cwd is missing", async () => {
+		const cwd = makeTempDir("@pi-claude-cwd-");
+		const runtimeCwd = path.join(cwd, "missing-workspace");
+		const { sessionFile } = await createClaudePersistedSession(cwd, { runtimeCwd });
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			id: "persisted-restricted",
+			displayName: "Persisted Restricted",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.setPersistedSubagentReviverFactory(createFactory(cwd), 0);
+
+		await expect(lifecycle.ensureLive(ref.id)).rejects.toThrow(
+			`cannot be revived because cwd "${runtimeCwd}" is unavailable`,
+		);
+		expect(registry.get(ref.id)).toBe(ref);
+	});
+
+	it("rejects unsupported persisted Claude tool-policy versions before SDK startup", async () => {
+		const cwd = makeTempDir("@pi-claude-policy-");
+		const { sessionFile } = await createClaudePersistedSession(cwd, { toolPolicyVersion: 99 });
+		let starts = 0;
+		const registry = AgentRegistry.global();
+		const ref = registry.register({
+			id: "persisted-restricted",
+			displayName: "Persisted Restricted",
+			kind: "sub",
+			parentId: "Main",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const lifecycle = AgentLifecycleManager.global();
+		lifecycle.setPersistedSubagentReviverFactory(
+			createFactory(cwd, undefined, async () => {
+				starts++;
+				throw new Error("unreachable");
+			}),
+			0,
+		);
+
+		await expect(lifecycle.ensureLive(ref.id)).rejects.toThrow("unsupported tool policy version 99");
+		expect(starts).toBe(0);
 	});
 });

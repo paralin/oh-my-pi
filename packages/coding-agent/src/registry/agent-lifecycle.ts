@@ -25,6 +25,7 @@ import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import {
+	type AgentPeer,
 	type AgentRef,
 	type AgentRefExpectation,
 	AgentRegistry,
@@ -33,7 +34,7 @@ import {
 	type RegistryEvent,
 } from "./agent-registry";
 
-export type AgentReviver = (expected: AgentRef) => Promise<AgentSession>;
+export type AgentReviver = (expected: AgentRef) => Promise<AgentPeer>;
 
 const AGENT_RELEASE_GRACE_MS = 5000;
 
@@ -57,7 +58,7 @@ export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentRe
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
-	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
+	/** Recreates a live peer from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
 	revive?: AgentReviver;
 }
 
@@ -83,7 +84,7 @@ interface ParkInFlight {
 
 interface RevivingAgent {
 	ref: AgentRef;
-	promise: Promise<AgentSession>;
+	promise: Promise<AgentPeer>;
 }
 
 export class AgentLifecycleManager {
@@ -147,8 +148,8 @@ export class AgentLifecycleManager {
 	}
 
 	/**
-	 * Take ownership of a finished subagent. Caller has already set registry
-	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
+	 * Take ownership of a retained subagent. An idle ref arms its TTL timer;
+	 * a running ref waits for the next idle registry event before arming one.
 	 * When `expected` is given, the adoption is refused if the id no longer
 	 * resolves to that ref (or that ref's session).
 	 */
@@ -163,7 +164,7 @@ export class AgentLifecycleManager {
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
 		this.#adopted.set(id, adopted);
-		this.#armTimer(id, adopted);
+		if (ref.status === "idle") this.#armTimer(id, adopted);
 	}
 
 	/** True if the id is adopted (parked or live) — and, when `expected` is given, still bound to that ref. */
@@ -280,7 +281,7 @@ export class AgentLifecycleManager {
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
-	async ensureLive(id: string): Promise<AgentSession> {
+	async ensureLive(id: string): Promise<AgentPeer> {
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -328,7 +329,7 @@ export class AgentLifecycleManager {
 	 * adopt it so the agent rejoins the normal idle↔parked lifecycle. Throws
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
-	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSession> {
+	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentPeer> {
 		let adoption = this.#adopted.get(id);
 		let revive = adoption?.ref === ref ? adoption.revive : undefined;
 		let coldAdopted = false;
@@ -449,7 +450,7 @@ export class AgentLifecycleManager {
 		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 
-	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {
+	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentPeer> {
 		const session = await revive(ref);
 		if (this.#disposed) {
 			// The owning lifecycle tore down while the reviver was in flight; dispose

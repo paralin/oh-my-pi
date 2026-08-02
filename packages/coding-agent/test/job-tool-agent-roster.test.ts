@@ -239,6 +239,50 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 		expect(registry.get("Runner")).toBeUndefined();
 	});
 
+	test("cancel cannot release a replacement registered while the old peer aborts", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const replacement = fakeSession();
+		let oldAborts = 0;
+		let oldDisposes = 0;
+		const oldSession = {
+			abort: async () => {
+				oldAborts++;
+				oldDisposes++;
+				registry.register({
+					id: "Runner",
+					displayName: "Replacement",
+					kind: "sub",
+					parentId: "Main",
+					session: replacement.session as never,
+					status: "running",
+				});
+			},
+			dispose: async () => {
+				oldDisposes++;
+			},
+		};
+		const oldRef = registry.register({
+			id: "Runner",
+			displayName: "Runner",
+			kind: "sub",
+			parentId: "Main",
+			session: oldSession as never,
+			status: "running",
+		});
+		lifecycle.adopt("Runner", { idleTtlMs: 0 });
+		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+
+		const result = await tool.execute("call", { op: "cancel", ids: ["Runner"] });
+
+		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Runner", status: "cancelled" }]);
+		expect(oldAborts).toBe(1);
+		expect(oldDisposes).toBe(1);
+		expect(registry.get("Runner")).not.toBe(oldRef);
+		expect(registry.get("Runner")?.session).toBe(replacement.session as never);
+		expect(replacement.disposeCalls()).toBe(0);
+	});
+
 	test("cancel refuses an agent spawned by someone else", async () => {
 		const registry = new AgentRegistry();
 		const lifecycle = new AgentLifecycleManager(registry);

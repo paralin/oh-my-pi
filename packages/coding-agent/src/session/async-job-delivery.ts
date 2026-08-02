@@ -50,7 +50,9 @@ export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
 };
 
-export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): CustomMessage<AsyncResultDetails> | null {
+export function buildAsyncResultBatchMessage(
+	entries: AsyncResultEntry[],
+): (CustomMessage<AsyncResultDetails> & { content: string }) | null {
 	if (entries.length === 0) return null;
 	const jobs = entries.map(entry => ({
 		jobId: entry.jobId,

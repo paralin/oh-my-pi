@@ -1,4 +1,6 @@
 import * as fs from "node:fs/promises";
+
+import { AsyncJobManager } from "../async";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -10,6 +12,8 @@ import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
 import type { EventBus } from "../utils/event-bus";
+import { createClaudeCodePeerReviver } from "./claude-code-runtime";
+import type { StartClaudeCodeQuery } from "./claude-code-sdk";
 import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
 import type { AgentDefinition } from "./types";
 
@@ -32,6 +36,8 @@ export interface PersistedSubagentReviveContext {
 	 * the same lifecycle/progress frames a live run does.
 	 */
 	eventBus?: EventBus;
+	/** Injection seam for deterministic Claude Code revival tests. */
+	startClaudeCodeQuery?: StartClaudeCodeQuery;
 }
 
 /**
@@ -58,15 +64,8 @@ export function createPersistedSubagentReviverFactory(
 		const sessionFile = ref.sessionFile;
 		if (!sessionFile) return undefined;
 		const peek = await SessionManager.peekSessionInit(sessionFile);
-		// No persisted contract (pre-session_init file) or the recorded workspace
-		// is gone (isolated/merged worktree, moved dir): leave it transcript-only
-		// (history://) rather than resurrect a wrong or broken session.
+		// Files without a persisted contract remain transcript-only.
 		if (!peek?.init) return undefined;
-		try {
-			await fs.stat(peek.cwd);
-		} catch {
-			return undefined;
-		}
 		const init = peek.init;
 		// taskDepth drives real capability gating (task-spawn allowance, memory
 		// startup, …); derive it from the persisted parent chain rather than
@@ -78,6 +77,64 @@ export function createPersistedSubagentReviverFactory(
 			seen.add(parentId);
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
+		}
+		if (init.runtime?.kind === "claude-code") {
+			const spawns: AgentDefinition["spawns"] =
+				init.spawns === "*"
+					? "*"
+					: (init.spawns
+							?.split(",")
+							.map(name => name.trim())
+							.filter(Boolean) ?? []);
+			const wakeAgent: AgentDefinition = {
+				name: ref.displayName,
+				description: "",
+				systemPrompt: init.systemPrompt,
+				tools: init.tools,
+				spawns,
+				readSummarize: init.readSummarize,
+				source: "user",
+			};
+			return createClaudeCodePeerReviver({
+				options: {
+					cwd: init.runtime.cwd,
+					agent: wakeAgent,
+					task: init.task,
+					assignment: init.task,
+					index: 0,
+					id: ref.id,
+					parentAgentId: ref.parentId ?? undefined,
+					taskDepth,
+					modelOverride: `claude-code/${init.runtime.model}${init.runtime.effort ? `:${init.runtime.effort}` : ""}`,
+					outputSchema: init.outputSchema,
+					outputSchemaMode: init.outputSchemaMode,
+					restrictToolNames: init.restrictToolNames,
+					enableIrc: true,
+					enableLsp: ctx.enableLsp,
+					enableMCP: true,
+					sessionFile,
+					persistArtifacts: true,
+					artifactsDir: sessionFile.slice(0, -6),
+					eventBus: ctx.eventBus,
+					authStorage: ctx.authStorage,
+					modelRegistry: ctx.modelRegistry,
+					settings: ctx.settings,
+					asyncJobManager: AsyncJobManager.instance(),
+					mcpManager: MCPManager.instance(),
+					parentArtifactManager: ctx.session.sessionManager.getArtifactManager() ?? undefined,
+					keepAlive: true,
+				},
+				nativeSession: init.runtime,
+				appendSystemPrompt: init.systemPrompt,
+				effort: init.runtime.effort,
+				startQuery: ctx.startClaudeCodeQuery,
+			});
+		}
+		// Native Pi sessions still revive from the OMP JSONL writer.
+		try {
+			await fs.stat(peek.cwd);
+		} catch {
+			return undefined;
 		}
 		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
 		// advisor-role model, anything else = the explicit pattern stamped onto

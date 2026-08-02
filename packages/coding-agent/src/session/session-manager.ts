@@ -2144,6 +2144,7 @@ export class SessionManager {
 		spawns?: string;
 		readSummarize?: boolean;
 		advisor?: string;
+		runtime?: SessionInitEntry["runtime"];
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
@@ -2639,6 +2640,7 @@ export class SessionManager {
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
+			runtime?: SessionInitEntry["runtime"];
 		} | null;
 	} | null> {
 		let loaded: FileEntry[];
@@ -2663,6 +2665,7 @@ export class SessionManager {
 			spawns?: string;
 			readSummarize?: boolean;
 			advisor?: string;
+			runtime?: SessionInitEntry["runtime"];
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
 			const entry = loaded[index];
@@ -2680,6 +2683,7 @@ export class SessionManager {
 					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 					advisor: entry.advisor,
+					runtime: entry.runtime,
 				};
 				break;
 			}

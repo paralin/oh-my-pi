@@ -1072,19 +1072,25 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
 			options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
+			const candidateRef = AgentRegistry.global().get(agentId);
+			const transcriptAvailable = await hasResolvableTranscript(agentId);
+			const ref = AgentRegistry.global().get(agentId) === candidateRef ? candidateRef : undefined;
+			const resumable = ref?.status === "idle" || ref?.status === "parked";
+			if (!resumable && !transcriptAvailable) return "";
+
+			const transcript = transcriptAvailable ? `transcript at history://${agentId}` : "transcript unavailable";
 			if (aborted) {
-				const ref = AgentRegistry.global().get(agentId);
-				const transcript = (await hasResolvableTranscript(agentId))
-					? `transcript at history://${agentId}`
-					: "transcript unavailable";
-				if (ref?.status === "idle" || ref?.status === "parked") {
+				if (resumable) {
 					const followUp = ircEnabled ? "message it via `hub` to resume; " : "";
 					return `\n\n${agentId} was stopped but is still resumable — ${followUp}${transcript}`;
 				}
 				return `\n\n${agentId} was aborted — ${transcript}`;
 			}
-			const followUp = ircEnabled ? "message it via `hub` to follow up; " : "";
-			return `\n\n${agentId} is now idle — ${followUp}transcript at history://${agentId}`;
+			if (resumable) {
+				const followUp = ircEnabled ? "message it via `hub` to follow up; " : "";
+				return `\n\n${agentId} is now idle — ${followUp}${transcript}`;
+			}
+			return `\n\nTranscript available at history://${agentId}`;
 		};
 		return manager.register(
 			"task",
@@ -1211,7 +1217,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = await buildFollowUpHint(false);
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1428,6 +1434,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				detached,
+				keepAlive: this.session.keepAliveSubagents,
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
 				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),

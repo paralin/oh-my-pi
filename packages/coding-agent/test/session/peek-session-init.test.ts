@@ -53,6 +53,14 @@ describe("SessionManager.peekSessionInit", () => {
 			spawns: "task",
 			readSummarize: false,
 			restrictToolNames: true,
+			runtime: {
+				kind: "claude-code",
+				sessionId: "claude-session",
+				cwd,
+				transcriptPath: path.join(cwd, "claude-session.jsonl"),
+				model: "claude-opus-5",
+				toolPolicyVersion: 1,
+			},
 		});
 		// Flush buffered entries (header + inits) so the lock-free peek can read them off disk.
 		manager.appendMessage(assistantMessage("flush"));
@@ -65,6 +73,26 @@ describe("SessionManager.peekSessionInit", () => {
 		expect(peek?.init?.spawns).toBe("task");
 		expect(peek?.init?.readSummarize).toBe(false);
 		expect(peek?.init?.restrictToolNames).toBe(true);
+		expect(peek?.init?.runtime).toEqual({
+			kind: "claude-code",
+			sessionId: "claude-session",
+			cwd,
+			transcriptPath: path.join(cwd, "claude-session.jsonl"),
+			model: "claude-opus-5",
+			toolPolicyVersion: 1,
+		});
+	});
+
+	it("treats session_init entries without runtime metadata as native Pi sessions", async () => {
+		const cwd = makeTempDir("@pi-peek-native-");
+		const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
+		const sessionFile = manager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file path");
+		manager.appendSessionInit({ systemPrompt: "native", task: "task", tools: ["read"], spawns: "" });
+		await manager.flush();
+
+		const peek = await SessionManager.peekSessionInit(sessionFile);
+		expect(peek?.init?.runtime).toBeUndefined();
 	});
 
 	it("returns init: null for a session file with no session_init (a main/legacy session)", async () => {

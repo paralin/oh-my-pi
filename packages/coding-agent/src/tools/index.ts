@@ -231,6 +231,8 @@ export interface ToolSession {
 	restrictToolNames?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Override whether Task children remain addressable after their run settles. */
+	keepAliveSubagents?: boolean;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
 	getEvalSessionId?: () => string | null;
 	/** Get session file */
