@@ -9,13 +9,26 @@
  * path is untouched.
  */
 
+import { Effort } from "@oh-my-pi/pi-ai";
+import { parseEffort } from "../thinking";
+
 /** Selector prefix that routes a subagent to the Claude Agent SDK runtime. */
 export const CLAUDE_CODE_RUNTIME_PREFIX = "claude-code/";
 
+/** Provider effort values accepted by the Claude Agent SDK. */
+export const CLAUDE_CODE_EFFORTS = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max] as const;
+export type ClaudeCodeEffort = (typeof CLAUDE_CODE_EFFORTS)[number];
+
+function isClaudeCodeEffort(effort: Effort | undefined): effort is ClaudeCodeEffort {
+	return effort !== undefined && (CLAUDE_CODE_EFFORTS as readonly Effort[]).includes(effort);
+}
+
 /** A resolved Claude runtime selection. */
 export interface ClaudeCodeSelection {
-	/** Selector suffix, passed to the SDK as its model. */
+	/** Selector suffix without its optional effort, passed to the SDK as its model. */
 	model: string;
+	/** Explicit provider effort parsed from the selector suffix. */
+	effort?: ClaudeCodeEffort;
 }
 
 /**
@@ -38,9 +51,16 @@ export function resolveClaudeCodeSelection(patterns: string | string[] | undefin
 				"Use only claude-code/ selectors or only Pi selectors.",
 		);
 	}
-	const model = claudeSelectors[0].slice(CLAUDE_CODE_RUNTIME_PREFIX.length).trim();
+	const rawModel = claudeSelectors[0].slice(CLAUDE_CODE_RUNTIME_PREFIX.length).trim();
+	if (!rawModel) {
+		throw new Error(`Claude runtime selector "${claudeSelectors[0]}" names no model.`);
+	}
+	const colon = rawModel.lastIndexOf(":");
+	const parsedEffort = colon > 0 ? parseEffort(rawModel.slice(colon + 1)) : undefined;
+	const effort = isClaudeCodeEffort(parsedEffort) ? parsedEffort : undefined;
+	const model = effort ? rawModel.slice(0, colon).trim() : rawModel;
 	if (!model) {
 		throw new Error(`Claude runtime selector "${claudeSelectors[0]}" names no model.`);
 	}
-	return { model };
+	return { model, ...(effort ? { effort } : {}) };
 }

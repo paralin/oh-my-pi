@@ -587,7 +587,8 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 		const claudeCode = policy.claudeCode;
 		const runSubagent = claudeCode
-			? (options: ExecutorOptions) => runClaudeCodeSubprocess({ options, model: claudeCode.model })
+			? (options: ExecutorOptions) =>
+					runClaudeCodeSubprocess({ options, model: claudeCode.model, effort: claudeCode.effort })
 			: runSubprocess;
 		const result = !isolationContext
 			? await runSubagent(baseOptions)

@@ -104,7 +104,7 @@ export function createPersistedSubagentReviverFactory(
 					id: ref.id,
 					parentAgentId: ref.parentId ?? undefined,
 					taskDepth,
-					modelOverride: `claude-code/${init.runtime.model}`,
+					modelOverride: `claude-code/${init.runtime.model}${init.runtime.effort ? `:${init.runtime.effort}` : ""}`,
 					outputSchema: init.outputSchema,
 					outputSchemaMode: init.outputSchemaMode,
 					restrictToolNames: init.restrictToolNames,
@@ -125,6 +125,7 @@ export function createPersistedSubagentReviverFactory(
 				},
 				nativeSession: init.runtime,
 				appendSystemPrompt: init.systemPrompt,
+				effort: init.runtime.effort,
 				startQuery: ctx.startClaudeCodeQuery,
 			});
 		}

@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Effort } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -20,6 +21,7 @@ import type {
 	ClaudeCodeQueryRequest,
 	StartClaudeCodeQuery,
 } from "@oh-my-pi/pi-coding-agent/task/claude-code-sdk";
+import type { ClaudeCodeEffort } from "@oh-my-pi/pi-coding-agent/task/claude-code-selector";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -102,7 +104,7 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean):
 
 async function createClaudePersistedSession(
 	cwd: string,
-	options: { transcript?: boolean; toolPolicyVersion?: number; runtimeCwd?: string } = {},
+	options: { transcript?: boolean; toolPolicyVersion?: number; runtimeCwd?: string; effort?: ClaudeCodeEffort } = {},
 ): Promise<{ sessionFile: string; transcriptPath: string }> {
 	const sessionId = "native-session";
 	const runtimeCwd = options.runtimeCwd ?? cwd;
@@ -136,6 +138,7 @@ async function createClaudePersistedSession(
 			cwd: runtimeCwd,
 			transcriptPath,
 			model: "claude-opus-5",
+			...(options.effort ? { effort: options.effort } : {}),
 			toolPolicyVersion: options.toolPolicyVersion ?? 1,
 		},
 	});
@@ -294,7 +297,7 @@ describe("persisted subagent revival", () => {
 	});
 	it("cold-revives Claude by session id and routes the next IRC turn into the resumed query", async () => {
 		const cwd = makeTempDir("@pi-claude-revive-");
-		const { sessionFile, transcriptPath } = await createClaudePersistedSession(cwd);
+		const { sessionFile, transcriptPath } = await createClaudePersistedSession(cwd, { effort: Effort.XHigh });
 		await fs.stat(transcriptPath);
 		const promptReceived = Promise.withResolvers<string>();
 		const emitResult = Promise.withResolvers<void>();
@@ -351,6 +354,7 @@ describe("persisted subagent revival", () => {
 			resume: "native-session",
 			cwd,
 			model: "claude-opus-5",
+			effort: Effort.XHigh,
 		});
 		expect(await promptReceived.promise).toContain("continue the native task");
 		emitResult.resolve();

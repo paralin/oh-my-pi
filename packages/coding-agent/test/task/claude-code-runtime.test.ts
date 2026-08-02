@@ -7,6 +7,7 @@ import * as claudeAgentSdk from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { Effort } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
@@ -479,6 +480,18 @@ describe("claude code runtime", () => {
 		});
 
 		expect(queryLog.requests[0]?.effort).toBe("max");
+	});
+
+	it("passes an explicit runtime-selector effort to the SDK", async () => {
+		const queryLog = log();
+		await runClaudeCodeSubprocess({
+			options: executorOptions(),
+			model: "claude-opus-5",
+			effort: Effort.XHigh,
+			startQuery: fakeQuery([{ yieldArgs: { result: { data: { ok: true } } } }], queryLog),
+		});
+
+		expect(queryLog.requests[0]?.effort).toBe("xhigh");
 	});
 
 	it("clamps requested effort to task.maxEffort", async () => {
@@ -1039,6 +1052,7 @@ describe("claude code runtime", () => {
 					}),
 				}),
 				model: "claude-opus-5",
+				effort: Effort.XHigh,
 				startQuery: live.startQuery,
 			});
 
@@ -1059,6 +1073,7 @@ describe("claude code runtime", () => {
 					cwd: root,
 					transcriptPath: claudeTranscriptPath(root, "retained-session"),
 					model: "claude-opus-5",
+					effort: Effort.XHigh,
 					toolPolicyVersion: 1,
 				},
 			});
@@ -1654,6 +1669,26 @@ describe("claude code runtime selection", () => {
 		expect(claude).toHaveBeenCalledTimes(2);
 		expect(piRun.policy.claudeCode).toBeUndefined();
 		await discardArtifacts(piRun);
+	});
+
+	it("expands a configured role alias with an exact Claude SDK effort", async () => {
+		mockDiscovery();
+		const { claude, pi } = dispatchSpies();
+
+		const run = await runStructuredSubagent(
+			request({
+				session: session({
+					"task.agentModelOverrides": { worker: "@opus" },
+					modelRoles: { opus: "claude-code/claude-opus-5:xhigh" },
+				}),
+			}),
+		);
+
+		expect(claude).toHaveBeenCalledTimes(1);
+		expect(claude.mock.calls[0][0]).toMatchObject({ model: "claude-opus-5", effort: Effort.XHigh });
+		expect(run.policy.claudeCode).toEqual({ model: "claude-opus-5", effort: Effort.XHigh });
+		expect(pi).not.toHaveBeenCalled();
+		await discardArtifacts(run);
 	});
 
 	it("selects the Claude runtime from agent frontmatter and keeps the existing override precedence", async () => {
