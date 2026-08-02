@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RuntimeApiKeyChainCredential } from "@oh-my-pi/pi-ai";
+import type { AuthStorage } from "../session/auth-storage";
 
 export const CODEX_HOME_ENV = "CODEX_HOME";
 export const OPENAI_CODEX_OAUTH_TOKEN_ENV = "OPENAI_CODEX_OAUTH_TOKEN";
@@ -42,6 +43,17 @@ export function toRuntimeCodexHomeChain(credentials: CodexHomeCredential[]): Run
 		email: credential.email,
 		usageType: "oauth",
 	}));
+}
+
+/** Apply selected Codex-home credentials to the process's runtime auth chain. */
+export function applyCodexHomeAuthToStorage(
+	authStorage: Pick<AuthStorage, "setRuntimeApiKeyChain">,
+	options: ApplyCodexHomeAuthChainOptions,
+	env: NodeJS.ProcessEnv = process.env,
+): CodexHomeAuthResult {
+	const result = applyCodexHomeAuthChain(options, env);
+	authStorage.setRuntimeApiKeyChain("openai-codex", toRuntimeCodexHomeChain(result.credentials));
+	return result;
 }
 
 function expandHome(input: string): string {
