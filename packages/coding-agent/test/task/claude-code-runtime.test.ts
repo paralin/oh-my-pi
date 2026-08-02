@@ -5,6 +5,7 @@ import * as claudeAgentSdk from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -139,9 +140,7 @@ function productionMcpQuery(yieldArgs: Record<string, unknown>[], queryLog: Quer
 			await client.connect(clientTransport);
 			try {
 				for (const args of yieldArgs) {
-					const result = CallToolResultSchema.parse(
-						await client.callTool({ name: "yield", arguments: args }),
-					);
+					const result = CallToolResultSchema.parse(await client.callTool({ name: "yield", arguments: args }));
 					queryLog.toolResults.push({
 						content: result.content
 							.filter(part => part.type === "text")
@@ -249,7 +248,7 @@ describe("claude code runtime", () => {
 		expect(started.cwd).toBe("/tmp");
 		expect(started.prompt).toBe("Inspect the target.");
 		expect(started.appendSystemPrompt).toBe(
-			`${AGENT.systemPrompt}\n\nYou MUST complete this task directly. Delegation and peer messaging are unavailable. You MUST terminate through the OMP \`yield\` tool.`,
+			`${AGENT.systemPrompt}\n\nUse OMP \`task\` for delegation and OMP \`hub\` for peer messaging or task-job custody. Native Claude coordination is unavailable. You MUST terminate through the OMP \`yield\` tool.`,
 		);
 		expect(started.disallowedTools).toEqual(["Agent", "Task", "SendMessage"]);
 		expect(CLAUDE_CODE_DENIED_TOOLS).toEqual(["Agent", "Task", "SendMessage"]);
@@ -258,9 +257,9 @@ describe("claude code runtime", () => {
 		expect(started.disallowedTools).not.toContain("Edit");
 		expect(started.disallowedTools).not.toContain("Bash");
 		expect(started.mcpServer.name).toBe(OMP_MCP_SERVER_NAME);
-		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["yield"]);
-		const yieldDescription = started.mcpServer.tools[0]?.description ?? "";
-		expect(yieldDescription).toContain('Use `result: { data: <your output> }` for success');
+		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["task", "hub", "yield"]);
+		const yieldDescription = started.mcpServer.tools.find(tool => tool.name === "yield")?.description ?? "";
+		expect(yieldDescription).toContain("Use `result: { data: <your output> }` for success");
 		expect(yieldDescription).toContain('`result: { error: "message" }` for failure');
 		expect(yieldDescription).not.toContain("Parameters:");
 		expect(result.resolvedModel).toBe("claude-opus-4-5");
@@ -292,7 +291,7 @@ describe("claude code runtime", () => {
 		expect(started.tools).not.toContain("Edit");
 		expect(started.tools).not.toContain("Write");
 		expect(started.disallowedTools).toEqual(["Agent", "Task", "SendMessage"]);
-		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["yield"]);
+		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["task", "hub", "yield"]);
 	});
 
 	it("keeps OMP coordination tools denied inside an explicit allowlist", async () => {
@@ -308,7 +307,7 @@ describe("claude code runtime", () => {
 		const started = queryLog.requests[0];
 		expect(started.tools).toEqual([]);
 		expect(started.disallowedTools).toEqual(["Agent", "Task", "SendMessage"]);
-		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["yield"]);
+		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["task", "hub", "yield"]);
 	});
 
 	it("rejects unsupported restricted OMP tools before query construction", async () => {
@@ -589,24 +588,24 @@ describe("claude code runtime", () => {
 					{
 						kind: "init",
 						model: "claude-opus-5",
-						tools: ["Read", "Edit", "mcp__omp__yield"],
+						tools: ["Read", "Edit", "mcp__omp__task", "mcp__omp__hub", "mcp__omp__yield"],
 						version: "2.1.220",
 					},
-					{ kind: "result", isError: false, text: "done", tokens: 1, requests: 1 },
+					{ yieldArgs: { result: { data: { ok: true } } } },
 				],
 				queryLog,
 			),
 			onEvidence: evidence => observed.push(evidence),
 		});
 
-		expect(result.resolvedModel).toBe("claude-opus-5");
+		expect(result).toMatchObject({ exitCode: 0, resolvedModel: "claude-opus-5" });
 		expect(observed).toEqual([
 			{
 				agentId: "Worker",
 				init: {
 					kind: "init",
 					model: "claude-opus-5",
-					tools: ["Read", "Edit", "mcp__omp__yield"],
+					tools: ["Read", "Edit", "mcp__omp__task", "mcp__omp__hub", "mcp__omp__yield"],
 					version: "2.1.220",
 				},
 				queryClosed: true,
@@ -615,6 +614,75 @@ describe("claude code runtime", () => {
 		]);
 		expect(queryLog.closes).toBe(1);
 		expect(AgentRegistry.global().get("Worker")).toBeUndefined();
+	});
+
+	it("fails startup when init exposes denied tools or omits required OMP tools", async () => {
+		const queryLog = log();
+		const result = await runClaudeCodeSubprocess({
+			options: executorOptions(),
+			model: "claude-opus-5",
+			startQuery: fakeQuery(
+				[
+					{
+						kind: "init",
+						model: "claude-opus-5",
+						tools: ["Read", "Agent", "mcp__omp__yield"],
+						version: "2.1.220",
+					},
+				],
+				queryLog,
+			),
+		});
+
+		expect(result.exitCode).toBe(1);
+		expect(result.stderr).toContain("Claude Code exposed denied tools: Agent.");
+		expect(result.stderr).toContain("Claude Code omitted required OMP tools: task, hub.");
+		expect(queryLog.closes).toBe(1);
+		expect(AgentRegistry.global().get("Worker")).toBeUndefined();
+	});
+
+	it("cancels and awaits surviving owner jobs before unregistering the Claude peer", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const started = Promise.withResolvers<void>();
+		const stopped = Promise.withResolvers<void>();
+		let jobId = "";
+		const startQuery: StartClaudeCodeQuery = async request => {
+			jobId = manager.register(
+				"task",
+				"unfinished nested task",
+				async ({ signal }) => {
+					started.resolve();
+					if (!signal.aborted) {
+						await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+					}
+					stopped.resolve();
+					return "cancelled";
+				},
+				{ ownerId: "Worker" },
+			);
+			async function* events(): AsyncGenerator<ClaudeCodeEvent> {
+				await started.promise;
+				const yieldTool = request.mcpServer.tools.find(tool => tool.name === "yield");
+				if (!yieldTool) throw new Error("Yield MCP tool missing");
+				await yieldTool.handler({ result: { data: { ok: true } } });
+			}
+			return { events: events(), close: () => {} };
+		};
+
+		try {
+			const result = await runClaudeCodeSubprocess({
+				options: executorOptions({ asyncJobManager: manager }),
+				model: "claude-opus-5",
+				startQuery,
+			});
+
+			expect(result.exitCode).toBe(0);
+			await stopped.promise;
+			expect(manager.getJob(jobId)?.status).toBe("cancelled");
+			expect(AgentRegistry.global().get("Worker")).toBeUndefined();
+		} finally {
+			await manager.dispose({ timeoutMs: 1_000 });
+		}
 	});
 
 	it("emits tool and assistant activity through Task progress channels", async () => {

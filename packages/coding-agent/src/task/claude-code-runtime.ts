@@ -1,38 +1,33 @@
 /**
  * Claude Agent SDK task runtime.
  *
- * Runs one synchronous `claude-code/{model-name}` task, exposes OMP Yield
- * through an in-process MCP tool, and returns the established Task result.
- * Claude Code keeps its coding tools while OMP supplies coordination.
+ * Runs one synchronous `claude-code/{model-name}` task, exposes OMP
+ * coordination through an in-process MCP server, and returns the established
+ * Task result. Claude Code keeps its coding tools while OMP owns coordination.
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import claudeCodeSubagentPrompt from "../prompts/system/claude-code-subagent.md" with { type: "text" };
-import claudeCodeYieldPrompt from "../prompts/tools/claude-code-yield.md" with { type: "text" };
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
 import { truncateTail } from "../session/streaming-output";
 import { resolveTaskEffortForSupportedLevels } from "../thinking";
-import type { ToolSession } from "../tools";
-import { YieldTool } from "../tools/yield";
 import { ClaudeCodePeer } from "./claude-code-peer";
 import {
 	type ClaudeCodeEvent,
-	type ClaudeCodeMcpTool,
 	type ClaudeCodeQuery,
 	type ClaudeCodeQueryRequest,
-	type ClaudeCodeToolResult,
-	isClaudeCodeMcpObjectSchema,
 	type StartClaudeCodeQuery,
 	startClaudeCodeQuery,
 } from "./claude-code-sdk";
+import { CLAUDE_CODE_MCP_TOOL_NAMES, createClaudeCodeMcpTools } from "./claude-code-tools";
 import {
 	type ExecutorOptions,
 	finalizeSubprocessResult,
+	reapSubagentJobs,
 	SUBAGENT_WARNING_MISSING_YIELD_WITHOUT_REMINDERS,
 } from "./executor";
-import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
@@ -43,7 +38,7 @@ import {
 	type YieldItem,
 } from "./types";
 
-/** In-process MCP server name; Claude sees the yield tool as `mcp__omp__yield`. */
+/** In-process MCP server name; Claude sees its tools under `mcp__omp__*`. */
 export const OMP_MCP_SERVER_NAME = "omp";
 
 /**
@@ -130,72 +125,6 @@ export interface ClaudeCodeSubprocessRequest {
 	onEvidence?: (evidence: ClaudeCodeRuntimeEvidence) => void;
 }
 
-/** The session fields {@link YieldTool} reads, supplied without a Pi session. */
-function yieldToolSession(options: ExecutorOptions): ToolSession {
-	return {
-		cwd: options.cwd,
-		hasUI: false,
-		settings: options.settings ?? Settings.isolated(),
-		outputSchema: options.outputSchema,
-		outputSchemaMode: options.outputSchemaMode,
-		getSessionFile: () => null,
-		getSessionSpawns: () => null,
-	};
-}
-
-/** Text of an agent tool result, flattened for the MCP wire. */
-function toolResultContent(content: { type: string; text?: string }[]): { type: "text"; text: string }[] {
-	return content
-		.filter(part => part.type === "text" && part.text !== undefined)
-		.map(part => ({ type: "text" as const, text: part.text ?? "" }));
-}
-
-/**
- * Build the OMP yield MCP tool. The handler delegates to `yieldTool`, routes
- * its thrown retry guidance back to the model as a tool error, and reuses the
- * registered subprocess yield handler to extract the item and decide whether
- * the yield terminates the run.
- */
-function buildYieldMcpTool(
-	yieldTool: YieldTool,
-	yieldItems: YieldItem[],
-	onTerminalYield: () => void,
-): ClaudeCodeMcpTool {
-	const inputSchema = yieldTool.parameters;
-	if (!isClaudeCodeMcpObjectSchema(inputSchema)) {
-		throw new TypeError("OMP Yield parameters must be an object JSON Schema.");
-	}
-	const handler = subprocessToolRegistry.getHandler("yield");
-	return {
-		name: yieldTool.name,
-		description: prompt.render(claudeCodeYieldPrompt, {
-			description: yieldTool.description,
-		}),
-		inputSchema,
-		handler: async (args): Promise<ClaudeCodeToolResult> => {
-			const toolCallId = `yield-${yieldItems.length}`;
-			try {
-				const result = await yieldTool.execute(toolCallId, args);
-				const event = {
-					toolName: yieldTool.name,
-					toolCallId,
-					args,
-					result: { content: toolResultContent(result.content), details: result.details },
-				};
-				const item = handler?.extractData?.(event);
-				if (item) yieldItems.push(item);
-				if (handler?.shouldTerminate?.(event) ?? true) onTerminalYield();
-				return { content: toolResultContent(result.content) };
-			} catch (error) {
-				return {
-					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-					isError: true,
-				};
-			}
-		},
-	};
-}
-
 /** Resolve a stable task failure message. */
 function failureMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -247,7 +176,6 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		throw new Error(`Agent "${options.id}" is already owned by another session generation.`);
 	}
 	const yieldItems: YieldItem[] = [];
-	const yieldTool = new YieldTool(yieldToolSession(options));
 	const progress: AgentProgress = {
 		index: options.index,
 		id: options.id,
@@ -354,6 +282,13 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 			stderr = runtimeLimitExceeded ? runtimeLimitReason : (parentAbortReason ?? "Subagent cancelled");
 		} else {
 			try {
+				const mcpTools = await createClaudeCodeMcpTools({
+					executor: options,
+					registry,
+					signal: abortController.signal,
+					yieldItems,
+					onTerminalYield: stopAfterTerminalYield,
+				});
 				query = await startQuery({
 					prompt: options.task,
 					model,
@@ -375,7 +310,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					allowDangerouslySkipPermissions: CLAUDE_CODE_SKIP_PERMISSIONS,
 					mcpServer: {
 						name: OMP_MCP_SERVER_NAME,
-						tools: [buildYieldMcpTool(yieldTool, yieldItems, stopAfterTerminalYield)],
+						tools: mcpTools,
 					},
 					abortController,
 				});
@@ -409,6 +344,20 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 				for await (const event of query.events) {
 					if (event.kind === "init") {
 						init = event;
+						const denied = CLAUDE_CODE_DENIED_TOOLS.filter(name => event.tools.includes(name));
+						const missing = CLAUDE_CODE_MCP_TOOL_NAMES.filter(
+							name => !event.tools.includes(`mcp__${OMP_MCP_SERVER_NAME}__${name}`),
+						);
+						if (denied.length > 0 || missing.length > 0) {
+							exitCode = 1;
+							stderr = [
+								denied.length > 0 ? `Claude Code exposed denied tools: ${denied.join(", ")}.` : "",
+								missing.length > 0 ? `Claude Code omitted required OMP tools: ${missing.join(", ")}.` : "",
+							]
+								.filter(Boolean)
+								.join("\n");
+							break;
+						}
 						continue;
 					}
 					if (event.kind === "tool-progress") {
@@ -481,6 +430,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 			exitCode = 1;
 			stderr ||= failureMessage(error);
 		}
+		if (options.asyncJobManager) await reapSubagentJobs(options.asyncJobManager, options.id);
 		queryClosed = queryConstructed && peer.queryClosed;
 		if (peer.queryCloseFailure) {
 			queryCloseFailure = `Claude Code query close failed: ${failureMessage(peer.queryCloseFailure.error)}`;
