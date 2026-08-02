@@ -205,7 +205,7 @@ function unquoteGitDiffPath(rawPath: string): string {
 			value = value.slice(1, -1);
 		}
 	}
-	return value.replace(/^[ab]\//, "");
+	return value.replace(/^[12abciow]\//, "");
 }
 
 function parseDiffGitLinePaths(line: string): string[] {

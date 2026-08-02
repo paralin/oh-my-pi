@@ -37,9 +37,9 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry } from "../registry/agent-registry";
+import { type AgentPeer, AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
-import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
+import { AgentSession, type AgentSessionEvent, type Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
@@ -413,6 +413,8 @@ export interface ExecutorOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	/** Scoped job owner inherited by nested Task and Hub tools. */
+	asyncJobManager?: AsyncJobManager;
 	/**
 	 * Parent session's live per-family service tiers, the source of truth for a
 	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
@@ -455,6 +457,14 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+}
+
+/** Cancel and await every asynchronous job owned by a settling subagent run. */
+export async function reapSubagentJobs(manager: AsyncJobManager, id: string): Promise<void> {
+	manager.cancelAll({ ownerId: id });
+	while (!(await manager.waitForOwnerJobs(id, { timeoutMs: 10_000 }))) {
+		logger.warn("Subagent async jobs still settling; delaying teardown until process exit", { id });
+	}
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -509,7 +519,7 @@ function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { 
 	return { data: candidate };
 }
 
-interface FinalizeSubprocessOutputArgs {
+export interface FinalizeSubprocessOutputArgs {
 	rawOutput: string;
 	exitCode: number;
 	stderr: string;
@@ -520,9 +530,13 @@ interface FinalizeSubprocessOutputArgs {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	lastAssistantText?: string;
+	/** Require an explicit Yield even when the terminal text matches the schema. */
+	requireYield?: boolean;
+	/** Missing-Yield warning for runtimes with a different reminder policy. */
+	missingYieldWarning?: string;
 }
 
-interface FinalizeSubprocessOutputResult {
+export interface FinalizeSubprocessOutputResult {
 	rawOutput: string;
 	exitCode: number;
 	stderr: string;
@@ -535,6 +549,8 @@ export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
 export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yield with null data.";
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
+export const SUBAGENT_WARNING_MISSING_YIELD_WITHOUT_REMINDERS =
+	"SYSTEM WARNING: Subagent exited without calling yield tool.";
 
 /** Build a schema_violation outcome — surfaced as a non-zero exit so callers treat it as a failure. */
 function buildSchemaViolationOutcome(
@@ -563,7 +579,7 @@ function buildSchemaViolationOutcome(
 
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
-	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText } = args;
+	const { yieldItems, doneAborted, signalAborted, outputSchema, lastAssistantText, requireYield = false } = args;
 	const mode = args.outputSchemaMode ?? "permissive";
 	const source = args.outputSchemaSource ?? (outputSchema === undefined ? "none" : "session");
 	const includeStructuredOutput = source !== "none";
@@ -642,7 +658,7 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			}
 		}
 	} else {
-		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted;
+		const allowFallback = exitCode === 0 && !doneAborted && !signalAborted && !requireYield;
 		const { normalized: normalizedSchema, error: schemaError } = normalizeSchema(outputSchema);
 		const hasOutputSchema = normalizedSchema !== undefined && !schemaError;
 		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, outputSchema) : null;
@@ -681,16 +697,61 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			exitCode = 0;
 			stderr = "";
 		} else if (exitCode === 0) {
+			const warning = args.missingYieldWarning ?? SUBAGENT_WARNING_MISSING_YIELD;
 			const hasRawOutput = rawOutput.trim().length > 0;
-			rawOutput = rawOutput ? `${SUBAGENT_WARNING_MISSING_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_MISSING_YIELD;
-			if (hasOutputSchema || !hasRawOutput) {
+			rawOutput = rawOutput ? `${warning}\n\n${rawOutput}` : warning;
+			if (requireYield || hasOutputSchema || !hasRawOutput) {
 				exitCode = 1;
-				stderr = SUBAGENT_WARNING_MISSING_YIELD;
+				stderr = warning;
 			}
 		}
 	}
 
 	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
+}
+
+export interface FinalizeSubprocessResultArgs extends FinalizeSubprocessOutputArgs {
+	doneAbortReason?: string;
+	signalAbortReason?: string;
+	runtimeLimitExceeded?: boolean;
+	runtimeLimitAbortReason?: string;
+	defaultAbortReason?: string;
+}
+
+export interface FinalizeSubprocessResult extends FinalizeSubprocessOutputResult {
+	aborted: boolean;
+	abortReason?: string;
+}
+
+/**
+ * Apply the shared Task abort precedence after shaping terminal output.
+ *
+ * A runtime timeout wins over a concurrent Yield. An aborted Yield wins over
+ * ordinary process completion. Parent cancellation applies only when no Yield
+ * completed, matching the established Pi task behavior.
+ */
+export function finalizeSubprocessResult(args: FinalizeSubprocessResultArgs): FinalizeSubprocessResult {
+	const finalized = finalizeSubprocessOutput(args);
+	const lastYield = args.yieldItems?.[args.yieldItems.length - 1];
+	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
+	const runtimeLimitExceeded = args.runtimeLimitExceeded === true;
+	const aborted =
+		runtimeLimitExceeded ||
+		finalized.abortedViaYield ||
+		(!finalized.hasYield && (args.doneAborted || args.signalAborted));
+	const abortReason = aborted
+		? runtimeLimitExceeded
+			? args.runtimeLimitAbortReason
+			: finalized.abortedViaYield
+				? yieldAbortReason
+				: (args.doneAbortReason ?? args.signalAbortReason ?? args.defaultAbortReason)
+		: undefined;
+	return {
+		...finalized,
+		exitCode: runtimeLimitExceeded && finalized.exitCode === 0 ? 1 : finalized.exitCode,
+		aborted,
+		abortReason,
+	};
 }
 
 /**
@@ -2057,8 +2118,8 @@ interface FinalizeRunArgs {
 }
 
 /**
- * Turn a settled run into a {@link SingleResult}: resolve the yield payload via
- * {@link finalizeSubprocessOutput}, salvage cancelled-run output, write the
+ * Turn a settled run into a {@link SingleResult}: shape its terminal result via
+ * {@link finalizeSubprocessResult}, salvage cancelled-run output, write the
  * `<id>.md` output artifact, flush final progress, and emit the lifecycle end
  * event.
  */
@@ -2074,9 +2135,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	// Breadcrumb the synchronous yield-payload shaping (O(rawOutput)) so a block
 	// here is attributed to this subagent rather than logged as "unknown".
 	pushLoopPhase(`subagent:${id}`);
-	let finalized: FinalizeSubprocessOutputResult;
+	let finalized: FinalizeSubprocessResult;
 	try {
-		finalized = finalizeSubprocessOutput({
+		const runtimeLimitExceeded = monitor.runtimeLimitExceeded();
+		finalized = finalizeSubprocessResult({
 			rawOutput,
 			exitCode,
 			stderr,
@@ -2087,6 +2149,11 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			outputSchemaMode: args.outputSchemaMode,
 			outputSchemaSource: args.outputSchemaSource,
 			lastAssistantText: monitor.lastAssistantSalvageText(),
+			doneAbortReason: done.abortReason,
+			signalAbortReason: signal?.aborted ? monitor.resolveSignalAbortReason() : undefined,
+			runtimeLimitExceeded,
+			runtimeLimitAbortReason: runtimeLimitExceeded ? monitor.resolveAbortReasonText() : undefined,
+			defaultAbortReason: done.aborted ? monitor.resolveAbortReasonText() : undefined,
 		});
 	} finally {
 		popLoopPhase();
@@ -2105,9 +2172,8 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 	) {
 		rawOutput = `[cancelled after ${progress.requests} req, ${progress.tokens} tok — last activity: "${formatSalvageSnippet(salvageText)}"]`;
 	}
-	const lastYield = yieldItems?.[yieldItems.length - 1];
-	const yieldAbortReason = lastYield?.status === "aborted" ? lastYield.error || "Subagent aborted task" : undefined;
-	const { abortedViaYield, hasYield } = finalized;
+	const wasAborted = finalized.aborted;
+	const finalAbortReason = finalized.abortReason;
 	const { content: truncatedOutput, truncated } = truncateTail(rawOutput, {
 		maxBytes: MAX_OUTPUT_BYTES,
 		maxLines: MAX_OUTPUT_LINES,
@@ -2130,25 +2196,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		}
 	}
 
-	// Update final progress. A wall-clock timeout always wins: if the runtime
-	// limit fired we report aborted/failed regardless of whether a yield landed
-	// while we were tearing the session down. The yield data is still surfaced
-	// to the caller via `progress.extractedToolData`, but the exit status must
-	// reflect the timeout so on-call doesn't mistake a stuck run for success.
-	const runtimeLimitExceeded = monitor.runtimeLimitExceeded();
-	if (runtimeLimitExceeded && exitCode === 0) {
-		exitCode = 1;
-	}
-	const wasAborted =
-		runtimeLimitExceeded || abortedViaYield || (!hasYield && (done.aborted || signal?.aborted || false));
-	const finalAbortReason = wasAborted
-		? runtimeLimitExceeded
-			? monitor.resolveAbortReasonText()
-			: abortedViaYield
-				? yieldAbortReason
-				: (done.abortReason ??
-					(signal?.aborted ? monitor.resolveSignalAbortReason() : monitor.resolveAbortReasonText()))
-		: undefined;
+	// Update final progress after output and abort precedence are resolved.
 	progress.status = wasAborted ? "aborted" : exitCode === 0 ? "completed" : "failed";
 	monitor.scheduleProgress(true);
 
@@ -2338,7 +2386,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
-	session: AgentSession;
+	session: AgentPeer;
 	aborted: boolean;
 	/** Which watchdog (if any) requested the abort; decides revivability. */
 	abortKind?: AbortReason;
@@ -2346,6 +2394,8 @@ export async function finalizeSubagentLifecycle(args: {
 	isolated: boolean;
 	agentIdleTtlMs: number;
 	reviveSession: AgentReviver | null;
+	/** False when a queued follow-up already owns the retained peer. */
+	markIdle?: boolean;
 }): Promise<void> {
 	const registry = AgentRegistry.global();
 	const ref = registry.get(args.id);
@@ -2397,7 +2447,7 @@ export async function finalizeSubagentLifecycle(args: {
 
 	// Keep-alive: finished and failed subagents both stay interrogable.
 	// The lifecycle manager owns idle-TTL parking + revival from here on.
-	if (!ref || !ownsRef || !registry.setStatus(args.id, "idle", ref)) {
+	if (!ref || !ownsRef || (args.markIdle !== false && !registry.setStatus(args.id, "idle", ref))) {
 		await disposeSession();
 		return;
 	}
@@ -2451,6 +2501,9 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const index = options.index ?? 0;
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
+	if (!(session instanceof AgentSession)) {
+		throw new Error(`Agent "${id}" runtime does not support Pi follow-up turns.`);
+	}
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -3232,12 +3285,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// within one interval — an unkillable process blocks here visibly
 			// (with periodic warnings) instead of silently racing teardown.
 			const jobManager = AsyncJobManager.instance();
-			if (jobManager) {
-				jobManager.cancelAll({ ownerId: id });
-				while (!(await jobManager.waitForOwnerJobs(id, { timeoutMs: 10_000 }))) {
-					logger.warn("Subagent async jobs still settling; delaying teardown until process exit", { id });
-				}
-			}
+			if (jobManager) await reapSubagentJobs(jobManager, id);
 		}
 
 		// Launch-latency breakdown (subagent invocation → first chat dispatch).
