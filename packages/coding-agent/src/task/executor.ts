@@ -413,6 +413,8 @@ export interface ExecutorOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	/** Scoped job owner inherited by nested Task and Hub tools. */
+	asyncJobManager?: AsyncJobManager;
 	/**
 	 * Parent session's live per-family service tiers, the source of truth for a
 	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
@@ -455,6 +457,14 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+}
+
+/** Cancel and await every asynchronous job owned by a settling subagent run. */
+export async function reapSubagentJobs(manager: AsyncJobManager, id: string): Promise<void> {
+	manager.cancelAll({ ownerId: id });
+	while (!(await manager.waitForOwnerJobs(id, { timeoutMs: 10_000 }))) {
+		logger.warn("Subagent async jobs still settling; delaying teardown until process exit", { id });
+	}
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -3273,12 +3283,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// within one interval — an unkillable process blocks here visibly
 			// (with periodic warnings) instead of silently racing teardown.
 			const jobManager = AsyncJobManager.instance();
-			if (jobManager) {
-				jobManager.cancelAll({ ownerId: id });
-				while (!(await jobManager.waitForOwnerJobs(id, { timeoutMs: 10_000 }))) {
-					logger.warn("Subagent async jobs still settling; delaying teardown until process exit", { id });
-				}
-			}
+			if (jobManager) await reapSubagentJobs(jobManager, id);
 		}
 
 		// Launch-latency breakdown (subagent invocation → first chat dispatch).
