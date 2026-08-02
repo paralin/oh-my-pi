@@ -11,7 +11,9 @@ import {
 } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
 import { acquireTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { Browser, Page, Target } from "puppeteer-core";
-import { CHROMIUM_AVAILABLE } from "./chromium-probe";
+
+// Dynamic import keeps Bun's test loader from reading the TLA export before it initializes.
+const { CHROMIUM_AVAILABLE } = await import("./chromium-probe");
 
 interface FakePageOptions {
 	url: string;

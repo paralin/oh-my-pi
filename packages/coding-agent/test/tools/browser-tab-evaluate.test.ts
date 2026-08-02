@@ -3,7 +3,9 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import { getTabsMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import { CHROMIUM_AVAILABLE } from "./chromium-probe";
+
+// Dynamic import keeps Bun's test loader from reading the TLA export before it initializes.
+const { CHROMIUM_AVAILABLE } = await import("./chromium-probe");
 
 function makeSession(): ToolSession {
 	return {
