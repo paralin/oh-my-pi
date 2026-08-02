@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import {
 	applyEligibleNestedPatches,
 	mergeIsolatedChanges,
@@ -100,7 +99,7 @@ describe("runIsolatedSubprocess", () => {
 			fellBack: false,
 			fallbackReason: null,
 		});
-		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result({ id: "PreserveBranchFailure" }));
+		const runSubagent = vi.fn(async () => result({ id: "PreserveBranchFailure" }));
 		vi.spyOn(worktreeModule, "commitToBranch").mockRejectedValue(new Error("remote: object corrupt"));
 		const captureSpy = vi.spyOn(worktreeModule, "captureDeltaPatch").mockResolvedValue({
 			rootPatch,
@@ -122,6 +121,7 @@ describe("runIsolatedSubprocess", () => {
 				index: 0,
 				id: "PreserveBranchFailure",
 			},
+			runSubagent,
 			context: { repoRoot, baseline },
 			preferredBackend: undefined,
 			agentId: "PreserveBranchFailure",
@@ -138,6 +138,66 @@ describe("runIsolatedSubprocess", () => {
 		expect(captureSpy).toHaveBeenCalledWith(isolationDir, baseline);
 		expect(deleteSpy).toHaveBeenCalledWith(repoRoot, "omp/task/PreserveBranchFailure");
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
+		expect(runSubagent).toHaveBeenCalledWith(expect.objectContaining({ worktree: isolationDir }));
+	});
+	it("preserves cancellation and cleans the isolation handle without capture", async () => {
+		const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-isolation-cancel-"));
+		tempRoots.push(repoRoot);
+		const isolationDir = path.join(repoRoot, "isolated");
+		vi.spyOn(worktreeModule, "ensureIsolation").mockResolvedValue({
+			mergedDir: isolationDir,
+			backend: natives.IsoBackendKind.Rcopy,
+			fellBack: false,
+			fallbackReason: null,
+		});
+		const capture = vi.spyOn(worktreeModule, "captureDeltaPatch");
+		const cleanup = vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
+		const cancelled = result({
+			id: "Cancelled",
+			exitCode: 1,
+			error: "cancelled",
+			aborted: true,
+			abortReason: "parent stopped",
+		});
+
+		const outcome = await runIsolatedSubprocess({
+			baseOptions: {
+				cwd: repoRoot,
+				agent: {
+					name: "task",
+					description: "Task agent",
+					systemPrompt: "test",
+					source: "bundled",
+				},
+				task: "Do work",
+				index: 0,
+				id: "Cancelled",
+			},
+			runSubagent: async () => cancelled,
+			context: {
+				repoRoot,
+				baseline: {
+					root: {
+						repoRoot,
+						headCommit: "base",
+						staged: "",
+						unstaged: "",
+						untracked: [],
+						untrackedPatch: "",
+					},
+					nested: [],
+				},
+			},
+			preferredBackend: undefined,
+			agentId: "Cancelled",
+			mergeMode: "patch",
+			artifactsDir: path.join(repoRoot, "artifacts"),
+			buildFailureResult: error => result({ exitCode: 1, error: String(error) }),
+		});
+
+		expect(outcome).toBe(cancelled);
+		expect(capture).not.toHaveBeenCalled();
+		expect(cleanup).toHaveBeenCalledTimes(1);
 	});
 });
 
