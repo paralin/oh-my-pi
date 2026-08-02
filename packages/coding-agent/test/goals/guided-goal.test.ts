@@ -256,7 +256,7 @@ describe("guided goal setup", () => {
 		}
 	});
 
-	it("allows explicit goal tool activation without an active goal, but keeps it out of the default set", async () => {
+	it("allows explicit goal tool activation and includes it by default when enabled", async () => {
 		const harness = await createHarness();
 		try {
 			const explicit = await createTools(createToolSession(harness.tempDir.path(), harness.settings), [
@@ -266,7 +266,7 @@ describe("guided goal setup", () => {
 			expect(explicit.map(tool => tool.name)).toContain("goal");
 
 			const defaults = await createTools(createToolSession(harness.tempDir.path(), harness.settings));
-			expect(defaults.map(tool => tool.name)).not.toContain("goal");
+			expect(defaults.map(tool => tool.name)).toContain("goal");
 		} finally {
 			await harness.cleanup();
 		}
