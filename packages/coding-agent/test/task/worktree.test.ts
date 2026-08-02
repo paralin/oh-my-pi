@@ -1239,6 +1239,8 @@ describe("commitToBranch preserves agent commits", () => {
 			await gitr(parent, ["clone", "-q", "--no-hardlinks", "--local", parent, isolation]);
 			await gitr(isolation, ["config", "user.email", "agent@example.com"]);
 			await gitr(isolation, ["config", "user.name", "Agent User"]);
+			await gitr(parent, ["config", "diff.mnemonicPrefix", "true"]);
+			await gitr(isolation, ["config", "diff.mnemonicPrefix", "true"]);
 
 			await fs.writeFile(path.join(parent, "src/wip-only.py"), "wip edit\n");
 			await fs.writeFile(path.join(parent, "src/wanted.py"), "wip mixed\n");

@@ -174,12 +174,9 @@ const taskSchemaBatchNoIsolation = type({
 	tasks: taskItemSchema.array(),
 	"+": "delete",
 });
-const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
-
-type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
 /** Active task tool parameter schema for the current isolation / batch flags */
-export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
+export type TaskToolSchemaInstance = BaseType;
 
 const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const taskSchemaCache = new Map<string, BaseType>();
@@ -214,7 +211,7 @@ function createTaskSchema(options: {
 			});
 			return type.raw({
 				context: "string",
-				tasks: item.array(),
+				tasks: [item, "[]"],
 				"+": "delete",
 			});
 		}
@@ -229,7 +226,7 @@ function createTaskSchema(options: {
 		});
 		return type.raw({
 			context: "string",
-			tasks: item.array(),
+			tasks: [item, "[]"],
 			"+": "delete",
 		});
 	}
@@ -266,8 +263,14 @@ export function getTaskSchema(options: {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	if (defaultAgent === "task" && !effortEnabled) {
-		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
-		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+		if (options.batchEnabled) {
+			return options.isolationEnabled
+				? (taskSchemaBatch as unknown as BaseType)
+				: (taskSchemaBatchNoIsolation as unknown as BaseType);
+		}
+		return options.isolationEnabled
+			? (taskSchema as unknown as BaseType)
+			: (taskSchemaNoIsolation as unknown as BaseType);
 	}
 	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${effortEnabled ? "effort" : "default"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);

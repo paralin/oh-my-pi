@@ -26,7 +26,6 @@ import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import type { ExecutorOptions } from "./executor";
-import { runSubprocess } from "./executor";
 import type { SingleResult } from "./types";
 import {
 	applyNestedPatches,
@@ -98,12 +97,14 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 
 export interface IsolatedRunOptions {
 	/**
-	 * Base run options handed to the subagent subprocess. This helper sets
+	 * Base run options handed to the selected runtime executor. This helper sets
 	 * `worktree`, clears `preloadedExtensionPaths` / `preloadedCustomToolPaths`
 	 * (isolated runs re-discover inside the worktree), and forwards everything
 	 * else unchanged.
 	 */
 	baseOptions: ExecutorOptions;
+	/** Selected runtime executor; receives the isolation worktree options. */
+	runSubagent: (options: ExecutorOptions) => Promise<SingleResult>;
 	/** Context returned by {@link prepareIsolationContext}. Baseline is cloned per spawn. */
 	context: IsolationContext;
 	/** PAL backend hint from `parseIsolationMode(...)` (undefined ⇒ resolver picks). */
@@ -162,7 +163,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
-		const result = await runSubprocess({
+		const result = await opts.runSubagent({
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,

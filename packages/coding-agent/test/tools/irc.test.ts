@@ -8,6 +8,7 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { ClaudeCodePeer } from "@oh-my-pi/pi-coding-agent/task/claude-code-peer";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type CoordinationDetails, HubTool, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
 
@@ -132,9 +133,40 @@ describe("IRC", () => {
 			expect(bus.unreadCount("0-Sub")).toBe(0);
 		});
 
+		it("reports idle Claude delivery as woken and preserves busy delivery as queued", async () => {
+			const peer = new ClaudeCodePeer({
+				id: "0-Claude",
+				prompt: "Inspect the target.",
+				abortController: new AbortController(),
+				registry,
+			});
+			const ref = registry.register({ id: "0-Claude", displayName: "claude", kind: "sub", session: peer });
+			peer.bindRef(ref);
+			const input = peer.input[Symbol.asyncIterator]();
+			expect((await input.next()).value).toBe("Inspect the target.");
+			expect(peer.completeTurn()).toBe(true);
+
+			const woken = await bus.send({ from: "0-Main", to: "0-Claude", body: "first" });
+			const queued = await bus.send({ from: "0-Main", to: "0-Claude", body: "second" });
+			expect(woken).toEqual({ to: "0-Claude", outcome: "woken" });
+			expect(queued).toEqual({ to: "0-Claude", outcome: "queued" });
+
+			const first = await input.next();
+			expect(first.value).toContain("first");
+			expect(peer.completeTurn()).toBe(false);
+			const second = await input.next();
+			expect(second.value).toContain("second");
+			expect(peer.completeTurn()).toBe(true);
+			expect(registry.get("0-Claude")?.status).toBe("idle");
+			await peer.dispose();
+		});
+
 		it("relays only subagent-to-subagent traffic to the main UI", async () => {
-			const main = makeFakeSession();
-			registry.register({ id: "Main", displayName: "main", kind: "main", session: main.session });
+			const { session: main } = createRealSession();
+			sessions.push(main);
+			vi.spyOn(main, "deliverIrcMessage").mockResolvedValue("injected");
+			const relay = vi.spyOn(main, "emitIrcRelayObservation");
+			registry.register({ id: "Main", displayName: "main", kind: "main", session: main });
 			const a = makeFakeSession();
 			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: a.session });
 			const b = makeFakeSession();
@@ -144,8 +176,8 @@ describe("IRC", () => {
 			await bus.send({ from: "0-A", to: "Main", body: "inbound to main" });
 			await bus.send({ from: "0-A", to: "0-B", body: "sibling note" });
 
-			expect(main.relayed).toHaveLength(1);
-			expect(main.relayed[0]?.details).toEqual({ from: "0-A", to: "0-B", body: "sibling note" });
+			expect(relay).toHaveBeenCalledTimes(1);
+			expect(relay.mock.calls[0]?.[0].details).toEqual({ from: "0-A", to: "0-B", body: "sibling note" });
 		});
 
 		it("send to an unknown or aborted agent fails", async () => {
@@ -166,6 +198,31 @@ describe("IRC", () => {
 			const receipt = await bus.send({ from: "0-Main", to: "0-Sub", body: "ping" });
 			expect(receipt).toEqual({ to: "0-Sub", outcome: "failed", error: "boom" });
 			expect(bus.unreadCount("0-Sub")).toBe(1);
+		});
+
+		it("does not buffer delivery to a disposed Claude generation", async () => {
+			const peer = new ClaudeCodePeer({
+				id: "0-Claude",
+				prompt: "Inspect the target.",
+				abortController: new AbortController(),
+				registry,
+			});
+			const ref = registry.register({ id: "0-Claude", displayName: "claude", kind: "sub", session: peer });
+			peer.bindRef(ref);
+			await peer.dispose();
+
+			const receipt = await bus.send({ from: "0-Main", to: "0-Claude", body: "ping" });
+			expect(receipt).toEqual({
+				to: "0-Claude",
+				outcome: "failed",
+				error: "Claude Code input mailbox is closed.",
+			});
+			expect(bus.unreadCount("0-Claude")).toBe(0);
+
+			const replacement = makeFakeSession();
+			registry.register({ id: "0-Claude", displayName: "replacement", kind: "sub", session: replacement.session });
+			expect(bus.inbox("0-Claude")).toEqual([]);
+			expect(replacement.delivered).toEqual([]);
 		});
 
 		it("send revives a parked recipient through the lifecycle manager", async () => {
