@@ -468,6 +468,42 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
 	});
 
+	it("runs an isolated Claude task through the shared isolation owner", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({ repoRoot: "/tmp" } as never);
+		const merge = vi.spyOn(isolationRunner, "mergeIsolatedChanges").mockResolvedValue({
+			summary: "",
+			changesApplied: true,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		});
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockImplementation(async ({ baseOptions, runSubagent }) => ({
+			...(await runSubagent({ ...baseOptions, worktree: "/tmp/isolated" })),
+			patchPath: "/tmp/Worker.patch",
+		}));
+		const claude = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess").mockResolvedValue(result());
+		const pi = vi.spyOn(executorModule, "runSubprocess");
+
+		await runStructuredSubagent(
+			request({
+				session: session({ isolationMode: "worktree" }),
+				model: "claude-code/claude-opus-5",
+				isolation: { requested: true },
+			}),
+		);
+
+		expect(claude).toHaveBeenCalledWith({
+			options: expect.objectContaining({ worktree: "/tmp/isolated" }),
+			model: "claude-opus-5",
+		});
+		expect(pi).not.toHaveBeenCalled();
+		expect(merge).toHaveBeenCalledWith({
+			result: expect.objectContaining({ patchPath: "/tmp/Worker.patch" }),
+			repoRoot: "/tmp",
+			mergeMode: "patch",
+		});
+	});
+
 	it("retains isolated failure artifacts needed for recovery", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;

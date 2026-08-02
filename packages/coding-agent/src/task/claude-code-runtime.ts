@@ -151,6 +151,7 @@ function unregisterOwnRef(registry: AgentRegistry, ref: AgentRef): void {
  */
 export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessRequest): Promise<SingleResult> {
 	const { options, model } = request;
+	const cwd = options.worktree ?? options.cwd;
 	const nativeTools = claudeCodeNativeTools(options.agent.tools);
 	const startQuery = request.startQuery ?? startClaudeCodeQuery;
 	const startTime = Date.now();
@@ -301,7 +302,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 									settings.get("task.maxEffort"),
 									"Claude Agent SDK",
 								),
-					cwd: options.cwd,
+					cwd,
 					executable: settings.get("task.claudeCode.executable") ?? "claude",
 					appendSystemPrompt: systemPromptAppend,
 					...(nativeTools !== undefined ? { tools: nativeTools } : {}),

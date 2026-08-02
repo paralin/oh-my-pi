@@ -133,13 +133,18 @@ describe("Claude Code OMP tools", () => {
 	it("builds the nested ToolSession from Claude identity and spawn policy", () => {
 		const jobs = manager();
 		const settings = Settings.isolated({ "task.maxRecursionDepth": 3 });
-		const session = createClaudeCodeToolSession(options(settings, jobs), AgentRegistry.global());
+		const executor = options(settings, jobs);
+		executor.additionalDirectories = ["/tmp/outside"];
+		executor.worktree = "/tmp/isolated";
+		const session = createClaudeCodeToolSession(executor, AgentRegistry.global());
 
 		expect(session.getAgentId?.()).toBe("ClaudePeer");
 		expect(session.taskDepth).toBe(1);
 		expect(session.getSessionSpawns()).toBe("*");
 		expect(session.agentRegistry).toBe(AgentRegistry.global());
 		expect(session.asyncJobManager).toBe(jobs);
+		expect(session.cwd).toBe("/tmp/isolated");
+		expect(session.additionalDirectories).toBeUndefined();
 	});
 
 	it("delegates synchronous nested work through TaskTool with Claude ownership and depth", async () => {

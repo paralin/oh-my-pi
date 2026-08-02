@@ -315,12 +315,6 @@ export async function resolveEffectiveSubagentPolicy(
 			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
 		);
 	}
-	if (isIsolated && claudeCode) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Isolated execution is unavailable for subagents selected with a claude-code/ model.",
-		);
-	}
 	return {
 		discovery,
 		agentName,
@@ -591,21 +585,24 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				);
 			}
 		}
-		const result = policy.claudeCode
-			? await runClaudeCodeSubprocess({ options: baseOptions, model: policy.claudeCode.model })
-			: !isolationContext
-				? await runSubprocess(baseOptions)
-				: await runIsolatedSubprocess({
-						baseOptions,
-						context: isolationContext,
-						preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
-						agentId: id,
-						mergeMode: policy.mergeMode,
-						artifactsDir: lease.artifactsDir,
-						description: trimToUndefined(request.identity?.label),
-						buildCommitMessage: makeIsolationCommitMessage(request.session),
-						buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
-					});
+		const claudeCode = policy.claudeCode;
+		const runSubagent = claudeCode
+			? (options: ExecutorOptions) => runClaudeCodeSubprocess({ options, model: claudeCode.model })
+			: runSubprocess;
+		const result = !isolationContext
+			? await runSubagent(baseOptions)
+			: await runIsolatedSubprocess({
+					baseOptions,
+					runSubagent,
+					context: isolationContext,
+					preferredBackend: parseIsolationMode(request.session.settings.get("task.isolation.mode")),
+					agentId: id,
+					mergeMode: policy.mergeMode,
+					artifactsDir: lease.artifactsDir,
+					description: trimToUndefined(request.identity?.label),
+					buildCommitMessage: makeIsolationCommitMessage(request.session),
+					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
+				});
 		attachStructuredOutputMetadata(result, policy.schema);
 		requiresRecoveryArtifacts =
 			policy.isIsolated &&

@@ -268,6 +268,17 @@ describe("claude code runtime", () => {
 		expect(queryLog.closes).toBe(1);
 	});
 
+	it("starts the SDK in the isolated worktree", async () => {
+		const queryLog = log();
+		await runClaudeCodeSubprocess({
+			options: executorOptions({ cwd: "/tmp/parent", worktree: "/tmp/isolated" }),
+			model: "claude-opus-5",
+			startQuery: fakeQuery([{ yieldArgs: { result: { data: { ok: true } } } }], queryLog),
+		});
+
+		expect(queryLog.requests[0]?.cwd).toBe("/tmp/isolated");
+	});
+
 	it("maps a parsed scout allowlist to exact read-only Claude built-ins", async () => {
 		const queryLog = log();
 		const parsed = parseAgentFields({

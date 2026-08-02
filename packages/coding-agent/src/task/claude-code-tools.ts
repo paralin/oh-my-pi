@@ -78,6 +78,7 @@ function toolFailure(error: unknown): ClaudeCodeToolResult {
 /** Session policy inherited by Task and Hub without constructing a Pi session. */
 export function createClaudeCodeToolSession(options: ExecutorOptions, registry: AgentRegistry): ToolSession {
 	const settings = options.settings ?? Settings.isolated();
+	const cwd = options.worktree ?? options.cwd;
 	const taskDepth = (options.taskDepth ?? 0) + 1;
 	const maxDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const atMaxDepth = maxDepth >= 0 && taskDepth >= maxDepth;
@@ -90,8 +91,8 @@ export function createClaudeCodeToolSession(options: ExecutorOptions, registry: 
 				: options.agent.spawns.join(",");
 	const getArtifactsDir = (): string | null => options.artifactsDir ?? null;
 	return {
-		cwd: options.cwd,
-		additionalDirectories: options.additionalDirectories,
+		cwd,
+		additionalDirectories: options.worktree === undefined ? options.additionalDirectories : undefined,
 		hasUI: false,
 		getApiKey: options.getApiKey,
 		contextFiles: options.contextFiles,
