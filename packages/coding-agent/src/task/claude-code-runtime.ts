@@ -10,7 +10,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import claudeCodeSubagentPrompt from "../prompts/system/claude-code-subagent.md" with { type: "text" };
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry } from "../registry/agent-registry";
 import { truncateTail } from "../session/streaming-output";
 import { resolveTaskEffortForSupportedLevels } from "../thinking";
 import { ClaudeCodePeer } from "./claude-code-peer";
@@ -24,6 +24,7 @@ import {
 import { CLAUDE_CODE_MCP_TOOL_NAMES, createClaudeCodeMcpTools } from "./claude-code-tools";
 import {
 	type ExecutorOptions,
+	finalizeSubagentLifecycle,
 	finalizeSubprocessResult,
 	reapSubagentJobs,
 	SUBAGENT_WARNING_MISSING_YIELD_WITHOUT_REMINDERS,
@@ -136,18 +137,12 @@ function cancellationMessage(signal: AbortSignal | undefined): string {
 	return signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Subagent cancelled");
 }
 
-/** Remove only the registration generation created by this one-shot run. */
-function unregisterOwnRef(registry: AgentRegistry, ref: AgentRef): void {
-	if (registry.get(ref.id) !== ref || ref.status === "aborted") return;
-	registry.unregister(ref.id, ref);
-}
-
 /**
  * Run one task on the Claude Agent SDK runtime.
  *
- * SDK and stream failures are returned through the normal task result. The
- * exact pre-registered peer generation and its query are released on every
- * settled path.
+ * SDK and stream failures are returned through the normal task result. One-shot
+ * and isolated peers close on settlement; retained peers remain under
+ * AgentLifecycleManager custody.
  */
 export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessRequest): Promise<SingleResult> {
 	const { options, model } = request;
@@ -160,7 +155,13 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 	const runtimeLimitReason = `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
 	const registry = AgentRegistry.global();
 	const abortController = new AbortController();
-	const peer = new ClaudeCodePeer(options.task, abortController);
+	const peer = new ClaudeCodePeer({
+		id: options.id,
+		prompt: options.task,
+		abortController,
+		registry,
+		asyncJobManager: options.asyncJobManager,
+	});
 	const ref = registry.registerIfAvailable(
 		{
 			id: options.id,
@@ -174,8 +175,10 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		null,
 	);
 	if (!ref) {
+		await peer.dispose();
 		throw new Error(`Agent "${options.id}" is already owned by another session generation.`);
 	}
+	peer.bindRef(ref);
 	const yieldItems: YieldItem[] = [];
 	const progress: AgentProgress = {
 		index: options.index,
@@ -196,6 +199,10 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		modelOverride: options.modelOverride,
 		resolvedModel: model,
 	};
+	const keepAlive = options.keepAlive !== false;
+	const isolated = options.worktree !== undefined;
+	const retainLive = keepAlive && !isolated;
+	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
 	let terminalYield = false;
 	let runtimeLimitExceeded = false;
 	let runtimeTimeout: NodeJS.Timeout | undefined;
@@ -210,6 +217,15 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 	let queryConstructed = false;
 	let queryClosed = false;
 	let queryCloseFailure: string | undefined;
+	let eventStreamEnded = false;
+	let startupRejected = false;
+	let initialTurnSettled = false;
+	const initialTurn = Promise.withResolvers<void>();
+	const settleInitialTurn = (): void => {
+		if (initialTurnSettled) return;
+		initialTurnSettled = true;
+		initialTurn.resolve();
+	};
 
 	const observedToolUses = new Set<string>();
 	const emitProgress = (): void => {
@@ -239,7 +255,6 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 			parentToolCallId: options.parentToolCallId,
 			detached: options.detached,
 			agentSource: options.agent.source,
-			description: options.description,
 			status,
 			sessionFile: options.sessionFile,
 			index: options.index,
@@ -248,7 +263,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 	const stopAfterTerminalYield = (): void => {
 		terminalYield = true;
 		clearTimeout(runtimeTimeout);
-		void peer.abort().catch(() => {});
+		if (!retainLive) void peer.dispose().catch(() => {});
 	};
 	const cancel = (): void => {
 		parentAbortReason = cancellationMessage(options.signal);
@@ -291,7 +306,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					onTerminalYield: stopAfterTerminalYield,
 				});
 				query = await startQuery({
-					prompt: options.task,
+					prompt: peer.input,
 					model,
 					effort:
 						options.effort === undefined
@@ -329,6 +344,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		}
 
 		if (query && !peer.attachQuery(query)) {
+			startupRejected = true;
 			exitCode = 1;
 			stderr = runtimeLimitExceeded
 				? runtimeLimitReason
@@ -338,107 +354,145 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 						? (peer.abortState.reason ?? "Subagent cancelled")
 						: `Agent "${options.id}" stopped while its Claude Code query was starting.`;
 		} else if (query && !registry.attachSession(options.id, peer, null, ref)) {
+			startupRejected = true;
 			exitCode = 1;
 			stderr = `Agent "${options.id}" was replaced or became terminal during Claude Code startup.`;
 		} else if (query) {
-			try {
-				for await (const event of query.events) {
-					if (event.kind === "init") {
-						init = event;
-						const denied = CLAUDE_CODE_DENIED_TOOLS.filter(name => event.tools.includes(name));
-						const missing = CLAUDE_CODE_MCP_TOOL_NAMES.filter(
-							name => !event.tools.includes(`mcp__${OMP_MCP_SERVER_NAME}__${name}`),
-						);
-						if (denied.length > 0 || missing.length > 0) {
-							exitCode = 1;
-							stderr = [
-								denied.length > 0 ? `Claude Code exposed denied tools: ${denied.join(", ")}.` : "",
-								missing.length > 0 ? `Claude Code omitted required OMP tools: ${missing.join(", ")}.` : "",
-							]
-								.filter(Boolean)
-								.join("\n");
-							break;
+			const eventPump = (async (): Promise<void> => {
+				try {
+					for await (const event of query.events) {
+						if (event.kind === "init") {
+							init = event;
+							const denied = CLAUDE_CODE_DENIED_TOOLS.filter(name => event.tools.includes(name));
+							const missing = CLAUDE_CODE_MCP_TOOL_NAMES.filter(
+								name => !event.tools.includes(`mcp__${OMP_MCP_SERVER_NAME}__${name}`),
+							);
+							if (denied.length > 0 || missing.length > 0) {
+								startupRejected = true;
+								exitCode = 1;
+								stderr = [
+									denied.length > 0 ? `Claude Code exposed denied tools: ${denied.join(", ")}.` : "",
+									missing.length > 0 ? `Claude Code omitted required OMP tools: ${missing.join(", ")}.` : "",
+								]
+									.filter(Boolean)
+									.join("\n");
+								abortController.abort(new Error(stderr));
+								settleInitialTurn();
+								return;
+							}
+							continue;
 						}
-						continue;
-					}
-					if (event.kind === "tool-progress") {
-						if (!observedToolUses.has(event.toolUseId)) {
-							observedToolUses.add(event.toolUseId);
-							progress.toolCount++;
+						if (event.kind === "tool-progress") {
+							if (!initialTurnSettled && !observedToolUses.has(event.toolUseId)) {
+								observedToolUses.add(event.toolUseId);
+								progress.toolCount++;
+							}
+							progress.currentTool = event.toolName;
+							progress.currentToolArgs = "";
+							progress.currentToolStartMs = Date.now() - event.elapsedSeconds * 1_000;
+							registry.setActivity(options.id, `running ${event.toolName}`, ref);
+							if (!initialTurnSettled) emitProgress();
+							continue;
 						}
-						progress.currentTool = event.toolName;
-						progress.currentToolArgs = "";
-						progress.currentToolStartMs = Date.now() - event.elapsedSeconds * 1_000;
-						registry.setActivity(options.id, `running ${event.toolName}`, ref);
-						emitProgress();
-						continue;
-					}
-					if (event.kind === "assistant") {
-						tokens += event.tokens;
-						requests += event.requests;
-						progress.tokens = tokens;
-						progress.requests = requests;
-						if (!event.text) {
-							if (terminalYield) break;
+						if (event.kind === "assistant") {
+							if (!initialTurnSettled) {
+								tokens += event.tokens;
+								requests += event.requests;
+								progress.tokens = tokens;
+								progress.requests = requests;
+							}
+							if (!event.text) continue;
+							progress.currentTool = undefined;
+							progress.currentToolArgs = undefined;
+							progress.currentToolStartMs = undefined;
+							if (!initialTurnSettled) lastAssistantText = event.text;
+							peer.recordAssistantText(event.text);
+							registry.setActivity(options.id, event.text, ref);
+							if (!initialTurnSettled) {
+								progress.recentOutput = event.text
+									.split("\n")
+									.filter(line => line.trim())
+									.slice(-8)
+									.reverse();
+								emitProgress();
+							}
 							continue;
 						}
 						progress.currentTool = undefined;
 						progress.currentToolArgs = undefined;
 						progress.currentToolStartMs = undefined;
-						lastAssistantText = event.text;
-						peer.recordAssistantText(event.text);
-						registry.setActivity(options.id, event.text, ref);
-						progress.recentOutput = event.text
-							.split("\n")
-							.filter(line => line.trim())
-							.slice(-8)
-							.reverse();
-						emitProgress();
-						if (terminalYield) break;
-						continue;
+						if (!initialTurnSettled) {
+							rawOutput = event.text;
+							tokens = event.tokens;
+							requests = event.requests;
+							if (event.isError && !terminalYield) {
+								exitCode = 1;
+								stderr = event.text;
+							}
+						}
+						observedToolUses.clear();
+						peer.completeTurn();
+						settleInitialTurn();
 					}
-					progress.currentTool = undefined;
-					progress.currentToolArgs = undefined;
-					progress.currentToolStartMs = undefined;
-					rawOutput = event.text;
-					tokens = event.tokens;
-					requests = event.requests;
-					if (event.isError && !terminalYield) {
-						exitCode = 1;
-						stderr = event.text;
+					eventStreamEnded = true;
+					if (!initialTurnSettled) {
+						peer.completeTurn();
+						settleInitialTurn();
 					}
-					break;
+				} catch (error) {
+					eventStreamEnded = true;
+					if (!initialTurnSettled) {
+						if (!terminalYield) {
+							exitCode = 1;
+							stderr = runtimeLimitExceeded
+								? runtimeLimitReason
+								: options.signal?.aborted
+									? (parentAbortReason ?? cancellationMessage(options.signal))
+									: peer.abortState.aborted
+										? (peer.abortState.reason ?? "Subagent cancelled")
+										: failureMessage(error);
+						}
+						peer.completeTurn();
+						settleInitialTurn();
+					} else if (!peer.abortState.aborted) {
+						void peer.abort({ reason: failureMessage(error) }).catch(() => {});
+					}
 				}
-			} catch (error) {
-				if (!terminalYield) {
-					exitCode = 1;
-					stderr = runtimeLimitExceeded
-						? runtimeLimitReason
-						: options.signal?.aborted
-							? (parentAbortReason ?? cancellationMessage(options.signal))
-							: peer.abortState.aborted
-								? (peer.abortState.reason ?? "Subagent cancelled")
-								: failureMessage(error);
-				}
-			}
+			})();
+			peer.attachEventPump(eventPump);
+			await initialTurn.promise;
 		}
 	} finally {
 		clearTimeout(runtimeTimeout);
 		options.signal?.removeEventListener("abort", cancel);
+		const hardAborted = options.signal?.aborted === true || peer.abortState.aborted || runtimeLimitExceeded;
+		const lifecycleKeepAlive =
+			keepAlive && terminalYield && queryConstructed && !eventStreamEnded && !startupRejected && !hardAborted;
+		const retainsLive = lifecycleKeepAlive && !isolated;
 		try {
-			await peer.dispose();
+			await finalizeSubagentLifecycle({
+				id: options.id,
+				session: peer,
+				aborted: hardAborted,
+				keepAlive: lifecycleKeepAlive,
+				isolated,
+				agentIdleTtlMs,
+				reviveSession: null,
+				markIdle: peer.turnIdle,
+			});
 		} catch (error) {
 			exitCode = 1;
 			stderr ||= failureMessage(error);
 		}
-		if (options.asyncJobManager) await reapSubagentJobs(options.asyncJobManager, options.id);
+		if (!retainsLive && options.asyncJobManager) {
+			await reapSubagentJobs(options.asyncJobManager, options.id);
+		}
 		queryClosed = queryConstructed && peer.queryClosed;
 		if (peer.queryCloseFailure) {
 			queryCloseFailure = `Claude Code query close failed: ${failureMessage(peer.queryCloseFailure.error)}`;
 			exitCode = 1;
 			stderr = stderr ? `${stderr}\n${queryCloseFailure}` : queryCloseFailure;
 		}
-		unregisterOwnRef(registry, ref);
 		request.onEvidence?.({
 			agentId: options.id,
 			init,

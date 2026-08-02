@@ -367,6 +367,8 @@ function outcomeColor(outcome: IrcDeliveryReceipt["outcome"]): ToolUIColor {
 			return "success";
 		case "revived":
 			return "warning";
+		case "queued":
+			return "accent";
 		case "injected":
 			return "accent";
 		case "failed":

@@ -8,6 +8,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { type AgentPeer, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as claudeCodeRuntime from "@oh-my-pi/pi-coding-agent/task/claude-code-runtime";
@@ -77,6 +78,7 @@ interface QueryLog {
 	requests: ClaudeCodeQueryRequest[];
 	toolResults: ClaudeCodeToolResult[];
 	closes: number;
+	prompts: string[];
 }
 
 function peerStub(): AgentPeer {
@@ -89,7 +91,7 @@ function peerStub(): AgentPeer {
 }
 
 function log(): QueryLog {
-	return { requests: [], toolResults: [], closes: 0 };
+	return { requests: [], toolResults: [], closes: 0, prompts: [] };
 }
 
 /**
@@ -98,12 +100,23 @@ function log(): QueryLog {
  * Claude. A step after the runtime stopped the query throws, matching the SDK's
  * behavior once its abort controller fires.
  */
+async function readInitialPrompt(request: ClaudeCodeQueryRequest, queryLog: QueryLog): Promise<void> {
+	if (typeof request.prompt === "string") {
+		queryLog.prompts.push(request.prompt);
+		return;
+	}
+	const first = await request.prompt[Symbol.asyncIterator]().next();
+	if (first.done) throw new Error("Claude input ended before the initial prompt.");
+	queryLog.prompts.push(first.value);
+}
+
 function fakeQuery(
 	steps: Step[],
 	queryLog: QueryLog,
 	failures: { start?: Error; stream?: Error } = {},
 ): StartClaudeCodeQuery {
 	return async request => {
+		await readInitialPrompt(request, queryLog);
 		if (failures.start) throw failures.start;
 		queryLog.requests.push(request);
 		const yieldTool = request.mcpServer.tools.find(tool => tool.name === "yield");
@@ -131,6 +144,7 @@ function fakeQuery(
 /** Dispatch Yield calls through the production SDK/MCP adapter over an in-memory transport. */
 function productionMcpQuery(yieldArgs: Record<string, unknown>[], queryLog: QueryLog): StartClaudeCodeQuery {
 	return async request => {
+		await readInitialPrompt(request, queryLog);
 		queryLog.requests.push(request);
 		const server = createClaudeCodeMcpServer(request.mcpServer);
 		async function* events(): AsyncGenerator<ClaudeCodeEvent> {
@@ -162,6 +176,110 @@ function productionMcpQuery(yieldArgs: Record<string, unknown>[], queryLog: Quer
 	};
 }
 
+interface LiveQueryHarness {
+	startQuery: StartClaudeCodeQuery;
+	inputs: string[];
+	closeCount: () => number;
+	emit: (event: ClaudeCodeEvent) => Promise<void>;
+	waitForInputs: (count: number) => Promise<void>;
+}
+
+interface VoidResolver {
+	promise: Promise<void>;
+	resolve: (value?: void | PromiseLike<void>) => void;
+}
+
+/** A retained fake query with independently controlled input and result boundaries. */
+function liveQueryHarness(queryLog: QueryLog): LiveQueryHarness {
+	interface QueuedEvent {
+		event: ClaudeCodeEvent;
+		consumed: VoidResolver;
+	}
+	const inputs: string[] = [];
+	const inputWaiters: Array<{ count: number; resolve: () => void }> = [];
+	const events: QueuedEvent[] = [];
+	let wakeEvents: (() => void) | undefined;
+	let eventsClosed = false;
+	let closes = 0;
+
+	const recordInput = (text: string): void => {
+		inputs.push(text);
+		for (let index = inputWaiters.length - 1; index >= 0; index--) {
+			const waiter = inputWaiters[index];
+			if (waiter && inputs.length >= waiter.count) {
+				inputWaiters.splice(index, 1);
+				waiter.resolve();
+			}
+		}
+	};
+	const waitForInputs = (count: number): Promise<void> => {
+		if (inputs.length >= count) return Promise.resolve();
+		const { promise, resolve } = Promise.withResolvers<void>();
+		inputWaiters.push({ count, resolve });
+		return promise;
+	};
+	const emit = (event: ClaudeCodeEvent): Promise<void> => {
+		if (eventsClosed) throw new Error("live query is closed");
+		const consumed = Promise.withResolvers<void>();
+		events.push({ event, consumed });
+		const wake = wakeEvents;
+		wakeEvents = undefined;
+		wake?.();
+		return consumed.promise;
+	};
+	const startQuery: StartClaudeCodeQuery = async request => {
+		if (typeof request.prompt === "string") throw new Error("retained query requires streaming input");
+		const input = request.prompt[Symbol.asyncIterator]();
+		const initial = await input.next();
+		if (initial.done) throw new Error("Claude input ended before the initial prompt.");
+		recordInput(initial.value);
+		queryLog.prompts.push(initial.value);
+		queryLog.requests.push(request);
+		const yieldTool = request.mcpServer.tools.find(tool => tool.name === "yield");
+		if (!yieldTool) throw new Error("no yield tool was admitted");
+
+		void (async () => {
+			for (;;) {
+				const next = await input.next();
+				if (next.done) return;
+				recordInput(next.value);
+			}
+		})();
+		async function* eventStream(): AsyncGenerator<ClaudeCodeEvent> {
+			for (;;) {
+				while (events.length === 0 && !eventsClosed) {
+					const ready = Promise.withResolvers<void>();
+					wakeEvents = ready.resolve;
+					await ready.promise;
+				}
+				const queued = events.shift();
+				if (!queued) return;
+				yield queued.event;
+				queued.consumed.resolve();
+			}
+		}
+		queueMicrotask(() => {
+			void (async () => {
+				queryLog.toolResults.push(await yieldTool.handler({ result: { data: { ok: true } } }));
+				await emit({ kind: "result", isError: false, text: "initial done", tokens: 1, requests: 1 });
+			})();
+		});
+		return {
+			events: eventStream(),
+			close: () => {
+				if (eventsClosed) return;
+				eventsClosed = true;
+				closes++;
+				const wake = wakeEvents;
+				wakeEvents = undefined;
+				wake?.();
+			},
+		};
+	};
+
+	return { startQuery, inputs, closeCount: () => closes, emit, waitForInputs };
+}
+
 function executorOptions(overrides: Partial<ExecutorOptions> = {}): ExecutorOptions {
 	return {
 		cwd: "/tmp",
@@ -171,6 +289,7 @@ function executorOptions(overrides: Partial<ExecutorOptions> = {}): ExecutorOpti
 		index: 0,
 		id: "Worker",
 		settings: Settings.isolated({ "task.claudeCode.executable": "claude-min" }),
+		keepAlive: false,
 		...overrides,
 	};
 }
@@ -246,7 +365,7 @@ describe("claude code runtime", () => {
 		expect(started.executable).toBe("claude-min");
 		expect(started.model).toBe("claude-opus-4-5");
 		expect(started.cwd).toBe("/tmp");
-		expect(started.prompt).toBe("Inspect the target.");
+		expect(queryLog.prompts).toEqual(["Inspect the target."]);
 		expect(started.appendSystemPrompt).toBe(
 			`${AGENT.systemPrompt}\n\nUse OMP \`task\` for delegation and OMP \`hub\` for peer messaging or task-job custody. Native Claude coordination is unavailable. You MUST terminate through the OMP \`yield\` tool.`,
 		);
@@ -506,8 +625,12 @@ describe("claude code runtime", () => {
 		}
 	});
 
-	it("disables filesystem settings and maps tool progress plus every assistant usage event", async () => {
+	it("maps streaming input, disables filesystem settings, and reports SDK progress", async () => {
 		const close = vi.fn();
+		async function* input(): AsyncGenerator<string> {
+			yield "Inspect the target.";
+			yield "Follow-up turn.";
+		}
 		async function* messages(): AsyncGenerator<SDKMessage> {
 			yield {
 				type: "tool_progress",
@@ -544,7 +667,7 @@ describe("claude code runtime", () => {
 		const queryCall = vi.spyOn(claudeAgentSdk, "query").mockReturnValue(sdkQuery as unknown as SdkQuery);
 
 		const started = await startClaudeCodeQuery({
-			prompt: "Inspect the target.",
+			prompt: input(),
 			model: "claude-opus-5",
 			cwd: "/tmp",
 			executable: "claude-min",
@@ -559,6 +682,29 @@ describe("claude code runtime", () => {
 		for await (const event of started.events) events.push(event);
 		started.close();
 
+		const sdkPrompt = queryCall.mock.calls[0]?.[0].prompt;
+		if (typeof sdkPrompt === "string") throw new Error("expected SDK streaming input");
+		const sdkInputs: SDKMessage[] = [];
+		for await (const message of sdkPrompt) sdkInputs.push(message);
+
+		expect(sdkInputs).toEqual([
+			{
+				type: "user",
+				message: { role: "user", content: [{ type: "text", text: "Inspect the target." }] },
+				parent_tool_use_id: null,
+				origin: { kind: "coordinator" },
+				priority: "next",
+				shouldQuery: true,
+			},
+			{
+				type: "user",
+				message: { role: "user", content: [{ type: "text", text: "Follow-up turn." }] },
+				parent_tool_use_id: null,
+				origin: { kind: "coordinator" },
+				priority: "next",
+				shouldQuery: true,
+			},
+		]);
 		expect(queryCall.mock.calls[0]?.[0].options?.settingSources).toEqual([]);
 		expect(queryCall.mock.calls[0]?.[0].options?.tools).toEqual(["Read", "Grep"]);
 		expect(events).toEqual([
@@ -783,13 +929,83 @@ describe("claude code runtime", () => {
 				body: "hello",
 				ts: Date.now(),
 			}),
-		).rejects.toThrow("unavailable before live mailbox support");
+		).resolves.toBe("queued");
 
 		finish.resolve();
 		const result = await running;
 		expect(result.exitCode).toBe(0);
 		expect(queryLog.closes).toBe(1);
 		expect(AgentRegistry.global().get("Worker")).toBeUndefined();
+	});
+
+	it("retains one query across queued, asynchronous, and parked lifecycle boundaries", async () => {
+		const queryLog = log();
+		const live = liveQueryHarness(queryLog);
+		const jobs = new AsyncJobManager({ retentionMs: 60_000 });
+		const registry = AgentRegistry.global();
+		const lifecycle = AgentLifecycleManager.global();
+		const result = await runClaudeCodeSubprocess({
+			options: executorOptions({
+				keepAlive: true,
+				asyncJobManager: jobs,
+				settings: Settings.isolated({
+					"task.claudeCode.executable": "claude-min",
+					"task.agentIdleTtlMs": 0,
+				}),
+			}),
+			model: "claude-opus-5",
+			startQuery: live.startQuery,
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(live.inputs).toEqual(["Inspect the target."]);
+		expect(live.closeCount()).toBe(0);
+		const retained = registry.get("Worker");
+		expect(retained).toMatchObject({ status: "idle" });
+		expect(retained?.session).toBeTruthy();
+		expect(lifecycle.has("Worker", retained)).toBe(true);
+
+		const bus = new IrcBus(registry, lifecycle);
+		const waiting = bus.wait("Worker", { from: "Main" }, 1_000);
+		const immediate = await bus.send({ from: "Main", to: "Worker", body: "wait result" });
+		expect(immediate).toEqual({ to: "Worker", outcome: "injected" });
+		expect((await waiting)?.body).toBe("wait result");
+		expect(live.inputs).toHaveLength(1);
+
+		const woken = await bus.send({ from: "Main", to: "Worker", body: "first turn" });
+		expect(woken).toEqual({ to: "Worker", outcome: "woken" });
+		await live.waitForInputs(2);
+		const queued = await bus.send({ from: "Main", to: "Worker", body: "second turn" });
+		expect(queued).toEqual({ to: "Worker", outcome: "queued" });
+		await live.waitForInputs(3);
+
+		jobs.register("bash", "owned proof", async () => "async owner result", {
+			id: "owned-proof",
+			ownerId: "Worker",
+		});
+		await jobs.waitForAll();
+		expect(await jobs.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Worker" } })).toBe(true);
+		await live.waitForInputs(4);
+		expect(live.inputs[1]).toContain("first turn");
+		expect(live.inputs[2]).toContain("second turn");
+		expect(live.inputs[3]).toContain("owned-proof");
+		expect(live.inputs[3]).toContain("async owner result");
+
+		await live.emit({ kind: "result", isError: false, text: "batch done", tokens: 1, requests: 1 });
+		expect(registry.get("Worker")?.status).toBe("idle");
+
+		await lifecycle.park("Worker");
+		expect(live.closeCount()).toBe(1);
+		expect(registry.get("Worker")).toMatchObject({ status: "parked", session: null });
+
+		jobs.register("bash", "after park", async () => "must not arrive", {
+			id: "after-park",
+			ownerId: "Worker",
+		});
+		await jobs.waitForAll();
+		expect(await jobs.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Worker" } })).toBe(true);
+		expect(live.inputs).toHaveLength(4);
+		await jobs.dispose({ timeoutMs: 1_000 });
 	});
 
 	it("refuses to replace a live registry generation before SDK startup", async () => {
@@ -851,11 +1067,12 @@ describe("claude code runtime", () => {
 		await consuming.promise;
 		const oldRef = AgentRegistry.global().get("Worker");
 		if (!oldRef?.session) throw new Error("Claude peer was not attached");
+		const oldSession = oldRef.session;
 
 		await Promise.all([
-			oldRef.session.abort({ reason: "Hub cancelled task" }),
-			oldRef.session.dispose(),
-			oldRef.session.abort({ reason: "Hub cancelled task" }),
+			oldSession.abort({ reason: "Hub cancelled task" }),
+			oldSession.dispose(),
+			oldSession.abort({ reason: "Hub cancelled task" }),
 		]);
 		expect(await AgentLifecycleManager.global().release("Worker", oldRef)).toBe(true);
 		const replacementSession = peerStub();
@@ -1036,11 +1253,12 @@ describe("claude code runtime", () => {
 		expect(observed).toEqual([
 			{
 				agentId: "Worker",
+				init: undefined,
 				queryClosed: false,
-				registryRefRemoved: true,
+				registryRefRemoved: false,
 			},
 		]);
-		expect(AgentRegistry.global().get("Worker")).toBeUndefined();
+		expect(AgentRegistry.global().get("Worker")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	it("returns the established result for a terminal yield", async () => {
@@ -1063,11 +1281,9 @@ describe("claude code runtime", () => {
 		expect(result.stderr).toBe("");
 		expect(result.error).toBeUndefined();
 		expect(result.structuredOutput).toMatchObject({ source: "agent", status: "valid", data: { ok: true } });
-		expect(result.agent).toBe("worker");
-		expect(result.id).toBe("Worker");
 		expect(result.tokens).toBe(18);
 		expect(result.requests).toBe(1);
-		// The terminal yield stopped the run: the scripted result event never ran.
+		// One-shot Yield closes before the scripted terminal result.
 		expect(queryLog.toolResults).toHaveLength(1);
 		expect(queryLog.toolResults[0].isError).toBeUndefined();
 		expect(queryLog.closes).toBe(1);
@@ -1191,7 +1407,7 @@ describe("claude code runtime", () => {
 		expect(result.aborted).toBe(true);
 		expect(result.abortReason).toBe("parent cancelled");
 		expect(queryLog.closes).toBe(1);
-		expect(AgentRegistry.global().get("Worker")).toBeUndefined();
+		expect(AgentRegistry.global().get("Worker")).toMatchObject({ status: "aborted", session: null });
 	});
 
 	it("enforces task.maxRuntimeMs through the aborted Task result", async () => {

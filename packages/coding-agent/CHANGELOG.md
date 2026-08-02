@@ -86,6 +86,7 @@
 - Added the `claude-code/{model}` Task selector, Claude Agent SDK runtime, `task.claudeCode.executable` setting, and `@anthropic-ai/claude-agent-sdk` dependency, with structured OMP Yield validation and live usage accounting.
 - Added OMP Task and Hub messaging/job tools to Claude Code task peers, with nested-task policy inheritance, owner-scoped asynchronous custody, and process-supervision rejection.
 - Added isolated Claude Code Task execution through OMP's existing patch, branch, merge, and cleanup custody.
+- Added retained Claude Code Task peers with ordered Hub and asynchronous-result input, truthful busy-delivery receipts, idle lifecycle custody, and query cleanup on park.
 
 ### Fixed
 

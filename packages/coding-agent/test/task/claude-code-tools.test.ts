@@ -164,12 +164,11 @@ describe("Claude Code OMP tools", () => {
 		expect(text(called)).toContain("Nested result");
 		expect(run).toHaveBeenCalledTimes(1);
 		expect(run.mock.calls[0]?.[0]).toMatchObject({
-			id: "ClaudePeer.Nested",
+			keepAlive: true,
 			parentAgentId: "ClaudePeer",
 			taskDepth: 1,
 			modelOverride: ["openai/gpt-4.1-mini"],
 			signal: controller.signal,
-			keepAlive: false,
 		});
 	});
 

@@ -109,8 +109,8 @@ export function createClaudeCodeToolSession(options: ExecutorOptions, registry: 
 		restrictToolNames: options.restrictToolNames,
 		taskDepth,
 		getEvalSessionId: () => options.parentEvalSessionId ?? null,
-		// A one-shot owner cannot retain addressable children after it exits.
-		keepAliveSubagents: false,
+		// Only live, non-isolated owners can retain addressable children.
+		keepAliveSubagents: options.keepAlive !== false && options.worktree === undefined,
 		getSessionFile: () => null,
 		getAgentId: () => options.id,
 		agentRegistry: registry,

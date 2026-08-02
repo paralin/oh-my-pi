@@ -17,6 +17,7 @@ import {
 	type McpSdkServerConfigWithInstance,
 	query,
 	type SDKMessage,
+	type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import * as z from "zod";
 
@@ -65,9 +66,12 @@ export interface ClaudeCodeMcpServer {
 	tools: ClaudeCodeMcpTool[];
 }
 
+/** One ordered input stream for a retained Claude query. */
+export type ClaudeCodeInput = string | AsyncIterable<string>;
+
 /** Everything one synchronous Claude Agent SDK task run needs. */
 export interface ClaudeCodeQueryRequest {
-	prompt: string;
+	prompt: ClaudeCodeInput;
 	/** Resolved `claude-code/{model-name}` suffix. */
 	model: string;
 	cwd: string;
@@ -180,10 +184,23 @@ export function createClaudeCodeMcpServer(definition: ClaudeCodeMcpServer): McpS
 	return server;
 }
 
+async function* mapSdkInput(input: AsyncIterable<string>): AsyncGenerator<SDKUserMessage> {
+	for await (const text of input) {
+		yield {
+			type: "user",
+			message: { role: "user", content: [{ type: "text", text }] },
+			parent_tool_use_id: null,
+			origin: { kind: "coordinator" },
+			priority: "next",
+			shouldQuery: true,
+		};
+	}
+}
+
 export const startClaudeCodeQuery: StartClaudeCodeQuery = async request => {
 	const server = createClaudeCodeMcpServer(request.mcpServer);
 	const started = query({
-		prompt: request.prompt,
+		prompt: typeof request.prompt === "string" ? request.prompt : mapSdkInput(request.prompt),
 		options: {
 			model: request.model,
 			effort: request.effort,
