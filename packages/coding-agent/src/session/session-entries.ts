@@ -1,5 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { ClaudeCodeEffort } from "../task/claude-code-selector";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -198,6 +199,8 @@ export interface ClaudeCodeSessionRuntime {
 	cwd: string;
 	transcriptPath: string;
 	model: string;
+	/** Provider effort selected for the native Claude query. Older entries omit it. */
+	effort?: ClaudeCodeEffort;
 	toolPolicyVersion: number;
 }
 

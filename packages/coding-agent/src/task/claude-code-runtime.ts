@@ -9,7 +9,6 @@ import * as path from "node:path";
  * Claude Code keeps its coding tools while OMP owns coordination.
  */
 
-import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import claudeCodeSubagentPrompt from "../prompts/system/claude-code-subagent.md" with { type: "text" };
@@ -24,10 +23,10 @@ import { ClaudeCodePeer } from "./claude-code-peer";
 import {
 	type ClaudeCodeEvent,
 	type ClaudeCodeQuery,
-	type ClaudeCodeQueryRequest,
 	type StartClaudeCodeQuery,
 	startClaudeCodeQuery,
 } from "./claude-code-sdk";
+import { CLAUDE_CODE_EFFORTS, type ClaudeCodeSelection } from "./claude-code-selector";
 import { CLAUDE_CODE_MCP_TOOL_NAMES, createClaudeCodeMcpTools } from "./claude-code-tools";
 import {
 	type ExecutorOptions,
@@ -110,13 +109,6 @@ export const CLAUDE_CODE_PERMISSION_MODE = "bypassPermissions" as const;
 /** The SDK requires this alongside {@link CLAUDE_CODE_PERMISSION_MODE}. */
 export const CLAUDE_CODE_SKIP_PERMISSIONS = true as const;
 
-const CLAUDE_CODE_EFFORTS = [
-	Effort.Low,
-	Effort.Medium,
-	Effort.High,
-	Effort.XHigh,
-	Effort.Max,
-] as const satisfies readonly NonNullable<ClaudeCodeQueryRequest["effort"]>[];
 /** Evidence emitted after a production-adapter run has released its one-shot peer. */
 export interface ClaudeCodeRuntimeEvidence {
 	agentId: string;
@@ -130,6 +122,8 @@ export interface ClaudeCodeSubprocessRequest {
 	options: ExecutorOptions;
 	/** Resolved `claude-code/{model-name}` suffix, handed to the SDK verbatim. */
 	model: string;
+	/** Explicit provider effort parsed from the runtime selector. */
+	effort?: ClaudeCodeSelection["effort"];
 	/** Injection seam: deterministic tests substitute a fake SDK query. */
 	startQuery?: StartClaudeCodeQuery;
 	/** Optional observation sink used by the live production-adapter probe. */
@@ -206,6 +200,7 @@ export interface ClaudeCodePeerReviverRequest {
 	options: ExecutorOptions;
 	nativeSession: ClaudeCodeSessionRuntime;
 	appendSystemPrompt: string;
+	effort?: ClaudeCodeSelection["effort"];
 	startQuery?: StartClaudeCodeQuery;
 }
 
@@ -258,6 +253,7 @@ export function createClaudeCodePeerReviver(request: ClaudeCodePeerReviverReques
 				resume: nativeSession.sessionId,
 				model: nativeSession.model,
 				cwd: nativeSession.cwd,
+				effort: request.effort,
 				executable: (options.settings ?? Settings.isolated()).get("task.claudeCode.executable") ?? "claude",
 				appendSystemPrompt: request.appendSystemPrompt,
 				...(nativeTools !== undefined ? { tools: nativeTools } : {}),
@@ -482,7 +478,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					model,
 					effort:
 						options.effort === undefined
-							? undefined
+							? request.effort
 							: resolveTaskEffortForSupportedLevels(
 									CLAUDE_CODE_EFFORTS,
 									options.effort,
@@ -550,6 +546,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 								cwd,
 								transcriptPath: claudeTranscriptPath(cwd, event.sessionId),
 								model,
+								...(request.effort ? { effort: request.effort } : {}),
 								toolPolicyVersion: CLAUDE_CODE_TOOL_POLICY_VERSION,
 							};
 							peer.setNativeSession(nativeSession);
@@ -668,6 +665,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					nativeSession,
 					appendSystemPrompt: systemPromptAppend ?? "",
 					startQuery,
+					effort: request.effort,
 				})
 			: null;
 		try {

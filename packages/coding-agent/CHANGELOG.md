@@ -56,6 +56,7 @@
 - Added isolated Claude Code Task execution through OMP's existing patch, branch, merge, and cleanup custody.
 - Added retained Claude Code Task peers with ordered Hub and asynchronous-result input, truthful busy-delivery receipts, idle lifecycle custody, and query cleanup on park.
 - Added metadata-only persistence for retained Claude Code peers, with read-only native transcript history and exact-session revival after parking or process restart.
+- Added configured `claude-code/{model}:{effort}` Task selectors to `omp models` output, and taught runtime role aliases to pass exact Claude SDK effort values.
 
 ### Fixed
 
