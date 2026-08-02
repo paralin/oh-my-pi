@@ -380,10 +380,10 @@ async function cancelAgentRegistration(
 			await ref.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		if (lifecycle) {
-			await lifecycle.release(id);
+			await lifecycle.release(id, ref);
 		} else {
 			await ref.session?.dispose();
-			registry?.unregister(id);
+			registry?.unregister(id, ref);
 		}
 	} catch (error) {
 		return {

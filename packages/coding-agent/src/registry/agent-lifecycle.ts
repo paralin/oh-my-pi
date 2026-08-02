@@ -21,8 +21,8 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AgentSession } from "../session/agent-session";
 import {
+	type AgentPeer,
 	type AgentRef,
 	type AgentRefExpectation,
 	AgentRegistry,
@@ -30,7 +30,7 @@ import {
 	type RegistryEvent,
 } from "./agent-registry";
 
-export type AgentReviver = (expected: AgentRef) => Promise<AgentSession>;
+export type AgentReviver = (expected: AgentRef) => Promise<AgentPeer>;
 
 /**
  * Builds a reviver for a `parked` ref restored from disk (Agent Hub scan,
@@ -44,7 +44,7 @@ export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentRe
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
-	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
+	/** Recreates a live peer from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
 	revive?: AgentReviver;
 }
 
@@ -70,7 +70,7 @@ interface ParkInFlight {
 
 interface RevivingAgent {
 	ref: AgentRef;
-	promise: Promise<AgentSession>;
+	promise: Promise<AgentPeer>;
 }
 
 export class AgentLifecycleManager {
@@ -265,7 +265,7 @@ export class AgentLifecycleManager {
 	 * Never returns a session that is mid-dispose: an in-flight park is either
 	 * cancelled (session still live) or awaited to completion before revive.
 	 */
-	async ensureLive(id: string): Promise<AgentSession> {
+	async ensureLive(id: string): Promise<AgentPeer> {
 		const park = this.#parks.get(id);
 		if (park) {
 			const parked = this.#registry.get(id);
@@ -313,7 +313,7 @@ export class AgentLifecycleManager {
 	 * adopt it so the agent rejoins the normal idle↔parked lifecycle. Throws
 	 * when the agent is not revivable or no reviver can be produced.
 	 */
-	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentSession> {
+	async #resolveAndRevive(id: string, ref: AgentRef): Promise<AgentPeer> {
 		let adoption = this.#adopted.get(id);
 		let revive = adoption?.ref === ref ? adoption.revive : undefined;
 		let coldAdopted = false;
@@ -412,7 +412,7 @@ export class AgentLifecycleManager {
 		this.#persistedReviverFactory = undefined;
 	}
 
-	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {
+	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentPeer> {
 		const session = await revive(ref);
 		let liveRef = this.#registry.get(id);
 		if (liveRef === ref && ref.status === "parked" && !ref.session) {

@@ -22,6 +22,7 @@ import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
+import { AgentSession } from "../../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
@@ -96,19 +97,20 @@ function formatResolvedModelBadge(resolved: string, preserveProvider = false): s
  */
 function modelBadge(ref: AgentRef, observed: ObservableSession | undefined): string | undefined {
 	const progress = observed?.progress;
+	const session = ref.session instanceof AgentSession ? ref.session : undefined;
 	// Prefer the live session's own resolved fallback selector; else honor the
 	// executor-reported fallback flag. The latter covers observer-only rows (no
 	// live session) AND live rows whose fallback armed no session retry state —
 	// e.g. the Fireworks Fast → base degrade, which emits `retry_fallback_applied`
 	// without populating `#activeRetryFallback`, so `retryFallbackModel` is undefined.
 	const fallbackSelector =
-		ref.session?.retryFallbackModel ?? (progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined);
+		session?.retryFallbackModel ?? (progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined);
 	if (fallbackSelector) {
 		return `${theme.fg("warning", "fallback →")} ${formatResolvedModelBadge(fallbackSelector, true)}`;
 	}
-	const model = ref.session?.model;
+	const model = session?.model;
 	if (model) {
-		const level = model.thinking ? ref.session?.thinkingLevel : undefined;
+		const level = model.thinking ? session.thinkingLevel : undefined;
 		return formatModelBadge(model.id, level);
 	}
 	const resolved = progress?.resolvedModel;
