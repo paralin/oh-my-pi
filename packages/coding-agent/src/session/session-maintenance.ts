@@ -255,7 +255,7 @@ export interface SessionMaintenanceHost {
 		suppressContinuation: boolean;
 	}): boolean;
 	scheduleAutoContinuePrompt(generation: number): boolean;
-	/** Scratch continuity owner; inactive when the session has no scratch document. */
+	/** Returns the session's ScratchHandoffController, which stays inactive without a scratch document. */
 	scratchHandoff(): ScratchHandoffController;
 	persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean>;
 	findLastAssistantMessage(): AssistantMessage | undefined;

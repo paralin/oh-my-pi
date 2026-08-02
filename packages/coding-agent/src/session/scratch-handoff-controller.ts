@@ -231,8 +231,9 @@ export interface ScratchHandoffControllerOptions {
  * LLM-authored handoff when a scratch document is active.
  */
 /**
- * Named progress points a scratch pass reports to its owner. The controller does
- * not know about trace identity; the maintenance owner correlates these.
+ * Named progress points a scratch pass reports as it runs. ScratchHandoffController
+ * carries no trace identity; SessionMaintenance correlates these phases with the
+ * maintenance trace.
  */
 export type ScratchHandoffPhase =
 	| "scratch-target-resolved"
@@ -240,7 +241,7 @@ export type ScratchHandoffPhase =
 	| "scratch-session-compacted"
 	| "scratch-session-rebuilt";
 
-/** Reports a phase as it completes; supplied by the owner running the pass. */
+/** Reports a phase as it completes; SessionMaintenance supplies this when it runs the pass. */
 export type ScratchHandoffPhaseReporter = (phase: ScratchHandoffPhase) => Promise<void>;
 
 export class ScratchHandoffController {

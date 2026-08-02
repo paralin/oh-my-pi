@@ -20,9 +20,9 @@ function buildSystemNotification(entries: SystemNotificationEntry[]): AgentMessa
 	};
 }
 
-/** Model the exact session wiring the notification delivery owner depends on:
- * streaming entries steer through the agent immediately, while idle entries
- * schedule a wake turn through injectIdle. */
+/** Model the exact session wiring YieldQueue depends on: streaming entries steer
+ * through the agent immediately, while idle entries schedule a wake turn through
+ * injectIdle. */
 function harness() {
 	let streaming = false;
 	const idleInjected: AgentMessage[][] = [];

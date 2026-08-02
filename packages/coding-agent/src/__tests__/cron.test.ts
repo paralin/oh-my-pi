@@ -54,8 +54,8 @@ describe("cron scheduling", () => {
 		});
 		const job = await manager.create({ expression: "1 10 * * *", prompt: "check in", recurring: false });
 		clock.setNow(job.nextFireAt);
-		// Active turn: the scheduler must still hand the fired job to its delivery
-		// owner immediately. Waiting for idle (a turn end or Escape abort) is the bug.
+		// Active turn: CronManager still calls enqueuePrompt for the fired job
+		// immediately. Waiting for idle (a turn end or Escape abort) is the bug.
 		clock.setIdle(false);
 		clock.timers.shift()?.();
 		await Promise.resolve();

@@ -38,8 +38,8 @@ async function claimRunInChild(
 	error?: string;
 }> {
 	const harnessModule = pathToFileURL(path.join(import.meta.dir, "rpc-harness.ts")).href;
-	// The child is a separate Bun eval process, so it must dynamically load the
-	// same owner module by file URL; a parent static import cannot cross the
+	// The child is a separate Bun eval process, so it must dynamically load
+	// rpc-harness.ts by file URL; a parent static import cannot cross the
 	// process boundary.
 	const script = `
 		const { RpcHarnessSessionOwner } = await import(${JSON.stringify(harnessModule)});

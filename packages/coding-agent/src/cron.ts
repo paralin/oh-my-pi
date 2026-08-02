@@ -315,9 +315,9 @@ export class CronManager {
 		const jobs = this.#jobs;
 		try {
 			// Deliver every due job as soon as it fires, whether the turn is active
-			// or idle. The delivery owner (the session) routes each notification to
-			// the next tool-call boundary when streaming and wakes a turn when idle,
-			// so the scheduler never waits for interactive input to hand a job off.
+			// or idle. #enqueuePrompt routes each notification to the next tool-call
+			// boundary while the session streams and wakes a turn when it is idle,
+			// so CronManager never waits for interactive input to hand a job off.
 			while (true) {
 				this.#refreshSession();
 				if (this.#sessionFile !== sessionFile || this.#sessionKey !== sessionKey || this.#jobs !== jobs) {

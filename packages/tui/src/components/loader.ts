@@ -155,8 +155,8 @@ export class Loader extends Text {
 	#syncText(): boolean {
 		const layoutFrame = this.#layoutFrames[this.#currentFrame];
 		this.#layoutFrame = layoutFrame;
-		// Function messages are live values and must be sampled by the loader's
-		// animation owner instead of requiring callers to schedule updates.
+		// Function messages are live values, so every spinner advance and every
+		// setMessage re-reads the current text here.
 		const message = typeof this.message === "function" ? this.message() : this.message;
 		return this.setText(`${layoutFrame} ${message}`);
 	}

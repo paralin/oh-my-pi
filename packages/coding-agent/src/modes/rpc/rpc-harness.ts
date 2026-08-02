@@ -74,7 +74,7 @@ export class RpcHarnessSessionOwner {
 		this.#publish = publish;
 	}
 
-	/** Opens a session owner and reloads its durable RPC record. */
+	/** Constructs an RpcHarnessSessionOwner and reloads its durable RPC record. */
 	static async open(
 		sessionId: string,
 		recordFile: string,
@@ -112,7 +112,7 @@ export class RpcHarnessSessionOwner {
 		});
 	}
 
-	/** Appends one event in owner order and assigns its sequence before publication. */
+	/** Appends one event through #eventTail in call order and assigns its sequence before publication. */
 	appendEvent(event: RpcAgentEventPayload): Promise<RpcHarnessEvent> {
 		const task = this.#eventTail.then(async () => {
 			if (this.#failure) throw this.#failure;
