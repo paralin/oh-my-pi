@@ -84,7 +84,7 @@ export class YieldQueue {
 		return false;
 	}
 
-	/** Re-arm the idle flush after the owner transitions from streaming to idle. */
+	/** Re-arm the idle flush after the session transitions from streaming to idle. */
 	notifyIdle(): void {
 		if (this.#options.isStreaming()) return;
 		for (const [kind, dispatcher] of this.#dispatchers) {
