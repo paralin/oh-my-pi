@@ -7163,11 +7163,10 @@ export class AgentSession {
 		return this.#irc.drainInboxMessages(agentId, opts);
 	}
 
-	/** Delivers an IRC message into this recipient session. */
 	/**
-	 * Deliver a scheduled prompt (a fired cron job) into this session as a
-	 * system notification. It flushes at the next idle boundary rather than
-	 * interrupting a running turn, so a scheduled job never lands mid-tool-loop.
+	 * Deliver a fired cron job as a system notification. YieldQueue steers it
+	 * into an active turn at the next interruptible boundary, or wakes a turn
+	 * when the session is idle.
 	 */
 	deliverScheduledPrompt(promptText: string): void {
 		if (this.#isDisposed) return;

@@ -1651,8 +1651,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
-	// Agent-created cron jobs are owned by the session that can actually run
-	// them: delivery is gated on idle so a fired job never lands mid-tool-loop.
+	// Agent-created cron jobs belong to the session that can run them. A fired
+	// job enters that session's YieldQueue, which steers an active turn at its
+	// next tool boundary or wakes the session when idle.
 	const cronManager = new CronManager({
 		getSessionFile: () => sessionManager.getSessionFile(),
 		getSessionId: () => sessionManager.getSessionId(),
