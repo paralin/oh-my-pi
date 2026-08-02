@@ -32,7 +32,10 @@ export type AgentKind = "main" | "sub" | "advisor";
 /** Live behavior shared by every agent runtime. Object identity is the session generation token. */
 export interface AgentPeer {
 	readonly messages: unknown[];
-	deliverIrcMessage(message: IrcMessage, options?: { expectsReply?: boolean }): Promise<"injected" | "woken">;
+	deliverIrcMessage(
+		message: IrcMessage,
+		options?: { expectsReply?: boolean },
+	): Promise<"injected" | "queued" | "woken">;
 	abort(options?: { reason?: string }): Promise<void>;
 	dispose(): Promise<void>;
 }

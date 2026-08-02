@@ -2,11 +2,11 @@
  * IrcBus - Process-global mailbox bus for agent-to-agent messaging.
  *
  * Replaces the old auto-reply model: a `send` never blocks on the recipient
- * generating anything. Delivery resolves the recipient via the global
- * AgentRegistry — parked agents are revived through the
- * AgentLifecycleManager, idle agents are woken with a real turn, and busy
- * agents receive the message as a non-interrupting aside at the next step
- * boundary (see AgentSession.deliverIrcMessage). Replies are real turns by
+ * generating anything. Delivery resolves the recipient through the global
+ * AgentRegistry. Parked agents are revived through AgentLifecycleManager.
+ * Idle agents wake with a real turn. Busy sessions either accept a
+ * non-interrupting aside at the next step boundary or queue the message at
+ * their next input boundary. Replies are real turns by
  * the recipient, observed via `wait` — with one exception: when the sender
  * awaits a reply and the recipient cannot run a real reply turn in time
  * (mid-turn with async execution disabled — possibly blocked in a
@@ -35,7 +35,7 @@ export interface IrcMessage {
 
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "injected" | "queued" | "woken" | "revived" | "failed";
 	error?: string;
 }
 
@@ -85,9 +85,9 @@ export class IrcBus {
 
 	/**
 	 * Fire-and-forget delivery. Never blocks on the recipient generating
-	 * anything: the receipt reports how the message reached the recipient
-	 * (waiter/aside = "injected", idle wake = "woken", park revival =
-	 * "revived"), not what they did with it.
+	 * anything. The receipt reports how the message reached the recipient:
+	 * waiter/aside = "injected", busy input = "queued", idle wake = "woken",
+	 * and park revival = "revived".
 	 *
 	 * Mailbox semantics: a successfully delivered message never lingers in
 	 * the recipient's mailbox — injection/wake puts the full body into their

@@ -127,6 +127,30 @@ describe("AgentLifecycleManager", () => {
 		expect(stub.disposeCalls()).toBe(1);
 	});
 
+	it("adopts a running agent without parking it until its first idle boundary", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		const ref = registry.register({
+			id: "Busy-Sub",
+			displayName: "task",
+			kind: "sub",
+			session: stub.session,
+			status: "running",
+		});
+		lifecycle.adopt("Busy-Sub", { idleTtlMs: TTL }, ref);
+
+		vi.advanceTimersByTime(TTL * 10);
+		await flushAsync();
+		expect(registry.get("Busy-Sub")?.status).toBe("running");
+		expect(stub.disposeCalls()).toBe(0);
+
+		registry.setStatus("Busy-Sub", "idle", ref);
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+		expect(registry.get("Busy-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+	});
+
 	it("ensureLive revives a parked agent through its reviver and flips it back to idle", async () => {
 		const revived = makeSessionStub();
 		registry.register({

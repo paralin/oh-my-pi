@@ -37,7 +37,7 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry } from "../registry/agent-registry";
+import { type AgentPeer, AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import { AgentSession, type AgentSessionEvent, type Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
@@ -2386,7 +2386,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
  */
 export async function finalizeSubagentLifecycle(args: {
 	id: string;
-	session: AgentSession;
+	session: AgentPeer;
 	aborted: boolean;
 	/** Which watchdog (if any) requested the abort; decides revivability. */
 	abortKind?: AbortReason;
@@ -2394,6 +2394,8 @@ export async function finalizeSubagentLifecycle(args: {
 	isolated: boolean;
 	agentIdleTtlMs: number;
 	reviveSession: AgentReviver | null;
+	/** False when a queued follow-up already owns the retained peer. */
+	markIdle?: boolean;
 }): Promise<void> {
 	const registry = AgentRegistry.global();
 	const ref = registry.get(args.id);
@@ -2445,7 +2447,7 @@ export async function finalizeSubagentLifecycle(args: {
 
 	// Keep-alive: finished and failed subagents both stay interrogable.
 	// The lifecycle manager owns idle-TTL parking + revival from here on.
-	if (!ref || !ownsRef || !registry.setStatus(args.id, "idle", ref)) {
+	if (!ref || !ownsRef || (args.markIdle !== false && !registry.setStatus(args.id, "idle", ref))) {
 		await disposeSession();
 		return;
 	}

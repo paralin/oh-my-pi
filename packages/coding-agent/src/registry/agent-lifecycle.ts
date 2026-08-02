@@ -132,8 +132,8 @@ export class AgentLifecycleManager {
 	}
 
 	/**
-	 * Take ownership of a finished subagent. Caller has already set registry
-	 * status to "idle". Arms the TTL timer (idleTtlMs <= 0 adopts without one).
+	 * Take ownership of a retained subagent. An idle ref arms its TTL timer;
+	 * a running ref waits for the next idle registry event before arming one.
 	 * When `expected` is given, the adoption is refused if the id no longer
 	 * resolves to that ref (or that ref's session).
 	 */
@@ -148,7 +148,7 @@ export class AgentLifecycleManager {
 		clearTimeout(existing?.timer);
 		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
 		this.#adopted.set(id, adopted);
-		this.#armTimer(id, adopted);
+		if (ref.status === "idle") this.#armTimer(id, adopted);
 	}
 
 	/** True if the id is adopted (parked or live) — and, when `expected` is given, still bound to that ref. */
