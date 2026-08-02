@@ -191,6 +191,18 @@ export interface CredentialPinEntry extends SessionEntryBase {
 	hash: string;
 }
 
+/** Runtime metadata for a Claude Code child whose conversation stays in native JSONL. */
+export interface ClaudeCodeSessionRuntime {
+	kind: "claude-code";
+	sessionId: string;
+	cwd: string;
+	transcriptPath: string;
+	model: string;
+	toolPolicyVersion: number;
+}
+
+export type SessionRuntimeMetadata = ClaudeCodeSessionRuntime;
+
 /** Session init entry - captures initial context for subagent sessions (debugging/replay). */
 export interface SessionInitEntry extends SessionEntryBase {
 	type: "session_init";
@@ -210,6 +222,8 @@ export interface SessionInitEntry extends SessionEntryBase {
 	spawns?: string;
 	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
 	readSummarize?: boolean;
+	/** Absent means the native Pi runtime for backward compatibility. */
+	runtime?: SessionRuntimeMetadata;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

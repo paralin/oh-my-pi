@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { SDKMessage, Query as SdkQuery } from "@anthropic-ai/claude-agent-sdk";
 import * as claudeAgentSdk from "@anthropic-ai/claude-agent-sdk";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -11,6 +13,7 @@ import { parseAgentFields } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { type AgentPeer, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { claudeTranscriptPath } from "@oh-my-pi/pi-coding-agent/session/claude-session-store";
 import * as claudeCodeRuntime from "@oh-my-pi/pi-coding-agent/task/claude-code-runtime";
 import {
 	CLAUDE_CODE_DENIED_TOOLS,
@@ -260,6 +263,13 @@ function liveQueryHarness(queryLog: QueryLog): LiveQueryHarness {
 		}
 		queueMicrotask(() => {
 			void (async () => {
+				await emit({
+					kind: "init",
+					sessionId: "retained-session",
+					model: "claude-opus-5",
+					tools: ["Read", "Edit", "mcp__omp__task", "mcp__omp__hub", "mcp__omp__yield"],
+					version: "2.1.220",
+				});
 				queryLog.toolResults.push(await yieldTool.handler({ result: { data: { ok: true } } }));
 				await emit({ kind: "result", isError: false, text: "initial done", tokens: 1, requests: 1 });
 			})();
@@ -744,6 +754,7 @@ describe("claude code runtime", () => {
 				[
 					{
 						kind: "init",
+						sessionId: "session-live-proof",
 						model: "claude-opus-5",
 						tools: ["Read", "Edit", "mcp__omp__task", "mcp__omp__hub", "mcp__omp__yield"],
 						version: "2.1.220",
@@ -761,6 +772,7 @@ describe("claude code runtime", () => {
 				agentId: "Worker",
 				init: {
 					kind: "init",
+					sessionId: "session-live-proof",
 					model: "claude-opus-5",
 					tools: ["Read", "Edit", "mcp__omp__task", "mcp__omp__hub", "mcp__omp__yield"],
 					version: "2.1.220",
@@ -782,6 +794,7 @@ describe("claude code runtime", () => {
 				[
 					{
 						kind: "init",
+						sessionId: "session-invalid-tools",
 						model: "claude-opus-5",
 						tools: ["Read", "Agent", "mcp__omp__yield"],
 						version: "2.1.220",
@@ -1006,6 +1019,53 @@ describe("claude code runtime", () => {
 		expect(await jobs.drainDeliveries({ timeoutMs: 1_000, filter: { ownerId: "Worker" } })).toBe(true);
 		expect(live.inputs).toHaveLength(4);
 		await jobs.dispose({ timeoutMs: 1_000 });
+	});
+
+	it("persists only Claude runtime metadata beside the parent transcript", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-claude-metadata-"));
+		const artifactsDir = path.join(root, "parent");
+		await fs.mkdir(artifactsDir);
+		const live = liveQueryHarness(log());
+		try {
+			const result = await runClaudeCodeSubprocess({
+				options: executorOptions({
+					cwd: root,
+					keepAlive: true,
+					persistArtifacts: true,
+					artifactsDir,
+					settings: Settings.isolated({
+						"task.claudeCode.executable": "claude-min",
+						"task.agentIdleTtlMs": 0,
+					}),
+				}),
+				model: "claude-opus-5",
+				startQuery: live.startQuery,
+			});
+
+			expect(result.exitCode).toBe(0);
+			const metadataFile = path.join(artifactsDir, "Worker.jsonl");
+			expect(AgentRegistry.global().get("Worker")?.sessionFile).toBe(metadataFile);
+			const entries = (await Bun.file(metadataFile).text())
+				.split("\n")
+				.filter(Boolean)
+				.map(line => JSON.parse(line) as Record<string, unknown>);
+			expect(entries.some(entry => entry.type === "message")).toBe(false);
+			const init = entries.find(entry => entry.type === "session_init");
+			expect(init).toMatchObject({
+				task: "Inspect the target.",
+				runtime: {
+					kind: "claude-code",
+					sessionId: "retained-session",
+					cwd: root,
+					transcriptPath: claudeTranscriptPath(root, "retained-session"),
+					model: "claude-opus-5",
+					toolPolicyVersion: 1,
+				},
+			});
+			await AgentLifecycleManager.global().release("Worker");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("refuses to replace a live registry generation before SDK startup", async () => {

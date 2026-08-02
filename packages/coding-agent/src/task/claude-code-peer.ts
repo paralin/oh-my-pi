@@ -6,7 +6,9 @@ import {
 	ASYNC_PREVIEW_MAX_CHARS,
 	buildAsyncResultBatchMessage,
 } from "../session/async-job-delivery";
+import { loadClaudeSessionMessagesReadOnly } from "../session/claude-session-store";
 import { buildIrcIncomingMessage } from "../session/irc-bridge";
+import type { ClaudeCodeSessionRuntime } from "../session/session-entries";
 import type { ClaudeCodeQuery } from "./claude-code-sdk";
 
 /** Terminal abort evidence consumed by the Task result owner. */
@@ -28,8 +30,8 @@ export class ClaudeCodeInputMailbox implements AsyncIterable<string> {
 	#iteratorCreated = false;
 	#inFlightInputs = 0;
 
-	constructor(initialPrompt: string) {
-		this.#queue.push(initialPrompt);
+	constructor(initialPrompt?: string) {
+		if (initialPrompt !== undefined) this.#queue.push(initialPrompt);
 	}
 
 	get turnIdle(): boolean {
@@ -91,10 +93,11 @@ export class ClaudeCodeInputMailbox implements AsyncIterable<string> {
 
 export interface ClaudeCodePeerOptions {
 	id: string;
-	prompt: string;
+	prompt?: string;
 	abortController: AbortController;
 	registry: AgentRegistry;
 	asyncJobManager?: AsyncJobManager;
+	nativeSession?: ClaudeCodeSessionRuntime;
 }
 
 /** One live Claude Code query registered as an OMP peer. */
@@ -110,6 +113,7 @@ export class ClaudeCodePeer implements AgentPeer {
 	#disposePromise: Promise<void> | undefined;
 	#abortState: ClaudeCodePeerAbortState = { aborted: false };
 	#queryCloseAttempted = false;
+	#nativeSession: ClaudeCodeSessionRuntime | undefined;
 	#queryCloseFailure: ClaudeCodeQueryCloseFailure | undefined;
 	#unregisterAsyncDeliverySink: (() => void) | undefined;
 
@@ -118,7 +122,9 @@ export class ClaudeCodePeer implements AgentPeer {
 		this.#abortController = options.abortController;
 		this.#registry = options.registry;
 		this.input = new ClaudeCodeInputMailbox(options.prompt);
-		this.messages = [{ role: "user", content: options.prompt, timestamp: Date.now() }];
+		this.messages =
+			options.prompt === undefined ? [] : [{ role: "user", content: options.prompt, timestamp: Date.now() }];
+		this.#nativeSession = options.nativeSession;
 		if (options.asyncJobManager) {
 			this.#unregisterAsyncDeliverySink = options.asyncJobManager.registerDeliverySink(
 				options.id,
@@ -143,9 +149,31 @@ export class ClaudeCodePeer implements AgentPeer {
 		return this.input.turnIdle;
 	}
 
+	async readHistorySnapshot(): Promise<{
+		messages: unknown[];
+		sourcePath?: string;
+		sourceLabel?: string;
+	}> {
+		const native = this.#nativeSession;
+		if (!native) return { messages: this.messages, sourceLabel: "live session" };
+		return {
+			messages: await loadClaudeSessionMessagesReadOnly(native.transcriptPath, native.cwd, native.sessionId),
+			sourcePath: native.transcriptPath,
+			sourceLabel: "native Claude transcript (read-only, live)",
+		};
+	}
+
+	setNativeSession(native: ClaudeCodeSessionRuntime): void {
+		this.#nativeSession = native;
+	}
+
 	/** Bind registry mutation to the exact generation registered for this peer. */
 	bindRef(ref: AgentRef): void {
-		if (ref.id !== this.#id || ref.session !== this) {
+		if (
+			ref.id !== this.#id ||
+			this.#registry.get(this.#id) !== ref ||
+			(ref.session !== null && ref.session !== this)
+		) {
 			throw new Error(`Claude Code peer "${this.#id}" cannot bind an unrelated registry generation.`);
 		}
 		this.#ref = ref;

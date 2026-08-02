@@ -1,16 +1,23 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
 /**
  * Claude Agent SDK task runtime.
  *
- * Runs one synchronous `claude-code/{model-name}` task, exposes OMP
- * coordination through an in-process MCP server, and returns the established
- * Task result. Claude Code keeps its coding tools while OMP owns coordination.
+ * Starts a `claude-code/{model-name}` task, exposes OMP coordination through
+ * an in-process MCP server, and retains the native query for later peer turns.
+ * Claude Code keeps its coding tools while OMP owns coordination.
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import claudeCodeSubagentPrompt from "../prompts/system/claude-code-subagent.md" with { type: "text" };
+import type { AgentReviver } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
+import { claudeTranscriptPath } from "../session/claude-session-store";
+import type { ClaudeCodeSessionRuntime } from "../session/session-entries";
+import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { resolveTaskEffortForSupportedLevels } from "../thinking";
 import { ClaudeCodePeer } from "./claude-code-peer";
@@ -47,6 +54,9 @@ export const OMP_MCP_SERVER_NAME = "omp";
  * task spawning and peer messaging.
  */
 export const CLAUDE_CODE_DENIED_TOOLS = ["Agent", "Task", "SendMessage"];
+
+/** Metadata policy understood by this runtime and its persisted reviver. */
+export const CLAUDE_CODE_TOOL_POLICY_VERSION = 1;
 
 /** Explicit semantic mapping from OMP tools to Claude built-ins. */
 const CLAUDE_CODE_NATIVE_TOOL_BY_OMP_NAME: Readonly<Partial<Record<string, string>>> = {
@@ -137,6 +147,163 @@ function cancellationMessage(signal: AbortSignal | undefined): string {
 	return signal.reason instanceof Error ? signal.reason.message : String(signal.reason ?? "Subagent cancelled");
 }
 
+function validateClaudeCodeInit(
+	event: Extract<ClaudeCodeEvent, { kind: "init" }>,
+	expectedSessionId?: string,
+): string | undefined {
+	if (expectedSessionId && event.sessionId !== expectedSessionId) {
+		return `Claude Code resumed session "${event.sessionId}" instead of "${expectedSessionId}".`;
+	}
+	const denied = CLAUDE_CODE_DENIED_TOOLS.filter(name => event.tools.includes(name));
+	const missing = CLAUDE_CODE_MCP_TOOL_NAMES.filter(
+		name => !event.tools.includes(`mcp__${OMP_MCP_SERVER_NAME}__${name}`),
+	);
+	return (
+		[
+			denied.length > 0 ? `Claude Code exposed denied tools: ${denied.join(", ")}.` : "",
+			missing.length > 0 ? `Claude Code omitted required OMP tools: ${missing.join(", ")}.` : "",
+		]
+			.filter(Boolean)
+			.join("\n") || undefined
+	);
+}
+
+function persistedSpawns(options: ExecutorOptions): string {
+	const spawns = options.agent.spawns;
+	return spawns === "*" ? "*" : (spawns?.join(",") ?? "");
+}
+
+async function writeClaudeCodeSessionMetadata(
+	file: string,
+	options: ExecutorOptions,
+	systemPrompt: string,
+	runtime: ClaudeCodeSessionRuntime,
+): Promise<void> {
+	await fs.mkdir(path.dirname(file), { recursive: true });
+	const manager = await SessionManager.open(file, undefined, undefined, {
+		initialCwd: runtime.cwd,
+		suppressBreadcrumb: true,
+	});
+	try {
+		manager.appendSessionInit({
+			systemPrompt,
+			task: options.task,
+			tools: options.agent.tools ?? [],
+			spawns: persistedSpawns(options),
+			readSummarize: options.agent.readSummarize,
+			outputSchema: options.outputSchema,
+			outputSchemaMode: options.outputSchemaMode,
+			restrictToolNames: options.restrictToolNames || undefined,
+			runtime,
+		});
+		await manager.flush();
+	} finally {
+		await manager.close();
+	}
+}
+
+export interface ClaudeCodePeerReviverRequest {
+	options: ExecutorOptions;
+	nativeSession: ClaudeCodeSessionRuntime;
+	appendSystemPrompt: string;
+	startQuery?: StartClaudeCodeQuery;
+}
+
+/** Build a reviver that resumes the exact native Claude conversation. */
+export function createClaudeCodePeerReviver(request: ClaudeCodePeerReviverRequest): AgentReviver {
+	return async expectedRef => {
+		const { nativeSession, options } = request;
+		if (nativeSession.toolPolicyVersion !== CLAUDE_CODE_TOOL_POLICY_VERSION) {
+			throw new Error(
+				`Claude Code session "${nativeSession.sessionId}" uses unsupported tool policy version ${nativeSession.toolPolicyVersion}.`,
+			);
+		}
+		try {
+			await fs.stat(nativeSession.cwd);
+		} catch {
+			throw new Error(
+				`Claude Code session "${nativeSession.sessionId}" cannot be revived because cwd "${nativeSession.cwd}" is unavailable.`,
+			);
+		}
+		try {
+			await fs.stat(nativeSession.transcriptPath);
+		} catch {
+			throw new Error(
+				`Claude Code session "${nativeSession.sessionId}" cannot be revived because transcript "${nativeSession.transcriptPath}" is unavailable.`,
+			);
+		}
+
+		const registry = AgentRegistry.global();
+		const abortController = new AbortController();
+		const peer = new ClaudeCodePeer({
+			id: options.id,
+			abortController,
+			registry,
+			asyncJobManager: options.asyncJobManager,
+			nativeSession,
+		});
+		peer.bindRef(expectedRef);
+		try {
+			const yieldItems: YieldItem[] = [];
+			const mcpTools = await createClaudeCodeMcpTools({
+				executor: options,
+				registry,
+				signal: abortController.signal,
+				yieldItems,
+				onTerminalYield: () => {},
+			});
+			const nativeTools = claudeCodeNativeTools(options.agent.tools);
+			const query = await (request.startQuery ?? startClaudeCodeQuery)({
+				prompt: peer.input,
+				resume: nativeSession.sessionId,
+				model: nativeSession.model,
+				cwd: nativeSession.cwd,
+				executable: (options.settings ?? Settings.isolated()).get("task.claudeCode.executable") ?? "claude",
+				appendSystemPrompt: request.appendSystemPrompt,
+				...(nativeTools !== undefined ? { tools: nativeTools } : {}),
+				disallowedTools: [...CLAUDE_CODE_DENIED_TOOLS],
+				permissionMode: CLAUDE_CODE_PERMISSION_MODE,
+				allowDangerouslySkipPermissions: CLAUDE_CODE_SKIP_PERMISSIONS,
+				mcpServer: {
+					name: OMP_MCP_SERVER_NAME,
+					tools: mcpTools,
+				},
+				abortController,
+			});
+			if (!peer.attachQuery(query)) {
+				throw new Error(`Agent "${options.id}" stopped while its Claude Code query was resuming.`);
+			}
+			const eventPump = (async (): Promise<void> => {
+				try {
+					for await (const event of query.events) {
+						if (event.kind === "init") {
+							const invalid = validateClaudeCodeInit(event, nativeSession.sessionId);
+							if (invalid) throw new Error(invalid);
+						} else if (event.kind === "tool-progress") {
+							registry.setActivity(options.id, `running ${event.toolName}`, expectedRef);
+						} else if (event.kind === "assistant") {
+							if (event.text) {
+								peer.recordAssistantText(event.text);
+								registry.setActivity(options.id, event.text, expectedRef);
+							}
+						} else {
+							peer.completeTurn();
+						}
+					}
+					await peer.abort({ reason: "Claude Code query ended unexpectedly." });
+				} catch (error) {
+					if (!peer.abortState.aborted) await peer.abort({ reason: failureMessage(error) });
+				}
+			})();
+			peer.attachEventPump(eventPump);
+			return peer;
+		} catch (error) {
+			await peer.dispose();
+			throw error;
+		}
+	};
+}
+
 /**
  * Run one task on the Claude Agent SDK runtime.
  *
@@ -152,6 +319,13 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 	const startTime = Date.now();
 	const settings = options.settings ?? Settings.isolated();
 	const maxRuntimeMs = options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs");
+	const keepAlive = options.keepAlive !== false;
+	const isolated = options.worktree !== undefined;
+	const retainLive = keepAlive && !isolated;
+	const metadataSessionFile =
+		retainLive && options.persistArtifacts && options.artifactsDir
+			? path.join(options.artifactsDir, `${options.id}.jsonl`)
+			: undefined;
 	const runtimeLimitReason = `Subagent runtime limit exceeded (task.maxRuntimeMs=${maxRuntimeMs})`;
 	const registry = AgentRegistry.global();
 	const abortController = new AbortController();
@@ -169,7 +343,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 			kind: "sub",
 			parentId: options.parentAgentId,
 			session: peer,
-			sessionFile: null,
+			sessionFile: metadataSessionFile ?? null,
 			status: "running",
 		},
 		null,
@@ -199,9 +373,6 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		modelOverride: options.modelOverride,
 		resolvedModel: model,
 	};
-	const keepAlive = options.keepAlive !== false;
-	const isolated = options.worktree !== undefined;
-	const retainLive = keepAlive && !isolated;
 	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
 	let terminalYield = false;
 	let runtimeLimitExceeded = false;
@@ -214,6 +385,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 	let tokens = 0;
 	let requests = 0;
 	let init: Extract<ClaudeCodeEvent, { kind: "init" }> | undefined;
+	let nativeSession: ClaudeCodeSessionRuntime | undefined;
 	let queryConstructed = false;
 	let queryClosed = false;
 	let queryCloseFailure: string | undefined;
@@ -353,7 +525,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					: peer.abortState.aborted
 						? (peer.abortState.reason ?? "Subagent cancelled")
 						: `Agent "${options.id}" stopped while its Claude Code query was starting.`;
-		} else if (query && !registry.attachSession(options.id, peer, null, ref)) {
+		} else if (query && !registry.attachSession(options.id, peer, metadataSessionFile ?? null, ref)) {
 			startupRejected = true;
 			exitCode = 1;
 			stderr = `Agent "${options.id}" was replaced or became terminal during Claude Code startup.`;
@@ -363,22 +535,31 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					for await (const event of query.events) {
 						if (event.kind === "init") {
 							init = event;
-							const denied = CLAUDE_CODE_DENIED_TOOLS.filter(name => event.tools.includes(name));
-							const missing = CLAUDE_CODE_MCP_TOOL_NAMES.filter(
-								name => !event.tools.includes(`mcp__${OMP_MCP_SERVER_NAME}__${name}`),
-							);
-							if (denied.length > 0 || missing.length > 0) {
+							const invalid = validateClaudeCodeInit(event);
+							if (invalid) {
 								startupRejected = true;
 								exitCode = 1;
-								stderr = [
-									denied.length > 0 ? `Claude Code exposed denied tools: ${denied.join(", ")}.` : "",
-									missing.length > 0 ? `Claude Code omitted required OMP tools: ${missing.join(", ")}.` : "",
-								]
-									.filter(Boolean)
-									.join("\n");
+								stderr = invalid;
 								abortController.abort(new Error(stderr));
 								settleInitialTurn();
 								return;
+							}
+							nativeSession = {
+								kind: "claude-code",
+								sessionId: event.sessionId,
+								cwd,
+								transcriptPath: claudeTranscriptPath(cwd, event.sessionId),
+								model,
+								toolPolicyVersion: CLAUDE_CODE_TOOL_POLICY_VERSION,
+							};
+							peer.setNativeSession(nativeSession);
+							if (metadataSessionFile) {
+								await writeClaudeCodeSessionMetadata(
+									metadataSessionFile,
+									options,
+									systemPromptAppend ?? "",
+									nativeSession,
+								);
 							}
 							continue;
 						}
@@ -436,8 +617,14 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 					}
 					eventStreamEnded = true;
 					if (!initialTurnSettled) {
+						if (!terminalYield) {
+							exitCode = 1;
+							stderr = "Claude Code query ended unexpectedly.";
+						}
 						peer.completeTurn();
 						settleInitialTurn();
+					} else if (!peer.abortState.aborted) {
+						await peer.abort({ reason: "Claude Code query ended unexpectedly." });
 					}
 				} catch (error) {
 					eventStreamEnded = true;
@@ -467,8 +654,22 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		options.signal?.removeEventListener("abort", cancel);
 		const hardAborted = options.signal?.aborted === true || peer.abortState.aborted || runtimeLimitExceeded;
 		const lifecycleKeepAlive =
-			keepAlive && terminalYield && queryConstructed && !eventStreamEnded && !startupRejected && !hardAborted;
+			keepAlive &&
+			terminalYield &&
+			queryConstructed &&
+			nativeSession !== undefined &&
+			!eventStreamEnded &&
+			!startupRejected &&
+			!hardAborted;
 		const retainsLive = lifecycleKeepAlive && !isolated;
+		const reviveSession = nativeSession
+			? createClaudeCodePeerReviver({
+					options: { ...options, signal: undefined, keepAlive: true },
+					nativeSession,
+					appendSystemPrompt: systemPromptAppend ?? "",
+					startQuery,
+				})
+			: null;
 		try {
 			await finalizeSubagentLifecycle({
 				id: options.id,
@@ -477,7 +678,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 				keepAlive: lifecycleKeepAlive,
 				isolated,
 				agentIdleTtlMs,
-				reviveSession: null,
+				reviveSession,
 				markIdle: peer.turnIdle,
 			});
 		} catch (error) {
