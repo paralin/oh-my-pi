@@ -75,6 +75,8 @@ export interface ClaudeCodeQueryRequest {
 	/** Resolved `claude-code/{model-name}` suffix. */
 	model: string;
 	cwd: string;
+	/** Native Claude conversation restored for a parked peer. */
+	resume?: string;
 	/** SDK-supported reasoning effort selected by common Task policy. */
 	effort?: EffortLevel;
 	/** `task.claudeCode.executable`, passed through as the Claude Code executable. */
@@ -100,7 +102,7 @@ export interface ClaudeCodeQueryRequest {
 
 /** The slice of the SDK message stream a task result and live evidence are built from. */
 export type ClaudeCodeEvent =
-	| { kind: "init"; model: string; tools: string[]; version: string }
+	| { kind: "init"; model: string; tools: string[]; version: string; sessionId: string }
 	| { kind: "assistant"; text?: string; tokens: number; requests: number }
 	| { kind: "tool-progress"; toolUseId: string; toolName: string; elapsedSeconds: number }
 	| { kind: "result"; isError: boolean; text: string; tokens: number; requests: number };
@@ -123,6 +125,7 @@ async function* mapSdkMessages(messages: AsyncIterable<SDKMessage>): AsyncGenera
 				model: message.model,
 				tools: [...message.tools],
 				version: message.claude_code_version,
+				sessionId: message.session_id,
 			};
 			continue;
 		}
@@ -206,6 +209,7 @@ export const startClaudeCodeQuery: StartClaudeCodeQuery = async request => {
 			effort: request.effort,
 			cwd: request.cwd,
 			pathToClaudeCodeExecutable: request.executable,
+			resume: request.resume,
 			...(request.tools !== undefined ? { tools: request.tools } : {}),
 			disallowedTools: request.disallowedTools,
 			permissionMode: request.permissionMode,

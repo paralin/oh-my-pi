@@ -30,8 +30,15 @@ export type AgentStatus = "running" | "idle" | "parked" | "aborted";
  */
 export type AgentKind = "main" | "sub" | "advisor";
 /** Live behavior shared by every agent runtime. Object identity is the session generation token. */
+export interface AgentHistorySnapshot {
+	messages: unknown[];
+	sourcePath?: string;
+	sourceLabel?: string;
+}
+
 export interface AgentPeer {
 	readonly messages: unknown[];
+	readHistorySnapshot?(): Promise<AgentHistorySnapshot>;
 	deliverIrcMessage(
 		message: IrcMessage,
 		options?: { expectsReply?: boolean },

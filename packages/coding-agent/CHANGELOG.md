@@ -55,6 +55,7 @@
 - Added OMP Task and Hub messaging/job tools to Claude Code task peers, with nested-task policy inheritance, owner-scoped asynchronous custody, and process-supervision rejection.
 - Added isolated Claude Code Task execution through OMP's existing patch, branch, merge, and cleanup custody.
 - Added retained Claude Code Task peers with ordered Hub and asynchronous-result input, truthful busy-delivery receipts, idle lifecycle custody, and query cleanup on park.
+- Added metadata-only persistence for retained Claude Code peers, with read-only native transcript history and exact-session revival after parking or process restart.
 
 ### Fixed
 
