@@ -8,6 +8,9 @@
 - Scheduler: `packages/coding-agent/src/cron.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/cron-list.md`
 
+## Availability
+
+The cron tools are not part of the default tool set. Activate them with `--tools` alongside the tools the session needs, for example `--tools read,bash,cron_create,cron_list,cron_delete`.
 ## Inputs
 
 The tool accepts no fields.

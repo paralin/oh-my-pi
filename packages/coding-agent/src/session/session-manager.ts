@@ -1821,6 +1821,10 @@ export class SessionManager {
 		return this.#sessionFile;
 	}
 
+	getStorage(): SessionStorage {
+		return this.#storage;
+	}
+
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
 		return artifactsDirectoryFor(this.#sessionFile);
