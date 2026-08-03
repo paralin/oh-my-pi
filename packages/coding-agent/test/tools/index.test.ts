@@ -304,6 +304,13 @@ describe("createTools", () => {
 		expect(tools.map(tool => tool.name)).toEqual(["read", "write"]);
 	});
 
+	it("does not force-add goal to an explicit no-tools session", async () => {
+		const session = createTestSession({ settings: createSettingsWithOverrides({ "goal.enabled": true }) });
+		const tools = await createTools(session, ["__none__"]);
+
+		expect(tools.map(t => t.name)).not.toContain("goal");
+	});
+
 	it("records active tools on the original session object", async () => {
 		const session = createTestSession();
 

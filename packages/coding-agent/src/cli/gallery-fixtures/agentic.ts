@@ -324,12 +324,11 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 
 	goal: {
 		label: "Goal",
-		// Streaming: op is "create"; objective text still being typed.
-		streamingArgs: { op: "create", objective: "Ship the auth hardening" },
+		// Streaming: op is "set"; objective text still being typed.
+		streamingArgs: { op: "set", objective: "Ship the auth hardening" },
 		args: {
-			op: "create",
+			op: "set",
 			objective: "Ship the auth hardening pass: per-account rate limits and sliding session expiry.",
-			token_budget: 500_000,
 		},
 		result: {
 			content: [
@@ -339,7 +338,7 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 				},
 			],
 			details: {
-				op: "create",
+				op: "set",
 				remainingTokens: 451_800,
 				completionBudgetReport: null,
 				goal: {
@@ -356,8 +355,8 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 		},
 		errorResult: {
 			isError: true,
-			content: [{ type: "text", text: "Goal tool failed: objective is required when op=create." }],
-			details: { op: "create" },
+			content: [{ type: "text", text: "Goal tool failed: objective is required when op=set." }],
+			details: { op: "set" },
 		},
 	},
 
