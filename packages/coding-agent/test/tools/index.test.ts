@@ -431,7 +431,22 @@ describe("createTools", () => {
 		expect(names).toContain("rewind");
 	});
 
-	it("HIDDEN_TOOLS contains yield and goal", () => {
-		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["goal", "yield"]);
+	it("HIDDEN_TOOLS contains yield, goal, and the cron tools", () => {
+		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual(["cron_create", "cron_delete", "cron_list", "goal", "yield"]);
+	});
+
+	it("leaves the cron tools out of the default set and takes them by name", async () => {
+		const session = createTestSession({ settings: createSettingsWithOverrides({ "tools.xdev": false }) });
+		const defaults = (await createTools(session)).map(t => t.name);
+		expect(defaults).not.toContain("cron_create");
+		expect(defaults).not.toContain("cron_list");
+		expect(defaults).not.toContain("cron_delete");
+
+		const requested = (await createTools(session, ["read", "cron_create", "cron_list", "cron_delete"])).map(
+			t => t.name,
+		);
+		expect(requested).toContain("cron_create");
+		expect(requested).toContain("cron_list");
+		expect(requested).toContain("cron_delete");
 	});
 });

@@ -1,0 +1,1 @@
+List every scheduled prompt in this session, including session-only and durable jobs. Each row includes its job id, cron expression, local next-fire time, recurrence/expiry, and durability. A durable one-shot whose scheduled time was missed during shutdown is listed with its immediate catch-up time until it fires.
