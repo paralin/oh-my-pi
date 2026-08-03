@@ -192,6 +192,15 @@ crate.annotation(
     build_script_env = {"PCRE2_SYS_STATIC": "1"},
 )
 
+# libspa-sys compiles bindgen's generated static-function wrappers during its
+# build script. Resolve CARGO_MANIFEST_DIR when the script runs because Bazel
+# compiles and executes build scripts in separate sandboxes.
+crate.annotation(
+    crate = "libspa-sys",
+    patches = ["//bazel/patches:libspa-sys-runtime-manifest-dir.patch"],
+    patch_args = ["-p1"],
+)
+
 # tree-sitter-just's scanner.c hard-errors when NDEBUG is set (opt-mode cc
 # default). cc-rs appends env CFLAGS after its computed flags, so -UNDEBUG wins.
 crate.annotation(
