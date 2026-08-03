@@ -7,6 +7,7 @@ import type { PartialFieldInfo } from "@aptre/protobuf-es-lite/field";
 import type { MessageType } from "@aptre/protobuf-es-lite/message";
 import { createEmptyMessageType, createMessageType } from "@aptre/protobuf-es-lite/message";
 import { ScalarType } from "@aptre/protobuf-es-lite/scalar";
+import { ProjectionSnapshot } from "./projection.pb.js";
 
 export const protobufPackage = "glados.sdk.llmsession";
 
@@ -193,13 +194,28 @@ export interface SessionSummary {
 export const SessionSummary: MessageType<SessionSummary> = /* @__PURE__ */ createMessageType({
 	typeName: "glados.sdk.llmsession.SessionSummary",
 	fields: [
-		{ no: 1, name: "session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 1,
+			name: "session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 2, name: "goal_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 3, name: "trajectory_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 3,
+			name: "trajectory_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 4, name: "agent_object_key", kind: "scalar", T: ScalarType.STRING },
 		{ no: 5, name: "provider", kind: "scalar", T: ScalarType.STRING },
 		{ no: 6, name: "state", kind: "scalar", T: ScalarType.STRING },
-		{ no: 7, name: "transcript_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 7,
+			name: "transcript_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 8, name: "input_tokens", kind: "scalar", T: ScalarType.INT64 },
 		{ no: 9, name: "output_tokens", kind: "scalar", T: ScalarType.INT64 },
 		{ no: 10, name: "updated_at", kind: "scalar", T: ScalarType.STRING },
@@ -207,8 +223,18 @@ export const SessionSummary: MessageType<SessionSummary> = /* @__PURE__ */ creat
 		{ no: 12, name: "canceled_at", kind: "scalar", T: ScalarType.STRING },
 		{ no: 13, name: "failure", kind: "scalar", T: ScalarType.STRING },
 		{ no: 14, name: "blocker", kind: "scalar", T: ScalarType.STRING },
-		{ no: 15, name: "provider_session_id", kind: "scalar", T: ScalarType.STRING },
-		{ no: 16, name: "parent_session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 15,
+			name: "provider_session_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 16,
+			name: "parent_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 17, name: "model", kind: "scalar", T: ScalarType.STRING },
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
@@ -231,7 +257,13 @@ export interface ListSessionsResponse {
 export const ListSessionsResponse: MessageType<ListSessionsResponse> = /* @__PURE__ */ createMessageType({
 	typeName: "glados.sdk.llmsession.ListSessionsResponse",
 	fields: [
-		{ no: 1, name: "sessions", kind: "message", T: () => SessionSummary, repeated: true },
+		{
+			no: 1,
+			name: "sessions",
+			kind: "message",
+			T: () => SessionSummary,
+			repeated: true,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -394,14 +426,44 @@ export interface AgentMessageSummary {
 export const AgentMessageSummary: MessageType<AgentMessageSummary> = /* @__PURE__ */ createMessageType({
 	typeName: "glados.sdk.llmsession.AgentMessageSummary",
 	fields: [
-		{ no: 1, name: "message_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 1,
+			name: "message_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 2, name: "inbox_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 3, name: "from_agent_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 4, name: "to_agent_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 5, name: "source_llm_session_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 6, name: "target_llm_session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 3,
+			name: "from_agent_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 4,
+			name: "to_agent_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 5,
+			name: "source_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 6,
+			name: "target_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 7, name: "dispatch_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 8, name: "steering_delivery_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 8,
+			name: "steering_delivery_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 9, name: "state", kind: "scalar", T: ScalarType.STRING },
 		{ no: 10, name: "body", kind: "scalar", T: ScalarType.STRING },
 		{ no: 11, name: "created_at", kind: "scalar", T: ScalarType.STRING },
@@ -592,14 +654,29 @@ export const CustodySummary: MessageType<CustodySummary> = /* @__PURE__ */ creat
 	typeName: "glados.sdk.llmsession.CustodySummary",
 	fields: [
 		{ no: 1, name: "dispatch_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 2, name: "llm_session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 3, name: "agent_object_key", kind: "scalar", T: ScalarType.STRING },
 		{ no: 4, name: "goal_object_key", kind: "scalar", T: ScalarType.STRING },
 		{ no: 5, name: "claim_state", kind: "scalar", T: ScalarType.STRING },
 		{ no: 6, name: "lane_state", kind: "scalar", T: ScalarType.STRING },
 		{ no: 7, name: "terminal_outcome", kind: "scalar", T: ScalarType.STRING },
-		{ no: 8, name: "last_steering_sequence", kind: "scalar", T: ScalarType.UINT64 },
-		{ no: 9, name: "last_cancellation_sequence", kind: "scalar", T: ScalarType.UINT64 },
+		{
+			no: 8,
+			name: "last_steering_sequence",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
+		{
+			no: 9,
+			name: "last_cancellation_sequence",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
 		{ no: 10, name: "artifacts_dir", kind: "scalar", T: ScalarType.STRING },
 		{ no: 11, name: "terminal_accepted", kind: "scalar", T: ScalarType.BOOL },
 		{ no: 12, name: "objective", kind: "scalar", T: ScalarType.STRING },
@@ -607,17 +684,57 @@ export const CustodySummary: MessageType<CustodySummary> = /* @__PURE__ */ creat
 		{ no: 14, name: "started_at", kind: "scalar", T: ScalarType.STRING },
 		{ no: 15, name: "worktree_path", kind: "scalar", T: ScalarType.STRING },
 		{ no: 16, name: "process_pid", kind: "scalar", T: ScalarType.UINT64 },
-		{ no: 17, name: "process_liveness", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 17,
+			name: "process_liveness",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 18, name: "last_event_at", kind: "scalar", T: ScalarType.STRING },
-		{ no: 19, name: "intent_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 20, name: "attempt_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 19,
+			name: "intent_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 20,
+			name: "attempt_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 21, name: "receipt_state", kind: "scalar", T: ScalarType.STRING },
 		{ no: 22, name: "ready_sequence", kind: "scalar", T: ScalarType.UINT64 },
-		{ no: 23, name: "consume_sequence", kind: "scalar", T: ScalarType.UINT64 },
-		{ no: 24, name: "consumed_by_llm_session_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 25, name: "provider_session_id", kind: "scalar", T: ScalarType.STRING },
-		{ no: 26, name: "process_group_released", kind: "scalar", T: ScalarType.BOOL },
-		{ no: 27, name: "parent_session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 23,
+			name: "consume_sequence",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
+		{
+			no: 24,
+			name: "consumed_by_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 25,
+			name: "provider_session_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 26,
+			name: "process_group_released",
+			kind: "scalar",
+			T: ScalarType.BOOL,
+		},
+		{
+			no: 27,
+			name: "parent_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 28, name: "model", kind: "scalar", T: ScalarType.STRING },
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
@@ -671,11 +788,29 @@ export const SessionSnapshot: MessageType<SessionSnapshot> = /* @__PURE__ */ cre
 	typeName: "glados.sdk.llmsession.SessionSnapshot",
 	fields: [
 		{ no: 1, name: "session", kind: "message", T: () => SessionSummary },
-		{ no: 2, name: "turns", kind: "message", T: () => SessionTurn, repeated: true },
+		{
+			no: 2,
+			name: "turns",
+			kind: "message",
+			T: () => SessionTurn,
+			repeated: true,
+		},
 		{ no: 3, name: "run_state", kind: "scalar", T: ScalarType.STRING },
 		{ no: 4, name: "stop_reason", kind: "scalar", T: ScalarType.STRING },
-		{ no: 5, name: "inbox_messages", kind: "message", T: () => AgentMessageSummary, repeated: true },
-		{ no: 6, name: "custody", kind: "message", T: () => CustodySummary, repeated: true },
+		{
+			no: 5,
+			name: "inbox_messages",
+			kind: "message",
+			T: () => AgentMessageSummary,
+			repeated: true,
+		},
+		{
+			no: 6,
+			name: "custody",
+			kind: "message",
+			T: () => CustodySummary,
+			repeated: true,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -698,7 +833,13 @@ export const ListSessionSnapshotsResponse: MessageType<ListSessionSnapshotsRespo
 	/* @__PURE__ */ createMessageType({
 		typeName: "glados.sdk.llmsession.ListSessionSnapshotsResponse",
 		fields: [
-			{ no: 1, name: "snapshots", kind: "message", T: () => SessionSnapshot, repeated: true },
+			{
+				no: 1,
+				name: "snapshots",
+				kind: "message",
+				T: () => SessionSnapshot,
+				repeated: true,
+			},
 		] satisfies readonly PartialFieldInfo[],
 		packedByDefault: true,
 	});
@@ -772,12 +913,44 @@ export const IntentKeySource: MessageType<IntentKeySource> = /* @__PURE__ */ cre
 		{ no: 1, name: "owner_artifact", kind: "scalar", T: ScalarType.STRING },
 		{ no: 2, name: "objective", kind: "scalar", T: ScalarType.STRING },
 		{ no: 3, name: "repository", kind: "scalar", T: ScalarType.STRING },
-		{ no: 4, name: "checkout_identity", kind: "scalar", T: ScalarType.STRING },
-		{ no: 5, name: "worktree_identity", kind: "scalar", T: ScalarType.STRING },
-		{ no: 6, name: "working_directory", kind: "scalar", T: ScalarType.STRING },
-		{ no: 7, name: "deliverable_paths", kind: "scalar", T: ScalarType.STRING, repeated: true },
-		{ no: 8, name: "write_surfaces", kind: "scalar", T: ScalarType.STRING, repeated: true },
-		{ no: 9, name: "resume_session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 4,
+			name: "checkout_identity",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 5,
+			name: "worktree_identity",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 6,
+			name: "working_directory",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 7,
+			name: "deliverable_paths",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+		{
+			no: 8,
+			name: "write_surfaces",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+		{
+			no: 9,
+			name: "resume_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -881,13 +1054,39 @@ export const SubmitSessionRequest: MessageType<SubmitSessionRequest> = /* @__PUR
 	fields: [
 		{ no: 1, name: "objective", kind: "scalar", T: ScalarType.STRING },
 		{ no: 2, name: "done_criteria", kind: "scalar", T: ScalarType.STRING },
-		{ no: 3, name: "adapter_argv", kind: "scalar", T: ScalarType.STRING, repeated: true },
+		{
+			no: 3,
+			name: "adapter_argv",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
 		{ no: 4, name: "worktree_path", kind: "scalar", T: ScalarType.STRING },
-		{ no: 5, name: "working_directory", kind: "scalar", T: ScalarType.STRING },
-		{ no: 6, name: "max_runtime_seconds", kind: "scalar", T: ScalarType.UINT64 },
-		{ no: 7, name: "parent_session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 5,
+			name: "working_directory",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 6,
+			name: "max_runtime_seconds",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
+		{
+			no: 7,
+			name: "parent_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 8, name: "model", kind: "scalar", T: ScalarType.STRING },
-		{ no: 9, name: "intent_identity", kind: "message", T: () => DispatchIntentIdentity },
+		{
+			no: 9,
+			name: "intent_identity",
+			kind: "message",
+			T: () => DispatchIntentIdentity,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -904,6 +1103,15 @@ export interface LookupDispatchIntentRequest {
 	 * @generated from field: string intent_key = 1;
 	 */
 	intentKey?: string;
+	/**
+	 * WaitForCustody holds the read open until the active attempt reaches
+	 * durable custody, or settles without it. The caller's deadline is the only
+	 * bound on that wait. Left false, the read returns what it observed right
+	 * now, which is how a caller establishes that an attempt really is admitted
+	 * and unbound before deciding to wait on it.
+	 *
+	 * @generated from field: bool wait_for_custody = 2;
+	 */
 	waitForCustody?: boolean;
 }
 
@@ -958,6 +1166,14 @@ export interface LookupDispatchIntentResponse {
 	 * @generated from field: glados.sdk.llmsession.CustodySummary custody = 6;
 	 */
 	custody?: CustodySummary;
+	/**
+	 * AwaitingCustody reports an active attempt the daemon observed as admitted
+	 * without durable custody yet. Only a completed response can set it, so it is
+	 * the proof that the unbound state was actually seen rather than inferred
+	 * from a read that ran out of time.
+	 *
+	 * @generated from field: bool awaiting_custody = 7;
+	 */
 	awaitingCustody?: boolean;
 }
 
@@ -967,7 +1183,12 @@ export const LookupDispatchIntentResponse: MessageType<LookupDispatchIntentRespo
 		fields: [
 			{ no: 1, name: "found", kind: "scalar", T: ScalarType.BOOL },
 			{ no: 2, name: "intent_state", kind: "scalar", T: ScalarType.STRING },
-			{ no: 3, name: "active_attempt_key", kind: "scalar", T: ScalarType.STRING },
+			{
+				no: 3,
+				name: "active_attempt_key",
+				kind: "scalar",
+				T: ScalarType.STRING,
+			},
 			{ no: 4, name: "attempt_state", kind: "scalar", T: ScalarType.STRING },
 			{ no: 5, name: "session", kind: "message", T: () => SessionSummary },
 			{ no: 6, name: "custody", kind: "message", T: () => CustodySummary },
@@ -975,6 +1196,391 @@ export const LookupDispatchIntentResponse: MessageType<LookupDispatchIntentRespo
 		] satisfies readonly PartialFieldInfo[],
 		packedByDefault: true,
 	});
+
+/**
+ * ReadWorldURIRequest is one bounded read of the canonical World namespace.
+ *
+ * @generated from message glados.sdk.llmsession.ReadWorldURIRequest
+ */
+export interface ReadWorldURIRequest {
+	/**
+	 * Uri is the canonical spacewave:// path exactly as the client formatted it.
+	 * The daemon does not percent-decode it: object keys are restricted to a
+	 * grammar that survives a URL path unchanged, so any decode here would be a
+	 * second interpretation of bytes that already mean one thing.
+	 *
+	 * A trailing "/-" selects the bounded key listing under the resolved key.
+	 * That selector is in the address itself, so one URI always means one read
+	 * and a listing cannot be requested for an address that does not say so.
+	 *
+	 * @generated from field: string uri = 1;
+	 */
+	uri?: string;
+	/**
+	 * Limit bounds the returned key listing. It must be positive and at most
+	 * 500. There is no unbounded read, and a zero limit is a caller that did not
+	 * choose a bound rather than a request for everything.
+	 *
+	 * @generated from field: uint32 limit = 2;
+	 */
+	limit?: number;
+}
+
+export const ReadWorldURIRequest: MessageType<ReadWorldURIRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.ReadWorldURIRequest",
+	fields: [
+		{ no: 1, name: "uri", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "limit", kind: "scalar", T: ScalarType.UINT32 },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * AgentSummary is one Agent tree row.
+ *
+ * @generated from message glados.sdk.llmsession.AgentSummary
+ */
+export interface AgentSummary {
+	/**
+	 * AgentObjectKey is the Agent World object key.
+	 *
+	 * @generated from field: string agent_object_key = 1;
+	 */
+	agentObjectKey?: string;
+	/**
+	 * ParentAgentObjectKey links to the supervising Agent.
+	 *
+	 * @generated from field: string parent_agent_object_key = 2;
+	 */
+	parentAgentObjectKey?: string;
+	/**
+	 * Name is the display name.
+	 *
+	 * @generated from field: string name = 3;
+	 */
+	name?: string;
+	/**
+	 * Tier is the current graph tier.
+	 *
+	 * @generated from field: string tier = 4;
+	 */
+	tier?: string;
+	/**
+	 * ActiveLlmSessionObjectKeys are runs currently occupying this Agent.
+	 *
+	 * @generated from field: repeated string active_llm_session_object_keys = 5;
+	 */
+	activeLlmSessionObjectKeys?: string[];
+}
+
+export const AgentSummary: MessageType<AgentSummary> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.AgentSummary",
+	fields: [
+		{ no: 1, name: "agent_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "parent_agent_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 3, name: "name", kind: "scalar", T: ScalarType.STRING },
+		{ no: 4, name: "tier", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 5,
+			name: "active_llm_session_object_keys",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * GoalSummary is one Goal tree row.
+ *
+ * @generated from message glados.sdk.llmsession.GoalSummary
+ */
+export interface GoalSummary {
+	/**
+	 * GoalObjectKey is the Goal World object key.
+	 *
+	 * @generated from field: string goal_object_key = 1;
+	 */
+	goalObjectKey?: string;
+	/**
+	 * ProgramObjectKey links to the owning Program.
+	 *
+	 * @generated from field: string program_object_key = 2;
+	 */
+	programObjectKey?: string;
+	/**
+	 * TrajectoryObjectKey links to the owning Trajectory.
+	 *
+	 * @generated from field: string trajectory_object_key = 3;
+	 */
+	trajectoryObjectKey?: string;
+	/**
+	 * Objective is the exact success target.
+	 *
+	 * @generated from field: string objective = 4;
+	 */
+	objective?: string;
+	/**
+	 * State is the Goal lifecycle state.
+	 *
+	 * @generated from field: string state = 5;
+	 */
+	state?: string;
+	/**
+	 * ActiveLlmSessionObjectKey is the live run when one exists.
+	 *
+	 * @generated from field: string active_llm_session_object_key = 6;
+	 */
+	activeLlmSessionObjectKey?: string;
+	/**
+	 * BlockedQuestionObjectKey links the Question currently blocking this Goal.
+	 *
+	 * @generated from field: string blocked_question_object_key = 7;
+	 */
+	blockedQuestionObjectKey?: string;
+}
+
+export const GoalSummary: MessageType<GoalSummary> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.GoalSummary",
+	fields: [
+		{ no: 1, name: "goal_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "program_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "trajectory_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 4, name: "objective", kind: "scalar", T: ScalarType.STRING },
+		{ no: 5, name: "state", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 6,
+			name: "active_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 7,
+			name: "blocked_question_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * AgentTreeSnapshot is the complete Agent, Goal, and custody projection.
+ *
+ * @generated from message glados.sdk.llmsession.AgentTreeSnapshot
+ */
+export interface AgentTreeSnapshot {
+	/**
+	 * Revision is the sessionstate custody revision when available.
+	 *
+	 * @generated from field: uint64 revision = 1;
+	 */
+	revision?: bigint;
+	/**
+	 * Agents are ordered by object key.
+	 *
+	 * @generated from field: repeated glados.sdk.llmsession.AgentSummary agents = 2;
+	 */
+	agents?: AgentSummary[];
+	/**
+	 * Goals are ordered by object key.
+	 *
+	 * @generated from field: repeated glados.sdk.llmsession.GoalSummary goals = 3;
+	 */
+	goals?: GoalSummary[];
+	/**
+	 * Custody rows are ordered by dispatch key.
+	 *
+	 * @generated from field: repeated glados.sdk.llmsession.CustodySummary custody = 4;
+	 */
+	custody?: CustodySummary[];
+}
+
+export const AgentTreeSnapshot: MessageType<AgentTreeSnapshot> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.AgentTreeSnapshot",
+	fields: [
+		{ no: 1, name: "revision", kind: "scalar", T: ScalarType.UINT64 },
+		{
+			no: 2,
+			name: "agents",
+			kind: "message",
+			T: () => AgentSummary,
+			repeated: true,
+		},
+		{
+			no: 3,
+			name: "goals",
+			kind: "message",
+			T: () => GoalSummary,
+			repeated: true,
+		},
+		{
+			no: 4,
+			name: "custody",
+			kind: "message",
+			T: () => CustodySummary,
+			repeated: true,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldKeyListing is one bounded page of object keys under a prefix.
+ *
+ * @generated from message glados.sdk.llmsession.WorldKeyListing
+ */
+export interface WorldKeyListing {
+	/**
+	 * Keys are the object keys under the prefix, ordered by key.
+	 *
+	 * @generated from field: repeated string keys = 1;
+	 */
+	keys?: string[];
+	/**
+	 * Truncated reports that the page stopped at Limit with more available.
+	 *
+	 * @generated from field: bool truncated = 2;
+	 */
+	truncated?: boolean;
+}
+
+export const WorldKeyListing: MessageType<WorldKeyListing> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldKeyListing",
+	fields: [
+		{
+			no: 1,
+			name: "keys",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+		{ no: 2, name: "truncated", kind: "scalar", T: ScalarType.BOOL },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * ReadWorldURIResponse carries exactly one read arm.
+ *
+ * @generated from message glados.sdk.llmsession.ReadWorldURIResponse
+ */
+export interface ReadWorldURIResponse {
+	/**
+	 * ObjectKey is the object key the URI resolved to.
+	 *
+	 * @generated from field: string object_key = 1;
+	 */
+	objectKey?: string;
+	/**
+	 * SpaceId is the Space the URI named, which matched the mounted World.
+	 *
+	 * @generated from field: string space_id = 2;
+	 */
+	spaceId?: string;
+	/**
+	 * SessionIdx is the session index the URI named, which matched the mounted
+	 * World.
+	 *
+	 * @generated from field: uint32 session_idx = 3;
+	 */
+	sessionIdx?: number;
+	/**
+	 * Found reports whether the resolved key names a readable object. A missing
+	 * object is a typed absence, not an error.
+	 *
+	 * @generated from field: bool found = 4;
+	 */
+	found?: boolean;
+
+	/**
+	 * Read is the single arm this response carries.
+	 *
+	 * @generated from oneof glados.sdk.llmsession.ReadWorldURIResponse.read
+	 */
+	read?:
+		| {
+				value?: undefined;
+				case: undefined;
+		  }
+		| {
+				/**
+				 * Snapshot is the existing projection for a stored object: session, goal,
+				 * question, evidence, DispatchIntent, and DispatchAttempt keys.
+				 *
+				 * @generated from field: glados.sdk.projection.ProjectionSnapshot snapshot = 5;
+				 */
+				value: ProjectionSnapshot;
+				case: "snapshot";
+		  }
+		| {
+				/**
+				 * AgentTree is the existing agent-tree read model, served unchanged at the
+				 * reserved virtual key. It is not converted into generic rows.
+				 *
+				 * @generated from field: glados.sdk.llmsession.AgentTreeSnapshot agent_tree = 6;
+				 */
+				value: AgentTreeSnapshot;
+				case: "agentTree";
+		  }
+		| {
+				/**
+				 * Listing is the bounded key listing for a prefix read.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldKeyListing listing = 7;
+				 */
+				value: WorldKeyListing;
+				case: "listing";
+		  };
+}
+
+export const ReadWorldURIResponse: MessageType<ReadWorldURIResponse> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.ReadWorldURIResponse",
+	fields: [
+		{ no: 1, name: "object_key", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "space_id", kind: "scalar", T: ScalarType.STRING },
+		{ no: 3, name: "session_idx", kind: "scalar", T: ScalarType.UINT32 },
+		{ no: 4, name: "found", kind: "scalar", T: ScalarType.BOOL },
+		{
+			no: 5,
+			name: "snapshot",
+			kind: "message",
+			T: () => ProjectionSnapshot,
+			oneof: "read",
+		},
+		{
+			no: 6,
+			name: "agent_tree",
+			kind: "message",
+			T: () => AgentTreeSnapshot,
+			oneof: "read",
+		},
+		{
+			no: 7,
+			name: "listing",
+			kind: "message",
+			T: () => WorldKeyListing,
+			oneof: "read",
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
 
 /**
  * ResumeSessionRequest continues one quiescent provider session in fresh daemon custody.
@@ -999,8 +1605,18 @@ export interface ResumeSessionRequest {
 export const ResumeSessionRequest: MessageType<ResumeSessionRequest> = /* @__PURE__ */ createMessageType({
 	typeName: "glados.sdk.llmsession.ResumeSessionRequest",
 	fields: [
-		{ no: 1, name: "session_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 2, name: "submission", kind: "message", T: () => SubmitSessionRequest },
+		{
+			no: 1,
+			name: "session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 2,
+			name: "submission",
+			kind: "message",
+			T: () => SubmitSessionRequest,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -1051,7 +1667,12 @@ export interface AccessSessionRequest {
 export const AccessSessionRequest: MessageType<AccessSessionRequest> = /* @__PURE__ */ createMessageType({
 	typeName: "glados.sdk.llmsession.AccessSessionRequest",
 	fields: [
-		{ no: 1, name: "session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 1,
+			name: "session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -1136,163 +1757,6 @@ export interface WatchAgentTreeRequest {}
 
 export const WatchAgentTreeRequest: MessageType<WatchAgentTreeRequest> =
 	/* @__PURE__ */ createEmptyMessageType<WatchAgentTreeRequest>("glados.sdk.llmsession.WatchAgentTreeRequest", true);
-
-/**
- * AgentSummary is one Agent tree row.
- *
- * @generated from message glados.sdk.llmsession.AgentSummary
- */
-export interface AgentSummary {
-	/**
-	 * AgentObjectKey is the Agent World object key.
-	 *
-	 * @generated from field: string agent_object_key = 1;
-	 */
-	agentObjectKey?: string;
-	/**
-	 * ParentAgentObjectKey links to the supervising Agent.
-	 *
-	 * @generated from field: string parent_agent_object_key = 2;
-	 */
-	parentAgentObjectKey?: string;
-	/**
-	 * Name is the display name.
-	 *
-	 * @generated from field: string name = 3;
-	 */
-	name?: string;
-	/**
-	 * Tier is the current graph tier.
-	 *
-	 * @generated from field: string tier = 4;
-	 */
-	tier?: string;
-	/**
-	 * ActiveLlmSessionObjectKeys are runs currently occupying this Agent.
-	 *
-	 * @generated from field: repeated string active_llm_session_object_keys = 5;
-	 */
-	activeLlmSessionObjectKeys?: string[];
-}
-
-export const AgentSummary: MessageType<AgentSummary> = /* @__PURE__ */ createMessageType({
-	typeName: "glados.sdk.llmsession.AgentSummary",
-	fields: [
-		{ no: 1, name: "agent_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 2, name: "parent_agent_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 3, name: "name", kind: "scalar", T: ScalarType.STRING },
-		{ no: 4, name: "tier", kind: "scalar", T: ScalarType.STRING },
-		{ no: 5, name: "active_llm_session_object_keys", kind: "scalar", T: ScalarType.STRING, repeated: true },
-	] satisfies readonly PartialFieldInfo[],
-	packedByDefault: true,
-});
-
-/**
- * GoalSummary is one Goal tree row.
- *
- * @generated from message glados.sdk.llmsession.GoalSummary
- */
-export interface GoalSummary {
-	/**
-	 * GoalObjectKey is the Goal World object key.
-	 *
-	 * @generated from field: string goal_object_key = 1;
-	 */
-	goalObjectKey?: string;
-	/**
-	 * ProgramObjectKey links to the owning Program.
-	 *
-	 * @generated from field: string program_object_key = 2;
-	 */
-	programObjectKey?: string;
-	/**
-	 * TrajectoryObjectKey links to the owning Trajectory.
-	 *
-	 * @generated from field: string trajectory_object_key = 3;
-	 */
-	trajectoryObjectKey?: string;
-	/**
-	 * Objective is the exact success target.
-	 *
-	 * @generated from field: string objective = 4;
-	 */
-	objective?: string;
-	/**
-	 * State is the Goal lifecycle state.
-	 *
-	 * @generated from field: string state = 5;
-	 */
-	state?: string;
-	/**
-	 * ActiveLlmSessionObjectKey is the live run when one exists.
-	 *
-	 * @generated from field: string active_llm_session_object_key = 6;
-	 */
-	activeLlmSessionObjectKey?: string;
-	/**
-	 * BlockedQuestionObjectKey links the Question currently blocking this Goal.
-	 *
-	 * @generated from field: string blocked_question_object_key = 7;
-	 */
-	blockedQuestionObjectKey?: string;
-}
-
-export const GoalSummary: MessageType<GoalSummary> = /* @__PURE__ */ createMessageType({
-	typeName: "glados.sdk.llmsession.GoalSummary",
-	fields: [
-		{ no: 1, name: "goal_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 2, name: "program_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 3, name: "trajectory_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 4, name: "objective", kind: "scalar", T: ScalarType.STRING },
-		{ no: 5, name: "state", kind: "scalar", T: ScalarType.STRING },
-		{ no: 6, name: "active_llm_session_object_key", kind: "scalar", T: ScalarType.STRING },
-		{ no: 7, name: "blocked_question_object_key", kind: "scalar", T: ScalarType.STRING },
-	] satisfies readonly PartialFieldInfo[],
-	packedByDefault: true,
-});
-
-/**
- * AgentTreeSnapshot is the complete Agent, Goal, and custody projection.
- *
- * @generated from message glados.sdk.llmsession.AgentTreeSnapshot
- */
-export interface AgentTreeSnapshot {
-	/**
-	 * Revision is the sessionstate custody revision when available.
-	 *
-	 * @generated from field: uint64 revision = 1;
-	 */
-	revision?: bigint;
-	/**
-	 * Agents are ordered by object key.
-	 *
-	 * @generated from field: repeated glados.sdk.llmsession.AgentSummary agents = 2;
-	 */
-	agents?: AgentSummary[];
-	/**
-	 * Goals are ordered by object key.
-	 *
-	 * @generated from field: repeated glados.sdk.llmsession.GoalSummary goals = 3;
-	 */
-	goals?: GoalSummary[];
-	/**
-	 * Custody rows are ordered by dispatch key.
-	 *
-	 * @generated from field: repeated glados.sdk.llmsession.CustodySummary custody = 4;
-	 */
-	custody?: CustodySummary[];
-}
-
-export const AgentTreeSnapshot: MessageType<AgentTreeSnapshot> = /* @__PURE__ */ createMessageType({
-	typeName: "glados.sdk.llmsession.AgentTreeSnapshot",
-	fields: [
-		{ no: 1, name: "revision", kind: "scalar", T: ScalarType.UINT64 },
-		{ no: 2, name: "agents", kind: "message", T: () => AgentSummary, repeated: true },
-		{ no: 3, name: "goals", kind: "message", T: () => GoalSummary, repeated: true },
-		{ no: 4, name: "custody", kind: "message", T: () => CustodySummary, repeated: true },
-	] satisfies readonly PartialFieldInfo[],
-	packedByDefault: true,
-});
 
 /**
  * WatchAgentTreeResponse is the response type for WatchAgentTree.
@@ -1423,10 +1887,20 @@ export const ControlAck: MessageType<ControlAck> = /* @__PURE__ */ createMessage
 	fields: [
 		{ no: 1, name: "request_id", kind: "scalar", T: ScalarType.STRING },
 		{ no: 2, name: "status", kind: "enum", T: ControlStatus_Enum },
-		{ no: 3, name: "session_object_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 3,
+			name: "session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
 		{ no: 4, name: "dispatch_key", kind: "scalar", T: ScalarType.STRING },
 		{ no: 5, name: "detail", kind: "scalar", T: ScalarType.STRING },
-		{ no: 6, name: "accepted_sequence", kind: "scalar", T: ScalarType.UINT64 },
+		{
+			no: 6,
+			name: "accepted_sequence",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });

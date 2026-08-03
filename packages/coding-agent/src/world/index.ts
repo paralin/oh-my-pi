@@ -27,11 +27,35 @@
  * values; under `verbatimModuleSyntax` those are split into `import type`.
  */
 
-export type { DispatchIntentLookup, WorldClientOptions, WorldEndpoint, WorldService } from "./client.js";
-export { DEFAULT_LOOKUP_TIMEOUT_MS, MAX_SESSION_PAGE, openResourceEndpoint, WorldClient } from "./client.js";
+export type {
+	DispatchIntentLookup,
+	WorldAddress,
+	WorldClientOptions,
+	WorldEndpoint,
+	WorldRead,
+	WorldService,
+} from "./client.js";
+export {
+	assertCanonicalWorldPath,
+	DEFAULT_LOOKUP_TIMEOUT_MS,
+	formatWorldURI,
+	formatWorldURL,
+	MAX_SESSION_PAGE,
+	MAX_WORLD_READ_PAGE,
+	openResourceEndpoint,
+	WORLD_LISTING_SELECTOR,
+	WorldClient,
+} from "./client.js";
 export type { WorldSocketSources } from "./config.js";
 export { isWorldConfigured, resolveWorldSocketPath, WORLD_SOCKET_ENV } from "./config.js";
-export type { CustodySummary, LookupDispatchIntentResponse, SessionSummary } from "./generated/llmsession.pb.js";
+export type {
+	AgentTreeSnapshot,
+	CustodySummary,
+	LookupDispatchIntentResponse,
+	ReadWorldURIResponse,
+	SessionSummary,
+} from "./generated/llmsession.pb.js";
+export type { ProjectionRow, ProjectionSnapshot } from "./generated/projection.pb.js";
 export type { IntentKeySource } from "./intent-key.js";
 export {
 	DEFAULT_DISPATCH_REPOSITORY,

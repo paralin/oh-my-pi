@@ -27,7 +27,11 @@ import {
 	startClaudeCodeQuery,
 } from "./claude-code-sdk";
 import { CLAUDE_CODE_EFFORTS, type ClaudeCodeSelection } from "./claude-code-selector";
-import { CLAUDE_CODE_MCP_TOOL_NAMES, createClaudeCodeMcpTools } from "./claude-code-tools";
+import {
+	CLAUDE_CODE_MCP_TOOL_NAMES,
+	CLAUDE_CODE_WORLD_READ_TOOL_NAME,
+	createClaudeCodeMcpTools,
+} from "./claude-code-tools";
 import {
 	type ExecutorOptions,
 	finalizeSubagentLifecycle,
@@ -74,10 +78,14 @@ const OMP_COORDINATION_TOOL_NAMES: Readonly<Partial<Record<string, true>>> = {
 	hub: true,
 	irc: true,
 	yield: true,
+	// Served over the same MCP bridge, so a restricted child that lists it is
+	// asking for a tool it will actually be given rather than an unsupported
+	// one. Whether it is advertised is still decided by configuration.
+	[CLAUDE_CODE_WORLD_READ_TOOL_NAME]: true,
 };
 
 /** Resolve a nonempty OMP allowlist to Claude built-ins without widening it. */
-function claudeCodeNativeTools(agentTools: readonly string[] | undefined): string[] | undefined {
+export function claudeCodeNativeTools(agentTools: readonly string[] | undefined): string[] | undefined {
 	if (!agentTools?.length) return undefined;
 	const tools: string[] = [];
 	const unsupported = new Set<string>();
