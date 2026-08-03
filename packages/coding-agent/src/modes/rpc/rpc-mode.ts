@@ -10,7 +10,11 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
+
 import { once } from "node:events";
+import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { Usage } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
@@ -26,10 +30,13 @@ import {
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
-import type { AgentSession } from "../../session/agent-session";
+import { type AgentSession, persistenceSafeAgentSessionEvent } from "../../session/agent-session";
+import type { AgentSessionEvent } from "../../session/agent-session-events";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
+import { sessionMessageUsage } from "../../session/session-stats";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
+import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
@@ -38,6 +45,8 @@ import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./h
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
+import { type RpcHarnessEvent, RpcHarnessSessionOwner, rpcHarnessRecordFileForSessionFile } from "./rpc-harness";
+import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
@@ -54,11 +63,97 @@ import type {
 	RpcHostUriResult,
 	RpcResponse,
 	RpcSessionState,
+	RpcSessionUsage,
 	RpcSubagentSubscriptionLevel,
 } from "./rpc-types";
 
 // Re-export types for consumers
 export type * from "./rpc-types";
+
+export function isRpcCustodyRestrictedPrompt(message: string): boolean {
+	return parseSlashCommand(message)?.name === "move";
+}
+
+export function hasPendingRpcContinuation(
+	session: Pick<AgentSession, "hasPendingAsyncWork" | "isCompacting" | "isStreaming" | "queuedMessageCount">,
+): boolean {
+	return (
+		session.isStreaming || session.isCompacting || session.hasPendingAsyncWork() || session.queuedMessageCount > 0
+	);
+}
+
+export function rpcExitOutcome(hasIncompleteWork: boolean): "aborted" | "completed" {
+	return hasIncompleteWork ? "aborted" : "completed";
+}
+export async function compactRpcSession<T>(
+	session: { readonly isStreaming: boolean; compact(customInstructions?: string): Promise<T> },
+	customInstructions: string | undefined,
+	sealResult?: (stopReason: string, outcome: "aborted") => Promise<void>,
+): Promise<T> {
+	const interruptsPrompt = session.isStreaming;
+	try {
+		return await session.compact(customInstructions);
+	} finally {
+		if (interruptsPrompt) await sealResult?.("aborted", "aborted");
+	}
+}
+
+export function hasActiveRpcSessionWork(
+	session: Pick<AgentSession, "hasPendingAsyncWork" | "isCompacting" | "isStreaming" | "queuedMessageCount">,
+	hasTrackedTasks: boolean,
+	hasActivePrompts: boolean,
+	hasPendingAgentMessageTasks: boolean,
+): boolean {
+	return hasPendingRpcContinuation(session) || hasTrackedTasks || hasActivePrompts || hasPendingAgentMessageTasks;
+}
+
+export async function disposeRpcSessionWithCustody(
+	session: { dispose(): Promise<void> },
+	owner?: { dispose(): Promise<void> },
+): Promise<void> {
+	await session.dispose();
+	await owner?.dispose();
+}
+
+export function deliverRpcSteeringIfNeeded(alreadyPersisted: boolean, deliver: () => Promise<void>): Promise<void> {
+	return alreadyPersisted ? Promise.resolve() : deliver();
+}
+
+function providerSafeAssistantText(event: AgentSessionEvent): string | undefined {
+	if (event.type !== "message_end" || event.message.role !== "assistant") return undefined;
+	const safeEvent = persistenceSafeAgentSessionEvent(event);
+	if (safeEvent.type !== "message_end" || safeEvent.message.role !== "assistant") return undefined;
+	const text = safeEvent.message.content
+		.filter(block => block.type === "text")
+		.map(block => block.text)
+		.join("")
+		.trim();
+	return text || undefined;
+}
+
+function addRpcUsage(target: RpcSessionUsage, usage: Usage): void {
+	target.input += usage.input;
+	target.output += usage.output;
+	target.reasoning += usage.reasoningTokens ?? 0;
+	target.cacheRead += usage.cacheRead;
+	target.cacheWrite += usage.cacheWrite;
+	target.total += usage.totalTokens;
+}
+
+export function summarizeRpcEpisode(events: readonly RpcHarnessEvent[]): {
+	finalMessage: string;
+	usage: RpcSessionUsage;
+} {
+	let finalMessage = "";
+	const usage: RpcSessionUsage = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	for (const event of events) {
+		if (event.type !== "message_end") continue;
+		finalMessage = providerSafeAssistantText(event as AgentSessionEvent) ?? finalMessage;
+		const messageUsage = sessionMessageUsage(event.message);
+		if (messageUsage) addRpcUsage(usage, messageUsage);
+	}
+	return { finalMessage, usage };
+}
 
 export type PendingExtensionRequest = {
 	resolve: (response: RpcExtensionUIResponse) => void;
@@ -172,6 +267,14 @@ type RpcExtensionUserMessageScope = {
  */
 export class RpcExtensionUserMessageTracker {
 	#activePromptScopes = new Set<RpcExtensionUserMessageScope>();
+	#pendingAgentMessageTasks = new Set<Promise<void>>();
+	get hasActivePrompts(): boolean {
+		return this.#activePromptScopes.size > 0;
+	}
+
+	get hasPendingAgentMessageTasks(): boolean {
+		return this.#pendingAgentMessageTasks.size > 0;
+	}
 
 	markAgentMessageTask(): void {
 		for (const scope of this.#activePromptScopes) {
@@ -180,6 +283,14 @@ export class RpcExtensionUserMessageTracker {
 	}
 
 	trackAgentMessageTask(task: Promise<unknown>): void {
+		const pendingTask = task.then(
+			() => {},
+			() => {},
+		);
+		this.#pendingAgentMessageTasks.add(pendingTask);
+		void pendingTask.then(() => {
+			this.#pendingAgentMessageTasks.delete(pendingTask);
+		});
 		for (const scope of this.#activePromptScopes) {
 			this.#trackAgentMessageTaskForScope(scope, task);
 		}
@@ -237,15 +348,110 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
+	trackPrompt?: (task: Promise<boolean>) => Promise<boolean>;
 }): void {
 	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
 	reportLocalOnlyPromptResult({
 		id: input.id,
-		prompt: trackedPrompt.prompt,
+		prompt: input.trackPrompt?.(trackedPrompt.prompt) ?? trackedPrompt.prompt,
 		output: input.output,
 		onError: input.onError,
 		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
 		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+	});
+}
+
+export class RpcTerminalTaskTracker {
+	#tasks = new Set<Promise<unknown>>();
+
+	track<T>(task: Promise<T>): Promise<T> {
+		this.#tasks.add(task);
+		void task.finally(() => this.#tasks.delete(task)).catch(() => {});
+		return task;
+	}
+
+	async wait(): Promise<void> {
+		while (this.#tasks.size > 0) {
+			await Promise.all([...this.#tasks]);
+		}
+	}
+}
+
+export class RpcCustodyBindingGuard {
+	#binding = false;
+
+	async run<T>(bind: () => Promise<T>): Promise<T> {
+		if (this.#binding) throw new Error("Durable RPC custody binding is already in progress");
+		this.#binding = true;
+		try {
+			return await bind();
+		} finally {
+			this.#binding = false;
+		}
+	}
+
+	assertWorkAllowed(): void {
+		if (this.#binding) throw new Error("Agent work is unavailable while durable RPC custody is binding");
+	}
+
+	assertSessionChangeAllowed(): void {
+		if (this.#binding) throw new Error("Session changes are unavailable while durable RPC custody is binding");
+	}
+}
+
+/**
+ * Dependencies for {@link streamRpcSessionEvent}. Provided by the RPC mode
+ * entrypoint; broken out so tests can drive the event path with stubs.
+ */
+export interface RpcSessionEventStreamDeps {
+	/** The ledger for the currently bound run, or undefined while none is bound. */
+	ledger: () => RpcHarnessSessionOwner | undefined;
+	output: (frame: object) => void;
+	sealResult: (stopReason: string, outcome: "completed" | "failed" | "aborted") => Promise<void>;
+	waitForMessagePersistence: (message: AgentMessage) => Promise<void>;
+	trackSteeringPersistence: (task: Promise<void>) => void;
+	onLedgerFailure: (command: string, error: unknown) => void;
+}
+
+/**
+ * Write one agent event to stdout.
+ *
+ * A bound run records and sequences the event before it is published, and a
+ * failed append reports `session.watch` and stops the run: emitting an event the
+ * client can never replay would break the replay cursor it depends on. An
+ * `agent_end` under a bound run also seals the terminal result. With no bound
+ * run the event is written straight through, unsequenced and unrecorded, which
+ * is the stream every client saw before the ledger existed.
+ */
+export function streamRpcSessionEvent(event: AgentSessionEvent, deps: RpcSessionEventStreamDeps): void {
+	const ledger = deps.ledger();
+	if (!ledger || ledger.hasResult) {
+		deps.output(event);
+		return;
+	}
+	void ledger.appendEvent(persistenceSafeAgentSessionEvent(event), event).catch(errorValue => {
+		if (ledger.hasResult) return;
+		deps.onLedgerFailure("session.watch", errorValue);
+	});
+	if (event.type === "message_end" && event.message.role === "user" && event.message.idempotencyKey) {
+		const prefix = `rpc:${ledger.sessionId}:`;
+		if (event.message.idempotencyKey.startsWith(prefix)) {
+			const steeringId = event.message.idempotencyKey.slice(prefix.length);
+			const persistence = deps
+				.waitForMessagePersistence(event.message)
+				.then(() => ledger.markSteeringInjected(steeringId));
+			deps.trackSteeringPersistence(persistence);
+			void persistence.catch(errorValue => deps.onLedgerFailure("session.steer", errorValue));
+		}
+	}
+	if (event.type !== "agent_end" || event.isTerminal !== true) return;
+	const assistantMessage = [...event.messages].reverse().find(message => message.role === "assistant") as
+		| { stopReason?: string }
+		| undefined;
+	const stopReason = assistantMessage?.stopReason ?? "completed";
+	const outcome = stopReason === "aborted" ? "aborted" : stopReason === "error" ? "failed" : "completed";
+	void deps.sealResult(stopReason, outcome).catch(errorValue => {
+		deps.onLedgerFailure("session.result", errorValue);
 	});
 }
 
@@ -316,6 +522,10 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
  *   for the command has been emitted via `output`. Errors from `handleCommand`
  *   on non-`bash` commands propagate; the caller is expected to wrap them.
  */
+function isBackgroundRpcCommand(command: RpcCommand): boolean {
+	return command.type === "bash" || command.type === "session.result";
+}
+
 export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
 	if (dispatchRpcControlFrame(parsed, deps)) return undefined;
 	// Regular RPC command. The transport contract states each remaining frame
@@ -324,17 +534,16 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 	// the union here.
 	const command = parsed as RpcCommand;
 
-	// `bash` can run for a long time. Dispatch it in the background so a
-	// subsequent `abort_bash` frame can be read and handled without waiting
-	// for the shell command to finish on its own. The response is emitted
-	// when `handleCommand` resolves; clients correlate via `command.id`.
-	if (command.type === "bash") {
+	// Long-running commands dispatch in the background so later control and
+	// steering commands can overtake them. The response is emitted when the
+	// command resolves; clients correlate it through `command.id`.
+	if (isBackgroundRpcCommand(command)) {
 		const task = (async () => {
 			try {
 				deps.output(await deps.handleCommand(command));
 			} catch (err: unknown) {
 				const message = err instanceof Error ? err.message : String(err);
-				deps.output(deps.errorResponse(command.id, "bash", message));
+				deps.output(deps.errorResponse(command.id, command.type, message));
 			}
 		})();
 		deps.trackBackgroundTask?.(task);
@@ -364,7 +573,7 @@ export class RpcInputDispatcher {
 			if (dispatchRpcControlFrame(parsed, this.#deps)) return;
 
 			const command = parsed as RpcCommand;
-			if (command.type === "bash") {
+			if (isBackgroundRpcCommand(command)) {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
 			}
@@ -421,10 +630,20 @@ export class RpcShutdownCoordinator {
 	#shutdown: Promise<void> | undefined;
 	readonly #isShutdownRequested: () => boolean;
 	readonly #performShutdown: () => Promise<void>;
+	readonly #prepareShutdown: (() => Promise<void>) | undefined;
 
-	constructor(options: { isShutdownRequested: () => boolean; performShutdown: () => Promise<void> }) {
+	constructor(options: {
+		isShutdownRequested: () => boolean;
+		prepareShutdown?: () => Promise<void>;
+		performShutdown: () => Promise<void>;
+	}) {
 		this.#isShutdownRequested = options.isShutdownRequested;
+		this.#prepareShutdown = options.prepareShutdown;
 		this.#performShutdown = options.performShutdown;
+	}
+
+	get hasTrackedTasks(): boolean {
+		return this.#tasks.size > 0;
 	}
 
 	/**
@@ -457,7 +676,8 @@ export class RpcShutdownCoordinator {
 	checkShutdownRequested(): Promise<void> {
 		if (!this.#shutdown) {
 			if (!this.#isShutdownRequested()) return Promise.resolve();
-			this.#shutdown = this.drain().then(() => this.#performShutdown());
+			this.#shutdown = this.#prepareShutdown?.().then(() => this.drain()) ?? this.drain();
+			this.#shutdown = this.#shutdown.then(() => this.#performShutdown());
 		}
 		return this.#shutdown;
 	}
@@ -724,7 +944,83 @@ export async function runRpcMode(
 	const hostToolBridge = new RpcHostToolBridge(output);
 	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
+	// The durable ledger stays dormant until a supervisor claims a run through
+	// `session.start` or `session.resume`. A client that never sends those keeps
+	// the original stream: events reach stdout directly, carry no sequence, and
+	// nothing is written to disk.
+	let harnessOwner: RpcHarnessSessionOwner | undefined;
+	let episodeFinalMessage = "";
+	let episodeUsage: RpcSessionUsage = { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+	const terminalTasks = new RpcTerminalTaskTracker();
+	const bindingGuard = new RpcCustodyBindingGuard();
+	const UNBOUND_RUN_ERROR = "No run is bound: send session.start or session.resume first";
+	const bindHarness = (runId: string) =>
+		bindingGuard.run(async () => {
+			const sessionFile = session.sessionFile;
+			if (!sessionFile) throw new Error("Durable RPC custody requires a persisted session");
+			const existingOwner = harnessOwner;
+			const owner =
+				existingOwner ??
+				(await RpcHarnessSessionOwner.open(
+					session.sessionId,
+					rpcHarnessRecordFileForSessionFile(sessionFile),
+					event => output(event),
+					path.join(path.dirname(sessionFile), "rpc-runs.jsonl"),
+					{
+						acquireSessionLease: true,
+						displayEvent: event => session.restoreProviderValueForDisplay(event),
+						displayResult: result => ({
+							...result,
+							finalMessage: session.restoreProviderTextForDisplay(result.finalMessage),
+						}),
+					},
+				));
+			try {
+				const binding = await owner.bindRun(runId);
+				if (!harnessOwner) {
+					harnessOwner = owner;
+					const summary = summarizeRpcEpisode(await owner.replayPersisted());
+					episodeFinalMessage = summary.finalMessage;
+					episodeUsage = summary.usage;
+				}
+				return { owner, binding };
+			} catch (error) {
+				if (!existingOwner) await owner.dispose();
+				throw error;
+			}
+		});
 
+	const completeRpcResult = async (stopReason: string, outcome: "completed" | "failed" | "aborted" = "completed") => {
+		const owner = harnessOwner;
+		if (!owner || owner.hasResult) return;
+		owner.beginResultSeal();
+		await terminalTasks.wait();
+		if (hasPendingRpcContinuation(session)) {
+			owner.cancelResultSeal();
+			return;
+		}
+		await owner.completeResult({
+			outcome,
+			stopReason,
+			finalMessage: episodeFinalMessage,
+			usage: episodeUsage,
+		});
+	};
+
+	/**
+	 * Seals the ledger on an exit path. The teardown that follows must run even
+	 * when the terminal result cannot be recorded, so the failure is emitted as a
+	 * response frame and the exit continues.
+	 */
+	const sealLedgerOnExit = async (stopReason: string, outcome: "completed" | "failed" | "aborted" = "completed") => {
+		try {
+			await completeRpcResult(stopReason, outcome);
+		} catch (errorValue) {
+			output(
+				error(undefined, "session.result", errorValue instanceof Error ? errorValue.message : String(errorValue)),
+			);
+		}
+	};
 	// Shutdown request flag (wrapped in object to allow mutation with const)
 	const shutdownState = { requested: false };
 
@@ -946,12 +1242,42 @@ export async function runRpcMode(
 		trackAgentInvokingMessage: task => {
 			extensionUserMessageTracker.trackAgentMessageTask(task);
 		},
+		assertAgentWorkAllowed: () => {
+			bindingGuard.assertWorkAllowed();
+			harnessOwner?.assertAcceptingWork();
+		},
+		assertSessionChangeAllowed: () => {
+			bindingGuard.assertSessionChangeAllowed();
+			if (harnessOwner) throw new Error("Session changes are unavailable after durable RPC custody is bound");
+		},
 		uiContext: rpcUiContext,
 	});
 
-	// Output all agent events as JSON
+	let requestFatalWatchShutdown: (() => Promise<void>) | undefined;
+	let watchFailureReported = false;
+	const reportLedgerFailure = (command: string, errorValue: unknown) => {
+		if (watchFailureReported) return;
+		watchFailureReported = true;
+		shutdownState.requested = true;
+		output(error(undefined, command, errorValue instanceof Error ? errorValue.message : String(errorValue)));
+		void requestFatalWatchShutdown?.();
+	};
 	session.subscribe(event => {
-		output(event);
+		if (harnessOwner && event.type === "message_end") {
+			episodeFinalMessage = providerSafeAssistantText(event) ?? episodeFinalMessage;
+			const usage = sessionMessageUsage(event.message);
+			if (usage) addRpcUsage(episodeUsage, usage);
+		}
+		streamRpcSessionEvent(event, {
+			ledger: () => harnessOwner,
+			output,
+			sealResult: completeRpcResult,
+			waitForMessagePersistence: message => session.waitForMessagePersistence(message),
+			trackSteeringPersistence: task => {
+				terminalTasks.track(task);
+			},
+			onLedgerFailure: reportLedgerFailure,
+		});
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
@@ -975,6 +1301,8 @@ export async function runRpcMode(
 	// Handle a single command
 	const handleCommand = async (command: RpcCommand): Promise<RpcResponse> => {
 		const id = command.id;
+		const handoffCompaction = (): boolean =>
+			session.settings.get("compaction.strategy") === "handoff" && session.autoCompactionEnabled;
 
 		switch (command.type) {
 			case "negotiate_protocol": {
@@ -988,7 +1316,13 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "prompt": {
-				const skillResult = await tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
+				harnessOwner?.assertAcceptingWork();
+				if (harnessOwner && isRpcCustodyRestrictedPrompt(command.message)) {
+					return error(id, "prompt", "Session changes are unavailable after durable RPC custody is bound");
+				}
+				const skillTask = tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
+				if (harnessOwner) terminalTasks.track(skillTask);
+				const skillResult = await skillTask;
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
@@ -1015,6 +1349,7 @@ export async function runRpcMode(
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
+							trackPrompt: task => terminalTasks.track(task),
 						});
 						return success(id, "prompt");
 					}
@@ -1034,17 +1369,122 @@ export async function runRpcMode(
 					output,
 					onError: promptError => output(error(id, "prompt", promptError.message)),
 					extensionUserMessageTracker,
+					trackPrompt: task => terminalTasks.track(task),
 				});
 				return success(id, "prompt");
 			}
+			case "session.start": {
+				if (
+					hasActiveRpcSessionWork(
+						session,
+						shutdownCoordinator.hasTrackedTasks,
+						extensionUserMessageTracker.hasActivePrompts,
+						extensionUserMessageTracker.hasPendingAgentMessageTasks,
+					) &&
+					!harnessOwner?.isBoundToRun(command.run_id)
+				) {
+					return error(id, "session.start", "Durable RPC custody must be bound before active session work");
+				}
+				if (handoffCompaction()) {
+					return error(
+						id,
+						"session.start",
+						"Disable automatic handoff compaction before binding durable RPC custody",
+					);
+				}
+				const { binding } = await bindHarness(command.run_id);
+				return success(id, "session.start", {
+					run_id: binding.runId,
+					session_id: binding.sessionId,
+					existing: binding.existing,
+				});
+			}
+
+			case "session.resume": {
+				if (
+					hasActiveRpcSessionWork(
+						session,
+						shutdownCoordinator.hasTrackedTasks,
+						extensionUserMessageTracker.hasActivePrompts,
+						extensionUserMessageTracker.hasPendingAgentMessageTasks,
+					) &&
+					!harnessOwner?.isBoundToRun(command.run_id)
+				) {
+					return error(id, "session.resume", "Durable RPC custody must be bound before active session work");
+				}
+				if (handoffCompaction()) {
+					return error(
+						id,
+						"session.resume",
+						"Disable automatic handoff compaction before binding durable RPC custody",
+					);
+				}
+				if (command.session_id !== undefined && command.session_id !== session.sessionId) {
+					return error(id, "session.resume", `Unknown session_id: ${command.session_id}`);
+				}
+				const { owner, binding } = await bindHarness(command.run_id);
+				const events = await owner.replay(command.after_sequence);
+				for (const event of events) output(event);
+				return success(id, "session.resume", {
+					run_id: binding.runId,
+					session_id: binding.sessionId,
+					existing: binding.existing,
+				});
+			}
+
+			case "session.replay":
+			case "session.watch": {
+				if (!harnessOwner) return error(id, command.type, UNBOUND_RUN_ERROR);
+				const limit = command.limit ?? 1_000;
+				const events = await harnessOwner.replay(command.after_sequence, limit);
+				const nextSequence = events.at(-1)?.sequence ?? command.after_sequence ?? 0;
+				return success(id, command.type, {
+					events,
+					next_sequence: nextSequence,
+					has_more: harnessOwner.latestSequence > nextSequence,
+				});
+			}
+
+			case "session.result": {
+				if (!harnessOwner) return error(id, "session.result", UNBOUND_RUN_ERROR);
+				const result = await harnessOwner.waitResult();
+				return success(id, "session.result", result);
+			}
+
+			case "session.steer": {
+				if (!harnessOwner) return error(id, "session.steer", UNBOUND_RUN_ERROR);
+				harnessOwner.assertAcceptingWork();
+				const idempotencyKey = `rpc:${session.sessionId}:${command.steering_id}`;
+				const persistedMessage = session.findPersistedUserMessageByIdempotencyKey(idempotencyKey);
+				const ack = await terminalTasks.track(
+					harnessOwner.steer(
+						command.steering_id,
+						command.message,
+						() =>
+							deliverRpcSteeringIfNeeded(persistedMessage !== undefined, () =>
+								session.steer(command.message, command.images, {
+									idempotencyKey,
+								}),
+							),
+						Bun.SHA256.hash(JSON.stringify([command.message, command.images ?? []]), "hex"),
+					),
+				);
+				if (persistedMessage) {
+					await session.waitForMessagePersistence(persistedMessage);
+					await harnessOwner.markSteeringInjected(command.steering_id);
+				}
+				return success(id, "session.steer", ack);
+			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
+				harnessOwner?.assertAcceptingWork();
+				await terminalTasks.track(session.steer(command.message, command.images));
 				return success(id, "steer");
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
+				harnessOwner?.assertAcceptingWork();
+				await terminalTasks.track(session.followUp(command.message, command.images));
 				return success(id, "follow_up");
 			}
 
@@ -1054,6 +1494,13 @@ export async function runRpcMode(
 			}
 
 			case "abort_and_prompt": {
+				if (harnessOwner) {
+					return error(
+						id,
+						"abort_and_prompt",
+						"abort_and_prompt is unavailable after durable RPC custody is bound",
+					);
+				}
 				await session.abort({ reason: USER_INTERRUPT_LABEL });
 				session
 					.prompt(command.message, { images: command.images })
@@ -1064,6 +1511,8 @@ export async function runRpcMode(
 			case "new_session":
 			case "switch_session":
 			case "branch": {
+				if (harnessOwner)
+					return error(id, command.type, "Session changes are unavailable after durable RPC custody is bound");
 				const result = await handleRpcSessionChange(session, command, subagentRegistry);
 				if (!result.data.cancelled) await emitAvailableCommandsUpdate();
 				return success(id, result.type, result.data);
@@ -1258,11 +1707,26 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "compact": {
-				const result = await session.compact(command.customInstructions);
+				harnessOwner?.assertAcceptingWork();
+				if (harnessOwner && session.settings.get("compaction.strategy") === "handoff") {
+					return error(id, "compact", "Handoff compaction is unavailable after durable RPC custody is bound");
+				}
+				const result = await compactRpcSession(
+					session,
+					command.customInstructions,
+					harnessOwner ? completeRpcResult : undefined,
+				);
 				return success(id, "compact", result);
 			}
 
 			case "set_auto_compaction": {
+				if (harnessOwner && command.enabled && session.settings.get("compaction.strategy") === "handoff") {
+					return error(
+						id,
+						"set_auto_compaction",
+						"Automatic handoff compaction is unavailable after durable RPC custody is bound",
+					);
+				}
 				session.setAutoCompactionEnabled(command.enabled);
 				return success(id, "set_auto_compaction");
 			}
@@ -1286,7 +1750,11 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "bash": {
-				const result = await session.executeBash(command.command);
+				bindingGuard.assertWorkAllowed();
+				harnessOwner?.assertAcceptingWork();
+				const bashTask = session.executeBash(command.command);
+				if (harnessOwner) terminalTasks.track(bashTask);
+				const result = await bashTask;
 				return success(id, "bash", result);
 			}
 
@@ -1332,6 +1800,9 @@ export async function runRpcMode(
 			}
 
 			case "handoff": {
+				if (harnessOwner) {
+					return error(id, "handoff", "Handoff is unavailable after durable RPC custody is bound");
+				}
 				// Resetting the agent mid-stream lets the live turn keep emitting into a
 				// session that handoff has already torn down. Refuse while a prompt is in
 				// flight (mirrors the TUI /handoff guard).
@@ -1455,16 +1926,26 @@ export async function runRpcMode(
 	// re-checks the request as each task settles.
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
+		prepareShutdown: async () => {
+			if (!watchFailureReported) {
+				await sealLedgerOnExit("shutdown_requested", rpcExitOutcome(hasPendingRpcContinuation(session)));
+			}
+		},
 		performShutdown: async () => {
 			// Route through the idempotent session.dispose() so the browser
 			// reaper (releaseTabsForOwner) and other bounded teardown run before
 			// the process exits. dispose() also emits `session_shutdown`, so we
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
-			await session.dispose();
+			// Ledger sealing runs before the task drain so session.result waiters
+			// resolve before shutdown waits for their response frames.
+			await disposeRpcSessionWithCustody(session, harnessOwner);
+			await stdoutQueue;
 			process.exit(0);
 		},
 	});
+	requestFatalWatchShutdown = () => shutdownCoordinator.checkShutdownRequested();
+	if (shutdownState.requested) void requestFatalWatchShutdown();
 
 	const dispatchFrameDeps: RpcInputFrameDeps = {
 		handleCommand,
@@ -1500,12 +1981,14 @@ export async function runRpcMode(
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await inputDispatcher.drain();
+	await sealLedgerOnExit("stdin_closed", rpcExitOutcome(hasPendingRpcContinuation(session)));
 	await shutdownCoordinator.drain();
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a
 	// prior pi.shutdown() through the coordinator makes this await settle
-	// immediately.
-	await session.dispose();
+	// immediately. Durable custody remains held through the complete teardown.
+	await disposeRpcSessionWithCustody(session, harnessOwner);
+	await stdoutQueue;
 	process.exit(0);
 }

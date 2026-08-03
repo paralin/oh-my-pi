@@ -111,6 +111,23 @@ describe("AgentSession steer idle drain", () => {
 		await session.waitForIdle();
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 	});
+	it("does not requeue a durable steering key already in the transcript", async () => {
+		await createSession([
+			{
+				role: "user",
+				content: "already delivered",
+				idempotencyKey: "rpc:session:old",
+				timestamp: Date.now(),
+			},
+			createAssistantMessage(),
+		]);
+		expect(session.findUserMessageByIdempotencyKey("rpc:session:old")).toMatchObject({
+			content: "already delivered",
+		});
+
+		await session.steer("already delivered", undefined, { idempotencyKey: "rpc:session:old" });
+		expect(session.queuedMessageCount).toBe(0);
+	});
 
 	it("delivers a steer queued after an interrupted tool result", async () => {
 		await createSession([

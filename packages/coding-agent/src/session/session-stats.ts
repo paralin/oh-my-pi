@@ -66,29 +66,18 @@ export class SessionStatsTracker {
 		let totalPremiumRequests = 0;
 		for (const message of state.messages) {
 			if (message.role === "assistant") {
-				const assistant = message;
-				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				totalInput += assistant.usage.input;
-				totalOutput += assistant.usage.output;
-				totalReasoning += assistant.usage.reasoningTokens ?? 0;
-				totalCacheRead += assistant.usage.cacheRead;
-				totalCacheWrite += assistant.usage.cacheWrite;
-				totalTokens += assistant.usage.totalTokens;
-				totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
-				totalCost += assistant.usage.cost.total;
+				toolCalls += message.content.filter(content => content.type === "toolCall").length;
 			}
-			if (message.role === "toolResult" && message.toolName === "task") {
-				const usage = taskToolUsage(message.details);
-				if (!usage) continue;
-				totalInput += usage.input;
-				totalOutput += usage.output;
-				totalReasoning += usage.reasoningTokens ?? 0;
-				totalCacheRead += usage.cacheRead;
-				totalCacheWrite += usage.cacheWrite;
-				totalTokens += usage.totalTokens;
-				totalPremiumRequests += usage.premiumRequests ?? 0;
-				totalCost += usage.cost.total;
-			}
+			const usage = sessionMessageUsage(message);
+			if (!usage) continue;
+			totalInput += usage.input;
+			totalOutput += usage.output;
+			totalReasoning += usage.reasoningTokens ?? 0;
+			totalCacheRead += usage.cacheRead;
+			totalCacheWrite += usage.cacheWrite;
+			totalTokens += usage.totalTokens;
+			totalPremiumRequests += usage.premiumRequests ?? 0;
+			totalCost += usage.cost.total;
 		}
 		return {
 			sessionFile: this.#host.sessionManager.getSessionFile(),
@@ -328,6 +317,13 @@ export class SessionStatsTracker {
 			baseUrl: this.#host.modelRegistry.getProviderBaseUrl?.(provider),
 		});
 	}
+}
+
+/** Returns provider usage carried by one completed session message. */
+export function sessionMessageUsage(message: AgentMessage): Usage | undefined {
+	if (message.role === "assistant") return message.usage;
+	if (message.role === "toolResult" && message.toolName === "task") return taskToolUsage(message.details);
+	return undefined;
 }
 
 function taskToolUsage(details: unknown): Usage | undefined {

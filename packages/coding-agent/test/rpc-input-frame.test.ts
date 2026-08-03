@@ -352,6 +352,51 @@ describe("RpcInputDispatcher", () => {
 		expect((outputs[1] as RpcResponse).command).toBe("get_state");
 	});
 
+	test("session.result waits in the background while later steering dispatches", async () => {
+		const result = Promise.withResolvers<RpcResponse>();
+		const started: string[] = [];
+		const backgroundTasks: Promise<void>[] = [];
+		const { deps, outputs } = makeDeps(async command => {
+			started.push(command.type);
+			if (command.type === "session.result") return result.promise;
+			if (command.type === "session.steer") {
+				return {
+					id: command.id,
+					type: "response",
+					command: "session.steer",
+					success: true,
+					data: { status: "ACCEPTED", steeringSequence: 1 },
+				};
+			}
+			throw new Error(`unexpected command type: ${command.type}`);
+		});
+		deps.trackBackgroundTask = task => backgroundTasks.push(task);
+		const dispatcher = new RpcInputDispatcher({ deps });
+
+		dispatcher.dispatch({ id: "result", type: "session.result" });
+		dispatcher.dispatch({ id: "steer", type: "session.steer", steering_id: "s-1", message: "continue" });
+		await dispatcher.drain();
+		expect(started).toEqual(["session.result", "session.steer"]);
+		expect((outputs[0] as RpcResponse).id).toBe("steer");
+
+		result.resolve({
+			id: "result",
+			type: "response",
+			command: "session.result",
+			success: true,
+			data: {
+				resultId: "result-1",
+				outcome: "completed",
+				stopReason: "done",
+				finalMessage: "done",
+				usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				terminalSequence: 1,
+			},
+		});
+		await Promise.all(backgroundTasks);
+		expect((outputs[1] as RpcResponse).id).toBe("result");
+	});
+
 	test("serial command rejection emits an error response and does not poison the queue", async () => {
 		const started: string[] = [];
 		const { deps, outputs } = makeDeps(async command => {
@@ -562,6 +607,7 @@ describe("RpcShutdownCoordinator", () => {
 		const { gate, deps, outputs, shutdown, recorder, coordinator } = makeBashHarness();
 
 		const awaited = dispatchRpcInputFrame({ id: "s1", type: "bash", command: "sleep 9999" }, deps);
+		expect(coordinator.hasTrackedTasks).toBe(true);
 		expect(awaited).toBeUndefined();
 
 		// Extension calls pi.shutdown() while bash is in flight; the input loop
@@ -579,11 +625,36 @@ describe("RpcShutdownCoordinator", () => {
 
 		gate.resolve(cancelledBashResponse("s1"));
 		await check;
+		expect(coordinator.hasTrackedTasks).toBe(false);
 
 		expect(outputs).toEqual([cancelledBashResponse("s1")]);
 		expect(recorder.state.calls).toBe(1);
 		// The bash response frame was already written when performShutdown ran.
 		expect(recorder.state.outputsAtShutdown).toBe(1);
+	});
+
+	test("prepares shutdown before draining result waiters", async () => {
+		const order: string[] = [];
+		const result = Promise.withResolvers<void>();
+		const coordinator = new RpcShutdownCoordinator({
+			isShutdownRequested: () => true,
+			prepareShutdown: async () => {
+				order.push("sealed");
+				result.resolve();
+			},
+			performShutdown: async () => {
+				order.push("shutdown");
+			},
+		});
+		coordinator.track(
+			result.promise.then(() => {
+				order.push("result");
+			}),
+		);
+
+		await coordinator.checkShutdownRequested();
+
+		expect(order).toEqual(["sealed", "result", "shutdown"]);
 	});
 
 	test("settle hook fires the deferred shutdown when no further client frames arrive", async () => {

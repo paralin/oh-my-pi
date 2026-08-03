@@ -196,6 +196,17 @@ export function computeDefaultSessionDir(
 	return sessionDir;
 }
 
+/**
+ * Derive the directory that holds per-session sidecar files written beside a
+ * transcript. A `<name>.jsonl` transcript yields `<name>/`; any other path
+ * yields `<path>.d/`. The name is a pure function of the transcript path, so a
+ * process holding only the session file can address the sidecars without a
+ * registry lookup, and two sessions in one directory stay separate.
+ */
+export function sessionSidecarDir(sessionFile: string): string {
+	return sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : `${sessionFile}.d`;
+}
+
 // =============================================================================
 // Terminal breadcrumbs: maps terminal (TTY) -> last session file for --continue
 // =============================================================================

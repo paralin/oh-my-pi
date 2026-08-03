@@ -343,6 +343,47 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 
+	it("deobfuscates the last assistant text returned to clients", () => {
+		const secret = "TERMINAL_SECRET_TOKEN_12345";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			obfuscator,
+		});
+		sessions.push(session);
+		session.agent.appendMessage(createAssistantMessage(obfuscator.obfuscate(`terminal ${secret}`)));
+
+		expect(session.getLastAssistantText()).toBe(`terminal ${secret}`);
+		const providerSafe = session.getLastAssistantText({ providerSafe: true });
+		expect(providerSafe).not.toContain(secret);
+		expect(session.restoreProviderTextForDisplay(providerSafe!)).toBe(`terminal ${secret}`);
+	});
+
+	it("distinguishes transient steering state from durable session history", () => {
+		const sessionManager = SessionManager.inMemory();
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+		const message: AgentMessage = {
+			role: "user",
+			content: "persist me",
+			idempotencyKey: "rpc:session:steer-1",
+			timestamp: Date.now(),
+		};
+		session.agent.appendMessage(message);
+		expect(session.findPersistedUserMessageByIdempotencyKey(message.idempotencyKey!)).toBeUndefined();
+
+		sessionManager.appendMessage(message);
+		expect(session.findPersistedUserMessageByIdempotencyKey(message.idempotencyKey!)).toBe(message);
+	});
+
 	it("keeps stored steering text raw while pre-LLM conversion wraps it", async () => {
 		const session = new AgentSession({
 			agent: createAgent(),

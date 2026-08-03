@@ -838,6 +838,8 @@ export interface UserMessage {
 	steering?: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
+	/** Stable key used to suppress duplicate delivery at a durable injection boundary. */
+	idempotencyKey?: string;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds

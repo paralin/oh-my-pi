@@ -30,6 +30,10 @@ export interface InitializeExtensionsOptions {
 	markAgentInvokingMessage?: () => void;
 	/** Optional lifecycle hook for extension-originated sends whose success/failure determines turn ownership. */
 	trackAgentInvokingMessage?: (task: Promise<unknown>) => void;
+	/** Rejects extension-originated messages that could start an agent turn. */
+	assertAgentWorkAllowed?: () => void;
+	/** Rejects extension command context operations that would change the active session. */
+	assertSessionChangeAllowed?: () => void;
 }
 
 /**
@@ -48,7 +52,9 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		onShutdown,
 		mode = "print",
 		uiContext,
+		assertAgentWorkAllowed,
 		markAgentInvokingMessage,
+		assertSessionChangeAllowed,
 		trackAgentInvokingMessage,
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
@@ -57,6 +63,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		// ExtensionActions
 		{
 			sendMessage: (message, sendOptions) => {
+				if (sendOptions?.triggerTurn) assertAgentWorkAllowed?.();
 				const sendTask = session.sendCustomMessage(message, sendOptions);
 				if (sendOptions?.triggerTurn) {
 					if (trackAgentInvokingMessage) {
@@ -70,6 +77,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				});
 			},
 			sendUserMessage: (content, sendOptions) => {
+				assertAgentWorkAllowed?.();
 				const sendTask = session.sendUserMessage(content, sendOptions);
 				if (trackAgentInvokingMessage) {
 					trackAgentInvokingMessage(sendTask);
@@ -109,13 +117,17 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			shutdown,
 			getContextUsage: () => session.getContextUsage(),
 			getSystemPrompt: () => session.systemPrompt,
-			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
+			compact: instructionsOrOptions => {
+				assertAgentWorkAllowed?.();
+				return runExtensionCompact(session, instructionsOrOptions);
+			},
 		},
 		// ExtensionCommandContextActions — commands invokable via prompt("/command")
 		{
 			getContextUsage: () => session.getContextUsage(),
 			waitForIdle: () => session.agent.waitForIdle(),
 			newSession: async newOptions => {
+				assertSessionChangeAllowed?.();
 				const success = await session.newSession({ parentSession: newOptions?.parentSession });
 				if (success && newOptions?.setup) {
 					await newOptions.setup(session.sessionManager);
@@ -123,21 +135,28 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 				return { cancelled: !success };
 			},
 			branch: async entryId => {
+				assertSessionChangeAllowed?.();
 				const result = await session.branch(entryId);
 				return { cancelled: result.cancelled };
 			},
 			navigateTree: async (targetId, navOptions) => {
+				assertSessionChangeAllowed?.();
 				const result = await session.navigateTree(targetId, { summarize: navOptions?.summarize });
 				return { cancelled: result.cancelled };
 			},
 			switchSession: async sessionPath => {
+				assertSessionChangeAllowed?.();
 				const success = await session.switchSession(sessionPath);
 				return { cancelled: !success };
 			},
 			reload: async () => {
+				assertSessionChangeAllowed?.();
 				await session.reload();
 			},
-			compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
+			compact: instructionsOrOptions => {
+				assertAgentWorkAllowed?.();
+				return runExtensionCompact(session, instructionsOrOptions);
+			},
 		},
 		uiContext,
 		mode,

@@ -21,7 +21,11 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
-import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	AgentSession,
+	type AgentSessionEvent,
+	persistenceSafeAgentSessionEvent,
+} from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SILENT_ABORT_MARKER } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -234,6 +238,12 @@ describe("AgentSession silent-abort marker stamping", () => {
 		expect(emittedMessage).not.toBe(message);
 		const emittedText = (emittedMessage.content[0] as TextContent).text;
 		expect(emittedText).toBe("hello SECRET_VALUE world");
+		const persistenceEvent = persistenceSafeAgentSessionEvent(emitted);
+		if (persistenceEvent.type !== "message_end" || persistenceEvent.message.role !== "assistant") {
+			throw new Error("expected a persistence-safe assistant message_end event");
+		}
+		expect((persistenceEvent.message.content[0] as TextContent).text).toBe(obfuscatedText);
+		expect(persistenceEvent.message).toBe(message);
 
 		// Flag is consumed.
 		expect(session.isPlanInternalAbortPending).toBe(false);

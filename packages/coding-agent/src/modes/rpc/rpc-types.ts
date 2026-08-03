@@ -37,6 +37,14 @@ export type RpcCommand =
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
+	// Durable session custody
+	| { id?: string; type: "session.start"; run_id: string }
+	| { id?: string; type: "session.resume"; run_id: string; session_id?: string; after_sequence?: number }
+	| { id?: string; type: "session.replay"; after_sequence?: number; limit?: number }
+	| { id?: string; type: "session.result" }
+	| { id?: string; type: "session.steer"; steering_id: string; message: string; images?: ImageContent[] }
+	| { id?: string; type: "session.watch"; after_sequence?: number; limit?: number }
+
 	// State
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
@@ -188,6 +196,31 @@ export interface RpcSubagentMessagesResult {
 	messages: AgentMessage[];
 }
 
+export interface RpcSessionUsage {
+	input: number;
+	output: number;
+	reasoning: number;
+	cacheRead: number;
+	cacheWrite: number;
+	total: number;
+}
+
+export interface RpcSessionResult {
+	outcome: "completed" | "failed" | "aborted";
+	stopReason: string;
+	finalMessage: string;
+	usage: RpcSessionUsage;
+	resultId: string;
+	terminalSequence: number;
+}
+
+export interface RpcSessionSteerAck {
+	status: "ACCEPTED" | "DUPLICATE" | "REJECTED";
+	steeringSequence: number;
+}
+
+export type RpcSessionStartData = { run_id: string; session_id: string; existing: boolean };
+
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
@@ -210,6 +243,22 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| {
+			id?: string;
+			type: "response";
+			command: "session.start" | "session.resume";
+			success: true;
+			data: RpcSessionStartData;
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "session.replay" | "session.watch";
+			success: true;
+			data: { events: RpcSessionEventFrame[]; next_sequence: number; has_more: boolean };
+	  }
+	| { id?: string; type: "response"; command: "session.result"; success: true; data: RpcSessionResult }
+	| { id?: string; type: "response"; command: "session.steer"; success: true; data: RpcSessionSteerAck }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -362,7 +411,52 @@ export interface RpcSubagentEventFrame {
 
 export type RpcSubagentFrame = RpcSubagentLifecycleFrame | RpcSubagentProgressFrame | RpcSubagentEventFrame;
 
-export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
+export interface RpcSteeringQueuedEvent {
+	type: "steering_queued";
+	steeringId: string;
+	steeringSequence: number;
+	message: string;
+}
+
+export interface RpcSteeringInjectedEvent {
+	type: "steering_injected";
+	steeringId: string;
+	steeringSequence: number;
+}
+
+export interface RpcSteeringRejectedEvent {
+	type: "steering_rejected";
+	steeringId: string;
+	steeringSequence: number;
+}
+
+export interface RpcSessionTerminalEvent {
+	type: "session_terminal";
+	sessionId: string;
+	outcome: "completed" | "failed" | "aborted";
+	stopReason: string;
+	finalMessage: string;
+	usage: RpcSessionUsage;
+	resultId: string;
+	terminalSequence: number;
+}
+
+export type RpcAgentEventPayload =
+	| AgentSessionEvent
+	| RpcSteeringQueuedEvent
+	| RpcSteeringInjectedEvent
+	| RpcSteeringRejectedEvent
+	| RpcSessionTerminalEvent;
+
+/** An agent event carrying the durable ledger position it was recorded at. */
+export type RpcSequencedAgentEvent = RpcAgentEventPayload & { sequence: number };
+
+/**
+ * An event frame on stdout. `sequence` is present only while a durable run is
+ * bound through `session.start` or `session.resume`; without one the stream is
+ * unsequenced and nothing is recorded.
+ */
+export type RpcSessionEventFrame = (RpcAgentEventPayload & { sequence?: number }) | RpcSubagentFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)
