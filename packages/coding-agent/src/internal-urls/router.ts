@@ -36,6 +36,7 @@ export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;
 
 	#handlers = new Map<string, ProtocolHandler>();
+	#worldClient: WorldClient | undefined;
 
 	constructor() {
 		this.register(new OmpProtocolHandler());
@@ -58,8 +59,8 @@ export class InternalUrlRouter {
 		// life of this router. `create` dials nothing and returns undefined when
 		// no socket is configured, so an unconfigured root simply has no
 		// `spacewave://` scheme rather than one whose every read fails.
-		const worldClient = WorldClient.create();
-		if (worldClient) this.register(new SpacewaveProtocolHandler(worldClient));
+		this.#worldClient = WorldClient.create();
+		if (this.#worldClient) this.register(new SpacewaveProtocolHandler(this.#worldClient));
 	}
 
 	/** Process-global router instance. */
@@ -68,9 +69,21 @@ export class InternalUrlRouter {
 		return InternalUrlRouter.#instance;
 	}
 
+	/** Close the process-global router's World client if one exists. */
+	static async closeWorldClient(): Promise<void> {
+		await InternalUrlRouter.#instance?.close();
+	}
+
 	/** Reset the global instance in tests. */
 	static resetForTests(): void {
 		InternalUrlRouter.#instance = undefined;
+	}
+
+	/** Close the router-bound World client. Safe to call more than once. */
+	async close(): Promise<void> {
+		const worldClient = this.#worldClient;
+		this.#worldClient = undefined;
+		await worldClient?.close();
 	}
 
 	register(handler: ProtocolHandler): void {

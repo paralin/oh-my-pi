@@ -88,11 +88,15 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 		process.stderr.write(`${chalk.red(renderError(err))}\n`);
 		failed = true;
 	} finally {
-		if (mcpManager) {
-			await mcpManager.disconnectAll();
-			if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
+		try {
+			if (mcpManager) {
+				await mcpManager.disconnectAll();
+				if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
+			}
+			authStorage?.close();
+		} finally {
+			await InternalUrlRouter.closeWorldClient();
 		}
-		authStorage?.close();
 	}
 
 	if (failed) process.exit(1);
