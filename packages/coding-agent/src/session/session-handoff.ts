@@ -189,6 +189,7 @@ export class SessionHandoff {
 					metadata: overrideSessionMetadataCompactionStrategy(
 						this.#host.agent.metadataForProvider(model.provider),
 						options?.metadataCompactionStrategy ?? "handoff",
+						options?.metadataIdleThreshold,
 					),
 				},
 				model.provider,

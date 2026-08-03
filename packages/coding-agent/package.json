@@ -51,6 +51,7 @@
   "dependencies": {
     "@agentclientprotocol/sdk": "catalog:",
     "@anthropic-ai/claude-agent-sdk": "catalog:",
+    "@aptre/protobuf-es-lite": "catalog:",
     "@babel/parser": "catalog:",
     "@mozilla/readability": "catalog:",
     "@oh-my-pi/hashline": "catalog:",
@@ -88,6 +89,7 @@
     "mammoth": "catalog:",
     "mupdf": "catalog:",
     "puppeteer-core": "catalog:",
+    "starpc": "catalog:",
     "turndown": "catalog:",
     "turndown-plugin-gfm": "catalog:",
     "zod": "catalog:"

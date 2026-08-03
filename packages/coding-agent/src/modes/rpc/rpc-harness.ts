@@ -1,6 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
+import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { canonicalJsonStringify, isRecord } from "@oh-my-pi/pi-utils";
 import { sessionSidecarDir } from "../../session/session-paths";
 import { isProcessIdentityLive, processStartToken } from "../../task/isolation-ownership";
 import type { RpcAgentEventPayload, RpcSessionResult, RpcSessionSteerAck, RpcSessionUsage } from "./rpc-types";
@@ -48,15 +50,23 @@ interface PendingStreamUpdate {
 	result: PromiseWithResolvers<RpcHarnessEvent>;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
 function runClaimFile(runIndexFile: string, runId: string): string {
 	const digest = Bun.SHA256.hash(runId, "hex");
 	return path.join(`${runIndexFile}.locks`, digest);
 }
 
+/**
+ * Derives the payload identity a `session.steer` retry has to reproduce.
+ *
+ * A supervisor that replays accepted steering after a restart rebuilds the
+ * request from its own records, so semantically identical members can arrive in
+ * another order. Hashing the canonicalized payload keeps that retry idempotent
+ * and lets accepted-but-not-injected work still be redelivered, while a changed
+ * message or image set moves the digest and stays rejected as a mismatch.
+ */
+export function rpcSteeringPayloadIdentity(message: string, images: ImageContent[] | undefined): string {
+	return Bun.SHA256.hash(canonicalJsonStringify([message, images ?? []]), "hex");
+}
 /** Returns the durable RPC record path beside an OMP session transcript. */
 export function rpcHarnessRecordFileForSessionFile(sessionFile: string): string {
 	return path.join(sessionSidecarDir(sessionFile), "rpc-ledger", "events.jsonl");
@@ -372,6 +382,15 @@ export class RpcHarnessSessionOwner {
 
 	get hasResult(): boolean {
 		return this.#result !== undefined;
+	}
+
+	/**
+	 * Whether a terminal result can still be recorded. Only a latched append
+	 * failure takes sealing away; a failure on a path that never reached the
+	 * ledger — a session transcript flush, for one — leaves the run sealable.
+	 */
+	get canSealResult(): boolean {
+		return this.#failure === undefined;
 	}
 
 	isBoundToRun(runId: string): boolean {

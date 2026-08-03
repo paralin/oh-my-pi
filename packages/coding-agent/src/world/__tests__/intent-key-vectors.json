@@ -1,0 +1,325 @@
+{
+  "vectors": [
+    {
+      "name": "base",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra"
+    },
+    {
+      "name": "ownerArtifact",
+      "source": {
+        "ownerArtifact": "plans/other.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:2yfeuwg4ajm53tomen2guajnui6gaotvxke7g5zzqm2tqyeueupq"
+    },
+    {
+      "name": "objective",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "Implement a different objective",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:jvddx3tu6cyb7ccz2ze55l3bqgoacwqsdj2amqyrkgwdgnazxl6a"
+    },
+    {
+      "name": "repository",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/other",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:bkil7dqse2qe3ueiectzwm77kjgzihjpv3e2tq6weacyblbtpieq"
+    },
+    {
+      "name": "checkoutIdentity",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "other",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:pa26pai3vj3oi5v7hh6yzfule5uumh5ucltk6ehrujkjwulqx7oq"
+    },
+    {
+      "name": "worktreeIdentity",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/other",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:gkf4l2pqkxqs2probtj2lgscquu2xyttmxht4rzs5t6n4l3vltaa"
+    },
+    {
+      "name": "workingDirectory",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/other",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:54leqsy4r6ocbkakuhzp25goj2hrcq7uwehyskqalikoojslcexq"
+    },
+    {
+      "name": "deliverablePaths",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/other-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:cpf7kvvh6erniqvjotof7ycd35pjmbqdfzagvqxkqmeuoxukb33q"
+    },
+    {
+      "name": "writeSurfaces",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:tqyojvi2kzonauog3fruul6nwuajylk4qwprshwmntwge3fujl3q"
+    },
+    {
+      "name": "resumeSessionObjectKey",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": "glados/live/omp/resume/llm-session"
+      },
+      "intentKey": "di:dma6zpztb3eikonidvmyaqqbyugm55phesrb2e6cnto3soeynxxa"
+    },
+    {
+      "name": "objectiveByteOrderMark",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement ﻿  dispatch   identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:74xpitte6qczrjzkdilcrz6g5y2jhegmvfacxox653sp65364c3q"
+    },
+    {
+      "name": "repositoryByteOrderMark",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "﻿github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:lsjxbx2bsmfizt6b6ox6lchs4yjx2dsrno52cj7ys5ayzdspld7q"
+    }
+  ],
+  "aliases": [
+    {
+      "name": "objectiveNextLineSeparators",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "Implementdispatchidentity",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra"
+    },
+    {
+      "name": "objectiveNoBreakSpaceSeparators",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": " Implement  dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra"
+    },
+    {
+      "name": "objectiveIdeographicSpaceSeparators",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "　Implement　　dispatch　identity　",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra"
+    },
+    {
+      "name": "worktreeIdentityUnicodeTrim",
+      "source": {
+        "ownerArtifact": "plans/dispatch.org::*Structures",
+        "objective": "  Implement   dispatch identity ",
+        "repository": "github.com/aperturerobotics/glados",
+        "checkoutIdentity": "glados",
+        "worktreeIdentity": "wt/glados-dispatch ",
+        "workingDirectory": "repos/glados",
+        "deliverablePaths": [
+          "plans/dispatch-report.org"
+        ],
+        "writeSurfaces": [
+          "repos/glados/core",
+          "plans/dispatch.org"
+        ],
+        "resumeSessionObjectKey": ""
+      },
+      "intentKey": "di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra"
+    }
+  ]
+}
