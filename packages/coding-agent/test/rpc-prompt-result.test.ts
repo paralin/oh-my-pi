@@ -56,6 +56,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
 			hasPendingExtensionEvents: false,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
@@ -70,6 +71,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: true,
 			hasPendingExtensionEvents: false,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
@@ -84,6 +86,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
 			hasPendingExtensionEvents: true,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
@@ -248,6 +251,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingAsyncWork: () => true,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
+			hasPendingYieldWake: () => false,
 		};
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
 		session.hasPendingAsyncWork = () => false;
@@ -271,6 +275,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
 			hasPendingExtensionEvents: false,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(rpcForcedExitOutcome(session, terminalTasks)).toBe("aborted");
@@ -286,6 +291,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
 			hasPendingExtensionEvents: true,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(rpcForcedExitOutcome(session, { hasPendingTasks: false })).toBe("aborted");
@@ -303,6 +309,7 @@ describe("RPC durable custody prompts", () => {
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
 			hasPendingExtensionEvents: false,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
@@ -319,12 +326,27 @@ describe("RPC durable custody prompts", () => {
 			hasPendingAsyncWork: () => false,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
+			hasPendingYieldWake: () => false,
 		};
 
 		expect(hasPendingRpcContinuation(session)).toBe(true);
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
 		session.hasPendingAdvisorReviews = false;
 		expect(hasPendingRpcContinuation(session)).toBe(false);
+	});
+
+	test("refuses to seal while an idle yield wake is queued", () => {
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			hasPendingAdvisorReviews: false,
+			hasPendingAsyncWork: () => false,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+			hasPendingYieldWake: () => true,
+		};
+
+		expect(hasPendingRpcContinuation(session)).toBe(true);
 	});
 
 	test("drains an advisor review inside the terminal boundary", async () => {
@@ -405,6 +427,32 @@ describe("RPC durable custody prompts", () => {
 
 		expect(retryCalls).toBe(1);
 		expect(unsubscribeCalls).toBe(1);
+	});
+	test("replaces a pending advisor retry with the latest terminal boundary", () => {
+		const listeners: Array<() => void> = [];
+		let terminalOutcome = "";
+		const session = {
+			onAdvisorReviewsSettled(listener: () => void) {
+				listeners.push(listener);
+				return () => undefined;
+			},
+		};
+
+		let cancel = retryRpcResultSealAfterAdvisorSettlement(session, () => {
+			terminalOutcome = "completed";
+		});
+		cancel = retryRpcResultSealAfterAdvisorSettlement(
+			session,
+			() => {
+				terminalOutcome = "failed";
+			},
+			cancel,
+		);
+		listeners[0]?.();
+		listeners[1]?.();
+		cancel();
+
+		expect(terminalOutcome).toBe("failed");
 	});
 	test("flushes deferred bash results before opening the terminal boundary", async () => {
 		let pendingBash = true;
