@@ -123,13 +123,22 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	if (planDefaultArmed) {
 		const planFilePath = session.getPlanReferencePath() || "local://PLAN.md";
 		const previousTools = session.getEnabledToolNames();
-		const planTools = session.hasBuiltInTool("write") ? [...new Set([...previousTools, "write"])] : previousTools;
-		await session.setActiveToolsByName(planTools);
-		session.setPlanModeState({
+		const planBaseTools = session.hasBuiltInTool("goal")
+			? previousTools.filter(name => name !== "goal")
+			: previousTools;
+		const planTools = session.hasBuiltInTool("write") ? [...new Set([...planBaseTools, "write"])] : planBaseTools;
+		const planModeState = {
 			enabled: true,
 			planFilePath,
 			workflow: "parallel",
-		});
+		} as const;
+		session.setPlanModeState(planModeState);
+		try {
+			await session.setActiveToolsByName(planTools);
+		} catch (error) {
+			session.setPlanModeState(undefined);
+			throw error;
+		}
 		session.sessionManager.appendModeChange("plan", { planFilePath });
 		abortAfterPlanProposal = true;
 		session.setPlanProposalHandler(async title => {
