@@ -2,9 +2,19 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in typed client for listing local GLaDOS World sessions and resolving deterministic dispatch identities through the daemon Console socket. It reads `world.socket` or `OMP_WORLD_SOCKET` and stays inert until one is set.
+- Added `session.start`, `session.resume`, `session.replay`, `session.result`, `session.steer`, and `session.watch` to RPC mode, giving an external supervisor a durable append-only record of a session beside its transcript. A run claims an identity so a retried dispatch resolves against the existing episode instead of launching a second one, events carry a sequence a reconnecting supervisor can replay from, steering is acknowledged and redelivered when it was accepted but never injected, and the terminal result is sealed only after the transcript and accepted extension work settle. Clients that do not bind durable custody are unaffected.
+- Added `cron_create`, `cron_list`, and `cron_delete`, which schedule session-scoped prompts from five-field cron expressions evaluated in local time. Durable jobs persist beside the transcript, survive supported session transitions, and replay a missed one-shot on resume.
+- Added the `claude-code/{model}` Task selector, Claude Agent SDK runtime, `task.claudeCode.executable` setting, and configured effort discovery, with structured OMP Yield validation and live usage accounting.
+- Added OMP Task and Hub coordination to isolated Claude Code peers, including retained peer state, ordered asynchronous delivery, metadata-only persistence, and exact-session revival.
+
 ### Changed
 
 - Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.
+- Scratch handoff is now an explicit compaction strategy. Checkpoints are created lazily, existing checkpoints close out through targeted edits, verified no-delta handoffs cancel before context loss, and shake compaction preserves checkpoint continuity and rewrite accounting.
+- `omp://` documentation pages now declare their intended audience with a first-line HTML comment. Maintainer pages stay directly readable while remaining hidden from default listings and completions.
 
 ### Fixed
 
@@ -15,6 +25,9 @@
 ### Fixed
 
 - Fixed `install.sh` reporting success (exit 0) for a musl binary that cannot start: the installer now smoke-runs the downloaded binary and, on failure, prints the captured error plus the `apk add libstdc++ libgcc` remediation for musl targets and exits non-zero. Documented the Alpine/musl runtime requirement in the README ([#7545](https://github.com/can1357/oh-my-pi/issues/7545)).
+- Fixed provider session metadata disclosure by recording only bounded effective compaction and tokenizer settings while preserving session identity; raw config paths are excluded.
+- Fixed pending idle compaction firing against a stale idle gate after its settings changed.
+- Fixed Claude Code Task runs losing Yield schema-retry ownership at the MCP boundary, ignoring explicit tool allowlists, or retaining baseline-only files during isolated branch capture.
 
 ## [17.2.6] - 2026-08-03
 
