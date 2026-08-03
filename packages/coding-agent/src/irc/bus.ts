@@ -18,7 +18,7 @@
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { AgentSession } from "../session/agent-session";
+import { isAgentSession } from "../session/agent-session";
 import type { CustomMessage } from "../session/messages";
 
 export interface IrcMessage {
@@ -368,7 +368,7 @@ export class IrcBus {
 	#relayToMainUi(message: IrcMessage): void {
 		if (message.to === MAIN_AGENT_ID || message.from === MAIN_AGENT_ID) return;
 		const mainSession = this.#registry.get(MAIN_AGENT_ID)?.session;
-		if (!(mainSession instanceof AgentSession)) return;
+		if (!isAgentSession(mainSession)) return;
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:relay",

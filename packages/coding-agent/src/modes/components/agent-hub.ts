@@ -22,7 +22,7 @@ import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
-import { AgentSession } from "../../session/agent-session";
+import { isAgentSession } from "../../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
@@ -97,7 +97,7 @@ function formatResolvedModelBadge(resolved: string, preserveProvider = false): s
  */
 function modelBadge(ref: AgentRef, observed: ObservableSession | undefined): string | undefined {
 	const progress = observed?.progress;
-	const session = ref.session instanceof AgentSession ? ref.session : undefined;
+	const session = isAgentSession(ref.session) ? ref.session : undefined;
 	// Prefer the live session's own resolved fallback selector; else honor the
 	// executor-reported fallback flag. The latter covers observer-only rows (no
 	// live session) AND live rows whose fallback armed no session retry state —
