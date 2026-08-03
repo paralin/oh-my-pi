@@ -11,7 +11,7 @@
 
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID, type RegistryEvent } from "../../registry/agent-registry";
-import { AgentSession } from "../../session/agent-session";
+import { type AgentSession, isAgentSession } from "../../session/agent-session";
 import { setTerminalTitleState } from "../../utils/title-generator";
 import type { InteractiveModeContext } from "../types";
 
@@ -41,7 +41,7 @@ export class SessionFocusController {
 		if (this.ctx.collabGuest) throw new Error("Viewing agents is unavailable in a collab session.");
 		if (id === MAIN_AGENT_ID) return this.unfocus();
 		const session = await this.lifecycle().ensureLive(id);
-		if (!(session instanceof AgentSession)) {
+		if (!isAgentSession(session)) {
 			throw new Error(`Agent "${id}" runtime cannot be focused as a Pi session.`);
 		}
 		if (id === this.#focusedAgentId && session === this.#attachedSession) return;

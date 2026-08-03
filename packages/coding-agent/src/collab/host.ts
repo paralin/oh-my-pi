@@ -24,7 +24,7 @@ import type {
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
-import { AgentSession, type AgentSessionEvent } from "../session/agent-session";
+import { type AgentSessionEvent, isAgentSession } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
@@ -609,7 +609,7 @@ export class CollabHost {
 				AgentLifecycleManager.global()
 					.ensureLive(agentId)
 					.then(session => {
-						if (!(session instanceof AgentSession)) {
+						if (!isAgentSession(session)) {
 							throw new Error(`Agent "${agentId}" runtime does not support collab chat turns.`);
 						}
 						return session.prompt(trimmed, { streamingBehavior: "steer" });

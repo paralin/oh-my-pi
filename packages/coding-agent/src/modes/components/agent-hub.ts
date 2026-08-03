@@ -34,7 +34,7 @@ import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
-import { AgentSession } from "../../session/agent-session";
+import { type AgentSession, isAgentSession } from "../../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { shortenPath, truncateToWidth } from "../../tools/render-utils";
 import { formatLocalDateTimeWithOffset } from "../../utils/local-date";
@@ -489,13 +489,9 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		return session ? this.#sessionMetrics.get(session)?.metrics : undefined;
 	}
 
-	#fallbackStatsSession(
-		ref: AgentRef,
-		observed: ObservableSession | undefined,
-	): NonNullable<AgentRef["session"]> | undefined {
+	#fallbackStatsSession(ref: AgentRef, observed: ObservableSession | undefined): AgentSession | undefined {
 		if (observed?.progress) return undefined;
-		const session = ref.session;
-		return session && typeof session.getSessionStats === "function" ? session : undefined;
+		return isAgentSession(ref.session) ? ref.session : undefined;
 	}
 
 	// ========================================================================

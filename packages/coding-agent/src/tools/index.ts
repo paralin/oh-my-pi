@@ -424,6 +424,10 @@ export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool |
 /**
  * Public callable factory map. External callers may invoke `BUILTIN_TOOLS.read(session)` or
  * `BUILTIN_TOOLS[name](session)` to construct a tool directly.
+ *
+ * Entries defer class binding reads until tool construction. Module
+ * initialization can otherwise observe a cyclic binding before its class is
+ * initialized.
  */
 export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	read: s => new ReadTool(s),
@@ -432,29 +436,29 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	edit: s => new EditTool(s),
 	ast_grep: s => new AstGrepTool(s),
 	ast_edit: s => new AstEditTool(s),
-	ask: AskTool.createIf,
-	debug: DebugTool.createIf,
+	ask: s => AskTool.createIf(s),
+	debug: s => DebugTool.createIf(s),
 	eval: s => new EvalTool(s),
-	github: GithubTool.createIf,
+	github: s => GithubTool.createIf(s),
 	glob: s => new GlobTool(s, { rootPathAlias: true }),
 	grep: s => new GrepTool(s),
-	lsp: LspTool.createIf,
+	lsp: s => LspTool.createIf(s),
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
 	computer: s => new ComputerTool(s),
-	checkpoint: CheckpointTool.createIf,
-	rewind: RewindTool.createIf,
+	checkpoint: s => CheckpointTool.createIf(s),
+	rewind: s => RewindTool.createIf(s),
 	task: s => TaskTool.create(s),
 	hub: s => new HubTool(s),
 	todo: s => new TodoTool(s),
 	web_search: s => new WebSearchTool(s),
 	write: s => new WriteTool(s),
-	memory_edit: MemoryEditTool.createIf,
-	retain: MemoryRetainTool.createIf,
-	recall: MemoryRecallTool.createIf,
-	reflect: MemoryReflectTool.createIf,
-	learn: LearnTool.createIf,
-	manage_skill: ManageSkillTool.createIf,
+	memory_edit: s => MemoryEditTool.createIf(s),
+	retain: s => MemoryRetainTool.createIf(s),
+	recall: s => MemoryRecallTool.createIf(s),
+	reflect: s => MemoryReflectTool.createIf(s),
+	learn: s => LearnTool.createIf(s),
+	manage_skill: s => ManageSkillTool.createIf(s),
 };
 
 export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {

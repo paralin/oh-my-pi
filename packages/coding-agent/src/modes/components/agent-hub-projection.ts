@@ -1,5 +1,6 @@
 import type { AgentMetricsSummary, AgentRef, AgentStatus } from "../../registry/agent-registry";
 import { MAIN_AGENT_ID } from "../../registry/agent-registry";
+import type { AgentSession } from "../../session/agent-session";
 import type { ObservableSession } from "../session-observer-registry";
 
 export type AgentMetrics = AgentMetricsSummary;
@@ -65,7 +66,7 @@ export function progressMetrics(observed: ObservableSession | undefined): AgentM
  * usage embedded in completed `task` tool results, so using it for a parent
  * row would double-count child rows in the aggregate.
  */
-function readSessionMetrics(session: NonNullable<AgentRef["session"]>): AgentMetrics | undefined {
+export function readSessionMetrics(session: AgentSession): AgentMetrics | undefined {
 	try {
 		const stats = session.getSessionStats();
 		const messages = session.agent?.state?.messages;
@@ -114,10 +115,7 @@ export function aggregateMetrics(args: {
 	rows: readonly AgentRef[];
 	observedById: ReadonlyMap<string, ObservableSession>;
 	metricsFor: (ref: AgentRef, observed: ObservableSession | undefined) => AgentMetrics | undefined;
-	fallbackStatsSession: (
-		ref: AgentRef,
-		observed: ObservableSession | undefined,
-	) => NonNullable<AgentRef["session"]> | undefined;
+	fallbackStatsSession: (ref: AgentRef, observed: ObservableSession | undefined) => AgentSession | undefined;
 	sessionMetrics: WeakMap<object, { metrics: AgentMetrics | undefined }>;
 	refreshFallback: boolean;
 }): { metrics: AggregateMetrics; hasFallbackLiveSessions: boolean } {

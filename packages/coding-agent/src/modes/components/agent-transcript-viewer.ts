@@ -21,7 +21,7 @@ import type { KeyId } from "../../config/keybindings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
-import { AgentSession } from "../../session/agent-session";
+import { isAgentSession } from "../../session/agent-session";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
 import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
@@ -537,7 +537,7 @@ export class AgentTranscriptViewer implements Component {
 			try {
 				// Revives a parked agent; returns the live session for running/idle.
 				const session = await lifecycle().ensureLive(id);
-				if (!(session instanceof AgentSession)) {
+				if (!isAgentSession(session)) {
 					throw new Error(`Agent "${id}" runtime does not support follow-up chat turns.`);
 				}
 				// Steers a mid-turn agent; sends a normal prompt to an idle one.

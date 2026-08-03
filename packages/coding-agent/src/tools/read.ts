@@ -345,8 +345,6 @@ async function streamLinesFromFile(
 	};
 }
 
-// Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
-const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 
 const readSchema = type({
 	path: type("string").describe(
@@ -626,9 +624,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return { content: [{ type: "text", text: metadataLines.join("\n") }], details: {}, sourcePath: absolutePath };
 		}
 
-		if (fileSize > MAX_IMAGE_SIZE) {
+		if (fileSize > MAX_IMAGE_INPUT_BYTES) {
 			const sizeStr = formatBytes(fileSize);
-			const maxStr = formatBytes(MAX_IMAGE_SIZE);
+			const maxStr = formatBytes(MAX_IMAGE_INPUT_BYTES);
 			throw new ToolError(`Image file too large: ${sizeStr} exceeds ${maxStr} limit.`);
 		}
 		try {
@@ -636,7 +634,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				path: readPath,
 				cwd: this.session.cwd,
 				autoResize: this.#autoResizeImages,
-				maxBytes: MAX_IMAGE_SIZE,
+				maxBytes: MAX_IMAGE_INPUT_BYTES,
 				resolvedPath: absolutePath,
 				detectedMimeType: mimeType,
 				excludeWebP: webpExclusionForModel(this.session.getActiveModel?.()),

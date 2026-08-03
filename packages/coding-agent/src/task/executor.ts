@@ -41,7 +41,7 @@ import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
 import { type AgentPeer, AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
-import { AgentSession, type AgentSessionEvent, type Prewalk } from "../session/agent-session";
+import { type AgentSession, type AgentSessionEvent, isAgentSession, type Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
@@ -2627,7 +2627,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const index = options.index ?? 0;
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
-	if (!(session instanceof AgentSession)) {
+	if (!isAgentSession(session)) {
 		throw new Error(`Agent "${id}" runtime does not support Pi follow-up turns.`);
 	}
 	const ref = AgentRegistry.global().get(id);

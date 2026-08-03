@@ -79,13 +79,46 @@ export type ToolRenderer = {
 	forceResultViewportRepaintOnSettle?: boolean;
 };
 
+/** Built on demand so each `vibe_*` lookup keeps a stable renderer identity. */
+const vibeRenderers = new Map<string, ToolRenderer>();
+function vibeRenderer(op: Parameters<typeof createVibeToolRenderer>[0]): ToolRenderer {
+	let renderer = vibeRenderers.get(op);
+	if (!renderer) {
+		renderer = createVibeToolRenderer(op) as ToolRenderer;
+		vibeRenderers.set(op, renderer);
+	}
+	return renderer;
+}
+
+/**
+ * Every entry resolves its renderer through a lazy getter.
+ *
+ * Renderer modules form import cycles through sdk and tools/index. Deferring
+ * each binding read until render time keeps module initialization independent
+ * of import order.
+ *
+ * Getters remain own and enumerable. Each returns its shared renderer object,
+ * which preserves aliases such as `apply_patch` and `edit`.
+ */
 export const toolRenderers: Record<string, ToolRenderer> = {
-	ask: askToolRenderer as ToolRenderer,
-	ast_grep: astGrepToolRenderer as ToolRenderer,
-	ast_edit: astEditToolRenderer as ToolRenderer,
-	bash: bashToolRenderer as ToolRenderer,
-	browser: browserToolRenderer as ToolRenderer,
-	computer: computerToolRenderer as ToolRenderer,
+	get ask(): ToolRenderer {
+		return askToolRenderer as ToolRenderer;
+	},
+	get ast_grep(): ToolRenderer {
+		return astGrepToolRenderer as ToolRenderer;
+	},
+	get ast_edit(): ToolRenderer {
+		return astEditToolRenderer as ToolRenderer;
+	},
+	get bash(): ToolRenderer {
+		return bashToolRenderer as ToolRenderer;
+	},
+	get browser(): ToolRenderer {
+		return browserToolRenderer as ToolRenderer;
+	},
+	get computer(): ToolRenderer {
+		return computerToolRenderer as ToolRenderer;
+	},
 	get cron_create(): ToolRenderer {
 		return cronCreateToolRenderer as ToolRenderer;
 	},
@@ -95,50 +128,90 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	get cron_delete(): ToolRenderer {
 		return cronDeleteToolRenderer as ToolRenderer;
 	},
-	debug: debugToolRenderer as ToolRenderer,
-	eval: evalToolRenderer as ToolRenderer,
-	edit: editToolRenderer as ToolRenderer,
-	apply_patch: editToolRenderer as ToolRenderer,
-	glob: globToolRenderer as ToolRenderer,
-	grep: grepToolRenderer as ToolRenderer,
-	lsp: lspToolRenderer as ToolRenderer,
-	inspect_image: inspectImageToolRenderer as ToolRenderer,
-	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →
-	// persisted-agents → vibe/runtime → task/executor → sdk) close an import
-	// cycle back here, so reading it at init order-dependently hits its
-	// temporal dead zone. Deferring the read to first access sidesteps it.
+	get debug(): ToolRenderer {
+		return debugToolRenderer as ToolRenderer;
+	},
+	get eval(): ToolRenderer {
+		return evalToolRenderer as ToolRenderer;
+	},
+	get edit(): ToolRenderer {
+		return editToolRenderer as ToolRenderer;
+	},
+	get apply_patch(): ToolRenderer {
+		return editToolRenderer as ToolRenderer;
+	},
+	get glob(): ToolRenderer {
+		return globToolRenderer as ToolRenderer;
+	},
+	get grep(): ToolRenderer {
+		return grepToolRenderer as ToolRenderer;
+	},
+	get lsp(): ToolRenderer {
+		return lspToolRenderer as ToolRenderer;
+	},
+	get inspect_image(): ToolRenderer {
+		return inspectImageToolRenderer as ToolRenderer;
+	},
 	get hub(): ToolRenderer {
 		return hubToolRenderer as ToolRenderer;
 	},
-	read: readToolRenderer as ToolRenderer,
+	get read(): ToolRenderer {
+		return readToolRenderer as ToolRenderer;
+	},
 	// Keyed by xd:// resolution-device names: the write dispatch delegates here
 	// by dispatch tool, and historical `resolve` tool transcripts still render
 	// through the `resolve` entry. Both devices carry the same ResolveDetails.
-	resolve: resolveRenderer as ToolRenderer,
-	reject: resolveRenderer as ToolRenderer,
-	retain: retainToolRenderer as ToolRenderer,
-	recall: recallToolRenderer as ToolRenderer,
-	reflect: reflectToolRenderer as ToolRenderer,
-	// Lazy getter: `taskToolRenderer` lives in a module that closes an import
-	// cycle back here (task/renderer → task/render → … → tools/renderers), so
-	// reading it at init order-dependently hits its temporal dead zone. Deferring
-	// the read to first access (render time) sidesteps the cycle entirely.
+	get resolve(): ToolRenderer {
+		return resolveRenderer as ToolRenderer;
+	},
+	get reject(): ToolRenderer {
+		return resolveRenderer as ToolRenderer;
+	},
+	get retain(): ToolRenderer {
+		return retainToolRenderer as ToolRenderer;
+	},
+	get recall(): ToolRenderer {
+		return recallToolRenderer as ToolRenderer;
+	},
+	get reflect(): ToolRenderer {
+		return reflectToolRenderer as ToolRenderer;
+	},
 	get task(): ToolRenderer {
 		return taskToolRenderer as ToolRenderer;
 	},
-	think: thinkToolRenderer as ToolRenderer,
-	todo: todoToolRenderer as ToolRenderer,
-	github: githubToolRenderer as ToolRenderer,
+	get think(): ToolRenderer {
+		return thinkToolRenderer as ToolRenderer;
+	},
+	get todo(): ToolRenderer {
+		return todoToolRenderer as ToolRenderer;
+	},
+	get github(): ToolRenderer {
+		return githubToolRenderer as ToolRenderer;
+	},
 	get goal(): ToolRenderer {
 		return goalToolRenderer as ToolRenderer;
 	},
-	web_search: webSearchToolRenderer as ToolRenderer,
-	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,
-	vibe_send: createVibeToolRenderer("send") as ToolRenderer,
-	vibe_wait: createVibeToolRenderer("wait") as ToolRenderer,
-	vibe_kill: createVibeToolRenderer("kill") as ToolRenderer,
-	vibe_list: createVibeToolRenderer("list") as ToolRenderer,
-	write: writeToolRenderer as ToolRenderer,
+	get web_search(): ToolRenderer {
+		return webSearchToolRenderer as ToolRenderer;
+	},
+	get vibe_spawn(): ToolRenderer {
+		return vibeRenderer("spawn");
+	},
+	get vibe_send(): ToolRenderer {
+		return vibeRenderer("send");
+	},
+	get vibe_wait(): ToolRenderer {
+		return vibeRenderer("wait");
+	},
+	get vibe_kill(): ToolRenderer {
+		return vibeRenderer("kill");
+	},
+	get vibe_list(): ToolRenderer {
+		return vibeRenderer("list");
+	},
+	get write(): ToolRenderer {
+		return writeToolRenderer as ToolRenderer;
+	},
 };
 
 // Wire the xd:// render delegation. Injected (instead of the xdev module

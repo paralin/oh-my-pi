@@ -25,7 +25,7 @@ import { MCPManager } from "../mcp/manager";
 import vibeTurnResultTemplate from "../prompts/tools/vibe-turn-result.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { AgentSession } from "../session/agent-session";
+import { hasAgentTurnState, isAgentSession } from "../session/agent-session";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
 import { sessionSidecarDir } from "../session/session-paths";
 import { getBundledAgent } from "../task/agents";
@@ -1045,7 +1045,7 @@ export class VibeSessionRegistry {
 
 		if (record.turn) {
 			const live = registered?.session;
-			if (live instanceof AgentSession && live.isStreaming) {
+			if (isAgentSession(live) && live.isStreaming) {
 				await live.steer(message);
 				record.lastActivityAt = Date.now();
 				return { id: record.id, mode: "steered" };
@@ -1684,7 +1684,10 @@ export function aggregateVibeWorkerTokensPerSecond(ownerId: string): number | nu
 	const registry = AgentRegistry.global();
 	for (const id of ids) {
 		const workerSession = registry.get(id)?.session;
-		if (!(workerSession instanceof AgentSession) || !workerSession.isStreaming) continue;
+		// The aggregation reads nothing but `isStreaming` and `state.messages`, so
+		// it gates on that turn state rather than on the event-stream surface: a
+		// worker that carries a live turn log must contribute its rate.
+		if (!hasAgentTurnState(workerSession) || !workerSession.isStreaming) continue;
 		const rate = calculateTokensPerSecond(workerSession.state.messages, true);
 		if (rate !== null) {
 			total += rate;

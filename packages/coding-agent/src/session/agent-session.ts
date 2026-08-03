@@ -174,6 +174,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
 import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
+import type { AgentPeer } from "../registry/agent-registry";
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -371,6 +372,28 @@ const persistenceSafeAgentEvents = new WeakMap<object, AgentSessionEvent>();
 /** Returns the provider-safe source event behind a deobfuscated display event. */
 export function persistenceSafeAgentSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
 	return (persistenceSafeAgentEvents.get(event) ?? event) as AgentSessionEvent;
+}
+
+/**
+ * Reports whether a peer uses the Pi AgentSession runtime.
+ *
+ * `subscribe` distinguishes AgentSession from ClaudeCodePeer and remains valid
+ * when the same class is loaded through more than one module identity.
+ */
+export function isAgentSession(peer: AgentPeer | null | undefined): peer is AgentSession {
+	return typeof (peer as AgentSession | null | undefined)?.subscribe === "function";
+}
+
+/** Reports whether a peer exposes session-manager state. */
+export function hasSessionManager(peer: AgentPeer | null | undefined): peer is AgentSession {
+	const candidate = peer as { sessionManager?: { getCwd?: unknown } } | null | undefined;
+	return typeof candidate?.sessionManager?.getCwd === "function";
+}
+
+/** Reports whether a peer exposes the state used to measure a live turn. */
+export function hasAgentTurnState(peer: AgentPeer | null | undefined): peer is AgentSession {
+	const candidate = peer as { state?: { messages?: unknown }; isStreaming?: unknown } | null | undefined;
+	return typeof candidate?.isStreaming === "boolean" && Array.isArray(candidate?.state?.messages);
 }
 
 const SESSION_STOP_CONTINUATION_CAP = 8;

@@ -6,9 +6,9 @@ import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
+import { sessionSidecarDir } from "../session/session-paths";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
-import { sessionSidecarDir } from "../session/session-paths";
 import { persistedVibeChildIds } from "../vibe/runtime";
 import {
 	type AgentHistorySummary,
