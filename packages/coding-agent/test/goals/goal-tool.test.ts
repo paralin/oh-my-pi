@@ -426,22 +426,24 @@ describe("GoalTool", () => {
 		const call = Bun.stripANSI(
 			goalToolRenderer.renderCall({ op: "create", objective: "Ship\tit" }, options, theme!).render(120).join("\n"),
 		);
-		const result = Bun.stripANSI(
-			goalToolRenderer
-				.renderResult(
-					{
-						content: [],
-						details: { op: "get", goal: createGoal({ objective: "Ship\tit" }) },
-					},
-					options,
-					theme!,
-				)
-				.render(120)
-				.join("\n"),
-		);
+		const rawResult = goalToolRenderer
+			.renderResult(
+				{
+					content: [],
+					details: { op: "get", goal: createGoal({ objective: "Ship\t\u001b]8;;https://example.com\u0007it" }) },
+				},
+				options,
+				theme!,
+			)
+			.render(120)
+			.join("\n");
+		const result = Bun.stripANSI(rawResult);
 
 		expect(call).not.toContain("\t");
 		expect(result).not.toContain("\t");
+		expect(result).not.toContain("\u001b");
+		expect(result).not.toContain("\u0007");
+		expect(result).not.toContain("https://example.com");
 		expect(call).toContain("Ship");
 		expect(result).toContain("Ship");
 	});

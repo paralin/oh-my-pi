@@ -85,9 +85,15 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	bash: bashToolRenderer as ToolRenderer,
 	browser: browserToolRenderer as ToolRenderer,
 	computer: computerToolRenderer as ToolRenderer,
-	cron_create: cronCreateToolRenderer as ToolRenderer,
-	cron_list: cronListToolRenderer as ToolRenderer,
-	cron_delete: cronDeleteToolRenderer as ToolRenderer,
+	get cron_create(): ToolRenderer {
+		return cronCreateToolRenderer as ToolRenderer;
+	},
+	get cron_list(): ToolRenderer {
+		return cronListToolRenderer as ToolRenderer;
+	},
+	get cron_delete(): ToolRenderer {
+		return cronDeleteToolRenderer as ToolRenderer;
+	},
 	debug: debugToolRenderer as ToolRenderer,
 	eval: evalToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
@@ -121,7 +127,9 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	},
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
-	goal: goalToolRenderer as ToolRenderer,
+	get goal(): ToolRenderer {
+		return goalToolRenderer as ToolRenderer;
+	},
 	web_search: webSearchToolRenderer as ToolRenderer,
 	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,
 	vibe_send: createVibeToolRenderer("send") as ToolRenderer,

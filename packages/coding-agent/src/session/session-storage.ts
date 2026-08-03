@@ -1,7 +1,9 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { sessionSidecarDir } from "./session-paths";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
@@ -76,6 +78,17 @@ export interface SessionStorage {
 	readTextSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
+	/**
+	 * Acquire a backend-wide lease when it is absent or expired.
+	 *
+	 * Implementations compare and publish atomically. `owner` identifies the
+	 * caller for conditional release.
+	 */
+	acquireLease?(path: string, owner: string, expiresAt: number, now: number): Promise<boolean>;
+	/** Extend a lease only when `owner` still identifies its holder. */
+	renewLease?(path: string, owner: string, expiresAt: number, now: number): Promise<boolean>;
+	/** Release a lease only when `owner` still identifies its holder. */
+	releaseLease?(path: string, owner: string): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
@@ -187,6 +200,19 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 }
 
+function withFileLeaseDatabase<T>(leasePath: string, operation: (db: Database) => T): T {
+	fs.mkdirSync(path.dirname(leasePath), { recursive: true });
+	const db = new Database(leasePath, { create: true });
+	try {
+		db.exec(
+			"PRAGMA busy_timeout = 5000; CREATE TABLE IF NOT EXISTS lease (id INTEGER PRIMARY KEY CHECK (id = 1), owner TEXT NOT NULL, expires_at INTEGER NOT NULL)",
+		);
+		return operation(db);
+	} finally {
+		db.close();
+	}
+}
+
 export class FileSessionStorage implements SessionStorage {
 	ensureDirSync(dir: string): void {
 		if (!fs.existsSync(dir)) {
@@ -265,6 +291,35 @@ export class FileSessionStorage implements SessionStorage {
 			if (isEnoent(err)) return false;
 			throw err;
 		}
+	}
+
+	acquireLease(leasePath: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const acquired = withFileLeaseDatabase(leasePath, db => {
+			const result = db
+				.query(
+					"INSERT INTO lease (id, owner, expires_at) VALUES (1, ?, ?) ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at WHERE lease.expires_at <= ?",
+				)
+				.run(owner, expiresAt, now);
+			return Number(result.changes) > 0;
+		});
+		return Promise.resolve(acquired);
+	}
+
+	renewLease(leasePath: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const renewed = withFileLeaseDatabase(leasePath, db => {
+			const result = db
+				.query("UPDATE lease SET expires_at = ? WHERE id = 1 AND owner = ? AND expires_at > ?")
+				.run(expiresAt, owner, now);
+			return Number(result.changes) > 0;
+		});
+		return Promise.resolve(renewed);
+	}
+
+	releaseLease(leasePath: string, owner: string): Promise<void> {
+		withFileLeaseDatabase(leasePath, db => {
+			db.query("DELETE FROM lease WHERE id = 1 AND owner = ?").run(owner);
+		});
+		return Promise.resolve();
 	}
 
 	readText(path: string): Promise<string> {
@@ -429,16 +484,12 @@ export class FileSessionStorage implements SessionStorage {
 		return new FileSessionStorageWriter(path, options);
 	}
 
-	/**
-	 * Delete a session file and its artifacts directory.
-	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
-	 */
+	/** Delete a session file and its canonical sidecar directory. */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
 		// Delete the session file itself
 		await this.unlink(sessionPath);
 
-		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
-		const artifactsDir = sessionPath.slice(0, -6);
+		const artifactsDir = sessionSidecarDir(sessionPath);
 
 		// Delete artifacts directory if it exists. Missing directories are fine, but
 		// surface real cleanup failures because the session file is already gone.
@@ -656,6 +707,7 @@ export class MemorySessionStorage implements SessionStorage {
 	// after that materialized chunk. Prefix/suffix reads binary-search byte
 	// offsets and join only the requested window.
 	#files = new Map<string, MemoryFileEntry>();
+	#leases = new Map<string, { owner: string; expiresAt: number }>();
 
 	#requireEntry(path: string): MemoryFileEntry {
 		const entry = this.#files.get(path);
@@ -723,6 +775,25 @@ export class MemorySessionStorage implements SessionStorage {
 
 	exists(path: string): Promise<boolean> {
 		return Promise.resolve(this.existsSync(path));
+	}
+
+	acquireLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const current = this.#leases.get(path);
+		if (current && current.expiresAt > now) return Promise.resolve(false);
+		this.#leases.set(path, { owner, expiresAt });
+		return Promise.resolve(true);
+	}
+
+	renewLease(path: string, owner: string, expiresAt: number, _now: number): Promise<boolean> {
+		const current = this.#leases.get(path);
+		if (current?.owner !== owner) return Promise.resolve(false);
+		current.expiresAt = expiresAt;
+		return Promise.resolve(true);
+	}
+
+	releaseLease(path: string, owner: string): Promise<void> {
+		if (this.#leases.get(path)?.owner === owner) this.#leases.delete(path);
+		return Promise.resolve();
 	}
 
 	readText(path: string): Promise<string> {

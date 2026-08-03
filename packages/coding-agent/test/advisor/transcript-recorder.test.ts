@@ -109,6 +109,22 @@ describe("AdvisorTranscriptRecorder", () => {
 		});
 	});
 
+	it("persists and loads advisor turns for a non-jsonl session path", async () => {
+		await withTempDir(async dir => {
+			const sessionFile = path.join(dir, "named-session");
+			const recorder = new AdvisorTranscriptRecorder(
+				() => sessionFile,
+				() => dir,
+			);
+			recorder.record(assistantMessage("reviewing", 42, 0.25));
+			await recorder.close();
+
+			const transcript = path.join(dir, "named-session.d", ADVISOR_TRANSCRIPT_FILENAME);
+			expect(await readMessageEntries(transcript)).toHaveLength(1);
+			expect((await loadAdvisorTranscriptCosts(sessionFile)).get("")).toBe(0.25);
+		});
+	});
+
 	it("marks advisor user deltas synthetic and agent-attributed", async () => {
 		await withTempDir(async dir => {
 			const sessionFile = path.join(dir, "sess.jsonl");
