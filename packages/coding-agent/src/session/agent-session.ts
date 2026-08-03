@@ -8847,7 +8847,6 @@ export class AgentSession {
 		 */
 		askReanswerCommitted?: boolean;
 	}> {
-		await this.#bash.flushPending();
 		const oldLeafId = this.sessionManager.getLeafId();
 
 		const targetEntry = this.sessionManager.getEntry(targetId);
@@ -8897,6 +8896,16 @@ export class AgentSession {
 			// Original arguments couldn't be recovered (corrupted/legacy session
 			// data) — fall through to a plain leaf move so navigation still works.
 		}
+
+		const sessionServicesSuspended = await this.#suspendSessionServices();
+		let branchTransitioned = false;
+		await using _sessionServices = {
+			[Symbol.asyncDispose]: async () => {
+				await this.#resumeSessionServices(sessionServicesSuspended, branchTransitioned, "tree navigation");
+			},
+		};
+		if (this.isStreaming) await this.abort({ goalReason: "internal" });
+		await this.#bash.flushPending();
 
 		// Collect entries to summarize (from old leaf to common ancestor). For an
 		// `ask` re-answer completion, the branch point is `targetEntry.parentId`
@@ -9052,7 +9061,6 @@ export class AgentSession {
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		const bashTransition = this.#bash.beginSessionTransition();
 		let summaryEntry: BranchSummaryEntry | undefined;
-		let branchTransitioned = false;
 		try {
 			if (summaryText) {
 				// Create summary at target position (can be null for root)

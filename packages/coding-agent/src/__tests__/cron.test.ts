@@ -845,6 +845,55 @@ describe("cron scheduling", () => {
 		manager.dispose();
 	});
 
+	it("refreshes indexed storage before copying a fork store", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionA = path.join(os.tmpdir(), `cron-stale-parent-${crypto.randomUUID()}.jsonl`);
+		const sessionB = path.join(os.tmpdir(), `cron-stale-fork-${crypto.randomUUID()}.jsonl`);
+		const oldStore = path.join(sessionSidecarDir(sessionA), "scheduled_tasks.json");
+		const newStore = path.join(sessionSidecarDir(sessionB), "scheduled_tasks.json");
+		const text = '[{"id":"durable"}]\n';
+		await storage.writeText(oldStore, text);
+		let refreshed = false;
+		const readText = storage.readText.bind(storage);
+		vi.spyOn(storage, "readText").mockImplementation(async file => {
+			if (file === oldStore && !refreshed) {
+				throw Object.assign(new Error("stale index"), { code: "ENOENT" });
+			}
+			return readText(file);
+		});
+		Object.defineProperty(storage, "refresh", {
+			value: async () => {
+				refreshed = true;
+			},
+		});
+		const manager = new CronManager({ sessionFile: sessionA, storage, enqueuePrompt: async () => undefined });
+
+		await manager.copyForkStore(sessionA, sessionB);
+
+		expect(refreshed).toBe(true);
+		expect(await storage.readText(newStore)).toBe(text);
+		await manager.dispose();
+	});
+
+	it("cancels a durable lease wait when the scheduler is suspended", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionFile = path.join(os.tmpdir(), `cron-suspend-lease-${crypto.randomUUID()}.jsonl`);
+		const manager = new CronManager({ sessionFile, storage, enqueuePrompt: async () => undefined });
+		const acquireLease = vi.spyOn(storage, "acquireLease").mockResolvedValue(false);
+		const create = manager.create({
+			expression: "0 11 * * *",
+			prompt: "never acquire",
+			durable: true,
+		});
+		await waitFor(() => acquireLease.mock.calls.length > 0, "durable mutation never attempted its lease");
+
+		const suspended = await Promise.race([manager.suspend().then(() => true), Bun.sleep(500).then(() => false)]);
+
+		expect(suspended).toBe(true);
+		await expect(create).rejects.toThrow("Cron session changed while acquiring durable storage.");
+		await manager.dispose();
+	});
+
 	it("retries a transient refresh load failure for the current session", async () => {
 		const storage = new MemorySessionStorage();
 		const sessionFile = path.join(os.tmpdir(), `cron-refresh-${crypto.randomUUID()}.jsonl`);

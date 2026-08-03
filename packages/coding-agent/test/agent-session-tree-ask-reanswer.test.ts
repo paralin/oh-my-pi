@@ -586,6 +586,40 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 	});
 });
 
+describe("AgentSession tree navigation service lifecycle", () => {
+	it("suspends session services before running tree hooks", async () => {
+		const order: string[] = [];
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_tree",
+			emit: async () => {
+				order.push("hook");
+				return undefined;
+			},
+		} as unknown as ExtensionRunner;
+		const ctx = await createTestSession({
+			inMemory: true,
+			extensionRunner,
+			beginSessionFork: async () => {
+				order.push("suspend");
+			},
+			completeSessionFork: async () => {
+				order.push("resume");
+			},
+		});
+		try {
+			const { session, sessionManager } = ctx;
+			const targetId = sessionManager.appendMessage(userMsg("first"));
+			sessionManager.appendMessage(assistantMsg("second"));
+
+			await session.navigateTree(targetId);
+
+			expect(order).toEqual(["suspend", "hook", "resume"]);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+});
+
 describe("AgentSession.buildAskReanswerContext", () => {
 	it("builds an AgentToolContext backed by real session state, not a fabricated stub", async () => {
 		const ctx = await createTestSession({ inMemory: true });
