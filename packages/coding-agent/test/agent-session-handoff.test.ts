@@ -165,6 +165,20 @@ describe("AgentSession handoff", () => {
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 	});
 
+	it("labels a manual handoff request with the handoff strategy", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue from here");
+
+		await session.handoff();
+
+		const call = generateHandoffSpy.mock.calls[0];
+		if (!call) throw new Error("Expected generateHandoffFromContext call");
+		const userId = JSON.parse(String(call[2].streamOptions.metadata?.user_id)) as { profile: { s: string } };
+		expect(userId.profile.s).toBe("handoff");
+	});
+
 	it("clears staged preview state when handoff creates the replacement session", async () => {
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
 		session.toolChoiceQueue.registerPendingInvoker("old-session-preview", "ast_edit", async () => ({
@@ -1484,6 +1498,7 @@ describe("AgentSession handoff", () => {
 		expect(handoffSpy).toHaveBeenCalledTimes(1);
 		expect(handoffSpy).toHaveBeenCalledWith(expect.stringContaining("Threshold-triggered maintenance"), {
 			autoTriggered: true,
+			metadataCompactionStrategy: "handoff",
 			signal: expect.anything(),
 			onSwitchCancelled: expect.any(Function),
 		});

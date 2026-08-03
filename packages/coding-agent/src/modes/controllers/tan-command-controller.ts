@@ -9,6 +9,7 @@ import * as sdk from "../../sdk";
 import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
+import { sessionSidecarDir } from "../../session/session-paths";
 import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
@@ -33,7 +34,7 @@ function extractAssistantText(message: AssistantMessage | undefined): string {
 async function removeCloneSession(cloneFile: string): Promise<void> {
 	await Promise.allSettled([
 		fs.rm(cloneFile, { force: true }),
-		fs.rm(cloneFile.slice(0, -6), { recursive: true, force: true }),
+		fs.rm(sessionSidecarDir(cloneFile), { recursive: true, force: true }),
 	]);
 }
 
@@ -96,7 +97,7 @@ export class TanCommandController {
 		// Nest the clone inside the parent's artifact directory (like a subagent
 		// session) rather than as a top-level sibling, so it shares the parent's
 		// artifacts in place — no copy needed.
-		const sessionDir = parentFile.slice(0, -6);
+		const sessionDir = sessionSidecarDir(parentFile);
 		const settings = createSubagentSettings(this.ctx.settings);
 		const customTools = mcpManager ? createMCPProxyTools(mcpManager) : undefined;
 		const enableLsp = this.ctx.settings.get("task.enableLsp") !== false;

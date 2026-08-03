@@ -21,6 +21,7 @@ import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } fro
 import { formatMatchLine } from "./match-line-format";
 import type { OutputMeta } from "./output-meta";
 import { resolveToolSearchScope, toPathList } from "./path-utils";
+import { PREVIEW_LIMITS } from "./render-constants";
 import {
 	appendParseErrorsBulletList,
 	capParseErrors,
@@ -31,7 +32,6 @@ import {
 	formatErrorMessage,
 	formatParseErrors,
 	formatParseErrorsCountLabel,
-	PREVIEW_LIMITS,
 } from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";

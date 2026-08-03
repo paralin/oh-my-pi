@@ -71,6 +71,12 @@ function createFakeRedis(): FakeRedis {
 		async send(command, args) {
 			record("send", [command, args]);
 			checkFailure("send");
+			if (command === "SET") {
+				const [key, value, mode] = args;
+				if (mode === "NX" && strings.has(key)) return null;
+				strings.set(key, value);
+				return "OK";
+			}
 			if (command !== "EVAL") throw new Error(`Unsupported Redis command: ${command}`);
 			const script = args[0] ?? "";
 			const keyCount = Number(args[1] ?? "0");
@@ -103,6 +109,18 @@ function createFakeRedis(): FakeRedis {
 				const [filePath, mtimeMs, title] = argv;
 				getHash(metaKey).set(filePath, mtimeMs);
 				getHash(titleKey).set(filePath, title);
+				return 1;
+			}
+			if (script.includes("OMP_RENEW_LEASE")) {
+				const [leaseKey] = keys;
+				const [owner] = argv;
+				return strings.get(leaseKey) === owner ? 1 : 0;
+			}
+			if (script.includes("OMP_RELEASE_LEASE")) {
+				const [leaseKey] = keys;
+				const [owner] = argv;
+				if (strings.get(leaseKey) !== owner) return 0;
+				strings.delete(leaseKey);
 				return 1;
 			}
 			throw new Error("Unsupported Redis script");
@@ -222,6 +240,21 @@ describe("RedisSessionStorage", () => {
 		const stat = storage.statSync("/sessions/p/a.jsonl");
 		expect(stat.size).toBe(12);
 		expect(typeof stat.mtimeMs).toBe("number");
+	});
+
+	it("coordinates leases across storage instances", async () => {
+		const first = await RedisSessionStorage.create({ client: redis });
+		const second = await RedisSessionStorage.create({ client: redis });
+		const lease = "/sessions/p/scheduled_tasks.json.delivery";
+
+		expect(await first.acquireLease(lease, "first", 2_000, 1_000)).toBe(true);
+		expect(await second.acquireLease(lease, "second", 2_000, 1_000)).toBe(false);
+		expect(await first.renewLease(lease, "first", 3_000, 1_500)).toBe(true);
+		expect(await second.renewLease(lease, "second", 3_000, 1_500)).toBe(false);
+		await second.releaseLease(lease, "second");
+		expect(await second.acquireLease(lease, "second", 2_000, 1_000)).toBe(false);
+		await first.releaseLease(lease, "first");
+		expect(await second.acquireLease(lease, "second", 2_000, 1_000)).toBe(true);
 	});
 
 	it("commits file content and metadata through one atomic Redis script", async () => {

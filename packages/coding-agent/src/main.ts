@@ -44,8 +44,8 @@ import {
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
-import { serviceTierSettingToTier } from "./config/service-tier";
 import { resolveScratchCompactionOverrides } from "./config/scratch-compaction-method";
+import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {

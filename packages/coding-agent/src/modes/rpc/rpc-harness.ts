@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 import { sessionSidecarDir } from "../../session/session-paths";
+import { isProcessIdentityLive, processStartToken } from "../../task/isolation-ownership";
 import type { RpcAgentEventPayload, RpcSessionResult, RpcSessionSteerAck, RpcSessionUsage } from "./rpc-types";
 
 const RECLAIM_LOCK_STALE_MS = 5_000;
@@ -56,44 +57,9 @@ function runClaimFile(runIndexFile: string, runId: string): string {
 	return path.join(`${runIndexFile}.locks`, digest);
 }
 
-async function processBirthId(pid: number): Promise<string | undefined> {
-	if (process.platform === "linux") {
-		try {
-			const stat = await fs.readFile(`/proc/${pid}/stat`, "utf8");
-			const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-			const startTime = fields[19];
-			return startTime ? `linux:${startTime}` : undefined;
-		} catch {
-			return undefined;
-		}
-	}
-	const command =
-		process.platform === "win32"
-			? [
-					"powershell.exe",
-					"-NoProfile",
-					"-Command",
-					`(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
-				]
-			: ["ps", "-o", "lstart=", "-p", String(pid)];
-	try {
-		const child = Bun.spawn(command, {
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "ignore",
-			env: { ...process.env, LC_ALL: "C" },
-		});
-		const [output, exitCode] = await Promise.all([new Response(child.stdout).text(), child.exited]);
-		const birthId = output.trim();
-		return exitCode === 0 && birthId ? `${process.platform}:${birthId}` : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
 /** Returns the durable RPC record path beside an OMP session transcript. */
 export function rpcHarnessRecordFileForSessionFile(sessionFile: string): string {
-	return path.join(sessionSidecarDir(sessionFile), "rpc.jsonl");
+	return path.join(sessionSidecarDir(sessionFile), "rpc-ledger", "events.jsonl");
 }
 
 /**
@@ -232,7 +198,7 @@ export class RpcHarnessSessionOwner {
 		}
 		const pending = this.#pendingStreamUpdate;
 		if (pending) {
-			this.#publish?.({ ...pending.publishedEvent });
+			this.#queuePublication(pending.publishedEvent);
 			pending.event = event;
 			pending.publishedEvent = publishedEvent;
 			return pending.result.promise;
@@ -258,6 +224,14 @@ export class RpcHarnessSessionOwner {
 
 	#queueEvent(task: () => Promise<RpcHarnessEvent>): Promise<RpcHarnessEvent> {
 		return this.#trackEventTask(this.#eventTail.then(task));
+	}
+
+	#queuePublication(event: RpcAgentEventPayload): void {
+		const task = this.#eventTail.then(() => {
+			if (this.#failure) throw this.#failure;
+			this.#publish?.({ ...event });
+		});
+		this.#trackEventTask(task).catch(() => {});
 	}
 
 	async #persistEvent(event: RpcAgentEventPayload, publishedEvents: RpcAgentEventPayload[]): Promise<RpcHarnessEvent> {
@@ -634,9 +608,8 @@ export class RpcHarnessSessionOwner {
 		await fs.mkdir(path.dirname(leaseFile), { recursive: true, mode: 0o700 });
 		const reclaimLock = `${leaseFile}.reclaim`;
 		const token = crypto.randomUUID();
-		const birthId = await processBirthId(process.pid);
-		if (!birthId) throw new Error("Unable to identify the RPC owner process");
-		const content = JSON.stringify({ pid: process.pid, birthId, token });
+		const startToken = await processStartToken(process.pid);
+		const content = JSON.stringify({ pid: process.pid, ...(startToken ? { startToken } : {}), token });
 		for (;;) {
 			if (await this.#publishExclusiveFile(leaseFile, content)) return token;
 			let leaseText: string;
@@ -656,8 +629,11 @@ export class RpcHarnessSessionOwner {
 				isRecord(lease) &&
 				typeof lease.pid === "number" &&
 				Number.isSafeInteger(lease.pid) &&
-				typeof lease.birthId === "string" &&
-				(await processBirthId(lease.pid)) === lease.birthId
+				lease.pid > 0 &&
+				(await isProcessIdentityLive(
+					lease.pid,
+					typeof lease.startToken === "string" ? lease.startToken : undefined,
+				))
 			) {
 				throw new Error(busyMessage);
 			}
@@ -733,8 +709,8 @@ export class RpcHarnessSessionOwner {
 			isRecord(owner) &&
 			typeof owner.pid === "number" &&
 			Number.isSafeInteger(owner.pid) &&
-			typeof owner.birthId === "string" &&
-			(await processBirthId(owner.pid)) === owner.birthId
+			owner.pid > 0 &&
+			(await isProcessIdentityLive(owner.pid, typeof owner.startToken === "string" ? owner.startToken : undefined))
 		) {
 			return false;
 		}

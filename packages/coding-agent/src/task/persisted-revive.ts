@@ -11,6 +11,7 @@ import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
 import { SessionManager } from "../session/session-manager";
+import { sessionSidecarDir } from "../session/session-paths";
 import type { EventBus } from "../utils/event-bus";
 import { createClaudeCodePeerReviver } from "./claude-code-runtime";
 import type { StartClaudeCodeQuery } from "./claude-code-sdk";
@@ -233,7 +234,7 @@ export function createPersistedSubagentReviverFactory(
 				sessionFile,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
-				artifactsDir: ctx.session.sessionFile?.slice(0, -6),
+				artifactsDir: ctx.session.sessionFile ? sessionSidecarDir(ctx.session.sessionFile) : undefined,
 			});
 			return session;
 		};

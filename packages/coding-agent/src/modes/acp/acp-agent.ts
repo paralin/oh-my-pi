@@ -475,6 +475,7 @@ export class AcpAgent implements Agent {
 	#createSession: CreateAcpSession;
 	#sessions = new Map<string, ManagedSessionRecord>();
 	#planPreviousTools = new WeakMap<AgentSession, string[]>();
+	#modeTransitionTails = new WeakMap<AgentSession, Promise<void>>();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
 	#clientCapabilities: ClientCapabilities | undefined;
@@ -1651,6 +1652,17 @@ export class AcpAgent implements Agent {
 	}
 
 	async #applyModeChange(session: AgentSession, modeId: string): Promise<void> {
+		const previous = this.#modeTransitionTails.get(session) ?? Promise.resolve();
+		const transition = previous.catch(() => {}).then(() => this.#applyModeChangeSerial(session, modeId));
+		this.#modeTransitionTails.set(session, transition);
+		try {
+			await transition;
+		} finally {
+			if (this.#modeTransitionTails.get(session) === transition) this.#modeTransitionTails.delete(session);
+		}
+	}
+
+	async #applyModeChangeSerial(session: AgentSession, modeId: string): Promise<void> {
 		const availableModes = this.#getAvailableModes(session);
 		if (!availableModes.some(mode => mode.id === modeId)) {
 			throw new Error(`Unsupported ACP mode: ${modeId}`);

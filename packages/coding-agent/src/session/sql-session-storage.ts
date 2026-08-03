@@ -62,6 +62,12 @@ interface DialectQueries {
 	upsertReplace: string;
 	/** Insert if missing; otherwise append the new chunk to existing content. Used for `writeLine`. */
 	upsertAppend: string;
+	/** Insert a lease or replace an expired lease. */
+	acquireLease: string;
+	/** Extend a lease held by its current owner. */
+	renewLease: string;
+	/** Delete a lease held by its current owner. */
+	releaseLease: string;
 	/** Update indexed title metadata without rewriting the JSONL body. */
 	updateTitle: string;
 	/** Delete a single row by path. */
@@ -72,6 +78,8 @@ interface DialectQueries {
 	loadIndex: string;
 	/** Read the full content for the async `readText` surface. */
 	readFull: string;
+	/** Read owner and expiry for lease verification. */
+	readLease: string;
 	/** Read bounded byte windows from the head and tail of the content. */
 	readSlices: string;
 }
@@ -89,6 +97,11 @@ interface ContentRow {
 	content: string;
 }
 
+interface LeaseRow {
+	content: string;
+	mtime_ms: number | bigint | string;
+}
+
 interface SliceRow {
 	head: unknown;
 	tail: unknown;
@@ -96,6 +109,7 @@ interface SliceRow {
 
 const DEFAULT_TABLE = "omp_session_files";
 const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
+const LEASE_PATH_PREFIX = "\u001fomp-lease:";
 const utf8Decoder = new TextDecoder("utf-8");
 
 function enoent(p: string): NodeJS.ErrnoException {
@@ -140,6 +154,12 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			upsertReplace:
 				`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) VALUES (?, ?, ?, ?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = VALUES(content), mtime_ms = VALUES(mtime_ms), title = VALUES(title), title_source = VALUES(title_source), title_updated_at = VALUES(title_updated_at)`,
+			acquireLease:
+				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
+				`ON DUPLICATE KEY UPDATE content = IF(mtime_ms <= ?, VALUES(content), content), ` +
+				`mtime_ms = IF(mtime_ms <= ?, VALUES(mtime_ms), mtime_ms)`,
+			renewLease: `UPDATE ${table} SET mtime_ms = ? WHERE path = ? AND content = ? AND mtime_ms > ?`,
+			releaseLease: `DELETE FROM ${table} WHERE path = ? AND content = ?`,
 			upsertAppend:
 				`INSERT INTO ${table} (path, content, mtime_ms) VALUES (?, ?, ?) ` +
 				`ON DUPLICATE KEY UPDATE content = CONCAT(content, VALUES(content)), mtime_ms = VALUES(mtime_ms)`,
@@ -148,6 +168,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			rename: `UPDATE ${table} SET path = ?, mtime_ms = ? WHERE path = ?`,
 			loadIndex: `SELECT path, mtime_ms, length(content) AS byte_len, title, title_source, title_updated_at FROM ${table}`,
 			readFull: `SELECT content AS content FROM ${table} WHERE path = ?`,
+			readLease: `SELECT content, mtime_ms FROM ${table} WHERE path = ?`,
 			readSlices:
 				`SELECT substring(cast(content AS binary), 1, ?) AS head, ` +
 				`CASE WHEN ? <= 0 THEN cast('' AS binary) ` +
@@ -188,6 +209,13 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 			`INSERT INTO ${table} (path, content, mtime_ms, title, title_source, title_updated_at) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}, ${placeholder(4)}, ${placeholder(5)}, ${placeholder(6)}) ` +
 			`ON CONFLICT (path) DO UPDATE SET content = excluded.content, mtime_ms = excluded.mtime_ms, title = excluded.title, title_source = excluded.title_source, title_updated_at = excluded.title_updated_at`,
+		acquireLease:
+			`INSERT INTO ${table} (path, content, mtime_ms) ` +
+			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}) ` +
+			`ON CONFLICT (path) DO UPDATE SET content = excluded.content, mtime_ms = excluded.mtime_ms ` +
+			`WHERE ${table}.mtime_ms <= ${placeholder(4)}`,
+		renewLease: `UPDATE ${table} SET mtime_ms = ${placeholder(1)} WHERE path = ${placeholder(2)} AND content = ${placeholder(3)} AND mtime_ms > ${placeholder(4)}`,
+		releaseLease: `DELETE FROM ${table} WHERE path = ${placeholder(1)} AND content = ${placeholder(2)}`,
 		upsertAppend:
 			`INSERT INTO ${table} (path, content, mtime_ms) ` +
 			`VALUES (${placeholder(1)}, ${placeholder(2)}, ${placeholder(3)}) ` +
@@ -197,6 +225,7 @@ function buildQueries(adapter: SqlSessionStorageAdapter, table: string): Dialect
 		rename: `UPDATE ${table} SET path = ${placeholder(1)}, mtime_ms = ${placeholder(2)} WHERE path = ${placeholder(3)}`,
 		loadIndex: `SELECT path, mtime_ms, ${byteLengthExpr} AS byte_len, title, title_source, title_updated_at FROM ${table}`,
 		readFull: `SELECT content AS content FROM ${table} WHERE path = ${placeholder(1)}`,
+		readLease: `SELECT content, mtime_ms FROM ${table} WHERE path = ${placeholder(1)}`,
 		readSlices,
 	};
 }
@@ -305,14 +334,16 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 
 	async loadIndex(): Promise<SessionStorageIndexEntry[]> {
 		const rows = (await this.#client.unsafe(this.#q.loadIndex)) as IndexRow[];
-		return rows.map(row => ({
-			path: row.path,
-			size: rowNumber(row.byte_len),
-			mtimeMs: rowNumber(row.mtime_ms),
-			title: row.title ?? undefined,
-			titleSource: rowTitleSource(row.title_source),
-			titleUpdatedAt: row.title_updated_at ?? undefined,
-		}));
+		return rows
+			.filter(row => !row.path.startsWith(LEASE_PATH_PREFIX))
+			.map(row => ({
+				path: row.path,
+				size: rowNumber(row.byte_len),
+				mtimeMs: rowNumber(row.mtime_ms),
+				title: row.title ?? undefined,
+				titleSource: rowTitleSource(row.title_source),
+				titleUpdatedAt: row.title_updated_at ?? undefined,
+			}));
 	}
 
 	async readFull(path: string): Promise<string | null> {
@@ -341,6 +372,26 @@ class SqlSessionStorageBackend implements SessionStorageBackend {
 			title?.source ?? null,
 			title?.updatedAt ?? null,
 		]);
+	}
+
+	async acquireLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const leasePath = `${LEASE_PATH_PREFIX}${path}`;
+		const values =
+			this.#adapter === "mysql" ? [leasePath, owner, expiresAt, now, now] : [leasePath, owner, expiresAt, now];
+		await this.#client.unsafe(this.#q.acquireLease, values);
+		return (await this.readFull(leasePath)) === owner;
+	}
+
+	async releaseLease(path: string, owner: string): Promise<void> {
+		await this.#client.unsafe(this.#q.releaseLease, [`${LEASE_PATH_PREFIX}${path}`, owner]);
+	}
+
+	async renewLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const leasePath = `${LEASE_PATH_PREFIX}${path}`;
+		await this.#client.unsafe(this.#q.renewLease, [expiresAt, leasePath, owner, now]);
+		const rows = (await this.#client.unsafe(this.#q.readLease, [leasePath])) as LeaseRow[];
+		const current = rows[0];
+		return current?.content === owner && rowNumber(current.mtime_ms) >= expiresAt;
 	}
 
 	async updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void> {

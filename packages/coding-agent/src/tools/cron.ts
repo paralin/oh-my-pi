@@ -11,7 +11,14 @@ import cronDeleteDescription from "../prompts/tools/cron-delete.md" with { type:
 import cronListDescription from "../prompts/tools/cron-list.md" with { type: "text" };
 import { renderStatusLine, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
-import { createCachedComponent, formatMoreItems, PREVIEW_LIMITS, replaceTabs, TRUNCATE_LENGTHS } from "./render-utils";
+import {
+	createCachedComponent,
+	formatMoreItems,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+} from "./render-utils";
 
 const cronCreateSchema = type({
 	expression: type("string").describe("standard 5-field cron expression evaluated in local time"),
@@ -27,7 +34,8 @@ type CronDeleteParams = typeof cronDeleteSchema.infer;
 
 function formatJob(job: CronJob): string {
 	const expiry = job.expiresAt === undefined ? "no expiry" : `expires ${new Date(job.expiresAt).toLocaleString()}`;
-	return `${job.id} | ${job.expression} | next ${new Date(job.nextFireAt).toLocaleString()} | ${job.recurring ? `recurring, ${expiry}` : "one-shot"} | ${job.durable ? "durable" : "session-only"}`;
+	const prompt = truncateToWidth(cronDisplayLine(shortenEmbeddedPaths(job.prompt)), 160);
+	return `${job.id} | ${job.expression} | prompt ${prompt} | next ${new Date(job.nextFireAt).toLocaleString()} | ${job.recurring ? `recurring, ${expiry}` : "one-shot"} | ${job.durable ? "durable" : "session-only"}`;
 }
 
 export class CronCreateTool implements AgentTool<typeof cronCreateSchema> {
@@ -109,6 +117,10 @@ function cronDisplayLine(text: string): string {
 	return replaceTabs(sanitizeText(text)).replace(/[\r\n]+/g, " ");
 }
 
+function cronTitle(text: string): string {
+	return truncateToWidth(cronDisplayLine(shortenEmbeddedPaths(text)), TRUNCATE_LENGTHS.TITLE);
+}
+
 function isCronJob(details: CronRenderDetails | undefined): details is CronJob {
 	return details !== undefined && "expression" in details;
 }
@@ -123,6 +135,7 @@ function cronJobRow(job: CronJob, theme: Theme): string {
 	return [
 		theme.fg("accent", cronDisplayLine(job.expression)),
 		theme.fg("dim", cronDisplayLine(job.id)),
+		theme.fg("dim", truncateToWidth(cronDisplayLine(shortenEmbeddedPaths(job.prompt)), TRUNCATE_LENGTHS.CONTENT)),
 		theme.fg("dim", `next ${new Date(job.nextFireAt).toLocaleString()}`),
 		...cronMode(job).map(value => theme.fg("dim", value)),
 	].join(theme.sep.dot);
@@ -146,9 +159,9 @@ function createCronRenderer(op: CronRenderOperation) {
 					title: `Cron ${op}`,
 					description:
 						op === "create"
-							? truncateToWidth(cronDisplayLine(args.expression ?? ""), TRUNCATE_LENGTHS.TITLE)
+							? cronTitle(args.expression ?? "")
 							: op === "delete"
-								? truncateToWidth(cronDisplayLine(args.id ?? ""), TRUNCATE_LENGTHS.TITLE)
+								? cronTitle(args.id ?? "")
 								: undefined,
 					meta,
 				},
@@ -171,21 +184,21 @@ function createCronRenderer(op: CronRenderOperation) {
 			const body: string[] = [];
 			let description =
 				op === "create"
-					? truncateToWidth(cronDisplayLine(args?.expression ?? ""), TRUNCATE_LENGTHS.TITLE)
+					? cronTitle(args?.expression ?? "")
 					: op === "delete"
-						? truncateToWidth(cronDisplayLine(args?.id ?? ""), TRUNCATE_LENGTHS.TITLE)
+						? cronTitle(args?.id ?? "")
 						: undefined;
 			let meta: string[] = [];
 			let icon: "error" | "warning" | undefined;
 
 			if (result.isError) {
 				icon = "error";
-				body.push(theme.fg("error", cronDisplayLine(text || "Unknown error")));
+				body.push(theme.fg("error", cronDisplayLine(shortenEmbeddedPaths(text || "Unknown error"))));
 			} else if (op === "create" && isCronJob(details)) {
 				description = truncateToWidth(cronDisplayLine(details.expression), TRUNCATE_LENGTHS.TITLE);
 				meta = [theme.fg("dim", `next ${new Date(details.nextFireAt).toLocaleString()}`), ...cronMode(details)];
 				body.push(
-					`${theme.fg("accent", cronDisplayLine(details.id))} ${theme.fg("dim", cronDisplayLine(details.prompt))}`,
+					`${theme.fg("accent", cronDisplayLine(details.id))} ${theme.fg("dim", cronDisplayLine(shortenEmbeddedPaths(details.prompt)))}`,
 				);
 			} else if (op === "list" && details && "jobs" in details) {
 				description = `${details.jobs.length} ${details.jobs.length === 1 ? "job" : "jobs"}`;

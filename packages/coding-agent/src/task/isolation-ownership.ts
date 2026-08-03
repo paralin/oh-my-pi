@@ -35,7 +35,7 @@ export interface IsolationOwner {
  * boot); other Unixes shell out to `ps -o lstart`. Platforms that report
  * neither (e.g. Windows) yield `null`, degrading to a pid-only liveness check.
  */
-async function processStartToken(pid: number): Promise<string | null> {
+export async function processStartToken(pid: number): Promise<string | null> {
 	if (process.platform === "linux") {
 		let stat: string;
 		try {
@@ -55,6 +55,18 @@ async function processStartToken(pid: number): Promise<string | null> {
 	if (res.exitCode !== 0) return null;
 	const started = res.text().trim();
 	return started.length > 0 ? started : null;
+}
+
+/** Whether `pid` still names the recorded process instance. */
+export async function isProcessIdentityLive(pid: number, startToken?: string): Promise<boolean> {
+	try {
+		process.kill(pid, 0);
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
+	}
+	if (!startToken) return true;
+	const current = await processStartToken(pid);
+	return current === null || current === startToken;
 }
 
 /**
@@ -90,17 +102,9 @@ export async function hasLiveIsolationOwner(baseDir: string): Promise<boolean> {
 	if (typeof decoded !== "object" || decoded === null || !("pid" in decoded)) return false;
 	const pid = decoded.pid;
 	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return false;
-	try {
-		process.kill(pid, 0);
-	} catch (err) {
-		if ((err as NodeJS.ErrnoException).code === "ESRCH") return false;
-	}
-	// The pid is live (or unknowable via EPERM). Reject a recycled pid: if the
-	// marker pinned the owner's start-time token, the process wearing that pid
-	// now must still present the same token.
-	if ("startToken" in decoded && typeof decoded.startToken === "string" && decoded.startToken.length > 0) {
-		const current = await processStartToken(pid);
-		if (current !== null && current !== decoded.startToken) return false;
-	}
-	return true;
+	const startToken =
+		"startToken" in decoded && typeof decoded.startToken === "string" && decoded.startToken.length > 0
+			? decoded.startToken
+			: undefined;
+	return isProcessIdentityLive(pid, startToken);
 }

@@ -13,7 +13,9 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
+import { renderStatusLine } from "../../tui/status-line";
+import { renderTreeList } from "../../tui/tree-list";
+import { Ellipsis, Hasher, type RenderCache, truncateToWidth } from "../../tui/utils";
 import type { ToolSession } from "..";
 import {
 	formatBadge,
@@ -430,7 +432,9 @@ function toJobRenderArgs(args: HubRenderArgs | undefined): JobRenderArgs | undef
 	}
 }
 
-const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
+function collapsedListLimit(): number {
+	return PREVIEW_LIMITS.COLLAPSED_ITEMS;
+}
 const LABEL_MAX_WIDTH = 60;
 const PREVIEW_LINES_COLLAPSED = 1;
 const PREVIEW_LINES_EXPANDED = 4;
@@ -606,7 +610,7 @@ export function jobsRenderResult(
 				{
 					items: sortedJobs,
 					expanded,
-					maxCollapsed: COLLAPSED_LIST_LIMIT,
+					maxCollapsed: collapsedListLimit(),
 					itemType: "job",
 					renderItem: job => {
 						const lines: string[] = [];
@@ -687,7 +691,7 @@ export function jobsRenderResult(
 							{
 								items: agents,
 								expanded,
-								maxCollapsed: COLLAPSED_LIST_LIMIT,
+								maxCollapsed: collapsedListLimit(),
 								itemType: "agent",
 								renderItem: agent => {
 									const icon = formatStatusIcon("running", uiTheme, options.spinnerFrame);

@@ -38,6 +38,9 @@
 
 - Fixed an issue where peer-IRC interrupts (such as subagent messages) incorrectly skipped non-interruptible tool calls queued in the same batch.
 - Improved interruption messaging to clearly distinguish between parent-agent steering and system-advisory interruptions.
+### Added
+
+- Exported `TokenizerMode` and `getTokenizerMode()` so consumers can snapshot the tokenizer mode used for session metadata.
 
 ## [17.2.5] - 2026-08-03
 
@@ -52,9 +55,6 @@
 - Fixed an issue where artifact recovery reads could be incorrectly elided during compaction.
 - The error→toolUse salvage in the agent loop (`recoverTransientErrorToolTurn`) now recognizes Anthropic stream-envelope truncation errors, so a turn cut after streaming complete tool calls runs those calls instead of ending the run with an error.
 - Shake no longer elides artifact recovery reads; the compaction dead-end rescue uses a dedicated `RESCUE_SHAKE_CONFIG`.
-### Added
-
-- Exported `TokenizerMode` and `getTokenizerMode()` so consumers can snapshot the tokenizer mode used for session metadata.
 
 ## [17.2.4] - 2026-08-01
 

@@ -197,6 +197,20 @@ describe("SessionManager.moveTo", () => {
 		expect(header?.cwd).toBe(path.resolve(cwdB));
 	});
 
+	it("moves sidecars for an explicit non-JSONL session path", async () => {
+		const explicitPath = path.join(cwdA, "explicit-session");
+		const session = await SessionManager.open(explicitPath);
+		const { path: artifactPath } = await session.allocateArtifactPath("cron");
+		if (!artifactPath) throw new Error("Expected artifact path");
+		await Bun.write(path.join(`${explicitPath}.d`, "scheduled_tasks.json"), "[]");
+
+		await session.moveTo(cwdB);
+
+		const movedFile = session.getSessionFile()!;
+		expect(fs.existsSync(`${explicitPath}.d`)).toBe(false);
+		expect(fs.existsSync(path.join(`${movedFile}.d`, "scheduled_tasks.json"))).toBe(true);
+	});
+
 	it("moves header-only session with pending user message (#flushed regression)", async () => {
 		// Create a header-only session
 		const explicitPath = path.join(cwdA, "explicit-session-2.jsonl");

@@ -14,7 +14,8 @@ import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForProj
 import type { DaemonOperation, DaemonRpcResult, DaemonSnapshot, DaemonSpec, DaemonState } from "../../launch/protocol";
 import { renderTerminalOutputIsolated } from "../../launch/terminal-output-worker-client";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
-import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../../tui";
+import { framedBlock, outputBlockContentWidth } from "../../tui/output-block";
+import { renderStatusLine } from "../../tui/status-line";
 import type { ToolSession } from "..";
 import { resolveToCwd } from "../path-utils";
 import {

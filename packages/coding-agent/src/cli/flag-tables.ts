@@ -30,8 +30,8 @@
  * real implementations at the dispatch site.
  */
 
-import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import { isScratchCompactionMethod, SCRATCH_COMPACTION_METHOD_VALUES } from "../config/scratch-compaction-method";
+import { isServiceTierOpenAISettingValue, SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { Args } from "./args";
 import { CliUsageError } from "./usage-error";

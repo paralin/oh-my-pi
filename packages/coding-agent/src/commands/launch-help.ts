@@ -1,8 +1,8 @@
 import { Args, type CommandMetadata, Flags } from "@oh-my-pi/pi-utils/cli";
 import { APP_NAME } from "@oh-my-pi/pi-utils/dirs";
 import { CLI_THINKING_LEVELS } from "../cli/thinking-levels";
-import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 import { SCRATCH_COMPACTION_METHOD_VALUES } from "../config/scratch-compaction-method";
+import { SERVICE_TIER_OPENAI_VALUES } from "../config/service-tier";
 
 export const launchHelp = {
 	description: "AI coding assistant",

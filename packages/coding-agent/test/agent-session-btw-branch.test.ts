@@ -77,6 +77,7 @@ describe("AgentSession.branchFromBtw", () => {
 		persisted?: boolean;
 		extensionRunner?: ExtensionRunner;
 		handler?: MockHandler;
+		beginSessionFork?: () => Promise<void>;
 	}) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: options?.handler ?? (() => ({ content: ["unused"] })) });
@@ -97,6 +98,7 @@ describe("AgentSession.branchFromBtw", () => {
 			settings,
 			modelRegistry,
 			extensionRunner: options?.extensionRunner,
+			beginSessionFork: options?.beginSessionFork,
 		});
 		return session;
 	}
@@ -287,6 +289,9 @@ describe("AgentSession.branchFromBtw", () => {
 				providerStarted.resolve();
 				return { content: ["main response"], delayMs: 60_000 };
 			},
+			beginSessionFork: async () => {
+				streamingAtSuspend = session?.isStreaming;
+			},
 		});
 		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 		await activeSession.sessionManager.flush();
@@ -309,6 +314,73 @@ describe("AgentSession.branchFromBtw", () => {
 
 		await activeSession.abort({ goalReason: "internal", reason: "test cleanup" });
 		await promptPromise;
+
+	});
+
+	it("aborts a wake started during scheduler suspension before replacing session state", async () => {
+		const providerStarted = Promise.withResolvers<void>();
+		let wakePromise: Promise<boolean> | undefined;
+		let wakeSettled = false;
+		const activeSession = await createSession({
+			handler: () => {
+				providerStarted.resolve();
+				return { content: ["scheduled response should not move"], delayMs: 60_000 };
+			},
+			beginSessionFork: async () => {
+				wakePromise = session?.prompt("scheduled prompt").finally(() => {
+					wakeSettled = true;
+				});
+				await providerStarted.promise;
+			},
+		});
+		const replaceSession = activeSession.sessionManager.newSession.bind(activeSession.sessionManager);
+		vi.spyOn(activeSession.sessionManager, "newSession").mockImplementation(async options => {
+			expect(wakeSettled).toBe(true);
+			return replaceSession(options);
+		});
+
+		expect(await activeSession.newSession()).toBe(true);
+		await wakePromise;
+
+		expect(activeSession.isStreaming).toBe(false);
+		expect(activeSession.messages).toEqual([]);
+	});
+
+	it("aborts a wake started during scheduler suspension before branching /btw", async () => {
+		const providerStarted = Promise.withResolvers<void>();
+		let wakePromise: Promise<boolean> | undefined;
+		let wakeSettled = false;
+		const activeSession = await createSession({
+			handler: () => {
+				providerStarted.resolve();
+				return { content: ["scheduled response should not move"], delayMs: 60_000 };
+			},
+			beginSessionFork: async () => {
+				wakePromise = session?.prompt("scheduled prompt").finally(() => {
+					wakeSettled = true;
+				});
+				await providerStarted.promise;
+			},
+		});
+		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		await activeSession.sessionManager.flush();
+		const createBranch = activeSession.sessionManager.createBranchedSession.bind(activeSession.sessionManager);
+		vi.spyOn(activeSession.sessionManager, "createBranchedSession").mockImplementation(parentId => {
+			expect(wakeSettled).toBe(true);
+			return createBranch(parentId);
+		});
+
+		const result = await activeSession.branchFromBtw("question", createBtwAssistant());
+		await wakePromise;
+
+		expect(result.cancelled).toBe(false);
+		expect(activeSession.isStreaming).toBe(false);
+		expect(activeSession.messages).not.toContainEqual(
+			expect.objectContaining({
+				role: "assistant",
+				content: [{ type: "text", text: "scheduled response should not move" }],
+			}),
+		);
 	});
 
 	it("refuses to branch /btw while user bash work is still running", async () => {

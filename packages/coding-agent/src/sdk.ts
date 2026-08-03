@@ -3492,7 +3492,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 			onSessionTransition: () => cronManager.refresh(),
 			beginSessionFork: () => cronManager.suspendForFork(),
-			completeSessionFork: result => cronManager.completeFork(result),
+			completeSessionFork: (result, isCurrent) => cronManager.completeFork(result, isCurrent),
 		});
 		hasSession = true;
 		// Extension factories normally register tools before session construction,
@@ -3610,7 +3610,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			build: buildLateDiagnosticsBatchMessage,
 			isStale: entry => entry.isStale(),
 		});
-		await cronManager.load();
+		void cronManager.prepare().catch(error => {
+			logger.warn("Cron session load failed during startup", { error });
+		});
 
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
@@ -3932,6 +3934,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		startDeferredMCPDiscovery?.(session);
+		cronManager.start();
 
 		return {
 			session,

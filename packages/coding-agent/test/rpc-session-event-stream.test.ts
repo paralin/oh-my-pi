@@ -120,10 +120,11 @@ describe("streamRpcSessionEvent", () => {
 			const ledger = await RpcHarnessSessionOwner.open("session-1", recordFile, event => frames.push(event));
 			const { deps, seals } = collect({ ledger: () => ledger, output: frame => frames.push(frame) });
 
-			streamRpcSessionEvent(notice("first"), deps);
-			streamRpcSessionEvent(agentEnd("error"), deps);
-			await ledger.replay();
-			await Promise.resolve();
+			const firstPersistence = streamRpcSessionEvent(notice("first"), deps);
+			const terminalPersistence = streamRpcSessionEvent(agentEnd("error"), deps);
+			expect(firstPersistence).toBeDefined();
+			expect(terminalPersistence).toBeDefined();
+			await Promise.all([firstPersistence, terminalPersistence]);
 
 			expect(frames.map(frame => (frame as { sequence?: number }).sequence)).toEqual([1, 2]);
 			expect(seals).toEqual([["error", "failed"]]);

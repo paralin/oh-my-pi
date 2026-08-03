@@ -16,6 +16,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { sessionSidecarDir } from "../session/session-paths";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
@@ -374,7 +375,7 @@ async function leaseArtifacts(
 ): Promise<ArtifactLease> {
 	const sessionFile = session.getSessionFile();
 	if (sessionFile) {
-		const artifactsDir = sessionFile.slice(0, -6);
+		const artifactsDir = sessionSidecarDir(sessionFile);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
 	}

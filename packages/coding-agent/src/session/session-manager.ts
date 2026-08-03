@@ -66,6 +66,7 @@ import {
 	computeDefaultSessionDir,
 	readTerminalBreadcrumbEntry,
 	resolveManagedSessionRoot,
+	sessionSidecarDir,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
 import { prepareEntryForPersistence } from "./session-persistence";
@@ -82,7 +83,6 @@ import {
 	normalizeWorkspaceDirectory,
 } from "./session-workspace";
 
-const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 
 function mintSessionId(): string {
@@ -98,7 +98,7 @@ function fileSafeTimestamp(iso: string): string {
 }
 
 function artifactsDirectoryFor(sessionFile: string | undefined): string | null {
-	return sessionFile ? sessionFile.slice(0, -JSONL_SUFFIX_LENGTH) : null;
+	return sessionFile ? sessionSidecarDir(sessionFile) : null;
 }
 
 /**
@@ -1187,7 +1187,7 @@ export class SessionManager {
 
 		if (this.#artifactManager && this.#artifactManagerSessionFile === sessionFile) return this.#artifactManager;
 
-		this.#artifactManager = new ArtifactManager(sessionFile.slice(0, -JSONL_SUFFIX_LENGTH));
+		this.#artifactManager = new ArtifactManager(sessionSidecarDir(sessionFile));
 		this.#artifactManagerSessionFile = sessionFile;
 		return this.#artifactManager;
 	}

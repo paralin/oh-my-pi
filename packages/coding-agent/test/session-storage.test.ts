@@ -8,6 +8,8 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sessionSidecarDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -152,6 +154,35 @@ describe("FileSessionStorage writer", () => {
 	});
 });
 
+describe("FileSessionStorage leases", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		tempDir = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-session-lease-"));
+	});
+
+	afterEach(async () => {
+		await fsp.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("coordinates renewal, expiry, and owner-checked release through SQLite", async () => {
+		const first = new FileSessionStorage();
+		const second = new FileSessionStorage();
+		const leasePath = path.join(tempDir, "scheduled_tasks.json.delivery");
+
+		expect(await first.acquireLease(leasePath, "first", 2_000, 1_000)).toBe(true);
+		expect(await second.acquireLease(leasePath, "second", 2_000, 1_000)).toBe(false);
+		expect(await first.renewLease(leasePath, "first", 4_000, 1_500)).toBe(true);
+		expect(await second.renewLease(leasePath, "second", 4_000, 1_500)).toBe(false);
+		expect(await first.renewLease(leasePath, "first", 5_000, 4_001)).toBe(false);
+		expect(await second.acquireLease(leasePath, "second", 5_000, 4_001)).toBe(true);
+		await first.releaseLease(leasePath, "first");
+		expect(await first.acquireLease(leasePath, "third", 5_000, 4_001)).toBe(false);
+		await second.releaseLease(leasePath, "second");
+		expect(await first.acquireLease(leasePath, "third", 6_000, 4_001)).toBe(true);
+	});
+});
+
 describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 	let tempDir: string;
 	let storage: FileSessionStorage;
@@ -185,6 +216,39 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("deletes the canonical sidecar for an explicit non-jsonl session path", async () => {
+		const sessionPath = path.join(tempDir, "explicit-session");
+		const artifactsDir = sessionSidecarDir(sessionPath);
+		await Bun.write(sessionPath, "session\n");
+		await fsp.mkdir(artifactsDir, { recursive: true });
+		await Bun.write(path.join(artifactsDir, "scheduled_tasks.json"), "[]");
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("does not migrate an artifact-like truncated-path directory", async () => {
+		const sessionPath = path.join(tempDir, "session");
+		const unrelatedDir = sessionPath.slice(0, -".jsonl".length);
+		const canonicalDir = sessionSidecarDir(sessionPath);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", version: 3, id: "session-id", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir })}\n`,
+		);
+		await fsp.mkdir(unrelatedDir, { recursive: true });
+		await Bun.write(path.join(unrelatedDir, "0.build.log"), "unrelated");
+
+		const manager = await SessionManager.open(sessionPath, tempDir, storage);
+		try {
+			expect(await Bun.file(path.join(unrelatedDir, "0.build.log")).text()).toBe("unrelated");
+			expect(fs.existsSync(canonicalDir)).toBe(false);
+		} finally {
+			await manager.close();
+		}
 	});
 
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {

@@ -280,13 +280,13 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
-import { buildLlmUsageEvent } from "./measurement-events";
 import {
 	buildLaunchCompletionBatchMessage,
 	isLaunchCompletionOwner,
 	LAUNCH_COMPLETION_MESSAGE_TYPE,
 	type LaunchCompletionEntry,
 } from "./launch-completion";
+import { buildLlmUsageEvent } from "./measurement-events";
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
@@ -352,6 +352,7 @@ import {
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildEffectiveSessionProfile, buildSessionMetadata } from "./session-metadata";
+import { sessionSidecarDir } from "./session-paths";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -497,11 +498,16 @@ export class AgentSession {
 	readonly #onSessionTransition: (() => void) | undefined;
 	readonly #beginSessionFork: (() => Promise<void>) | undefined;
 	readonly #completeSessionFork:
-		| ((result: { oldSessionFile: string; newSessionFile: string } | undefined) => Promise<void>)
+		| ((
+				result: { oldSessionFile: string; newSessionFile: string } | undefined,
+				isCurrent?: () => boolean,
+		  ) => Promise<void>)
 		| undefined;
+	#sessionServiceTransitionGeneration = 0;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
 	editClipboard?: Clipboard;
+	#assertBackgroundAgentWorkAllowed: (() => void) | undefined;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -527,6 +533,7 @@ export class AgentSession {
 	#lastLlmUsagePrefixHash: string | undefined;
 	#deliberatePrefixResetPending = false;
 	#eventListeners: AgentSessionEventListener[] = [];
+	#messagePersistenceBarriers = new Set<(event: AgentSessionEvent) => Promise<void>>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
@@ -535,6 +542,9 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	#pendingExtensionEventCount = 0;
+	#pendingExtensionEventsIdle: Promise<void> = Promise.resolve();
+	#resolvePendingExtensionEvents: (() => void) | undefined;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
@@ -822,6 +832,11 @@ export class AgentSession {
 	 *  the agent responds to the peer. Skip only when a queued steer/follow-up will itself drive a
 	 *  resume turn whose aside poll already consumes these (no double-wake). */
 	#resumeStrandedIrcAsides(): void {
+		try {
+			this.#assertBackgroundAgentWorkAllowed?.();
+		} catch {
+			return;
+		}
 		if (this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		const records = this.#irc.drainPending();
@@ -2198,7 +2213,7 @@ export class AgentSession {
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "message_update") {
 			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			await this.#queueExtensionEvent(event);
 			return;
 		}
 		// Take a FIFO ticket before the extension emit: extension deliveries for
@@ -2296,11 +2311,13 @@ export class AgentSession {
 			}
 		}
 		if (event.type !== "agent_end") {
+			const tracksExtensionEvent = this.#extensionRunner?.hasHandlers(event.type) === true;
+			if (tracksExtensionEvent) this.#beginPendingExtensionEvent();
 			const processing = this.#processAgentEvent(event);
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
 				this.#advisors.trackCardEvent(processing);
 			}
-			return processing;
+			return tracksExtensionEvent ? processing.finally(() => this.#endPendingExtensionEvent()) : processing;
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
@@ -2702,6 +2719,9 @@ export class AgentSession {
 		if (event.type !== "agent_end") {
 			try {
 				await this.#emitSessionEvent(displayEvent);
+				if (displayEvent.type === "message_end") {
+					for (const barrier of [...this.#messagePersistenceBarriers]) await barrier(displayEvent);
+				}
 			} catch (error) {
 				if (event.type === "message_end") {
 					const persistMessageEnd = () => this.#persistMessageEnd(event.message);
@@ -2909,13 +2929,21 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				// Public agent_end is held out of the eager display pass and emitted
-				// here after maintenance routing, tagged isTerminal so subscribers can
-				// tell final settles from scheduled continuations.
-				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
-				void this.#emitAgentEndNotification([...activeMessages], options).catch(err => {
-					logger.error("Agent end extension notification failed", { err });
-				});
+				this.#beginPendingExtensionEvent();
+				try {
+					// Public agent_end is held out of the eager display pass and emitted
+					// here after maintenance routing, tagged isTerminal so subscribers can
+					// tell final settles from scheduled continuations.
+					await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
+				} catch (error) {
+					this.#endPendingExtensionEvent();
+					throw error;
+				}
+				void this.#emitAgentEndNotification([...activeMessages], options)
+					.catch(err => {
+						logger.error("Agent end extension notification failed", { err });
+					})
+					.finally(() => this.#endPendingExtensionEvent());
 			};
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
@@ -3825,6 +3853,15 @@ export class AgentSession {
 		return () => this.#sessionChangeCallbacks.delete(callback);
 	}
 
+	/**
+	 * Register work that must finish after message_end publication and before
+	 * the matching transcript entry is appended.
+	 */
+	registerMessagePersistenceBarrier(barrier: (event: AgentSessionEvent) => Promise<void>): () => void {
+		this.#messagePersistenceBarriers.add(barrier);
+		return () => this.#messagePersistenceBarriers.delete(barrier);
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -4269,6 +4306,7 @@ export class AgentSession {
 		this.agent.setAppendOnlyContext(undefined);
 		this.rawSseDebugBuffer.clear();
 		this.sessionManager.releaseRetainedEntries();
+		this.#messagePersistenceBarriers.clear();
 	}
 
 	#closeAllProviderSessions(reason: string): void {
@@ -5038,16 +5076,19 @@ export class AgentSession {
 		this.#rewoundToolResultIds.clear();
 	}
 
-	/** Drop mutable tool decisions and directives owned by the previous logical session. */
-	#clearSessionScopedToolState(): void {
-		this.agent.clearDeferredToolDirectives();
-		this.#toolChoiceQueue.clear();
+	#cancelScheduledPromptDeliveriesForTransition(): void {
 		this.yieldQueue.clear(SCHEDULED_NOTIFICATION_KIND);
 		const transitionError = new Error("Session changed before scheduled prompt delivery.");
 		this.#rejectScheduledPromptDeliveries(transitionError);
 		this.#scheduledPromptBatch.clear();
 		this.#scheduledPromptBatchTask?.reject(transitionError);
 		this.#scheduledPromptBatchTask = undefined;
+	}
+	/** Drop mutable tool decisions and directives owned by the previous logical session. */
+	#clearSessionScopedToolState(): void {
+		this.agent.clearDeferredToolDirectives();
+		this.#toolChoiceQueue.clear();
+		this.#cancelScheduledPromptDeliveriesForTransition();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
 		this.#onSessionTransition?.();
@@ -6046,6 +6087,15 @@ export class AgentSession {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[], options?: { idempotencyKey?: string }): Promise<void> {
+		await this.steerWithResult(text, images, options);
+	}
+
+	/** Queue steering and report whether usage preflight accepted it. */
+	async steerWithResult(
+		text: string,
+		images?: ImageContent[],
+		options?: { idempotencyKey?: string },
+	): Promise<boolean> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -6057,12 +6107,13 @@ export class AgentSession {
 					.peekSteeringQueue()
 					.some(message => message.role === "user" && message.idempotencyKey === idempotencyKey))
 		) {
-			return;
+			return true;
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		if (!(await this.#runUsageAwarePreflight())) return;
+		if (!(await this.#runUsageAwarePreflight())) return false;
 		await this.#queueUserMessage(expandedText, images, "steer", options?.idempotencyKey);
+		return true;
 	}
 
 	/**
@@ -6586,6 +6637,36 @@ export class AgentSession {
 		);
 	}
 
+	/** Whether any agent or next-turn message remains queued, including hidden extension messages. */
+	get hasQueuedAgentMessages(): boolean {
+		return this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length > 0;
+	}
+
+	/** Whether an extension lifecycle handler can still enqueue work from the current custody boundary. */
+	get hasPendingExtensionEvents(): boolean {
+		return this.#pendingExtensionEventCount > 0;
+	}
+
+	/** Wait until extension lifecycle handlers from the current boundary have settled. */
+	waitForPendingExtensionEvents(): Promise<void> {
+		return this.#pendingExtensionEventsIdle;
+	}
+
+	#beginPendingExtensionEvent(): void {
+		if (this.#pendingExtensionEventCount++ > 0) return;
+		const deferred = Promise.withResolvers<void>();
+		this.#pendingExtensionEventsIdle = deferred.promise;
+		this.#resolvePendingExtensionEvents = deferred.resolve;
+	}
+
+	#endPendingExtensionEvent(): void {
+		this.#pendingExtensionEventCount--;
+		if (this.#pendingExtensionEventCount > 0) return;
+		this.#pendingExtensionEventCount = 0;
+		this.#resolvePendingExtensionEvents?.();
+		this.#resolvePendingExtensionEvents = undefined;
+	}
+
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
 		return {
 			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
@@ -6875,11 +6956,18 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		let advisorRecordersDetached = false;
 		await this.abort();
-		this.#cancelOwnAsyncJobs();
-		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
+		const sessionServicesSuspended = await this.#suspendSessionServices();
+		let advisorRecordersDetached = false;
+		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
+			this.#cancelOwnAsyncJobs();
+			this.#closeAllProviderSessions("new session");
+			await this.#bash.flushPending();
+		} catch (error) {
+			await this.#resumeSessionServices(sessionServicesSuspended, false, "new session");
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
@@ -6952,6 +7040,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "new session");
 		}
 	}
 
@@ -6963,17 +7052,43 @@ export class AgentSession {
 		return setSessionName.call(this.sessionManager, name, source, trigger);
 	}
 
+	async #suspendSessionServices(): Promise<boolean> {
+		if (!this.#beginSessionFork) return false;
+		this.#cancelScheduledPromptDeliveriesForTransition();
+		this.#sessionServiceTransitionGeneration++;
+		await this.#beginSessionFork();
+		return true;
+	}
+
+	async #resumeSessionServices(suspended: boolean, committed: boolean, transition: string): Promise<void> {
+		if (!suspended) return;
+		try {
+			await this.#completeSessionFork?.(undefined);
+		} catch (error) {
+			if (!committed) throw error;
+			logger.warn(`Failed to resume session services after committed ${transition}`, {
+				sessionFile: this.sessionFile,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.#scheduleSessionServiceRecovery(undefined);
+		}
+	}
+
 	#scheduleSessionServiceRecovery(result: { oldSessionFile: string; newSessionFile: string } | undefined): void {
 		if (!this.#completeSessionFork || this.#isDisposed) return;
+		const generation = this.#sessionServiceTransitionGeneration;
 		const retry = (): void => {
 			const timer = setTimeout(() => {
-				if (this.#isDisposed) return;
-				void this.#completeSessionFork?.(result).catch(error => {
+				if (this.#isDisposed || generation !== this.#sessionServiceTransitionGeneration) return;
+				void this.#completeSessionFork?.(
+					result,
+					() => !this.#isDisposed && generation === this.#sessionServiceTransitionGeneration,
+				).catch(error => {
 					logger.warn("Failed to recover session services after committed transition", {
 						sessionFile: this.sessionFile,
 						error: error instanceof Error ? error.message : String(error),
 					});
-					if (!this.#isDisposed) retry();
+					if (!this.#isDisposed && generation === this.#sessionServiceTransitionGeneration) retry();
 				});
 			}, 250);
 			timer.unref();
@@ -7004,24 +7119,22 @@ export class AgentSession {
 			}
 		}
 
-		await this.#bash.flushPending();
-		// Flush current session to ensure all entries are written
-		await this.sessionManager.flush();
+		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let advisorRecordersDetached = false;
-		let sessionForkStarted = false;
+		let sessionForkStarted = sessionServicesSuspended;
+		let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
 		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
+			await this.#bash.flushPending();
+			// Flush current session to ensure all entries are written
+			await this.sessionManager.flush();
 			advisorRecordersDetached = true;
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
 			const bashTransition = this.#bash.beginSessionTransition();
-			if (this.#beginSessionFork) {
-				await this.#beginSessionFork();
-				sessionForkStarted = true;
-			}
 
 			// Fork the session (creates new session file with same entries)
-			let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
 			try {
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
@@ -7039,8 +7152,8 @@ export class AgentSession {
 			this.#recovery.reanchorServedAttribution(previousSessionId);
 
 			// Copy artifacts directory if it exists
-			const oldArtifactDir = forkResult.oldSessionFile.slice(0, -6);
-			const newArtifactDir = forkResult.newSessionFile.slice(0, -6);
+			const oldArtifactDir = sessionSidecarDir(forkResult.oldSessionFile);
+			const newArtifactDir = sessionSidecarDir(forkResult.newSessionFile);
 
 			try {
 				const oldDirStat = await fs.promises.stat(oldArtifactDir);
@@ -7049,7 +7162,7 @@ export class AgentSession {
 						recursive: true,
 						filter: source => {
 							const relative = path.relative(oldArtifactDir, source);
-							return relative !== "rpc.jsonl" && !relative.startsWith("rpc.jsonl.");
+							return relative !== "rpc-ledger" && !relative.startsWith(`rpc-ledger${path.sep}`);
 						},
 					});
 				}
@@ -7060,20 +7173,6 @@ export class AgentSession {
 						newArtifactDir,
 						error: err instanceof Error ? err.message : String(err),
 					});
-				}
-			}
-			if (this.#completeSessionFork) {
-				try {
-					await this.#completeSessionFork(forkResult);
-					sessionForkStarted = false;
-				} catch (error) {
-					logger.warn("Failed to finalize committed session fork", {
-						oldSessionFile: forkResult.oldSessionFile,
-						newSessionFile: forkResult.newSessionFile,
-						error: error instanceof Error ? error.message : String(error),
-					});
-					sessionForkStarted = false;
-					this.#scheduleSessionServiceRecovery(forkResult);
 				}
 			}
 
@@ -7095,10 +7194,24 @@ export class AgentSession {
 					previousSessionFile,
 				});
 			}
+			if (this.#completeSessionFork) {
+				try {
+					await this.#completeSessionFork(forkResult);
+					sessionForkStarted = false;
+				} catch (error) {
+					logger.warn("Failed to finalize committed session fork", {
+						oldSessionFile: forkResult.oldSessionFile,
+						newSessionFile: forkResult.newSessionFile,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					sessionForkStarted = false;
+					this.#scheduleSessionServiceRecovery(forkResult);
+				}
+			}
 
 			return true;
 		} finally {
-			if (sessionForkStarted) await this.#completeSessionFork?.(undefined);
+			if (sessionForkStarted) await this.#completeSessionFork?.(forkResult);
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
 		}
 	}
@@ -7110,10 +7223,8 @@ export class AgentSession {
 		let moveCommitted = false;
 		let failure: unknown;
 		try {
-			if (this.#beginSessionFork) {
-				await this.#beginSessionFork();
-				sessionServicesSuspended = true;
-			}
+			sessionServicesSuspended = await this.#suspendSessionServices();
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
 			await this.sessionManager.moveTo(newCwd, targetSessionDir);
 			moveCommitted = true;
 		} catch (error) {
@@ -7726,6 +7837,11 @@ export class AgentSession {
 		return this.#bash.hasPendingMessages;
 	}
 
+	/** Persist pending bash result messages before a terminal or session boundary. */
+	flushPendingBashMessages(): Promise<void> {
+		return this.#bash.flushPending();
+	}
+
 	// =========================================================================
 	// User-Initiated Python Execution
 	// =========================================================================
@@ -7847,6 +7963,7 @@ export class AgentSession {
 
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage, opts?: { expectsReply?: boolean }): Promise<"injected" | "woken"> {
+		this.#assertBackgroundAgentWorkAllowed?.();
 		return this.#irc.deliver(msg, opts);
 	}
 
@@ -7855,6 +7972,11 @@ export class AgentSession {
 		observer: ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/** Installs a mode-specific guard for peer messages that can start agent work. */
+	setBackgroundAgentWorkGuard(guard: (() => void) | undefined): void {
+		this.#assertBackgroundAgentWorkAllowed = guard;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
@@ -8056,13 +8178,19 @@ export class AgentSession {
 			}
 		}
 
-		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
-
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
+		const sessionServicesSuspended = await this.#suspendSessionServices();
+		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
+			this.#disconnectFromAgent();
+			await this.#sessionBeforeSwitchReconciler?.();
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+		} catch (error) {
+			await this.#resumeSessionServices(sessionServicesSuspended, false, "session switch");
+			throw error;
+		}
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -8113,6 +8241,7 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
 
+		let sessionTransitioned = false;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -8267,6 +8396,7 @@ export class AgentSession {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
+			sessionTransitioned = true;
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -8326,6 +8456,8 @@ export class AgentSession {
 			}
 			this.#bash.finishSessionTransition(bashTransition, false);
 			throw error;
+		} finally {
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session switch");
 		}
 	}
 
@@ -8369,23 +8501,23 @@ export class AgentSession {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
-		// Clear pending messages (bound to old session state)
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.#queuedMessageDrainBlocked = false;
-		this.#usagePreflightReadyForNextModelCall = false;
-
-		await this.#bash.flushPending();
-		// Flush pending writes before branching
-		await this.sessionManager.flush();
-		const bashTransition = this.#bash.beginSessionTransition();
-		this.#cancelOwnAsyncJobs();
-		this.#abortAutolearnCapture();
-		await this.#drainAutolearnCapture();
-
+		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
+			// Clear pending messages (bound to old session state)
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+
+			await this.#bash.flushPending();
+			// Flush pending writes before branching
+			await this.sessionManager.flush();
+			const bashTransition = this.#bash.beginSessionTransition();
+			this.#cancelOwnAsyncJobs();
+			this.#abortAutolearnCapture();
+			await this.#drainAutolearnCapture();
+
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -8438,6 +8570,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
 		}
 	}
 
@@ -8479,17 +8612,12 @@ export class AgentSession {
 			}
 		}
 
-		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
-			throw new Error("Cannot branch /btw: session changed since /btw started");
-		}
-
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
 			POST_PROMPT_DRAIN_TIMEOUT_MS,
 			"Timed out draining post-prompt tasks before /btw branch",
 		);
 		if (
-			this.isStreaming ||
 			this.isBashRunning ||
 			this.isEvalRunning ||
 			this.isCompacting ||
@@ -8502,18 +8630,25 @@ export class AgentSession {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.agent.replaceQueues([], []);
-		this.#queuedMessageDrainBlocked = false;
-		this.#usagePreflightReadyForNextModelCall = false;
-		await this.#bash.flushPending();
-		await this.sessionManager.flush();
-		const bashTransition = this.#bash.beginSessionTransition();
-		this.#cancelOwnAsyncJobs();
-		this.#abortAutolearnCapture();
-		await this.#drainAutolearnCapture();
-
+		if (this.isStreaming) {
+			await this.abort({ goalReason: "internal", reason: "branching /btw" });
+			this.agent.replaceQueues([], []);
+		}
+		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			if (this.isStreaming) {
+				await this.abort({ goalReason: "internal", reason: "branching /btw" });
+				this.agent.replaceQueues([], []);
+			}
+			await this.#bash.flushPending();
+			await this.sessionManager.flush();
+			const bashTransition = this.#bash.beginSessionTransition();
+			this.#cancelOwnAsyncJobs();
+			this.#abortAutolearnCapture();
+			await this.#drainAutolearnCapture();
+
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -8564,6 +8699,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
 		}
 	}
 

@@ -147,6 +147,7 @@ class FakeAgentSession {
 	goalModeState: GoalModeState | undefined;
 	activeToolNames: string[] = [];
 	setActiveToolsError: Error | undefined;
+	setActiveToolsBlocker: ((toolNames: string[]) => Promise<void>) | undefined;
 	builtInToolNames = new Set<string>();
 	waitForIdleCalls = 0;
 	waitForIdleBlocker: (() => Promise<void>) | undefined;
@@ -342,6 +343,7 @@ class FakeAgentSession {
 	}
 
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
+		await this.setActiveToolsBlocker?.(toolNames);
 		if (this.setActiveToolsError) throw this.setActiveToolsError;
 		this.activeToolNames = [...toolNames];
 	}
@@ -668,6 +670,35 @@ describe("ACP agent", () => {
 		expect(session.planProposalHandler).toBeUndefined();
 		expect(session.activeToolNames).toEqual(["read", "goal"]);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("serializes overlapping plan and default mode transitions", async () => {
+		const harness = await createHarness();
+		Settings.instance.set("plan.enabled", true);
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		session.activeToolNames = ["read", "goal"];
+		session.builtInToolNames.add("goal");
+		const planRebuild = Promise.withResolvers<void>();
+		const planRebuildStarted = Promise.withResolvers<void>();
+		session.setActiveToolsBlocker = async toolNames => {
+			if (toolNames.length === 1 && toolNames[0] === "read") {
+				planRebuildStarted.resolve();
+				await planRebuild.promise;
+			}
+		};
+
+		const enterPlan = harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
+		await planRebuildStarted.promise;
+		const enterDefault = harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "default" });
+		planRebuild.resolve();
+		await Promise.all([enterPlan, enterDefault]);
+
+		expect(session.planModeState).toBeUndefined();
+		expect(session.planProposalHandler).toBeUndefined();
+		expect(session.activeToolNames).toEqual(["read", "goal"]);
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});

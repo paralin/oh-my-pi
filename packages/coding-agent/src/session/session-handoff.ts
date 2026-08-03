@@ -21,6 +21,7 @@ import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types
 import type { BashSessionTransition } from "./bash-runner";
 import type { SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
+import { overrideSessionMetadataCompactionStrategy } from "./session-metadata";
 
 function createHandoffContext(document: string): string {
 	return `<handoff-context>\n${document}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
@@ -196,6 +197,10 @@ export class SessionHandoff {
 					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
 					signal: handoffSignal,
+					metadata: overrideSessionMetadataCompactionStrategy(
+						this.#host.agent.metadataForProvider(model.provider),
+						options?.metadataCompactionStrategy ?? "handoff",
+					),
 				},
 				model.provider,
 			);

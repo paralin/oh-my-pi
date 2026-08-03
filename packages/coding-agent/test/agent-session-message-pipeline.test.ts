@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
 import {
 	Agent,
 	type AgentMessage,
@@ -31,6 +32,7 @@ import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sessionSidecarDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -1442,6 +1444,33 @@ describe("AgentSession message pipeline", () => {
 		expect(session.systemPrompt.join("\n")).not.toContain(injected);
 		expect(contexts).toHaveLength(2);
 		expect(contexts[1]!.systemPrompt?.join("\n")).not.toContain(injected);
+	});
+
+	it("copies fork artifacts from an explicit non-JSONL session sidecar", async () => {
+		using tempDir = TempDir.createSync("@pi-explicit-session-fork-");
+		const explicitSessionFile = tempDir.join("explicit-session");
+		const sessionManager = await SessionManager.open(explicitSessionFile);
+		sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
+		sessionManager.appendMessage(createAssistantMessage("done"));
+		const artifact = await sessionManager.allocateArtifactPath("cron");
+		if (!artifact.path) throw new Error("Expected artifact path");
+		await Bun.write(artifact.path, "artifact payload");
+		const relativeArtifactPath = path.relative(sessionSidecarDir(explicitSessionFile), artifact.path);
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+
+		await session.fork();
+
+		const forkedSessionFile = session.sessionFile;
+		if (!forkedSessionFile) throw new Error("Expected forked session file");
+		expect(await Bun.file(path.join(sessionSidecarDir(forkedSessionFile), relativeArtifactPath)).text()).toBe(
+			"artifact payload",
+		);
 	});
 
 	it("does not duplicate promoted memory in the base prompt when forking", async () => {

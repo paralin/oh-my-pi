@@ -23,6 +23,7 @@ import { DynamicBorder } from "../modes/components/dynamic-border";
 import { TranscriptBlock } from "../modes/components/transcript-container";
 import { getSelectListTheme, getSymbolTheme, theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
+import { sessionSidecarDir } from "../session/session-paths";
 import { formatBytes } from "../tools/render-utils";
 import { openPath } from "../utils/open";
 import { DebugLogViewerComponent } from "./log-viewer";
@@ -488,7 +489,7 @@ export class DebugSelectorComponent extends Container {
 			return;
 		}
 
-		const artifactsDir = sessionFile.slice(0, -6);
+		const artifactsDir = sessionSidecarDir(sessionFile);
 
 		try {
 			const stat = await fs.stat(artifactsDir);

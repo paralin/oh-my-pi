@@ -7,6 +7,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
 import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { sessionSidecarDir } from "../session/session-paths";
 import { writeArchive } from "../utils/zip";
 import type { CpuProfile, HeapSnapshot } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
@@ -130,8 +131,8 @@ export async function createReportBundle(options: ReportBundleOptions): Promise<
 			// Session file might not exist yet
 		}
 
-		// Artifacts directory (same path without .jsonl)
-		const artifactsDir = options.sessionFile.slice(0, -6);
+		// Artifacts directory
+		const artifactsDir = sessionSidecarDir(options.sessionFile);
 		await addDirectoryToArchive(data, files, artifactsDir, "artifacts");
 
 		// Look for subagent sessions in the same directory
@@ -226,7 +227,7 @@ async function addSubagentSessions(
 				files.push(archivePath);
 
 				// Also add artifacts for this subagent session
-				const artifactsDir = filePath.slice(0, -6);
+				const artifactsDir = sessionSidecarDir(filePath);
 				await addDirectoryToArchive(data, files, artifactsDir, `subagents/${filename.slice(0, -6)}`);
 			} catch {
 				// Skip files we can't read

@@ -66,6 +66,18 @@ redis.call("HSET", KEYS[1], ARGV[1], ARGV[2])
 redis.call("HSET", KEYS[2], ARGV[1], ARGV[3])
 return 1`;
 
+const RENEW_LEASE_SCRIPT = `-- OMP_RENEW_LEASE
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("PEXPIRE", KEYS[1], ARGV[2])
+end
+return 0`;
+
+const RELEASE_LEASE_SCRIPT = `-- OMP_RELEASE_LEASE
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+end
+return 0`;
+
 function encodeTitleMeta(title: SessionTitleUpdate): string {
 	return JSON.stringify(title);
 }
@@ -214,6 +226,28 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 		]);
 	}
 
+	async acquireLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const ttlMs = Math.max(1, expiresAt - now);
+		const result = await this.#client.send("SET", [this.#leaseKey(path), owner, "NX", "PX", String(ttlMs)]);
+		return result === "OK";
+	}
+
+	async renewLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		const ttlMs = Math.max(1, expiresAt - now);
+		const result = await this.#client.send("EVAL", [
+			RENEW_LEASE_SCRIPT,
+			"1",
+			this.#leaseKey(path),
+			owner,
+			String(ttlMs),
+		]);
+		return result === 1;
+	}
+
+	async releaseLease(path: string, owner: string): Promise<void> {
+		await this.#client.send("EVAL", [RELEASE_LEASE_SCRIPT, "1", this.#leaseKey(path), owner]);
+	}
+
 	async truncate(path: string, mtimeMs: number): Promise<void> {
 		await this.writeFull(path, "", mtimeMs);
 	}
@@ -245,6 +279,10 @@ class RedisSessionStorageBackend implements SessionStorageBackend {
 
 	#fileKey(path: string): string {
 		return `${this.#prefix}file:${path}`;
+	}
+
+	#leaseKey(path: string): string {
+		return `${this.#prefix}lease:${path}`;
 	}
 
 	#metaKey(): string {

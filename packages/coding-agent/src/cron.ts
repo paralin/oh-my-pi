@@ -7,6 +7,11 @@ const MAX_SEARCH_MINUTES = 8 * 366 * 24 * 60;
 const RECURRING_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const DELIVERY_RETRY_BASE_MS = 1_000;
 const DELIVERY_RETRY_MAX_MS = 60_000;
+const REFRESH_RETRY_BASE_MS = 250;
+const REFRESH_RETRY_ATTEMPTS = 5;
+const DELIVERY_CLAIM_RETRY_MS = 1_000;
+const DELIVERY_LEASE_MS = 5 * 60 * 1_000;
+const DURABLE_MUTATION_CLAIM_RETRY_MS = 10;
 
 export interface CronJob {
 	id: string;
@@ -23,6 +28,87 @@ interface CronDeliveryRetry {
 	attempts: number;
 	retryAt: number;
 	delivered: boolean;
+}
+
+interface CronDeliveryClaim {
+	path: string;
+	storage: SessionStorage;
+	owner: string;
+}
+
+function supportsDurableClaims(storage: SessionStorage): boolean {
+	return (
+		typeof storage.acquireLease === "function" &&
+		typeof storage.renewLease === "function" &&
+		typeof storage.releaseLease === "function"
+	);
+}
+
+interface CronClaimMaintenance {
+	renew(): Promise<boolean>;
+	stop(): Promise<void>;
+}
+
+function maintainDeliveryClaim(claim: CronDeliveryClaim | undefined, now: () => number): CronClaimMaintenance {
+	const renewLease = claim?.storage.renewLease;
+	if (!claim || !renewLease) {
+		return {
+			renew: () => Promise.resolve(true),
+			stop: () => Promise.resolve(),
+		};
+	}
+	let renewal = Promise.resolve(true);
+	const renew = (): Promise<boolean> => {
+		renewal = renewal.then(async held => {
+			if (!held) return false;
+			const renewedAt = now();
+			try {
+				return await renewLease.call(
+					claim.storage,
+					claim.path,
+					claim.owner,
+					renewedAt + DELIVERY_LEASE_MS,
+					renewedAt,
+				);
+			} catch (error) {
+				logger.warn("Cron delivery lease renewal failed", { error });
+				return false;
+			}
+		});
+		return renewal;
+	};
+	const timer = setInterval(() => {
+		void renew();
+	}, DELIVERY_LEASE_MS / 3);
+	timer.unref();
+	return {
+		renew,
+		stop: async () => {
+			clearInterval(timer);
+			await renewal;
+		},
+	};
+}
+
+async function acquireDeliveryClaim(
+	store: string,
+	storage: SessionStorage,
+	now: number,
+): Promise<CronDeliveryClaim | undefined> {
+	const acquireLease = storage.acquireLease;
+	if (!acquireLease || !storage.renewLease || !storage.releaseLease) return undefined;
+	const path = `${store}.delivery`;
+	const owner = crypto.randomUUID();
+	const acquired = await acquireLease.call(storage, path, owner, now + DELIVERY_LEASE_MS, now);
+	return acquired ? { path, storage, owner } : undefined;
+}
+
+async function releaseDeliveryClaim(claim: CronDeliveryClaim): Promise<void> {
+	try {
+		await claim.storage.releaseLease?.(claim.path, claim.owner);
+	} catch (error) {
+		logger.warn("Cron delivery claim release failed", { error });
+	}
 }
 
 export interface CronSchedule {
@@ -138,7 +224,7 @@ export function nextCronFire(expression: string, after: Date): Date {
 	throw new Error("Cron expression has no match within eight years.");
 }
 
-function parseStoredJobs(text: string, now: number): CronJob[] {
+function parseStoredJobs(text: string, now: number, normalizeOverdue = true): CronJob[] {
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(text);
@@ -160,8 +246,8 @@ function parseStoredJobs(text: string, now: number): CronJob[] {
 			continue;
 		}
 		if (job.recurring && job.expiresAt !== undefined && job.expiresAt <= now) continue;
-		if (!job.recurring && job.nextFireAt <= now) job.nextFireAt = now;
-		if (job.recurring && job.nextFireAt <= now) {
+		if (normalizeOverdue && !job.recurring && job.nextFireAt <= now) job.nextFireAt = now;
+		if (normalizeOverdue && job.recurring && job.nextFireAt <= now) {
 			job.nextFireAt = nextCronFire(job.expression, new Date(now)).getTime();
 		}
 		jobs.push(job);
@@ -199,11 +285,13 @@ export class CronManager {
 	#loadedSessions = new Set<string | undefined>();
 	#sessionLoads = new Map<string | undefined, Promise<void>>();
 	#timer: CronTimer | undefined;
+	#refreshRetryTimer: CronTimer | undefined;
+	#refreshGeneration = 0;
 	#processing = false;
-	#sequence = 0;
 	#mutationTail: Promise<void> = Promise.resolve();
 	#disposed = false;
 	#suspended = false;
+	#started = false;
 	#completedForkCopy: string | undefined;
 	readonly #deliveryRetries = new WeakMap<CronJob, CronDeliveryRetry>();
 
@@ -225,22 +313,70 @@ export class CronManager {
 		this.#clearTimer = options.clearTimer ?? (timer => clearTimeout(timer));
 	}
 
-	async load(): Promise<void> {
+	async prepare(): Promise<void> {
 		if (this.#disposed || this.#suspended) return;
 		await this.#loadCurrentSession();
+	}
+
+	async load(): Promise<void> {
+		this.#started = true;
+		await this.prepare();
 		this.#armTimer();
+	}
+
+	start(): void {
+		if (this.#disposed || this.#started) return;
+		this.#started = true;
+		this.refresh();
 	}
 
 	/** Refresh jobs and timers after the live AgentSession changes identity. */
 	refresh(): void {
-		if (this.#disposed || this.#suspended) return;
+		if (this.#disposed || this.#suspended || !this.#started) return;
+		this.#cancelRefreshRetry();
+		const generation = ++this.#refreshGeneration;
 		this.#refreshSession();
-		void this.#loadCurrentSession()
-			.then(() => this.#armTimer())
-			.catch(error => logger.warn("Cron session load failed", { error }));
+		const sessionKey = this.#sessionKey;
+		const load = (attempt: number): void => {
+			void this.#loadCurrentSession()
+				.then(() => {
+					if (generation !== this.#refreshGeneration || sessionKey !== this.#sessionKey) return;
+					this.#armTimer();
+				})
+				.catch(error => {
+					logger.warn("Cron session load failed", { error });
+					if (
+						this.#disposed ||
+						this.#suspended ||
+						generation !== this.#refreshGeneration ||
+						sessionKey !== this.#sessionKey ||
+						attempt >= REFRESH_RETRY_ATTEMPTS
+					) {
+						return;
+					}
+					this.#refreshRetryTimer = this.#setTimer(
+						() => {
+							this.#refreshRetryTimer = undefined;
+							if (
+								this.#disposed ||
+								this.#suspended ||
+								generation !== this.#refreshGeneration ||
+								sessionKey !== this.#sessionKey
+							) {
+								return;
+							}
+							load(attempt + 1);
+						},
+						REFRESH_RETRY_BASE_MS * 2 ** attempt,
+					);
+				});
+		};
+		load(0);
 	}
 
 	async suspend(): Promise<void> {
+		this.#refreshGeneration++;
+		this.#cancelRefreshRetry();
 		if (this.#disposed) return;
 		this.#suspended = true;
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
@@ -263,7 +399,10 @@ export class CronManager {
 		if (text !== undefined) await this.#storage.writeTextAtomic(newStore, text);
 	}
 
-	async completeFork(result: { oldSessionFile: string; newSessionFile: string } | undefined): Promise<void> {
+	async completeFork(
+		result: { oldSessionFile: string; newSessionFile: string } | undefined,
+		isCurrent: () => boolean = () => true,
+	): Promise<void> {
 		if (result) {
 			const copyKey = `${result.oldSessionFile}\0${result.newSessionFile}`;
 			if (this.#completedForkCopy !== copyKey) {
@@ -271,16 +410,23 @@ export class CronManager {
 				this.#completedForkCopy = copyKey;
 			}
 		}
-		await this.resume();
-		this.#completedForkCopy = undefined;
+		if (!isCurrent()) return;
+		await this.resume(isCurrent);
+		if (isCurrent()) this.#completedForkCopy = undefined;
 	}
 
-	async resume(): Promise<void> {
-		if (this.#disposed) return;
+	async resume(isCurrent: () => boolean = () => true): Promise<void> {
+		if (this.#disposed || !isCurrent()) return;
 		this.#suspended = false;
 		this.#refreshSession();
 		this.#loadedSessions.delete(this.#sessionKey);
 		await this.#loadCurrentSession();
+		if (!isCurrent()) {
+			this.#suspended = true;
+			if (this.#timer !== undefined) this.#clearTimer(this.#timer);
+			this.#timer = undefined;
+			return;
+		}
 		this.#armTimer();
 	}
 
@@ -289,10 +435,13 @@ export class CronManager {
 			await this.#loadCurrentSession();
 			if (!input.prompt.trim()) throw new Error("Cron prompt cannot be empty.");
 			if (input.durable && !this.#sessionFile) throw new Error("Durable cron jobs require a persisted session.");
+			if (input.durable && !supportsDurableClaims(this.#storage)) {
+				throw new Error("Durable cron jobs require storage lease support.");
+			}
 			parseCronExpression(input.expression);
 			const now = this.#now();
 			const job: CronJob = {
-				id: `cron-${now.toString(36)}-${(++this.#sequence).toString(36)}`,
+				id: `cron-${now.toString(36)}-${crypto.randomUUID()}`,
 				expression: input.expression.trim(),
 				prompt: input.prompt,
 				recurring: input.recurring ?? true,
@@ -301,9 +450,14 @@ export class CronManager {
 				expiresAt: input.recurring === false ? undefined : now + RECURRING_LIFETIME_MS,
 				nextFireAt: nextCronFire(input.expression, new Date(now)).getTime(),
 			};
-			this.#jobs.set(job.id, job);
 			try {
-				if (job.durable) await this.#persist();
+				if (job.durable) {
+					await this.#withDurableMutation(() => {
+						this.#jobs.set(job.id, job);
+					});
+				} else {
+					this.#jobs.set(job.id, job);
+				}
 			} catch (error) {
 				this.#jobs.delete(job.id);
 				throw error;
@@ -321,22 +475,30 @@ export class CronManager {
 	delete(id: string): Promise<boolean> {
 		return this.#serializeMutation(async () => {
 			await this.#loadCurrentSession();
-			const deleted = this.#jobs.get(id);
-			if (!deleted) return false;
-			this.#jobs.delete(id);
+			let deleted: CronJob | undefined;
+			const remove = (): boolean => {
+				deleted = this.#jobs.get(id);
+				if (!deleted) return false;
+				this.#jobs.delete(id);
+				return true;
+			};
 			try {
-				if (deleted.durable) await this.#persist();
+				const cached = this.#jobs.get(id);
+				const didDelete =
+					this.#sessionFile && (!cached || cached.durable) ? await this.#withDurableMutation(remove) : remove();
+				this.#armTimer();
+				return didDelete;
 			} catch (error) {
-				this.#jobs.set(id, deleted);
+				if (deleted) this.#jobs.set(id, deleted);
 				throw error;
 			}
-			this.#armTimer();
-			return true;
 		});
 	}
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#refreshGeneration++;
+		this.#cancelRefreshRetry();
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
 		this.#timer = undefined;
 	}
@@ -402,6 +564,64 @@ export class CronManager {
 		}
 	}
 
+	async #withDurableMutation<T>(mutation: () => T): Promise<T> {
+		const sessionFile = this.#sessionFile;
+		const sessionKey = this.#sessionKey;
+		const jobs = this.#jobs;
+		if (!sessionFile) throw new Error("Durable cron jobs require a persisted session.");
+		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
+		let claim: CronDeliveryClaim | undefined;
+		while (!claim) {
+			if (this.#disposed) throw new Error("Cron manager is disposed.");
+			claim = await acquireDeliveryClaim(store, this.#storage, this.#now());
+			if (!claim) {
+				await Bun.sleep(DURABLE_MUTATION_CLAIM_RETRY_MS);
+			}
+		}
+		const maintenance = maintainDeliveryClaim(claim, this.#now);
+		try {
+			this.#refreshSession();
+			if (this.#sessionFile !== sessionFile || this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
+				throw new Error("Cron session changed while acquiring durable storage.");
+			}
+			await this.#reloadDurableJobs(sessionFile, jobs);
+			const result = mutation();
+			if (!(await maintenance.renew())) throw new Error("Cron delivery lease was lost.");
+			await this.#persist(sessionFile, jobs, sessionKey);
+			return result;
+		} finally {
+			await maintenance.stop();
+			await releaseDeliveryClaim(claim);
+		}
+	}
+
+	async #reloadDurableJobs(sessionFile: string, jobs: Map<string, CronJob>): Promise<void> {
+		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
+		const text = await this.#storage.readText(store).catch(async error => {
+			if (isEnoent(error) || !(await this.#storage.exists(store))) return undefined;
+			throw error;
+		});
+		const retries = new Map<string, CronDeliveryRetry>();
+		for (const job of jobs.values()) {
+			if (!job.durable) continue;
+			const retry = this.#deliveryRetries.get(job);
+			if (retry) retries.set(`${job.id}\0${job.nextFireAt}`, retry);
+			jobs.delete(job.id);
+		}
+		if (text === undefined) return;
+		for (const job of parseStoredJobs(text, this.#now(), false)) {
+			jobs.set(job.id, job);
+			const retry = retries.get(`${job.id}\0${job.nextFireAt}`);
+			if (retry) this.#deliveryRetries.set(job, retry);
+		}
+	}
+
+	#cancelRefreshRetry(): void {
+		if (this.#refreshRetryTimer === undefined) return;
+		this.#clearTimer(this.#refreshRetryTimer);
+		this.#refreshRetryTimer = undefined;
+	}
+
 	#refreshSession(): void {
 		const sessionFileValue = this.#getSessionFile();
 		const sessionFile = sessionFileValue ? path.resolve(sessionFileValue) : undefined;
@@ -454,7 +674,7 @@ export class CronManager {
 	}
 
 	#armTimer(): void {
-		if (this.#disposed || this.#suspended) return;
+		if (this.#disposed || this.#suspended || !this.#started) return;
 		this.#refreshSession();
 		if (!this.#loadedSessions.has(this.#sessionKey)) return;
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
@@ -509,80 +729,101 @@ export class CronManager {
 				if (this.#sessionKey !== sessionKey || this.#jobs !== jobs) break;
 				sessionFile = this.#sessionFile;
 				const now = this.#now();
-				let durableExpired = false;
-				for (const candidate of jobs.values()) {
-					if (candidate.recurring && candidate.expiresAt !== undefined && candidate.expiresAt <= now) {
-						jobs.delete(candidate.id);
-						if (candidate.durable) durableExpired = true;
-					}
-				}
-				if (durableExpired) await this.#persist(sessionFile, jobs, sessionKey);
-				const due = [...jobs.values()]
-					.sort((a, b) => this.#nextAttemptAt(a) - this.#nextAttemptAt(b))
-					.filter(candidate => this.#nextAttemptAt(candidate) <= now);
-				if (due.length === 0) break;
-
-				const deliveries = due.map(job => {
-					const previousNextFireAt = job.nextFireAt;
-					if (job.recurring) {
-						const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now)));
-						if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) jobs.delete(job.id);
-						else job.nextFireAt = next.getTime();
-					} else {
-						jobs.delete(job.id);
-					}
-					return {
-						job,
-						previousNextFireAt,
-						priorRetry: this.#deliveryRetries.get(job),
-					};
-				});
-				const restore = (delivery: (typeof deliveries)[number]): void => {
-					delivery.job.nextFireAt = delivery.previousNextFireAt;
-					jobs.set(delivery.job.id, delivery.job);
-				};
-				if (this.#disposed || this.#suspended) {
-					for (const delivery of deliveries) restore(delivery);
-					break;
-				}
-				this.#refreshSession();
-				if (this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
-					for (const delivery of deliveries) restore(delivery);
-					break;
-				}
-				sessionFile = this.#sessionFile;
-
-				const outcomes = await Promise.allSettled(
-					deliveries.map(delivery =>
-						delivery.priorRetry?.delivered ? Promise.resolve() : this.#enqueuePrompt(delivery.job.prompt),
-					),
+				const needsDurableClaim = [...jobs.values()].some(
+					candidate =>
+						candidate.durable &&
+						(this.#nextAttemptAt(candidate) <= now ||
+							(candidate.recurring && candidate.expiresAt !== undefined && candidate.expiresAt <= now)),
 				);
-				let deliveryError: unknown;
-				for (const [index, outcome] of outcomes.entries()) {
-					if (outcome.status === "fulfilled") continue;
-					const delivery = deliveries[index];
-					if (!delivery) continue;
-					restore(delivery);
-					const attempts = (delivery.priorRetry?.attempts ?? 0) + 1;
-					const retryDelay = Math.min(
-						DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6),
-						DELIVERY_RETRY_MAX_MS,
-					);
-					this.#deliveryRetries.set(delivery.job, {
-						attempts,
-						retryAt: this.#now() + retryDelay,
-						delivered: false,
-					});
-					deliveryError ??= outcome.reason;
-				}
-
-				const durableAccepted = deliveries.filter(
-					(delivery, index) => delivery.job.durable && outcomes[index]?.status === "fulfilled",
-				);
+				const claim =
+					needsDurableClaim && sessionFile
+						? await acquireDeliveryClaim(
+								path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json"),
+								this.#storage,
+								now,
+							)
+						: undefined;
+				const maintenance = maintainDeliveryClaim(claim, this.#now);
 				try {
-					if (durableAccepted.length > 0) await this.#persist(sessionFile, jobs, sessionKey);
-				} catch (error) {
-					for (const delivery of durableAccepted) {
+					if (claim && sessionFile) await this.#reloadDurableJobs(sessionFile, jobs);
+
+					let durableExpired = false;
+					for (const candidate of jobs.values()) {
+						if (candidate.recurring && candidate.expiresAt !== undefined && candidate.expiresAt <= now) {
+							if (candidate.durable && !claim) {
+								this.#deliveryRetries.set(candidate, {
+									attempts: 0,
+									retryAt: now + DELIVERY_CLAIM_RETRY_MS,
+									delivered: false,
+								});
+								continue;
+							}
+							jobs.delete(candidate.id);
+							if (candidate.durable) durableExpired = true;
+						}
+					}
+					if (durableExpired) {
+						if (!(await maintenance.renew())) throw new Error("Cron delivery lease was lost.");
+						await this.#persist(sessionFile, jobs, sessionKey);
+					}
+					let due = [...jobs.values()]
+						.sort((a, b) => this.#nextAttemptAt(a) - this.#nextAttemptAt(b))
+						.filter(candidate => this.#nextAttemptAt(candidate) <= now);
+					if (needsDurableClaim && !claim) {
+						for (const candidate of due) {
+							if (!candidate.durable) continue;
+							this.#deliveryRetries.set(candidate, {
+								attempts: 0,
+								retryAt: now + DELIVERY_CLAIM_RETRY_MS,
+								delivered: false,
+							});
+						}
+						due = due.filter(candidate => !candidate.durable);
+					}
+					if (due.length === 0) {
+						break;
+					}
+
+					const deliveries = due.map(job => {
+						const previousNextFireAt = job.nextFireAt;
+						if (job.recurring) {
+							const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now)));
+							if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) jobs.delete(job.id);
+							else job.nextFireAt = next.getTime();
+						} else {
+							jobs.delete(job.id);
+						}
+						return {
+							job,
+							previousNextFireAt,
+							priorRetry: this.#deliveryRetries.get(job),
+						};
+					});
+					const restore = (delivery: (typeof deliveries)[number]): void => {
+						delivery.job.nextFireAt = delivery.previousNextFireAt;
+						jobs.set(delivery.job.id, delivery.job);
+					};
+					if (this.#disposed || this.#suspended) {
+						for (const delivery of deliveries) restore(delivery);
+						break;
+					}
+					this.#refreshSession();
+					if (this.#sessionKey !== sessionKey || this.#jobs !== jobs) {
+						for (const delivery of deliveries) restore(delivery);
+						break;
+					}
+					sessionFile = this.#sessionFile;
+
+					const outcomes = await Promise.allSettled(
+						deliveries.map(delivery =>
+							delivery.priorRetry?.delivered ? Promise.resolve() : this.#enqueuePrompt(delivery.job.prompt),
+						),
+					);
+					let deliveryError: unknown;
+					for (const [index, outcome] of outcomes.entries()) {
+						if (outcome.status === "fulfilled") continue;
+						const delivery = deliveries[index];
+						if (!delivery) continue;
 						restore(delivery);
 						const attempts = (delivery.priorRetry?.attempts ?? 0) + 1;
 						const retryDelay = Math.min(
@@ -592,17 +833,57 @@ export class CronManager {
 						this.#deliveryRetries.set(delivery.job, {
 							attempts,
 							retryAt: this.#now() + retryDelay,
-							delivered: true,
+							delivered: false,
 						});
+						deliveryError ??= outcome.reason;
 					}
-					throw error;
+
+					const durableAccepted = deliveries.filter(
+						(delivery, index) => delivery.job.durable && outcomes[index]?.status === "fulfilled",
+					);
+					try {
+						if (durableAccepted.length > 0) {
+							if (!(await maintenance.renew())) throw new Error("Cron delivery lease was lost.");
+							await this.#persist(sessionFile, jobs, sessionKey);
+						}
+					} catch (error) {
+						for (const delivery of durableAccepted) {
+							restore(delivery);
+							const attempts = (delivery.priorRetry?.attempts ?? 0) + 1;
+							const retryDelay = Math.min(
+								DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6),
+								DELIVERY_RETRY_MAX_MS,
+							);
+							this.#deliveryRetries.set(delivery.job, {
+								attempts,
+								retryAt: this.#now() + retryDelay,
+								delivered: true,
+							});
+						}
+						throw error;
+					}
+					for (const [index, delivery] of deliveries.entries()) {
+						if (outcomes[index]?.status === "fulfilled") this.#deliveryRetries.delete(delivery.job);
+					}
+					if (deliveryError !== undefined) throw deliveryError;
+				} finally {
+					await maintenance.stop();
+					if (claim) await releaseDeliveryClaim(claim);
 				}
-				for (const [index, delivery] of deliveries.entries()) {
-					if (outcomes[index]?.status === "fulfilled") this.#deliveryRetries.delete(delivery.job);
-				}
-				if (deliveryError !== undefined) throw deliveryError;
 			}
 		} catch (error) {
+			const failedAt = this.#now();
+			for (const job of jobs.values()) {
+				if (!job.durable || this.#nextAttemptAt(job) > failedAt) continue;
+				const prior = this.#deliveryRetries.get(job);
+				const attempts = (prior?.attempts ?? 0) + 1;
+				const retryDelay = Math.min(DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6), DELIVERY_RETRY_MAX_MS);
+				this.#deliveryRetries.set(job, {
+					attempts,
+					retryAt: failedAt + retryDelay,
+					delivered: prior?.delivered ?? false,
+				});
+			}
 			logger.warn("Cron job delivery failed", { error });
 		} finally {
 			this.#processing = false;

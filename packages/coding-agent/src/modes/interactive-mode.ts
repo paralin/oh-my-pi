@@ -3547,14 +3547,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			await this.session.activateVibeTools(vibeBaseTools);
 		} catch (error) {
-			this.session.setVibeModeState(undefined);
-			this.vibeModeEnabled = false;
-			this.#vibeModePreviousTools = undefined;
-			this.#vibeModeOwnerScope = undefined;
+			await this.#exitVibeMode();
 			throw error;
 		}
 		if (this.#goalBlocksModeEntry()) {
 			await this.#exitVibeMode();
+			const goalState = this.session.getGoalModeState();
+			if (goalState?.goal) {
+				this.sessionManager.appendModeChange(goalState.enabled ? "goal" : "goal_paused");
+			}
 			this.showWarning("Exit goal mode first.");
 			return false;
 		}

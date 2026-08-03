@@ -41,6 +41,7 @@ const bundledDependencyStubs: Record<string, string> = {
 	"../../session/session-loader": "export const loadEntriesFromFile = async () => [];",
 	"../../session/session-manager":
 		"export class SessionManager { static async open() { return new SessionManager(); } }",
+	"../../session/session-paths": "export const sessionSidecarDir = sessionFile => sessionFile + '.d';",
 	"./args": "export const parseExportArgs = () => undefined;",
 	"./web-palette": 'export const webExportThemeVars = () => "";',
 };

@@ -8,6 +8,7 @@ import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { loadBundledAgents } from "../task/agents";
 import { isReadOnlyAgent } from "../task/read-only-policy";
+import { sessionSidecarDir } from "../session/session-paths";
 import { persistedVibeChildIds } from "../vibe/runtime";
 import {
 	type AgentHistorySummary,
@@ -325,9 +326,15 @@ export async function registerPersistedSubagents(
 	if (!shouldContinue()) return;
 	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
 	if (!shouldContinue()) return;
-	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
-	await registerPersistedSubagentsFromDir(registry, root, undefined, vibeOwnedIds, transcripts, shouldContinue);
+	await registerPersistedSubagentsFromDir(
+		registry,
+		sessionSidecarDir(sessionFile),
+		undefined,
+		vibeOwnedIds,
+		transcripts,
+		shouldContinue,
+	);
 	if (!shouldContinue()) return;
 	let nextTranscript = 0;
 	const workers = Array.from({ length: Math.min(4, transcripts.length) }, async () => {

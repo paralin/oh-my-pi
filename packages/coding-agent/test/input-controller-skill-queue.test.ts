@@ -650,6 +650,248 @@ describe("AgentSession derived queued custom display", () => {
 		expect(session.yieldQueue.has(SCHEDULED_NOTIFICATION_KIND)).toBe(false);
 	});
 
+	it("suspends session services across a new-session transition", async () => {
+		let suspended = false;
+		let aborted = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				expect(aborted).toBe(true);
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async result => {
+				expect(result).toBeUndefined();
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			aborted = true;
+			await abort(options);
+		});
+		const startNewSession = session.sessionManager.newSession.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "newSession").mockImplementation(async options => {
+			expect(suspended).toBe(true);
+			transitions.push("new");
+			await startNewSession(options);
+		});
+
+		await session.newSession();
+
+		expect(suspended).toBe(false);
+		expect(transitions).toEqual(["suspend", "new", "resume"]);
+	});
+
+	it("suspends session services across a session switch", async () => {
+		let suspended = false;
+		let aborted = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				expect(aborted).toBe(true);
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async result => {
+				expect(result).toBeUndefined();
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			aborted = true;
+			await abort(options);
+		});
+		await session.sessionManager.ensureOnDisk();
+		const sessionFile = session.sessionFile;
+		if (!sessionFile) throw new Error("Expected persisted session");
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async target => {
+			expect(suspended).toBe(true);
+			transitions.push("switch");
+			await setSessionFile(target);
+		});
+
+		await session.switchSession(sessionFile);
+
+		expect(suspended).toBe(false);
+		expect(transitions).toEqual(["suspend", "switch", "resume"]);
+	});
+
+	it("suspends session services across a branch transition", async () => {
+		let suspended = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async result => {
+				expect(result).toBeUndefined();
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		let streaming = true;
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
+		const abort = vi.spyOn(session, "abort").mockImplementation(async () => {
+			expect(suspended).toBe(true);
+			streaming = false;
+		});
+		session.sessionManager.appendMessage({ role: "user", content: "ancestor", timestamp: 1 });
+		session.sessionManager.appendMessage({ role: "user", content: "branch point", timestamp: 2 });
+		const entryId = session.sessionManager.getLeafId();
+		if (!entryId) throw new Error("Expected a branchable entry");
+		const createBranchedSession = session.sessionManager.createBranchedSession.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "createBranchedSession").mockImplementation(parentId => {
+			expect(suspended).toBe(true);
+			expect(streaming).toBe(false);
+			transitions.push("branch");
+			createBranchedSession(parentId);
+		});
+
+		await session.branch(entryId);
+
+		expect(suspended).toBe(false);
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(transitions).toEqual(["suspend", "branch", "resume"]);
+	});
+
+	it("suspends session services before flushing fork state", async () => {
+		let suspended = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async () => {
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		let streaming = true;
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
+		const abort = vi.spyOn(session, "abort").mockImplementation(async () => {
+			expect(suspended).toBe(true);
+			streaming = false;
+		});
+		await session.sessionManager.ensureOnDisk();
+		const flush = session.sessionManager.flush.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "flush").mockImplementation(async () => {
+			expect(suspended).toBe(true);
+			expect(streaming).toBe(false);
+			transitions.push("flush");
+			await flush();
+		});
+
+		await session.fork();
+
+		expect(suspended).toBe(false);
+		expect(abort).toHaveBeenCalledTimes(1);
+		expect(transitions).toEqual(["suspend", "flush", "resume"]);
+	});
+
+	it("cancels a streaming scheduled delivery before suspending fork services", async () => {
+		let deliverySettled = false;
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				await Promise.resolve();
+				expect(deliverySettled).toBe(true);
+			},
+			completeSessionFork: async () => {},
+		});
+		const { session } = fixture;
+		let streaming = true;
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => streaming });
+		const delivery = session.deliverScheduledPrompt("queued before fork");
+		void delivery.catch(() => {
+			deliverySettled = true;
+		});
+		const queued = Promise.withResolvers<void>();
+		setImmediate(queued.resolve);
+		await queued.promise;
+		vi.spyOn(session, "abort").mockImplementation(async () => {
+			streaming = false;
+		});
+		await session.sessionManager.ensureOnDisk();
+
+		await expect(session.fork()).resolves.toBe(true);
+		await expect(delivery).rejects.toThrow("Session changed before scheduled prompt delivery.");
+	});
+
+	it("resumes fork services after adopting the fork session identity", async () => {
+		let session: AgentSession | undefined;
+		let resumedSessionId: string | undefined;
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {},
+			completeSessionFork: async () => {
+				resumedSessionId = session?.agent.sessionId;
+			},
+		});
+		session = fixture.session;
+		await session.sessionManager.ensureOnDisk();
+		const previousSessionId = session.agent.sessionId;
+		await expect(session.fork()).resolves.toBe(true);
+
+		expect(session.agent.sessionId).not.toBe(previousSessionId);
+		expect(resumedSessionId).toBe(session.agent.sessionId);
+	});
+
+	it("resumes session services when a pre-fork abort fails", async () => {
+		let resumes = 0;
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {},
+			completeSessionFork: async () => {
+				resumes++;
+			},
+		});
+		const { session } = fixture;
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+		vi.spyOn(session, "abort").mockRejectedValue(new Error("abort persistence failed"));
+		await session.sessionManager.ensureOnDisk();
+
+		await expect(session.fork()).rejects.toThrow("abort persistence failed");
+
+		expect(resumes).toBe(1);
+	});
+
+	it("resumes session services when a pre-branch abort fails", async () => {
+		let resumes = 0;
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {},
+			completeSessionFork: async () => {
+				resumes++;
+			},
+		});
+		const { session } = fixture;
+		session.sessionManager.appendMessage({ role: "user", content: "ancestor", timestamp: 1 });
+		session.sessionManager.appendMessage({ role: "user", content: "branch point", timestamp: 2 });
+		const entryId = session.sessionManager.getLeafId();
+		if (!entryId) throw new Error("Expected a branchable entry");
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => true });
+		vi.spyOn(session, "abort").mockRejectedValue(new Error("abort persistence failed"));
+
+		await expect(session.branch(entryId)).rejects.toThrow("abort persistence failed");
+
+		expect(resumes).toBe(1);
+	});
+
 	it("retries committed fork finalization with the fork paths", async () => {
 		const finalized: Array<{ oldSessionFile: string; newSessionFile: string } | undefined> = [];
 		const recovered = Promise.withResolvers<void>();
@@ -677,6 +919,30 @@ describe("AgentSession derived queued custom display", () => {
 			{ oldSessionFile, newSessionFile },
 			{ oldSessionFile, newSessionFile },
 		]);
+	});
+
+	it("cancels stale service recovery when a newer transition starts", async () => {
+		const finalized: Array<{ oldSessionFile: string; newSessionFile: string } | undefined> = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {},
+			completeSessionFork: async result => {
+				finalized.push(result);
+				if (finalized.length === 1) throw new Error("fork resume failed");
+			},
+		});
+		const { session, tempDir } = fixture;
+		await session.sessionManager.ensureOnDisk();
+		await expect(session.fork()).resolves.toBe(true);
+		const newCwd = path.join(tempDir.path(), "newer-transition");
+		await fs.mkdir(newCwd);
+
+		await session.moveSession(newCwd);
+		await Bun.sleep(400);
+
+		expect(finalized).toHaveLength(2);
+		expect(finalized[0]).toBeDefined();
+		expect(finalized[1]).toBeUndefined();
 	});
 
 	it("suspends session services while moving persisted artifacts", async () => {
@@ -709,6 +975,34 @@ describe("AgentSession derived queued custom display", () => {
 
 		expect(suspended).toBe(false);
 		expect(transitions).toEqual(["suspend", "move", "resume"]);
+	});
+
+	it("aborts a wake started during scheduler suspension before moving session files", async () => {
+		let wakeStreaming = false;
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				wakeStreaming = true;
+			},
+			completeSessionFork: async () => {},
+		});
+		const { session, tempDir } = fixture;
+		await session.sessionManager.ensureOnDisk();
+		Object.defineProperty(session, "isStreaming", { configurable: true, get: () => wakeStreaming });
+		const abort = vi.spyOn(session, "abort").mockImplementation(async () => {
+			wakeStreaming = false;
+		});
+		const moveTo = session.sessionManager.moveTo.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "moveTo").mockImplementation(async (...args) => {
+			expect(wakeStreaming).toBe(false);
+			await moveTo(...args);
+		});
+		const newCwd = path.join(tempDir.path(), "wake-safe-move");
+		await fs.mkdir(newCwd);
+
+		await session.moveSession(newCwd);
+
+		expect(abort).toHaveBeenCalledWith({ goalReason: "internal" });
 	});
 
 	it("retries move resumption without blocking session idle", async () => {

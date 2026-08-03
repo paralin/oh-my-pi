@@ -28,6 +28,7 @@ import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import type { OutputMeta } from "./output-meta";
 import { isInternalUrlPath, resolveToolSearchScope } from "./path-utils";
+import { PREVIEW_LIMITS } from "./render-constants";
 import {
 	appendParseErrorsBulletList,
 	capParseErrors,
@@ -37,7 +38,6 @@ import {
 	formatMoreItems,
 	formatParseErrors,
 	formatParseErrorsCountLabel,
-	PREVIEW_LIMITS,
 } from "./render-utils";
 import { PREVIEW_PENDING_NOTICE, queueResolveHandler } from "./resolve";
 import { ToolError } from "./tool-errors";

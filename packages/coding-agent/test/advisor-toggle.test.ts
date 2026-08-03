@@ -587,8 +587,9 @@ describe("AgentSession advisor toggle", () => {
 		appendAdvisorCost(advisor, 0.5, 1);
 		const previousSessionFile = sessionManager.getSessionFile();
 		if (!previousSessionFile) throw new Error("Expected the previous session to be persisted");
-		await fs.mkdir(previousSessionFile.slice(0, -6), { recursive: true });
-		await fs.writeFile(path.join(previousSessionFile.slice(0, -6), "rpc.jsonl"), "parent custody");
+		const previousRpcLedgerDir = path.join(previousSessionFile.slice(0, -6), "rpc-ledger");
+		await fs.mkdir(previousRpcLedgerDir, { recursive: true });
+		await fs.writeFile(path.join(previousRpcLedgerDir, "events.jsonl"), "parent custody");
 		const fork = sessionManager.fork.bind(sessionManager);
 		vi.spyOn(sessionManager, "fork").mockImplementation(async () => {
 			const result = await fork();
@@ -606,7 +607,9 @@ describe("AgentSession advisor toggle", () => {
 		expect(advisor.state.messages).toContainEqual(advisorMessage(0.5, 1));
 		const forkedSessionFile = sessionManager.getSessionFile();
 		if (!forkedSessionFile) throw new Error("Expected the forked session to be persisted");
-		expect(await Bun.file(path.join(forkedSessionFile.slice(0, -6), "rpc.jsonl")).exists()).toBe(false);
+		expect(await Bun.file(path.join(forkedSessionFile.slice(0, -6), "rpc-ledger", "events.jsonl")).exists()).toBe(
+			false,
+		);
 		await session.dispose();
 		expect((await loadAdvisorTranscriptCosts(forkedSessionFile)).get("")).toBeCloseTo(0.5, 8);
 	});

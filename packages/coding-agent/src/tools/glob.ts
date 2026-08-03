@@ -30,13 +30,8 @@ import {
 	resolveToCwd,
 	toPathList,
 } from "./path-utils";
-import {
-	createCachedComponent,
-	formatCount,
-	formatEmptyMessage,
-	formatErrorMessage,
-	PREVIEW_LIMITS,
-} from "./render-utils";
+import { PREVIEW_LIMITS } from "./render-constants";
+import { createCachedComponent, formatCount, formatEmptyMessage, formatErrorMessage } from "./render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 

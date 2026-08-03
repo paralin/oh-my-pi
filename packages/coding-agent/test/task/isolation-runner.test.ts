@@ -218,10 +218,10 @@ describe("runIsolatedSubprocess", () => {
 			fellBack: false,
 			fallbackReason: null,
 		});
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		const runSubagent = async (options: Parameters<NonNullable<typeof runIsolatedSubprocess>>[0]["baseOptions"]) => {
 			options.onCleanupDeferred?.(cleanupGate.promise);
 			return result({ exitCode: 1, aborted: true, error: "cleanup exceeded its deadline" });
-		});
+		};
 		const cleanupSpy = vi.spyOn(worktreeModule, "cleanupIsolation").mockResolvedValue();
 
 		const outcome = await runIsolatedSubprocess({
@@ -237,6 +237,7 @@ describe("runIsolatedSubprocess", () => {
 				index: 0,
 				id: "DeferredCleanup",
 			},
+			runSubagent,
 			context: {
 				repoRoot: "/repo",
 				baseline: {

@@ -1,4 +1,5 @@
 import { toError } from "@oh-my-pi/pi-utils";
+import { sessionSidecarDir } from "./session-paths";
 import type {
 	SessionStorage,
 	SessionStorageStat,
@@ -28,6 +29,9 @@ export interface SessionStorageBackend {
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	acquireLease?(path: string, owner: string, expiresAt: number, now: number): Promise<boolean>;
+	renewLease?(path: string, owner: string, expiresAt: number, now: number): Promise<boolean>;
+	releaseLease?(path: string, owner: string): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -228,6 +232,21 @@ export class IndexedSessionStorage implements SessionStorage {
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
+	acquireLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		if (!this.#backend.acquireLease) throw new Error("Session storage backend does not support leases");
+		return this.#backend.acquireLease(path, owner, expiresAt, now);
+	}
+
+	renewLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		if (!this.#backend.renewLease) throw new Error("Session storage backend does not support lease renewal");
+		return this.#backend.renewLease(path, owner, expiresAt, now);
+	}
+
+	releaseLease(path: string, owner: string): Promise<void> {
+		if (!this.#backend.releaseLease) throw new Error("Session storage backend does not support leases");
+		return this.#backend.releaseLease(path, owner);
+	}
+
 	async writeText(path: string, content: string): Promise<void> {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
@@ -323,7 +342,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
 
-		const artifactsDir = sessionPath.slice(0, -6);
+		const artifactsDir = sessionSidecarDir(sessionPath);
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;
 		const paths = [sessionPath];
 		for (const key of this.#index.keys()) {

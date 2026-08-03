@@ -1118,6 +1118,73 @@ describe("AgentSession concurrent prompt guard", () => {
 			await sessionB.dispose();
 		}
 	});
+
+	it("tracks asynchronous message-end extension handlers as pending custody work", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			streamFn: createMockModel({ handler: () => ({ content: ["Done"] }) }).stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-extension-custody.db"));
+		authStorages.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models-extension-custody.yml"));
+		const extensionRuntime = new ExtensionRuntime();
+		const handlerStarted = Promise.withResolvers<void>();
+		const handlerGate = Promise.withResolvers<void>();
+		const extension = await loadExtensionFromFactory(
+			pi => {
+				pi.on("message_end", async () => {
+					handlerStarted.resolve();
+					await handlerGate.promise;
+				});
+			},
+			tempDir,
+			new EventBus(),
+			extensionRuntime,
+			"delayed-message-end",
+		);
+		const extensionRunner = new ExtensionRunner(
+			[extension],
+			extensionRuntime,
+			tempDir,
+			SessionManager.inMemory(),
+			modelRegistry,
+		);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry,
+			extensionRunner,
+		});
+
+		agent.emitExternalEvent({ type: "message_end", message: createAssistantMessage("done") });
+		expect(session.hasPendingExtensionEvents).toBe(true);
+		await handlerStarted.promise;
+		handlerGate.resolve();
+		await session.waitForPendingExtensionEvents();
+		expect(session.hasPendingExtensionEvents).toBe(false);
+	});
+
+	it("rejects IRC delivery when the mode custody guard is closed", async () => {
+		await createSession();
+		const prompt = vi.spyOn(session.agent, "prompt");
+		session.setBackgroundAgentWorkGuard(() => {
+			throw new Error("run already sealed");
+		});
+
+		expect(() =>
+			session.deliverIrcMessage({
+				id: "irc-after-seal",
+				from: "peer",
+				to: "Main",
+				body: "continue",
+				ts: Date.now(),
+			}),
+		).toThrow("run already sealed");
+		expect(prompt).not.toHaveBeenCalled();
+	});
 });
 
 describe("AgentSession TTSR resume gate", () => {

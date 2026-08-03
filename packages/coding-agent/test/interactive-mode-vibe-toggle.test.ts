@@ -199,16 +199,23 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await entering;
 
 		expect(mode.vibeModeEnabled).toBe(false);
+		const lastMode = session.sessionManager
+			.getEntries()
+			.filter(entry => entry.type === "mode_change")
+			.at(-1);
+		expect(lastMode).toMatchObject({ type: "mode_change", mode: "goal" });
 		expect(submit).not.toHaveBeenCalled();
 	});
 
 	it("rolls back vibe mode when rebuilding tools fails", async () => {
 		vi.spyOn(session, "activateVibeTools").mockRejectedValue(new Error("vibe tool rebuild failed"));
+		const deactivate = vi.spyOn(session, "deactivateVibeTools");
 
 		await expect(mode.handleVibeModeCommand()).rejects.toThrow("vibe tool rebuild failed");
 
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getVibeModeState()).toBeUndefined();
+		expect(deactivate).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps a same-named non-built-in Todo tool unavailable in Vibe mode", async () => {

@@ -42,13 +42,8 @@ import {
 	stripRawOutputArtifactNotice,
 } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import {
-	capPreviewLines,
-	DEFAULT_TERMINAL_PREVIEW_LINES,
-	formatToolWorkingDirectory,
-	previewWindowRows,
-	replaceTabs,
-} from "./render-utils";
+import { DEFAULT_TERMINAL_PREVIEW_LINES } from "./render-constants";
+import { capPreviewLines, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
 import { extractLeadingCdTarget, tokenizeShellSegments } from "./shell-tokenize";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
