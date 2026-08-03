@@ -273,13 +273,13 @@ import {
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
-import { buildLlmUsageEvent } from "./measurement-events";
 import {
 	buildLaunchCompletionBatchMessage,
 	isLaunchCompletionOwner,
 	LAUNCH_COMPLETION_MESSAGE_TYPE,
 	type LaunchCompletionEntry,
 } from "./launch-completion";
+import { buildLlmUsageEvent } from "./measurement-events";
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,

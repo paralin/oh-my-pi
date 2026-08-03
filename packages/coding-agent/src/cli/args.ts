@@ -3,8 +3,8 @@
  */
 import { $env, APP_NAME, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import type { ScratchCompactionMethod } from "../config/scratch-compaction-method";
+import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
 import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {

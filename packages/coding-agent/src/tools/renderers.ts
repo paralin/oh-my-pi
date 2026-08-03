@@ -121,7 +121,9 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	},
 	todo: todoToolRenderer as ToolRenderer,
 	github: githubToolRenderer as ToolRenderer,
-	goal: goalToolRenderer as ToolRenderer,
+	get goal(): ToolRenderer {
+		return goalToolRenderer as ToolRenderer;
+	},
 	web_search: webSearchToolRenderer as ToolRenderer,
 	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,
 	vibe_send: createVibeToolRenderer("send") as ToolRenderer,

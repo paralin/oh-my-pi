@@ -77,8 +77,8 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
-import { buildCompactionMeasurement } from "./measurement-events";
 import { resolveCompactionStrategy } from "./compaction-strategy";
+import { buildCompactionMeasurement } from "./measurement-events";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {

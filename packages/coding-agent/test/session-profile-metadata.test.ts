@@ -34,7 +34,7 @@ describe("session profile metadata", () => {
 			account_uuid: ACCOUNT_UUID,
 			device_id: expect.stringMatching(/^[0-9a-f]{64}$/),
 		});
-		expect(profileMetadata).toEqual({ t: 120000, s: "context-full", z: "accurate" });
+		expect(profileMetadata).toEqual({ t: 120000, s: "scratch-handoff", z: "accurate" });
 		expect(String(metadata.user_id).length).toBeLessThan(256);
 	});
 
