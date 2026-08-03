@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Shell, PTY, Process, and Key Internals
 
 This document covers execution/process/terminal primitives in `@oh-my-pi/pi-natives`: `shell`, `pty`, `ps`, and `keys`, using the architecture terms from `docs/natives-architecture.md`.

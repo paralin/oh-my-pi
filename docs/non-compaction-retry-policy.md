@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Non-compaction auto-retry policy
 
 This document describes the standard API-error retry path coordinated by `AgentSession` and implemented by `TurnRecovery`.

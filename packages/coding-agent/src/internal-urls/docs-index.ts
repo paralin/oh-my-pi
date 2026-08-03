@@ -3,8 +3,9 @@
  *
  * Compiled binaries and the prepacked npm bundle inline a compressed index of the
  * docs (injected via `process.env.PI_DOCS_EMBED` at build time). The format is two lines:
- *   1. a plain JSON array of the sorted doc file names, and
- *   2. a base64 gzip blob of the index-aligned doc bodies (`string[]`).
+ *   1. a JSON header, `{ "files": string[], "maintainer": string[] }`, holding the
+ *      sorted doc file names and the subset of them written for a maintainer, and
+ *   2. a base64 gzip blob of the `files`-aligned doc bodies (`string[]`).
  * Listing/completion (`getDocFilenames`) parses only the small first line and
  * never inflates the blob; the bodies are gunzipped off the event loop (via the
  * async `node:zlib` threadpool) lazily, once, on the first actual read. When the
@@ -20,6 +21,7 @@ import { promisify } from "node:util";
 import { gunzip } from "node:zlib";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { Glob } from "bun";
+import { readDocAudience } from "./doc-audience";
 
 const docsEmbed = process.env.PI_DOCS_EMBED ?? "";
 
@@ -28,12 +30,20 @@ const gunzipAsync = promisify(gunzip);
 export interface DocsIndex {
 	/** Sorted documentation file names, relative to `docs/`. */
 	readonly filenames: readonly string[];
+	/** The subset of {@link filenames} whose pages declare `omp-audience: maintainer`. */
+	readonly maintainerFilenames: ReadonlySet<string>;
 	/** Resolve a doc body by path; inflates the embedded bodies off-thread, lazily, on first call. */
 	getBody(relativePath: string): Promise<string | undefined>;
 }
 
+/** First line of a populated embed. */
+interface DocsIndexHeader {
+	readonly files: string[];
+	readonly maintainer: string[];
+}
+
 /**
- * Decode a populated two-line embed (`<filenames JSON>\n<base64 gzip of bodies>`)
+ * Decode a populated two-line embed (`<header JSON>\n<base64 gzip of bodies>`)
  * into a lazily-inflating index, or `null` when there is no newline separator
  * (the empty placeholder, or a malformed payload — the caller decides which).
  * Reading `filenames` never touches the blob; the bodies are gunzipped off the
@@ -43,10 +53,12 @@ export interface DocsIndex {
 export function decodeDocsIndex(embed: string): DocsIndex | null {
 	const newline = embed.indexOf("\n");
 	if (newline === -1) return null;
-	const filenames = JSON.parse(embed.slice(0, newline)) as string[];
+	const header = JSON.parse(embed.slice(0, newline)) as DocsIndexHeader;
+	const filenames = header.files;
 	let bodies: Promise<Record<string, string>> | undefined;
 	return {
 		filenames,
+		maintainerFilenames: new Set(header.maintainer),
 		getBody(relativePath: string): Promise<string | undefined> {
 			bodies ??= (async () => {
 				const inflated = await gunzipAsync(Buffer.from(embed.slice(newline + 1), "base64"));
@@ -70,19 +82,22 @@ export function decodeDocsIndex(embed: string): DocsIndex | null {
 function readDocsFromDisk(): DocsIndex | null {
 	const docsDir = path.resolve(import.meta.dir, "../../../../docs");
 	const filenames: string[] = [];
+	const maintainerFilenames = new Set<string>();
 	const bodies: Record<string, string> = {};
 	try {
 		for (const relativePath of new Glob("**/*.md").scanSync(docsDir)) {
 			const normalized = relativePath.split(path.sep).join("/");
 			filenames.push(normalized);
-			bodies[normalized] = readFileSync(path.join(docsDir, relativePath), "utf8");
+			const body = readFileSync(path.join(docsDir, relativePath), "utf8");
+			bodies[normalized] = body;
+			if (readDocAudience(body) === "maintainer") maintainerFilenames.add(normalized);
 		}
 	} catch (err) {
 		if (isEnoent(err)) return null;
 		throw err;
 	}
 	filenames.sort();
-	return { filenames, getBody: relativePath => Promise.resolve(bodies[relativePath]) };
+	return { filenames, maintainerFilenames, getBody: relativePath => Promise.resolve(bodies[relativePath]) };
 }
 
 /**
@@ -146,9 +161,15 @@ function getIndex(): DocsIndex {
 	return index;
 }
 
-/** Sorted list of available documentation file names (relative to `docs/`). */
-export function getDocFilenames(): readonly string[] {
-	return getIndex().filenames;
+/**
+ * Sorted list of available documentation file names (relative to `docs/`).
+ * Pages marked `omp-audience: maintainer` are left out unless `includeMaintainer`
+ * is set.
+ */
+export function getDocFilenames(options?: { includeMaintainer?: boolean }): readonly string[] {
+	const { filenames, maintainerFilenames } = getIndex();
+	if (options?.includeMaintainer || maintainerFilenames.size === 0) return filenames;
+	return filenames.filter(filename => !maintainerFilenames.has(filename));
 }
 
 /** Resolve a documentation file's content, or `undefined` when not found. */

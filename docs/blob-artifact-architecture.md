@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Blob and artifact storage architecture
 
 This document describes how coding-agent stores large/binary payloads outside session JSONL, how truncated tool output is persisted, and how internal URLs (`artifact://`, `agent://`) resolve back to stored data.

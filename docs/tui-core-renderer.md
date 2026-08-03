@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # TUI core renderer — the append-only contract
 
 What you are dealing with before you touch the rendering engine. This is the

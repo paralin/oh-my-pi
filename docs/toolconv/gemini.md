@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Gemini Pythonic tool-calling format (`tool_code` / `default_api`)
 
 Tool-calling convention of Google's hosted **Gemini** models (current generation, incl. `gemini-3.5-flash` / `*-pro` / `*-preview`) and the **Gemma 3** open-weights family. Both drive tool use **entirely through prompt engineering** — there are **no dedicated special tokens**. The model emits each invocation as **Python source**: a call `default_api.<function_name>(<kwargs>)`, conventionally wrapped in `print(...)` and placed inside a fenced ```` ```tool_code ```` block; it reads results back from a ```` ```tool_outputs ```` block. Because the mechanism is plain text the model was post-trained to produce, the exact same syntax periodically leaks into ordinary output (surfaced by Vertex/AI-Studio as `finish_reason = MALFORMED_FUNCTION_CALL`) — that leak is the clearest public evidence of the format.

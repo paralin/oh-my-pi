@@ -407,6 +407,12 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined, credential: true },
 
+	// Pages marked `omp-audience: maintainer` document how OMP itself is built.
+	// They stay readable by exact path either way; this controls whether the
+	// `omp://` listing and completions offer them. Turn it off while working on
+	// OMP's own source.
+	"docs.hideMaintainer": { type: "boolean", default: true },
+
 	autoResume: {
 		type: "boolean",
 		default: false,

@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Architecture
 
 `@oh-my-pi/pi-natives` combines a JavaScript ESM loader with a Rust Node-API addon:

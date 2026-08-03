@@ -740,7 +740,7 @@ async function expandVirtualInternalResource(
 	ranges: readonly LineRange[] | undefined,
 ): Promise<VirtualSearchResource[]> {
 	if (OMP_ROOT_URL_RE.test(rawPath)) {
-		const completions = await internalRouter.complete("omp", "");
+		const completions = await internalRouter.complete("omp", "", context);
 		if (completions && completions.length > 0) {
 			const resources: VirtualSearchResource[] = [];
 			const seen = new Set<string>();

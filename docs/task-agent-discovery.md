@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Task Agent Discovery and Selection
 
 This document describes how the task subsystem discovers agent definitions, merges multiple sources, and resolves a requested agent at execution time.

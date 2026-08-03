@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Gemma 4 tool-calling format (token-delimited `call:NAME{…}`)
 
 Tool-calling convention of Google's **Gemma 4** open-weights family (`google/gemma-4-*-it`). It is a clean break from the prompt-engineered Pythonic `tool_code` form used by Gemma 3 and hosted Gemini (see `gemini.md`): Gemma 4 introduces **dedicated special tokens** and a compact **token-delimited brace syntax**. Calls and responses each get their own paired markers, and every string value is wrapped in a `<|"|>` token rather than ASCII quotes. The model emits one call as `<|tool_call>call:NAME{key:value,…}<tool_call|>`; the developer parses it, runs the tool, and appends `<|tool_response>response:NAME{output:…}<tool_response|>`.

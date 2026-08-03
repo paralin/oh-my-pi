@@ -3,24 +3,27 @@ import { gzipSync } from "node:zlib";
 import { decodeDocsIndex } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
 import { buildDocsIndexPayload } from "../../scripts/generate-docs-index";
 
-function embed(files: readonly string[], bodies: readonly string[]): string {
-	return `${JSON.stringify(files)}\n${Buffer.from(gzipSync(Buffer.from(JSON.stringify(bodies)))).toString("base64")}`;
+function embed(files: readonly string[], maintainer: readonly string[], bodies: readonly string[]): string {
+	const header = JSON.stringify({ files, maintainer });
+	return `${header}\n${Buffer.from(gzipSync(Buffer.from(JSON.stringify(bodies)))).toString("base64")}`;
 }
 
 const files = ["agent.md", "tools/read.md"];
+const maintainer = ["tools/read.md"];
 const bodies = ["agent body", "read body"];
-const embedPayload = embed(files, bodies);
+const embedPayload = embed(files, maintainer, bodies);
 
 // The embed path only runs in compiled binaries / the npm bundle; dev tests
 // otherwise exercise the disk fallback (empty placeholder), so a regression in
-// the two-line `<filenames>\n<gzip bodies>` parsing would ship broken `omp://`
+// the two-line `<header>\n<gzip bodies>` parsing would ship broken `omp://`
 // docs undetected. These cover the populated-embed decode directly.
 describe("decodeDocsIndex (embedded docs path)", () => {
 	it("lists filenames from the first line without inflating the blob", () => {
 		// A deliberately corrupt blob: filenames must resolve anyway, proving the
 		// listing path never decodes the gzip body.
-		const index = decodeDocsIndex(`${JSON.stringify(files)}\n@@@not-a-valid-gzip-blob@@@`);
+		const index = decodeDocsIndex(`${JSON.stringify({ files, maintainer })}\n@@@not-a-valid-gzip-blob@@@`);
 		expect(index?.filenames).toEqual(files);
+		expect([...(index?.maintainerFilenames ?? [])]).toEqual(maintainer);
 	});
 
 	it("resolves bodies by index-aligned path, lazily, on first read", async () => {

@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # ERRATA — GPT-5 Harmony-Header Leakage
 
 Historical research note, not a current runtime contract. The statistics below

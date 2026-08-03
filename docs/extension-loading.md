@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Extension Loading (TypeScript/JavaScript Modules)
 
 This document covers how the coding agent discovers and loads extension modules at startup. Scanned native/configured directories auto-discover `.ts` and `.js`; explicitly named files and installed-plugin manifest entries may also use `.mjs` and `.cjs`.

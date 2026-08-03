@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Resolution devices runtime
 
 Pending previews and plan approval do not use a `resolve` tool. They finalize through plain-text `write` calls to virtual `xd://` devices implemented in `packages/coding-agent/src/tools/resolve.ts`:

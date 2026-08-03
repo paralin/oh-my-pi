@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # pi-native auth-gateway transport
 
 `pi-native` is the lossless transport between a pi-ai client and an

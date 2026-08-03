@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Install ID
 
 A persistent per-install UUID shared across sessions and profiles. It supplies a stable installation identity where provider compatibility protocols, account-scoped device metadata, auth-broker usage reporting, or deduplicated diagnostic pushes require one. The UUID itself is random; it is not derived from hostname, username, hardware, or account data.

@@ -7,7 +7,7 @@ import {
 	type SlashCommand,
 } from "@oh-my-pi/pi-tui";
 import { formatKeyHints, type KeybindingsManager } from "../config/keybindings";
-import { isSettingsInitialized, settings } from "../config/settings";
+import { isSettingsInitialized, type Settings, settings } from "../config/settings";
 import { applyEmojiCompletion, getEmojiSuggestions, isEmojiPrefix, tryEmojiInlineReplace } from "./emoji-autocomplete";
 import { getGithubRefContext, getGithubRefSuggestions } from "./github-ref-autocomplete";
 import {
@@ -32,6 +32,7 @@ interface PromptActionAutocompleteItem extends AutocompleteItem {
 interface PromptActionAutocompleteOptions {
 	commands: SlashCommand[];
 	basePath: string;
+	settings?: Settings;
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
@@ -130,12 +131,19 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#baseProvider: CombinedAutocompleteProvider;
 	#actions: PromptActionDefinition[];
 	#basePath: string;
+	#settings: Settings | undefined;
 
-	constructor(commands: SlashCommand[], basePath: string, actions: PromptActionDefinition[]) {
+	constructor(
+		commands: SlashCommand[],
+		basePath: string,
+		actions: PromptActionDefinition[],
+		sessionSettings?: Settings,
+	) {
 		this.#commands = commands;
 		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath);
 		this.#basePath = basePath;
 		this.#actions = actions;
+		this.#settings = sessionSettings;
 	}
 
 	async getSuggestions(
@@ -163,7 +171,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 				// tokens such as `#copy` literal.
 				const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
 				if (githubRefSuggestions) return githubRefSuggestions;
-				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
+				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath, this.#settings);
 			}
 		}
 
@@ -193,7 +201,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			}
 		}
 
-		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor, this.#basePath);
+		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor, this.#basePath, this.#settings);
 		if (urlSuggestions) return urlSuggestions;
 
 		if (!isSettingsInitialized() || settings.get("emojiAutocomplete")) {
@@ -318,5 +326,5 @@ export function createPromptActionAutocompleteProvider(
 		},
 	];
 
-	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions);
+	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions, options.settings);
 }

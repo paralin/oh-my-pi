@@ -93,15 +93,16 @@ export function extractInternalUrlContext(textBeforeCursor: string): InternalUrl
 export async function getInternalUrlSuggestions(
 	textBeforeCursor: string,
 	cwd?: string,
+	settings?: unknown,
 ): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 	const ctx = extractInternalUrlContext(textBeforeCursor);
 	if (!ctx) return null;
 
-	const candidates = await InternalUrlRouter.instance().complete(
-		ctx.scheme,
-		ctx.query,
-		cwd === undefined ? undefined : { cwd },
-	);
+	const context =
+		cwd === undefined && settings === undefined
+			? undefined
+			: { ...(cwd === undefined ? {} : { cwd }), ...(settings === undefined ? {} : { settings }) };
+	const candidates = await InternalUrlRouter.instance().complete(ctx.scheme, ctx.query, context);
 	if (!candidates || candidates.length === 0) return null;
 
 	const query = ctx.query.toLowerCase();

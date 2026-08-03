@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # TTSR Injection Lifecycle
 
 This document covers the current Time Traveling Stream Rules (TTSR) runtime path from rule discovery to stream interruption, retry injection, extension notifications, and session-state handling.

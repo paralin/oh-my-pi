@@ -4,6 +4,7 @@ import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { resetActiveRulesForTests, setActiveRules } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { SSHHost } from "@oh-my-pi/pi-coding-agent/capability/ssh";
 import type { CapabilityResult } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { resetActiveSkillsForTests, setActiveSkills } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
@@ -128,6 +129,15 @@ describe("internal-url-autocomplete", () => {
 			const suggestions = await getInternalUrlSuggestions("ssh://", "/tmp/proj");
 			expect(suggestions?.items.map(i => i.value)).toEqual(["ssh://web1"]);
 			expect(spy.mock.calls[0]?.[1]).toEqual({ cwd: "/tmp/proj" });
+		});
+
+		it("threads session settings through omp completion", async () => {
+			const suggestions = await getInternalUrlSuggestions(
+				"omp://natives",
+				"/tmp/proj",
+				Settings.isolated({ "docs.hideMaintainer": false }),
+			);
+			expect(suggestions?.items.map(item => item.value)).toContain("omp://natives-architecture.md");
 		});
 
 		it("percent-encodes a configured ssh host with reserved characters while matching a raw query", async () => {

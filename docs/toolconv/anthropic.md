@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Anthropic Claude tool use (Messages API content blocks)
 
 Anthropic's Claude is a closed, hosted model family; there are no released weights and therefore no `--tool-call-parser` flag to set. The canonical tool-calling convention is the **Messages API** (`POST /v1/messages`, header `anthropic-version: 2023-06-01`): tools are advertised in a top-level `tools` array, the model returns structured `tool_use` **content blocks** with `stop_reason: "tool_use"`, and you feed results back as `tool_result` content blocks inside a `user` message. Tool use is "enabled" simply by including the `tools` parameter (optionally with `tool_choice`); the API then injects a tool-use system prompt and parses the model's output back into JSON blocks for you. This applies to all current models (Claude Opus / Sonnet / Haiku 3.x, 4, 4.x) and is mirrored by gateways such as LiteLLM and by third-party Claude-compatible servers.

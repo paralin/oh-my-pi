@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Filesystem scan cache architecture contract
 
 This document defines the shared Rust filesystem scan cache implemented by `crates/pi-walker` and consumed by native discovery APIs exposed to `packages/coding-agent`.

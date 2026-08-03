@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Plugin manager and installer plumbing
 
 This document describes how `omp plugin` npm/git/link and marketplace operations mutate plugin state on disk and become runtime capabilities. Marketplace installs keep their own registries and cache, then register the cached plugin through the same `node_modules` and `omp-plugins.lock.json` runtime surfaces used by npm/git/link installs; see `docs/marketplace.md`.

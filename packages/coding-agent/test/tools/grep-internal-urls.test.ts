@@ -336,6 +336,22 @@ describe("GrepTool internal URL resolution", () => {
 		expect(text).toContain("Grep file contents with a regex across files");
 	});
 
+	it("uses session settings when expanding omp:// root", async () => {
+		const session = createSession({
+			settings: Settings.isolated({
+				"grep.contextBefore": 0,
+				"grep.contextAfter": 0,
+				"docs.hideMaintainer": false,
+			}),
+		});
+		const result = await new GrepTool(session).execute("test-call", {
+			pattern: "Natives Architecture",
+			path: "omp://",
+		});
+
+		expect(getResultText(result)).toContain("# omp://natives-architecture.md");
+	});
+
 	it("expands omp://docs to grep embedded documentation files", async () => {
 		const session = createSession();
 		const tool = new GrepTool(session);

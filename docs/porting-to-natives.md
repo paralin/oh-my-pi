@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Porting Hot Paths to `pi-natives`
 
 This is the contributor path for moving a measured JS/TS hot path into `crates/pi-natives` and exposing it through `@oh-my-pi/pi-natives`.

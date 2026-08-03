@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Gemini Manifest Extensions (`gemini-extension.json`)
 
 This document covers how the coding-agent discovers and parses Gemini-style manifest extensions (`gemini-extension.json`) into the `extensions` capability.
