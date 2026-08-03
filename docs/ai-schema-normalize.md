@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # AI tool-schema normalization
 
 `@oh-my-pi/pi-ai` exposes one unified schema normalizer that providers consume

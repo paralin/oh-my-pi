@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # ArkType Guide (for migrating Zod → ArkType in this repo)
 
 Pinned to **arktype 2.2.0** (installed). Verified against the installed `.d.ts` and runtime this

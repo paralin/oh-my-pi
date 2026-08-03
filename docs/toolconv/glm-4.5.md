@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # GLM-4.5 / GLM-4.6 tool-calling format
 
 Native tool-calling convention of Zhipu AI / Z.ai's **GLM-4.5** family (`zai-org/GLM-4.5` 355B-A32B and `zai-org/GLM-4.5-Air` 106B-A12B, `model_type: "glm4_moe"`), shared byte-for-byte by **GLM-4.6**. Unlike the JSON-in-a-tag conventions used by most families, GLM emits each tool call as an **XML-like** block: `<tool_call>{name}` followed by alternating `<arg_key>`/`<arg_value>` element pairs, closed by `</tool_call>`. The prompt is a GLM-style sequence opened by `[gMASK]<sop>` with turn markers `<|system|>`, `<|user|>`, `<|assistant|>`, `<|observation|>`. An inference server turns the raw stream into OpenAI-style `tool_calls` with a parser plus a reasoning parser: both vLLM and SGLang expose `--tool-call-parser glm45 --reasoning-parser glm45` (vLLM additionally needs `--enable-auto-tool-choice`). Tool calling and reasoning are driven entirely by the bundled `chat_template.jinja`; thinking mode is on by default and is disabled per-request with `chat_template_kwargs={"enable_thinking": False}`.

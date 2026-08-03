@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Native Crates
 
 Contributor-facing map of the Rust crates under `crates/`. These crates back

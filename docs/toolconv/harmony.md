@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # OpenAI Harmony response format
 
 Harmony is the response format OpenAI trained its open-weight `gpt-oss` models on (`gpt-oss-20b`, `gpt-oss-120b`, released August 2025). It defines the conversation envelope, the multi-channel reasoning/answer separation, and the function-calling wire syntax. The models will not work correctly if prompted without it. The format deliberately mirrors the OpenAI *Responses* API (roles, channels, recipients) rather than the older Chat Completions shape.

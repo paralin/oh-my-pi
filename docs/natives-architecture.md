@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Architecture
 
 `@oh-my-pi/pi-natives` is a two-layer package around an ESM loader:

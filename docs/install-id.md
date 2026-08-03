@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Install ID
 
 A persistent per-install UUID that identifies a single oh-my-pi installation across sessions. Used as a stable correlation key for server-side dedup of telemetry-style pushes (currently the auto-QA grievance flush from `report_tool_issue`).

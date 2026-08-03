@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Provider streaming internals
 
 This document explains how token/tool streaming is normalized in `@oh-my-pi/pi-ai`, then propagated through `@oh-my-pi/pi-agent-core` and `coding-agent` session events.

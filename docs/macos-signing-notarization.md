@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # macOS signing & notarization
 
 The compiled macOS `omp` binaries shipped on GitHub Releases are signed with a

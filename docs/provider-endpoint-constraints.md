@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Provider endpoint constraints
 
 Provider integrations are not interchangeable just because they speak an

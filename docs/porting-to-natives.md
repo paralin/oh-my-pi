@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Porting to pi-natives (N-API) — Field Notes
 
 This is a practical guide for moving hot paths into `crates/pi-natives` and wiring them through the generated native package entrypoint. It exists to avoid the same failures happening twice.

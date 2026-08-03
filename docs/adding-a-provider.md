@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Adding a provider
 
 A provider is described in two halves:

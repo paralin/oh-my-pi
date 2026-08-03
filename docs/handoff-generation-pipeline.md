@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # `/handoff` generation pipeline
 
 This document describes how the coding-agent implements `/handoff`: trigger path, oneshot generation, session switch, context reinjection, persistence, and UI behavior.

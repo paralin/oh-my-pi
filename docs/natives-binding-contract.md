@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Binding Contract (JavaScript/TypeScript Side)
 
 This document defines the JS/TS contract between `@oh-my-pi/pi-natives` callers and the loaded N-API addon.

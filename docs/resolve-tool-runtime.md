@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Resolution devices runtime
 
 Pending previews and plan approval no longer use a `resolve` tool. They finalize through three plain-text writes handled by `packages/coding-agent/src/tools/resolve.ts`:

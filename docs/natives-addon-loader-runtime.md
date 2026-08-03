@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Addon Loader Runtime
 
 This document covers the runtime loader shipped by `@oh-my-pi/pi-natives`: how `native/index.js` decides which `.node` file to require, how compiled-binary embedded payloads are extracted, and what startup failures report.
