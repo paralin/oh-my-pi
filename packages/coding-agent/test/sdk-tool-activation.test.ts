@@ -8,14 +8,16 @@ import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	type CreateAgentSessionOptions,
 	type CustomTool,
@@ -59,6 +61,19 @@ const sdkCustomTool = {
 		return { content: [{ type: "text", text: "sdk custom" }] };
 	},
 } satisfies CustomTool;
+
+const shadowGoalExtension: ExtensionFactory = pi => {
+	pi.registerTool({
+		name: "goal",
+		label: "Shadow Goal",
+		description: "Extension tool sharing the built-in goal tool name.",
+		parameters: type({}),
+		defaultInactive: true,
+		async execute() {
+			return { content: [{ type: "text", text: "shadow goal" }] };
+		},
+	});
+};
 
 describe("createAgentSession defaultInactive tool activation", () => {
 	const tempDirs: string[] = [];
@@ -1552,6 +1567,127 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).toContain("yield");
 		} finally {
 			await session.dispose();
+		}
+	});
+
+	it("keeps the goal tool active before a goal exists", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toContain("goal");
+			const goalTool = session.agent.state.tools.find(tool => tool.name === "goal");
+			expect(goalTool).toBeDefined();
+
+			await goalTool!.execute("goal-set", {
+				op: "set",
+				objective: "Ship the goal tool availability fix.",
+			});
+
+			expect(session.getGoalModeState()?.enabled).toBe(true);
+			expect(session.getGoalModeState()?.goal.objective).toBe("Ship the goal tool availability fix.");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("blocks goal starts while the real SDK session has an incompatible mode", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+		});
+
+		try {
+			session.setPlanModePaused(true);
+			const goalTool = session.agent.state.tools.find(tool => tool.name === "goal");
+			expect(goalTool).toBeDefined();
+
+			for (const op of ["create", "set", "resume"] as const) {
+				await expect(
+					goalTool!.execute(`goal-${op}`, {
+						op,
+						objective: "Must not start during a paused plan.",
+					}),
+				).rejects.toThrow(/plan mode/i);
+			}
+
+			session.setPlanModePaused(false);
+			session.setVibeModeState({ enabled: true });
+			for (const op of ["create", "set", "resume"] as const) {
+				await expect(
+					goalTool!.execute(`goal-vibe-${op}`, {
+						op,
+						objective: "Must not start during vibe mode.",
+					}),
+				).rejects.toThrow(/vibe mode/i);
+			}
+			expect(session.getGoalModeState()).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("force-includes the goal tool into explicit toolNames lists", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "goal"]));
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("does not force-activate a defaultInactive extension tool shadowing goal", async () => {
+		const tempDir = makeTempDir();
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [shadowGoalExtension],
+			toolNames: ["read"],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("goal");
+			expect(session.getActiveToolNames()).toContain("read");
+			expect(session.getActiveToolNames()).not.toContain("goal");
+			expect(session.systemPrompt.join("\n")).not.toContain("shadow goal");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("preserves an active extension tool shadowing goal in plan mode", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			extensions: [shadowGoalExtension],
+			toolNames: ["read", "goal"],
+		});
+		await Settings.init({ inMemory: true, cwd: tempDir });
+		initTheme();
+		const mode = new InteractiveMode(session, "test");
+
+		try {
+			expect(session.hasBuiltInTool("goal")).toBe(false);
+			expect(session.getActiveToolNames()).toContain("goal");
+
+			await mode.handlePlanModeCommand();
+
+			expect(mode.planModeEnabled).toBe(true);
+			expect(session.getActiveToolNames()).toContain("goal");
+		} finally {
+			mode.stop();
+			await session.dispose();
+			resetSettingsForTest();
 		}
 	});
 

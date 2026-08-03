@@ -36,6 +36,14 @@ export const HIDDEN_TOOL_NAMES = ["yield", "goal", "think"] as const;
 
 export type HiddenToolName = (typeof HIDDEN_TOOL_NAMES)[number];
 
+/**
+ * Explicit `toolNames` value that requests no built-in tools (used by helper
+ * sessions like the agent-spec generator and the agentic commit helper). It
+ * matches no real tool, so it resolves to an empty active set; force-adds such
+ * as `goal` must skip a list that only asks for it.
+ */
+export const NO_TOOLS_SENTINEL = "__none__";
+
 const LEGACY_BUILTIN_TOOL_NAME_ALIASES: ReadonlyMap<string, BuiltinToolName> = new Map([
 	["search", "grep"],
 	["find", "glob"],

@@ -632,6 +632,10 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(harness.mode.goalModeEnabled).toBe(false);
 		expect(harness.mode.goalModePaused).toBe(false);
 		expect(harness.session.getGoalModeState()).toBeUndefined();
+		// The restored active tool set is rebuilt from #goalModePreviousTools via
+		// setActiveToolsByName without re-running createTools, so goal must survive
+		// there directly (not only in the re-derived toolNamesFor set below).
+		expect(harness.session.getActiveToolNames()).toContain("goal");
 		expect(await toolNamesFor(harness)).toContain("goal");
 		expect(appendCustomEntry).toHaveBeenCalledWith(
 			"goal-completed",

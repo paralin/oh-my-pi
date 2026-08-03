@@ -4,11 +4,12 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
+import { sanitizeStatusText } from "../../modes/shared";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import goalDescription from "../../prompts/tools/goal.md" with { type: "text" };
 import { formatDuration } from "../../slash-commands/helpers/format";
 import type { ToolSession } from "../../tools";
-import { formatErrorDetail, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { formatErrorDetail, replaceTabs, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { ToolError } from "../../tools/tool-errors";
 import { framedBlock, renderStatusLine, truncateToWidth } from "../../tui";
 import { completionBudgetReport, remainingTokens } from "../runtime";
@@ -78,25 +79,23 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 			throw new ToolError("Goal mode is not active.");
 		}
 
+		const startsGoal = params.op === "create" || params.op === "set" || params.op === "resume";
+		const assertCanStart = () => this.#assertCanStartGoal();
+		if (startsGoal) assertCanStart();
+
 		let response: GoalToolResponse;
 
 		if (params.op === "create") {
-			const created = await runtime.createGoal(validateObjectiveParams(params, "create"));
+			const created = await runtime.createGoal(validateObjectiveParams(params, "create"), assertCanStart);
 			response = buildGoalToolResponse(created.goal);
 		} else if (params.op === "set") {
-			const state = this.#session.getGoalModeState?.();
-			if (state?.goal && state.goal.status !== "dropped" && state.goal.status !== "complete") {
-				const updated = await runtime.replaceGoal(validateObjectiveParams(params, "set"));
-				response = buildGoalToolResponse(updated.goal);
-			} else {
-				const created = await runtime.createGoal(validateObjectiveParams(params, "set"));
-				response = buildGoalToolResponse(created.goal);
-			}
+			const updated = await runtime.setGoal(validateObjectiveParams(params, "set"), assertCanStart);
+			response = buildGoalToolResponse(updated.goal);
 		} else if (params.op === "get") {
 			const state = this.#session.getGoalModeState?.();
 			response = buildGoalToolResponse(state?.goal ?? null);
 		} else if (params.op === "resume") {
-			const resumed = await runtime.resumeGoal();
+			const resumed = await runtime.resumeGoal(assertCanStart);
 			response = buildGoalToolResponse(resumed.goal);
 		} else if (params.op === "drop") {
 			const dropped = await runtime.dropGoal();
@@ -129,6 +128,15 @@ export class GoalTool implements AgentTool<typeof goalSchema, GoalToolDetails> {
 				completionBudgetReport: response.completionBudgetReport,
 			},
 		};
+	}
+
+	#assertCanStartGoal(): void {
+		if (this.#session.getPlanModeState?.()?.enabled || this.#session.isPlanModePaused?.()) {
+			throw new ToolError("Exit plan mode before starting or resuming a goal.");
+		}
+		if (this.#session.getVibeModeState?.()?.enabled) {
+			throw new ToolError("Exit vibe mode before starting or resuming a goal.");
+		}
 	}
 }
 
@@ -174,8 +182,8 @@ export const goalToolRenderer = {
 		const description = describeOp(args.op);
 		const meta: string[] = [];
 		const trimmedObjective = args.objective?.trim();
-		if (args.op === "create" && trimmedObjective) {
-			const objective = truncateToWidth(trimmedObjective, TRUNCATE_LENGTHS.TITLE);
+		if ((args.op === "create" || args.op === "set") && trimmedObjective) {
+			const objective = truncateToWidth(replaceTabs(sanitizeStatusText(trimmedObjective)), TRUNCATE_LENGTHS.TITLE);
 			meta.push(uiTheme.italic(uiTheme.fg("muted", `"${objective}"`)));
 		}
 		return new Text(renderStatusLine({ icon: "pending", title: "Goal", description, meta }, uiTheme), 0, 0);
@@ -223,7 +231,7 @@ export const goalToolRenderer = {
 		);
 
 		const lines: string[] = [];
-		const objectiveText = truncateToWidth(goal.objective.trim(), TRUNCATE_LENGTHS.LONG);
+		const objectiveText = truncateToWidth(replaceTabs(goal.objective.trim()), TRUNCATE_LENGTHS.LONG);
 		lines.push(uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`)));
 
 		const used = formatNumber(goal.tokensUsed);

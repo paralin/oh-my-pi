@@ -113,6 +113,7 @@ describe("AgentSession plan-mode convergence", () => {
 			sideResponses?: MockResponse[];
 			planYolo?: boolean;
 			rebuildGate?: { fail: boolean };
+			includeGoal?: boolean;
 		},
 	): Promise<PlanHarness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -121,6 +122,7 @@ describe("AgentSession plan-mode convergence", () => {
 		const askTool = makeTool("ask");
 		const writeTool = makeTool("write");
 		const readTool = makeTool("read");
+		const goalTool = makeTool("goal");
 
 		const mock = createMockModel({ responses });
 		const agent = new Agent({
@@ -130,7 +132,9 @@ describe("AgentSession plan-mode convergence", () => {
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: options?.planYolo ? [readTool] : [askTool, writeTool, readTool],
+				tools: options?.planYolo
+					? [readTool, ...(options.includeGoal ? [goalTool] : [])]
+					: [askTool, writeTool, readTool],
 				messages: [],
 			},
 			streamFn: mock.stream,
@@ -162,8 +166,9 @@ describe("AgentSession plan-mode convergence", () => {
 				["ask", askTool],
 				["write", writeTool],
 				["read", readTool],
+				...(options?.includeGoal ? ([["goal", goalTool]] as const) : []),
 			]),
-			builtInToolNames: ["ask", "write", "read"],
+			builtInToolNames: ["ask", "write", "read", ...(options?.includeGoal ? ["goal"] : [])],
 			advisorTools: [],
 			advisorStreamFn,
 			sideStreamFn,
@@ -345,6 +350,16 @@ describe("AgentSession plan-mode convergence", () => {
 
 		expect(harness.session.getPlanModeState()).toBeUndefined();
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
+	});
+
+	it("removes the built-in goal tool from PlanYolo", async () => {
+		const harness = await createPlanSession([{ content: ["planning"] }], { planYolo: true, includeGoal: true });
+
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+
+		expect(harness.session.getActiveToolNames()).toContain("write");
+		expect(harness.session.getActiveToolNames()).not.toContain("goal");
 	});
 
 	it("keeps PlanYolo retryable when pre-plan tool restoration fails", async () => {

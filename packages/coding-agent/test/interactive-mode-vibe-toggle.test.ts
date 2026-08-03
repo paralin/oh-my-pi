@@ -161,6 +161,56 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 	});
 
+	it("publishes vibe mode before rebuilding tools", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const activateVibeTools = session.activateVibeTools.bind(session);
+		vi.spyOn(session, "activateVibeTools").mockImplementation(async toolNames => {
+			started.resolve();
+			await release.promise;
+			await activateVibeTools(toolNames);
+		});
+
+		const entering = mode.handleVibeModeCommand();
+		await started.promise;
+
+		expect(session.getVibeModeState()).toEqual({ enabled: true });
+
+		release.resolve();
+		await entering;
+	});
+
+	it("does not submit a vibe prompt when a goal races tool activation", async () => {
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const activateVibeTools = session.activateVibeTools.bind(session);
+		vi.spyOn(session, "activateVibeTools").mockImplementation(async toolNames => {
+			started.resolve();
+			await release.promise;
+			await activateVibeTools(toolNames);
+		});
+		const submit = vi.fn();
+		mode.onInputCallback = submit;
+
+		const entering = mode.handleVibeModeCommand("draft the implementation");
+		await started.promise;
+		await session.goalRuntime.createGoal({ objective: "Ship the release", tokenBudget: 100 });
+		release.resolve();
+		await entering;
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(submit).not.toHaveBeenCalled();
+	});
+
+	it("rolls back vibe mode when rebuilding tools fails", async () => {
+		vi.spyOn(session, "activateVibeTools").mockRejectedValue(new Error("vibe tool rebuild failed"));
+
+		await expect(mode.handleVibeModeCommand()).rejects.toThrow("vibe tool rebuild failed");
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
 	it("keeps a same-named non-built-in Todo tool unavailable in Vibe mode", async () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected active model");

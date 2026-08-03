@@ -147,6 +147,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		process.stderr.write(
 			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
 		);
+
 	}
 
 	// Always subscribe to enable session persistence via _handleAgentEvent

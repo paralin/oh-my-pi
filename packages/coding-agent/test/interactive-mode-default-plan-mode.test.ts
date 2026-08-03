@@ -142,6 +142,141 @@ describe("InteractiveMode plan.defaultOnStartup", () => {
 		expect(session?.getActiveToolNames()).toContain("read");
 	});
 
+	it("publishes plan mode before rebuilding tools", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const setActiveToolsByName = session!.setActiveToolsByName.bind(session!);
+		vi.spyOn(session!, "setActiveToolsByName").mockImplementation(async toolNames => {
+			started.resolve();
+			await release.promise;
+			await setActiveToolsByName(toolNames);
+		});
+
+		const entering = created.init({ suppressWelcomeIntro: true });
+		await started.promise;
+
+		expect(session?.getPlanModeState()).toMatchObject({ enabled: true, planFilePath: "local://PLAN.md" });
+
+		release.resolve();
+		await entering;
+	});
+
+	it("preserves a goal journal entry that races plan tool activation", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const setActiveToolsByName = session!.setActiveToolsByName.bind(session!);
+		vi.spyOn(session!, "setActiveToolsByName").mockImplementation(async toolNames => {
+			started.resolve();
+			await release.promise;
+			await setActiveToolsByName(toolNames);
+		});
+		const appendModeChange = vi.spyOn(session!.sessionManager, "appendModeChange");
+
+		const entering = created.init({ suppressWelcomeIntro: true });
+		await started.promise;
+		await session!.goalRuntime.createGoal({ objective: "Ship the release", tokenBudget: 100 });
+		release.resolve();
+		await entering;
+
+		const modes = appendModeChange.mock.calls.map(([mode]) => mode);
+		expect(modes.at(-1)).toBe("goal");
+		expect(modes).not.toContain("none");
+		expect(created.planModeEnabled).toBe(false);
+	});
+
+	it("does not submit a plan prompt when a goal races tool activation", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": false, "compaction.enabled": false }));
+		const started = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const setActiveToolsByName = session!.setActiveToolsByName.bind(session!);
+		vi.spyOn(session!, "setActiveToolsByName").mockImplementation(async toolNames => {
+			started.resolve();
+			await release.promise;
+			await setActiveToolsByName(toolNames);
+		});
+		const submit = vi.fn();
+		created.onInputCallback = submit;
+
+		const entering = created.handlePlanModeCommand("draft the plan");
+		await started.promise;
+		await session!.goalRuntime.createGoal({ objective: "Ship the release", tokenBudget: 100 });
+		release.resolve();
+		await entering;
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(submit).not.toHaveBeenCalled();
+	});
+
+	it("publishes paused plan state before restoring normal tools", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		await created.init({ suppressWelcomeIntro: true });
+		const setActiveToolsByName = session!.setActiveToolsByName.bind(session!);
+		let pausedDuringRestore = false;
+		let sessionPausedDuringRestore = false;
+		vi.spyOn(session!, "setActiveToolsByName").mockImplementation(async toolNames => {
+			pausedDuringRestore = created.planModePaused;
+			sessionPausedDuringRestore = session!.isPlanModePaused();
+			await setActiveToolsByName(toolNames);
+		});
+
+		await created.handlePlanModeCommand();
+
+		expect(pausedDuringRestore).toBe(true);
+		expect(sessionPausedDuringRestore).toBe(true);
+		expect(created.planModePaused).toBe(true);
+	});
+
+	it("restores paused plan state when a goal appears during re-entry", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		expect(created.planModePaused).toBe(true);
+		expect(session!.isPlanModePaused()).toBe(true);
+		let reads = 0;
+		vi.spyOn(session!, "getGoalModeState").mockImplementation(() => {
+			reads += 1;
+			return reads === 1 ? undefined : ({ enabled: true } as never);
+		});
+
+		await created.handlePlanModeCommand("continue");
+
+		expect(created.planModePaused).toBe(true);
+		expect(session!.isPlanModePaused()).toBe(true);
+	});
+
+	it("rolls back plan mode when rebuilding tools fails", async () => {
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			rebuildGate: { fail: true },
+		});
+
+		await expect(created.init({ suppressWelcomeIntro: true })).rejects.toThrow("rebuild failed");
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePlanFilePath).toBeUndefined();
+		expect(session?.getPlanModeState()).toBeUndefined();
+	});
+
+	it("restores paused plan mode when re-entry tool rebuilding fails", async () => {
+		const rebuildGate = { fail: false };
+		const writeTool = makeTool("write");
+		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }), {
+			rebuildGate,
+			extraRegistryTools: [writeTool],
+			builtInToolNames: ["read", "write"],
+		});
+		await created.init({ suppressWelcomeIntro: true });
+		await created.handlePlanModeCommand();
+		expect(created.planModePaused).toBe(true);
+		rebuildGate.fail = true;
+
+		await expect(created.handlePlanModeCommand("continue")).rejects.toThrow("rebuild failed");
+
+		expect(created.planModeEnabled).toBe(false);
+		expect(created.planModePaused).toBe(true);
+		expect(session?.getPlanModeState()).toBeUndefined();
+	});
 	it("activates write when entering plan mode even if it was hidden by discoveryMode (issue #3165)", async () => {
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
 		// `write` and refine it with `edit`. Under `tools.discoveryMode === "all"`

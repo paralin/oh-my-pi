@@ -52,7 +52,14 @@ function cloneEvent(event: GoalRuntimeEvent): GoalRuntimeEvent {
 	return { ...event };
 }
 
-function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage; now?: number } = {}) {
+function createHarness(
+	initial: {
+		state?: GoalModeState;
+		usage?: GoalTokenUsage;
+		now?: number;
+		onEmit?: (event: GoalRuntimeEvent) => Promise<void>;
+	} = {},
+) {
 	let state = cloneState(initial.state);
 	let usage = createUsage(initial.usage);
 	let now = initial.now ?? 0;
@@ -68,6 +75,7 @@ function createHarness(initial: { state?: GoalModeState; usage?: GoalTokenUsage;
 		getCurrentUsage: () => createUsage(usage),
 		emit: async event => {
 			events.push(cloneEvent(event));
+			await initial.onEmit?.(event);
 		},
 		persist: (mode, persistedState) => {
 			persists.push({ mode, state: cloneState(persistedState) });
@@ -415,7 +423,27 @@ describe("goal runtime", () => {
 		expect(harness.persists.at(-1)?.state?.goal.objective).toBe("Second");
 	});
 
-	it("replaces a paused goal with a fresh active goal", async () => {
+	it("preserves usage flushed while setting an active goal", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ objective: "Existing", tokenBudget: 100, tokensUsed: 3 }),
+			},
+		});
+
+		harness.runtime.onTurnStart("turn-1", createUsage());
+		harness.advance(1_000);
+		harness.setUsage({ input: 12 });
+
+		const next = await harness.runtime.setGoal({ objective: "Second", tokenBudget: 20 });
+
+		expect(next.goal.status).toBe("active");
+		expect(next.goal.tokensUsed).toBe(15);
+		expect(next.goal.timeUsedSeconds).toBe(1);
+	});
+
+	it("sets a fresh active goal over a paused goal", async () => {
 		const harness = createHarness({
 			state: {
 				enabled: false,
@@ -424,15 +452,18 @@ describe("goal runtime", () => {
 			},
 		});
 
-		const next = await harness.runtime.replaceGoal({ objective: "Second", tokenBudget: 25 });
+		const next = await harness.runtime.setGoal({ objective: "Second", tokenBudget: 25 });
 
 		expect(next.enabled).toBe(true);
 		expect(next.goal.objective).toBe("Second");
-		expect(next.goal.status).toBe("active");
+		expect(next.goal.status).toBe("budget-limited");
 		expect(next.goal.tokenBudget).toBe(25);
-		expect(next.goal.tokensUsed).toBe(0);
+		expect(next.goal.tokensUsed).toBe(30);
+		expect(next.goal.timeUsedSeconds).toBe(0);
 		expect(next.goal.id).not.toBe("goal-1");
 		expect(harness.persists.at(-1)?.mode).toBe("goal");
+		expect(harness.hiddenMessages).toHaveLength(1);
+		expect(harness.hiddenMessages[0]?.customType).toBe("goal-budget-limit");
 	});
 
 	it("allows creating a new goal after the previous one is complete", async () => {
@@ -449,6 +480,59 @@ describe("goal runtime", () => {
 		expect(next.goal.objective).toBe("Phase 4");
 		expect(next.goal.status).toBe("active");
 		expect(next.enabled).toBe(true);
+	});
+
+	it("revalidates queued goal starts after acquiring runtime ownership", async () => {
+		const completionFanout = Promise.withResolvers<void>();
+		let blockCompletion = true;
+		const harness = createHarness({
+			state: { enabled: true, mode: "active", goal: createGoal() },
+			onEmit: async () => {
+				if (!blockCompletion) return;
+				blockCompletion = false;
+				await completionFanout.promise;
+			},
+		});
+		const completing = harness.runtime.completeGoalFromTool();
+		await Promise.resolve();
+		let planActive = false;
+		const queuedStart = harness.runtime.createGoal({ objective: "Next" }, () => {
+			if (planActive) throw new Error("plan active");
+		});
+		planActive = true;
+		completionFanout.resolve();
+
+		await completing;
+		await expect(queuedStart).rejects.toThrow("plan active");
+		expect(harness.getState()?.goal.status).toBe("complete");
+	});
+
+	it("keeps an exhausted paused goal budget-limited when resumed", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: false,
+				mode: "active",
+				goal: createGoal({ status: "paused", tokenBudget: 20, tokensUsed: 20 }),
+			},
+		});
+
+		const resumed = await harness.runtime.resumeGoal();
+		expect(resumed.enabled).toBe(true);
+		expect(resumed.goal.status).toBe("budget-limited");
+		expect(harness.hiddenMessages).toHaveLength(1);
+		expect(harness.hiddenMessages[0]?.customType).toBe("goal-budget-limit");
+	});
+
+	it("rejects resume when the current goal is not paused", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ status: "active" }),
+			},
+		});
+
+		await expect(harness.runtime.resumeGoal()).rejects.toThrow("No paused goal.");
 	});
 
 	it("completeGoalFromTool succeeds for a paused goal (enabled=false)", async () => {

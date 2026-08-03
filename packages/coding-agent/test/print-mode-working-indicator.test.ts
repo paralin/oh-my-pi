@@ -40,13 +40,14 @@ interface DelayedSession {
 	getModeChanges: () => Array<{ mode: string; data?: Record<string, unknown> }>;
 	getPlanProposalHandler: () => PlanProposalHandler | undefined;
 	getCurrentPlanMode: () => PlanModeState | undefined;
+	getEnabledToolNames: () => string[];
 	emit: (event: AgentSessionEvent) => void;
 	getAbortCalls: () => number;
 }
 
 function createDelayedSession(
 	finalMessage: AssistantMessage,
-	options: { defaultPlanMode?: boolean } = {},
+	options: { defaultPlanMode?: boolean; enabledTools?: string[]; builtInTools?: string[] } = {},
 ): DelayedSession {
 	const messages: AssistantMessage[] = [];
 	const { promise: promptStarted, resolve: markPromptStarted } = Promise.withResolvers<void>();
@@ -54,7 +55,7 @@ function createDelayedSession(
 	let advisorDrainPrepared = false;
 	let planModeState: PlanModeState | undefined;
 	let planModeAtPrompt: PlanModeState | undefined;
-	let enabledToolNames = ["read"];
+	let enabledToolNames = options.enabledTools ?? ["read"];
 	const modeChanges: Array<{ mode: string; data?: Record<string, unknown> }> = [];
 	let planProposalHandler: PlanProposalHandler | undefined;
 	let subscriber: ((event: AgentSessionEvent) => void) | undefined;
@@ -81,7 +82,7 @@ function createDelayedSession(
 		isStreaming: false,
 		getPlanReferencePath: () => "",
 		getEnabledToolNames: () => enabledToolNames,
-		hasBuiltInTool: (name: string) => name === "write",
+		hasBuiltInTool: (name: string) => (options.builtInTools ?? ["write"]).includes(name),
 		setActiveToolsByName: async (names: string[]) => {
 			enabledToolNames = names;
 		},
@@ -140,6 +141,7 @@ function createDelayedSession(
 		getPlanProposalHandler: () => planProposalHandler,
 		getTextOutputCommitted: () => textOutputCommitted,
 		getCurrentPlanMode: () => planModeState,
+		getEnabledToolNames: () => enabledToolNames,
 		emit: event => subscriber?.(event),
 		getAbortCalls: () => abortCalls,
 	};
@@ -209,6 +211,23 @@ describe("print mode working indicator", () => {
 		await delayed.promptStarted;
 		try {
 			expect(stderrOutput.join("")).not.toContain("plan.defaultOnStartup");
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+	});
+
+	it("removes the built-in goal tool from default print plan mode", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("plan ready"), {
+			defaultPlanMode: true,
+			enabledTools: ["read", "goal"],
+			builtInTools: ["write", "goal"],
+		});
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "/plan hello" });
+
+		await delayed.promptStarted;
+		try {
+			expect(delayed.getEnabledToolNames()).toEqual(["read", "write"]);
 		} finally {
 			delayed.resolvePrompt();
 			await run;

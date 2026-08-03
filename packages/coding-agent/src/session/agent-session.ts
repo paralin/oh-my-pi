@@ -518,6 +518,11 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
+	// Plan mode paused keeps `planFilePath` state cleared (#planModeState becomes
+	// undefined) while the plan stays logically active, so track it separately for
+	// consumers (e.g. the goal tool) that must treat a paused plan as still in
+	// plan mode. Kept in sync by InteractiveMode#updatePlanModeStatus.
+	#planModePaused = false;
 	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
@@ -4912,6 +4917,14 @@ export class AgentSession {
 			// does not inherit a stale `required` tool choice.
 			this.#toolChoiceQueue.removeByLabel("plan-mode-decision");
 		}
+	}
+
+	isPlanModePaused(): boolean {
+		return this.#planModePaused;
+	}
+
+	setPlanModePaused(paused: boolean): void {
+		this.#planModePaused = paused;
 	}
 
 	getGoalModeState(): GoalModeState | undefined {
