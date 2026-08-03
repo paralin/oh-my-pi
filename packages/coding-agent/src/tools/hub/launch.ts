@@ -40,12 +40,13 @@ interface CompletionRegistration {
 	inFlight: number;
 	retained: boolean;
 	active: boolean;
-	cleanup: () => void;
+	cleanup: (preservePending?: boolean) => void;
 }
 
 interface CompletionLease {
 	retain: () => void;
-	reject: () => void;
+	reject: (preservePending?: boolean) => void;
+	hasConcurrentRequest: () => boolean;
 }
 
 const completionRegistrations = new WeakMap<
@@ -72,15 +73,17 @@ function registerCompletionSink(
 	let registration = owners.get(owner);
 	if (!registration) {
 		const unregister = client.onCompletion(owner, notification => {
-			if (session.isDisposed?.()) return;
-			session.queueLaunchCompletion?.(notification);
+			if (session.isDisposed?.()) throw new Error("Session disposed before launch completion delivery");
+			const delivery = session.queueLaunchCompletion?.(notification);
+			if (!delivery) throw new Error("Session cannot accept launch completion delivery");
+			return delivery;
 		});
 		let unregisterDispose: (() => void) | void;
 		let unregisterSessionChange: (() => void) | void;
-		const cleanup = (): void => {
+		const cleanup = (preservePending = false): void => {
 			if (!registration?.active) return;
 			registration.active = false;
-			unregister();
+			unregister({ preservePending });
 			unregisterDispose?.();
 			unregisterSessionChange?.();
 			owners.delete(owner);
@@ -89,21 +92,22 @@ function registerCompletionSink(
 		};
 		registration = { inFlight: 0, retained: false, active: true, cleanup };
 		owners.set(owner, registration);
-		unregisterDispose = session.registerDisposeCallback?.(cleanup);
-		unregisterSessionChange = session.registerSessionChangeCallback?.(cleanup);
+		unregisterDispose = session.registerDisposeCallback?.(() => cleanup(true));
+		unregisterSessionChange = session.registerSessionChangeCallback?.(() => cleanup(true));
 	}
 	registration.inFlight++;
 	let settled = false;
-	const settle = (retain: boolean): void => {
+	const settle = (retain: boolean, preservePending = false): void => {
 		if (settled || !registration.active) return;
 		settled = true;
 		registration.inFlight--;
 		if (retain) registration.retained = true;
-		if (!registration.retained && registration.inFlight === 0) registration.cleanup();
+		if (!registration.retained && registration.inFlight === 0) registration.cleanup(preservePending);
 	};
 	return {
 		retain: () => settle(true),
-		reject: () => settle(false),
+		hasConcurrentRequest: () => registration.active && registration.inFlight > 1,
+		reject: preservePending => settle(false, preservePending),
 	};
 }
 
@@ -412,15 +416,31 @@ export async function executeLaunch(
 			resumedDaemonFound = true;
 			if (daemon.owner !== resumedOwner) registerCompletionSink(session, client, daemon.owner)?.retain();
 		}
-		if (params.op === "list" && resumedOwner && !resumedDaemonFound) completionLease?.reject();
+		if (params.op === "list" && resumedOwner && !resumedDaemonFound) completionLease?.reject(true);
 		else completionLease?.retain();
 		return {
 			content: [{ type: "text", text: replaceTabs(toolContent(result, params)) }],
 			details: await toolDetails(result, params),
 		};
 	} catch (error) {
-		if (error instanceof DaemonBrokerRejectedError && owner) completionLease?.reject();
-		else completionLease?.retain();
+		if (error instanceof DaemonBrokerRejectedError && owner) {
+			if (completionLease?.hasConcurrentRequest()) {
+				completionLease.reject();
+			} else {
+				try {
+					const listed = await client.request({ op: "list" }, signal);
+					const ownerStillRunning =
+						listed.op === "list" &&
+						listed.daemons.some(daemon => daemon.owner === owner && !TERMINAL_STATES[daemon.state]);
+					if (ownerStillRunning) completionLease?.retain();
+					else completionLease?.reject();
+				} catch {
+					completionLease?.retain();
+				}
+			}
+		} else {
+			completionLease?.retain();
+		}
 		throw error;
 	}
 }

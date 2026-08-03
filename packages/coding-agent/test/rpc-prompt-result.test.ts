@@ -1,14 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
 	compactRpcSession,
+	deliverRpcSteeringIfNeeded,
+	drainRpcTerminalBoundary,
 	hasActiveRpcSessionWork,
 	hasPendingRpcContinuation,
 	isRpcCustodyRestrictedPrompt,
+	materializeRpcCustodyTranscript,
 	RpcCustodyBindingGuard,
 	RpcExtensionUserMessageTracker,
+	RpcTerminalTaskTracker,
 	reportLocalOnlyPromptResult,
 	rpcExitOutcome,
 	shouldDeferRpcResult,
+	startRpcResidualPrompt,
 	watchAndReportLocalOnlyPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type {
@@ -40,21 +45,59 @@ describe("RPC durable custody prompts", () => {
 			isStreaming: false,
 			isCompacting: false,
 			hasPendingAsyncWork: () => true,
-			queuedMessageCount: 0,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+			hasPendingExtensionEvents: false,
 		};
 
 		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
 	});
 
-	test("treats queued messages as active pre-custody work", () => {
+	test("treats hidden queued messages as active pre-custody work", () => {
 		const session = {
 			isStreaming: false,
 			isCompacting: false,
 			hasPendingAsyncWork: () => false,
-			queuedMessageCount: 1,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: true,
+			hasPendingExtensionEvents: false,
 		};
 
 		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
+	});
+
+	test("treats an unfinished extension lifecycle handler as active pre-custody work", () => {
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			hasPendingAsyncWork: () => false,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+			hasPendingExtensionEvents: true,
+		};
+
+		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
+	});
+
+	test("rejects custody steering when delivery is cancelled before queueing", async () => {
+		await expect(deliverRpcSteeringIfNeeded(false, async () => false)).rejects.toThrow(
+			"cancelled before the message was queued",
+		);
+	});
+
+	test("materializes the transcript before durable custody opens its sidecar", async () => {
+		let materialized = false;
+		const session = {
+			sessionFile: "/tmp/session.jsonl",
+			sessionManager: {
+				async ensureOnDisk() {
+					materialized = true;
+				},
+			},
+		};
+
+		await expect(materializeRpcCustodyTranscript(session)).resolves.toBe("/tmp/session.jsonl");
+		expect(materialized).toBe(true);
 	});
 
 	test("recognizes every parsed move command spelling", () => {
@@ -127,14 +170,39 @@ describe("RPC durable custody prompts", () => {
 			isStreaming: false,
 			isCompacting: false,
 			hasPendingAsyncWork: () => true,
-			queuedMessageCount: 0,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
 		};
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
 		session.hasPendingAsyncWork = () => false;
-		session.queuedMessageCount = 1;
+		session.hasPendingBashMessages = true;
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
-		session.queuedMessageCount = 0;
+		session.hasPendingBashMessages = false;
+		session.hasQueuedAgentMessages = true;
+		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
+		session.hasQueuedAgentMessages = false;
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("completed");
+	});
+
+	test("flushes deferred bash results before opening the terminal boundary", async () => {
+		let pendingBash = true;
+		let flushes = 0;
+		await drainRpcTerminalBoundary(
+			{
+				get hasPendingBashMessages() {
+					return pendingBash;
+				},
+				async flushPendingBashMessages() {
+					flushes++;
+					pendingBash = false;
+				},
+			},
+			new RpcTerminalTaskTracker(),
+			new RpcExtensionUserMessageTracker(),
+		);
+
+		expect(flushes).toBe(1);
+		expect(pendingBash).toBe(false);
 	});
 
 	test("forces aborted exit results despite pending continuations", () => {
@@ -142,17 +210,28 @@ describe("RPC durable custody prompts", () => {
 		expect(shouldDeferRpcResult(true, true)).toBe(false);
 	});
 
+	test("rechecks custody before starting an ACP residual prompt", () => {
+		let started = false;
+		expect(() =>
+			startRpcResidualPrompt(
+				{
+					assertAcceptingWork() {
+						throw new Error("run already sealed");
+					},
+				},
+				() => {
+					started = true;
+				},
+			),
+		).toThrow("run already sealed");
+		expect(started).toBe(false);
+	});
+
 	test("seals a streaming episode after manual compaction aborts it", async () => {
 		const seals: Array<[string, string]> = [];
-		const session = {
-			isStreaming: true,
-			compact: async () => {
-				session.isStreaming = false;
-				return { summary: "compacted" };
-			},
-		};
+		const compact = async () => ({ summary: "compacted" });
 
-		const result = await compactRpcSession(session, undefined, async (stopReason, outcome) => {
+		const result = await compactRpcSession(true, compact, async (stopReason, outcome) => {
 			seals.push([stopReason, outcome]);
 		});
 
@@ -208,6 +287,22 @@ describe("reportLocalOnlyPromptResult", () => {
 		await messagePreparation.promise;
 		await Promise.resolve();
 		expect(extensionUserMessages.hasPendingAgentMessageTasks).toBe(false);
+	});
+
+	test("waits for all extension message preparation to settle", async () => {
+		const extensionUserMessages = new RpcExtensionUserMessageTracker();
+		const messagePreparation = Promise.withResolvers<void>();
+		extensionUserMessages.trackAgentMessageTask(messagePreparation.promise);
+		let settled = false;
+		const terminal = extensionUserMessages.waitForPendingAgentMessageTasks().then(() => {
+			settled = true;
+		});
+
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		messagePreparation.resolve();
+		await terminal;
+		expect(settled).toBe(true);
 	});
 
 	test("does not emit false prompt_result when an extension command schedules a user message", async () => {
@@ -373,6 +468,42 @@ describe("reportLocalOnlyPromptResult", () => {
 		expect(() => context.compact()).toThrow("run already sealed");
 		expect(() => commands.compact()).toThrow("run already sealed");
 		expect(sends).toBe(0);
+	});
+
+	test("routes both extension compaction contexts through the mode boundary", async () => {
+		let contextActions: ExtensionContextActions | undefined;
+		let commandActions: ExtensionCommandContextActions | undefined;
+		const calls: unknown[] = [];
+		const session = {
+			extensionRunner: {
+				initialize: (
+					_actions: ExtensionActions,
+					context: ExtensionContextActions,
+					commands: ExtensionCommandContextActions,
+				) => {
+					contextActions = context;
+					commandActions = commands;
+				},
+				onError: () => {},
+				emit: async () => {},
+			},
+		} as unknown as AgentSession;
+
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+			runCompact: async options => {
+				calls.push(options);
+			},
+		});
+
+		await contextActions!.compact("context");
+		await commandActions!.compact({ mode: "soft" });
+		expect(calls).toEqual(["context", { mode: "soft" }]);
 	});
 
 	test("suppresses prompt_result when extension sendUserMessage succeeds", async () => {

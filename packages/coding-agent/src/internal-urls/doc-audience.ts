@@ -15,8 +15,8 @@
 /** Who a documentation page is written for. */
 export type DocAudience = "agent" | "maintainer";
 
-const AUDIENCE_MARKER = /^[ \t]*<!--[ \t]*omp-audience:[ \t]*([^\r\n]*?)[ \t]*-->/;
-const AUDIENCE_DECLARATION = /^[ \t]*<!--[ \t]*omp-audience:/;
+const AUDIENCE_MARKER = /^\uFEFF?[ \t]*<!--[ \t]*omp-audience:[ \t]*([^\r\n]*?)[ \t]*-->/;
+const AUDIENCE_DECLARATION = /^\uFEFF?[ \t]*<!--[ \t]*omp-audience:/;
 
 /** Read the audience a page declares on its first line, defaulting to `agent`. */
 export function readDocAudience(body: string): DocAudience {

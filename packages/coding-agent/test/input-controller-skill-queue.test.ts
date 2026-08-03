@@ -650,6 +650,143 @@ describe("AgentSession derived queued custom display", () => {
 		expect(session.yieldQueue.has(SCHEDULED_NOTIFICATION_KIND)).toBe(false);
 	});
 
+	it("suspends session services across a new-session transition", async () => {
+		let suspended = false;
+		let aborted = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				expect(aborted).toBe(true);
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async result => {
+				expect(result).toBeUndefined();
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			aborted = true;
+			await abort(options);
+		});
+		const startNewSession = session.sessionManager.newSession.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "newSession").mockImplementation(async options => {
+			expect(suspended).toBe(true);
+			transitions.push("new");
+			await startNewSession(options);
+		});
+
+		await session.newSession();
+
+		expect(suspended).toBe(false);
+		expect(transitions).toEqual(["suspend", "new", "resume"]);
+	});
+
+	it("suspends session services across a session switch", async () => {
+		let suspended = false;
+		let aborted = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				expect(aborted).toBe(true);
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async result => {
+				expect(result).toBeUndefined();
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		const abort = session.abort.bind(session);
+		vi.spyOn(session, "abort").mockImplementation(async options => {
+			aborted = true;
+			await abort(options);
+		});
+		await session.sessionManager.ensureOnDisk();
+		const sessionFile = session.sessionFile;
+		if (!sessionFile) throw new Error("Expected persisted session");
+		const setSessionFile = session.sessionManager.setSessionFile.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "setSessionFile").mockImplementation(async target => {
+			expect(suspended).toBe(true);
+			transitions.push("switch");
+			await setSessionFile(target);
+		});
+
+		await session.switchSession(sessionFile);
+
+		expect(suspended).toBe(false);
+		expect(transitions).toEqual(["suspend", "switch", "resume"]);
+	});
+
+	it("suspends session services across a branch transition", async () => {
+		let suspended = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async result => {
+				expect(result).toBeUndefined();
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		session.sessionManager.appendMessage({ role: "user", content: "ancestor", timestamp: 1 });
+		session.sessionManager.appendMessage({ role: "user", content: "branch point", timestamp: 2 });
+		const entryId = session.sessionManager.getLeafId();
+		if (!entryId) throw new Error("Expected a branchable entry");
+		const createBranchedSession = session.sessionManager.createBranchedSession.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "createBranchedSession").mockImplementation(parentId => {
+			expect(suspended).toBe(true);
+			transitions.push("branch");
+			createBranchedSession(parentId);
+		});
+
+		await session.branch(entryId);
+
+		expect(suspended).toBe(false);
+		expect(transitions).toEqual(["suspend", "branch", "resume"]);
+	});
+
+	it("suspends session services before flushing fork state", async () => {
+		let suspended = false;
+		const transitions: string[] = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {
+				suspended = true;
+				transitions.push("suspend");
+			},
+			completeSessionFork: async () => {
+				suspended = false;
+				transitions.push("resume");
+			},
+		});
+		const { session } = fixture;
+		await session.sessionManager.ensureOnDisk();
+		const flush = session.sessionManager.flush.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "flush").mockImplementation(async () => {
+			expect(suspended).toBe(true);
+			transitions.push("flush");
+			await flush();
+		});
+
+		await session.fork();
+
+		expect(suspended).toBe(false);
+		expect(transitions).toEqual(["suspend", "flush", "resume"]);
+	});
+
 	it("retries committed fork finalization with the fork paths", async () => {
 		const finalized: Array<{ oldSessionFile: string; newSessionFile: string } | undefined> = [];
 		const recovered = Promise.withResolvers<void>();

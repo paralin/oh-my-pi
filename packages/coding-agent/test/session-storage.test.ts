@@ -8,6 +8,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { sessionSidecarDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
 
@@ -183,6 +184,19 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 
 		await expect(storage.deleteSessionWithArtifacts(sessionPath)).resolves.toBeUndefined();
+		expect(fs.existsSync(sessionPath)).toBe(false);
+		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("deletes the canonical sidecar for an explicit non-jsonl session path", async () => {
+		const sessionPath = path.join(tempDir, "explicit-session");
+		const artifactsDir = sessionSidecarDir(sessionPath);
+		await Bun.write(sessionPath, "session\n");
+		await fsp.mkdir(artifactsDir, { recursive: true });
+		await Bun.write(path.join(artifactsDir, "scheduled_tasks.json"), "[]");
+
+		await storage.deleteSessionWithArtifacts(sessionPath);
+
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(false);
 	});

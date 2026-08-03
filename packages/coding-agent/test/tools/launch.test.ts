@@ -641,7 +641,9 @@ esac
 
 			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 			const completions: DaemonSnapshot[] = [];
-			unregister = recovered.onCompletion(owner, notification => completions.push(notification.daemon));
+			unregister = recovered.onCompletion(owner, notification => {
+				completions.push(notification.daemon);
+			});
 			await recovered.request({ op: "list" });
 			expect(await waitUntil(() => completions.length === 1, 2_000)).toBeTrue();
 			expect(completions[0]).toMatchObject({ name: "pre-recovery-exit", state: "exited" });
@@ -1034,22 +1036,24 @@ esac
 		}
 	}, 9_000);
 
-	it("acknowledges a completion when its consumer throws", async () => {
+	it("acknowledges a completion only after its consumer accepts delivery", async () => {
 		if (process.platform === "win32") return;
-		const projectDir = await tempDir("omp-daemon-sink-failure-project-");
-		const runtimeDir = await tempDir("omp-daemon-sink-failure-runtime-");
+		const projectDir = await tempDir("omp-daemon-sink-acceptance-project-");
+		const runtimeDir = await tempDir("omp-daemon-sink-acceptance-runtime-");
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-		const owner = "throwing-owner";
-		let delivered = false;
-		const unregister = client.onCompletion(owner, () => {
-			delivered = true;
-			throw new Error("sink failed");
+		const owner = "delayed-owner";
+		const delivered = Promise.withResolvers<void>();
+		const accepted = Promise.withResolvers<void>();
+		const unregister = client.onCompletion(owner, async () => {
+			delivered.resolve();
+			await accepted.promise;
 		});
+		const metaPath = path.join(runtimeDir, "daemons", "delayed-sink", "meta.json");
 		try {
 			await client.request({
 				op: "start",
 				spec: {
-					name: "throwing-sink",
+					name: "delayed-sink",
 					application: "/bin/sh",
 					args: ["-c", "exit 0"],
 					env: {},
@@ -1061,8 +1065,17 @@ esac
 				},
 				owner,
 			});
-			expect(await waitUntil(() => Promise.resolve(delivered), 3_000)).toBeTrue();
-			await expect(client.request({ op: "list" })).resolves.toMatchObject({ op: "list" });
+			await delivered.promise;
+			const pending = (await Bun.file(metaPath).json()) as { pendingCompletions?: unknown[] };
+			expect(pending.pendingCompletions).toHaveLength(1);
+
+			accepted.resolve();
+			expect(
+				await waitUntil(async () => {
+					const metadata = (await Bun.file(metaPath).json()) as { pendingCompletions?: unknown[] };
+					return metadata.pendingCompletions?.length === 0;
+				}, 2_000),
+			).toBeTrue();
 		} finally {
 			unregister();
 			await shutdown(client);
@@ -1454,7 +1467,9 @@ esac
 
 		const second = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const completions: DaemonSnapshot[] = [];
-		const unregister = second.onCompletion(owner, notification => completions.push(notification.daemon));
+		const unregister = second.onCompletion(owner, notification => {
+			completions.push(notification.daemon);
+		});
 		try {
 			await second.request({ op: "list" });
 			await Bun.sleep(100);
@@ -1493,7 +1508,9 @@ esac
 
 		const second = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
 		const completions: DaemonSnapshot[] = [];
-		const unregisterSecond = second.onCompletion(owner, notification => completions.push(notification.daemon));
+		const unregisterSecond = second.onCompletion(owner, notification => {
+			completions.push(notification.daemon);
+		});
 		try {
 			await second.request({ op: "list" });
 			await Bun.sleep(100);

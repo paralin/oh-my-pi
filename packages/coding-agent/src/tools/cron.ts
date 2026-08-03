@@ -11,7 +11,14 @@ import cronDeleteDescription from "../prompts/tools/cron-delete.md" with { type:
 import cronListDescription from "../prompts/tools/cron-list.md" with { type: "text" };
 import { renderStatusLine, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
-import { createCachedComponent, formatMoreItems, PREVIEW_LIMITS, replaceTabs, TRUNCATE_LENGTHS } from "./render-utils";
+import {
+	createCachedComponent,
+	formatMoreItems,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	shortenEmbeddedPaths,
+	TRUNCATE_LENGTHS,
+} from "./render-utils";
 
 const cronCreateSchema = type({
 	expression: type("string").describe("standard 5-field cron expression evaluated in local time"),
@@ -180,12 +187,12 @@ function createCronRenderer(op: CronRenderOperation) {
 
 			if (result.isError) {
 				icon = "error";
-				body.push(theme.fg("error", cronDisplayLine(text || "Unknown error")));
+				body.push(theme.fg("error", cronDisplayLine(shortenEmbeddedPaths(text || "Unknown error"))));
 			} else if (op === "create" && isCronJob(details)) {
 				description = truncateToWidth(cronDisplayLine(details.expression), TRUNCATE_LENGTHS.TITLE);
 				meta = [theme.fg("dim", `next ${new Date(details.nextFireAt).toLocaleString()}`), ...cronMode(details)];
 				body.push(
-					`${theme.fg("accent", cronDisplayLine(details.id))} ${theme.fg("dim", cronDisplayLine(details.prompt))}`,
+					`${theme.fg("accent", cronDisplayLine(details.id))} ${theme.fg("dim", cronDisplayLine(shortenEmbeddedPaths(details.prompt)))}`,
 				);
 			} else if (op === "list" && details && "jobs" in details) {
 				description = `${details.jobs.length} ${details.jobs.length === 1 ? "job" : "jobs"}`;

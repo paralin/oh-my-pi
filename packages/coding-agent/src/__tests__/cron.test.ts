@@ -301,6 +301,41 @@ describe("cron scheduling", () => {
 		manager.dispose();
 	});
 
+	it("retries a transient refresh load failure for the current session", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionFile = path.join(os.tmpdir(), `cron-refresh-${crypto.randomUUID()}.jsonl`);
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const job = {
+			id: "cron-recovered",
+			expression: "0 11 * * *",
+			prompt: "recover me",
+			recurring: false,
+			durable: true,
+			createdAt: clock.now(),
+			nextFireAt: new Date(2026, 0, 1, 11, 0).getTime(),
+		};
+		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
+		await storage.writeText(store, JSON.stringify([job]));
+		const readText = vi.spyOn(storage, "readText").mockRejectedValueOnce(new Error("backend unavailable"));
+		const manager = new CronManager({
+			sessionFile,
+			storage,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => undefined,
+		});
+
+		manager.refresh();
+		await settle();
+		expect(clock.delays).toEqual([250]);
+		clock.timers.shift()?.();
+		await settle();
+		expect(manager.list()).toEqual([job]);
+		expect(readText).toHaveBeenCalledTimes(2);
+		manager.dispose();
+	});
+
 	it("does not recopy a fork store when scheduler resumption is retried", async () => {
 		const manager = new CronManager({
 			sessionFile: path.join(os.tmpdir(), `cron-retry-${crypto.randomUUID()}.jsonl`),
@@ -321,6 +356,28 @@ describe("cron scheduling", () => {
 		await expect(manager.completeFork(result)).resolves.toBeUndefined();
 		expect(copy).toHaveBeenCalledTimes(1);
 		expect(resume).toHaveBeenCalledTimes(2);
+		manager.dispose();
+	});
+
+	it("does not resume when a newer transition starts during fork recovery", async () => {
+		const manager = new CronManager({
+			sessionFile: path.join(os.tmpdir(), `cron-stale-recovery-${crypto.randomUUID()}.jsonl`),
+			enqueuePrompt: async () => undefined,
+		});
+		let current = true;
+		vi.spyOn(manager, "copyForkStore").mockImplementation(async () => {
+			current = false;
+		});
+		const resume = vi.spyOn(manager, "resume");
+		const result = {
+			oldSessionFile: path.join(os.tmpdir(), "cron-parent.jsonl"),
+			newSessionFile: path.join(os.tmpdir(), "cron-fork.jsonl"),
+		};
+
+		await manager.suspendForFork();
+		await manager.completeFork(result, () => current);
+
+		expect(resume).not.toHaveBeenCalled();
 		manager.dispose();
 	});
 
@@ -960,7 +1017,7 @@ describe("cron scheduling", () => {
 						details: {
 							id: "cron-1",
 							expression,
-							prompt: "first\nsecond\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007",
+							prompt: `inspect ${os.homedir()}/private/file\nsecond\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007`,
 							recurring: false,
 							durable: false,
 							createdAt: 0,
@@ -975,8 +1032,9 @@ describe("cron scheduling", () => {
 		);
 		expect(rendered).not.toContain("\t");
 		expect(rendered).not.toContain("1".repeat(80));
-		expect(rendered).toContain("first second");
+		expect(rendered).toContain("inspect ~/private/file second");
 		expect(rendered).not.toContain("\u001b");
+		expect(rendered).not.toContain(os.homedir());
 	});
 
 	it("sanitizes cron error output into one display line", async () => {
@@ -987,7 +1045,10 @@ describe("cron scheduling", () => {
 				.renderResult(
 					{
 						content: [
-							{ type: "text", text: "bad\nerror\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007" },
+							{
+								type: "text",
+								text: `failed opening ${os.homedir()}/private/store\nerror\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007`,
+							},
 						],
 						isError: true,
 					},
@@ -997,7 +1058,8 @@ describe("cron scheduling", () => {
 				.render(200)
 				.join("\n"),
 		);
-		expect(rendered).toContain("bad errorlinked");
+		expect(rendered).toContain("failed opening ~/private/store errorlinked");
 		expect(rendered).not.toContain("\u001b");
+		expect(rendered).not.toContain(os.homedir());
 	});
 });

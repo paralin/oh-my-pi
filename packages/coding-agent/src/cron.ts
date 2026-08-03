@@ -7,6 +7,8 @@ const MAX_SEARCH_MINUTES = 8 * 366 * 24 * 60;
 const RECURRING_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const DELIVERY_RETRY_BASE_MS = 1_000;
 const DELIVERY_RETRY_MAX_MS = 60_000;
+const REFRESH_RETRY_BASE_MS = 250;
+const REFRESH_RETRY_ATTEMPTS = 5;
 
 export interface CronJob {
 	id: string;
@@ -199,6 +201,8 @@ export class CronManager {
 	#loadedSessions = new Set<string | undefined>();
 	#sessionLoads = new Map<string | undefined, Promise<void>>();
 	#timer: CronTimer | undefined;
+	#refreshRetryTimer: CronTimer | undefined;
+	#refreshGeneration = 0;
 	#processing = false;
 	#sequence = 0;
 	#mutationTail: Promise<void> = Promise.resolve();
@@ -234,13 +238,50 @@ export class CronManager {
 	/** Refresh jobs and timers after the live AgentSession changes identity. */
 	refresh(): void {
 		if (this.#disposed || this.#suspended) return;
+		this.#cancelRefreshRetry();
+		const generation = ++this.#refreshGeneration;
 		this.#refreshSession();
-		void this.#loadCurrentSession()
-			.then(() => this.#armTimer())
-			.catch(error => logger.warn("Cron session load failed", { error }));
+		const sessionKey = this.#sessionKey;
+		const load = (attempt: number): void => {
+			void this.#loadCurrentSession()
+				.then(() => {
+					if (generation !== this.#refreshGeneration || sessionKey !== this.#sessionKey) return;
+					this.#armTimer();
+				})
+				.catch(error => {
+					logger.warn("Cron session load failed", { error });
+					if (
+						this.#disposed ||
+						this.#suspended ||
+						generation !== this.#refreshGeneration ||
+						sessionKey !== this.#sessionKey ||
+						attempt >= REFRESH_RETRY_ATTEMPTS
+					) {
+						return;
+					}
+					this.#refreshRetryTimer = this.#setTimer(
+						() => {
+							this.#refreshRetryTimer = undefined;
+							if (
+								this.#disposed ||
+								this.#suspended ||
+								generation !== this.#refreshGeneration ||
+								sessionKey !== this.#sessionKey
+							) {
+								return;
+							}
+							load(attempt + 1);
+						},
+						REFRESH_RETRY_BASE_MS * 2 ** attempt,
+					);
+				});
+		};
+		load(0);
 	}
 
 	async suspend(): Promise<void> {
+		this.#refreshGeneration++;
+		this.#cancelRefreshRetry();
 		if (this.#disposed) return;
 		this.#suspended = true;
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
@@ -263,7 +304,10 @@ export class CronManager {
 		if (text !== undefined) await this.#storage.writeTextAtomic(newStore, text);
 	}
 
-	async completeFork(result: { oldSessionFile: string; newSessionFile: string } | undefined): Promise<void> {
+	async completeFork(
+		result: { oldSessionFile: string; newSessionFile: string } | undefined,
+		isCurrent: () => boolean = () => true,
+	): Promise<void> {
 		if (result) {
 			const copyKey = `${result.oldSessionFile}\0${result.newSessionFile}`;
 			if (this.#completedForkCopy !== copyKey) {
@@ -271,16 +315,23 @@ export class CronManager {
 				this.#completedForkCopy = copyKey;
 			}
 		}
-		await this.resume();
-		this.#completedForkCopy = undefined;
+		if (!isCurrent()) return;
+		await this.resume(isCurrent);
+		if (isCurrent()) this.#completedForkCopy = undefined;
 	}
 
-	async resume(): Promise<void> {
-		if (this.#disposed) return;
+	async resume(isCurrent: () => boolean = () => true): Promise<void> {
+		if (this.#disposed || !isCurrent()) return;
 		this.#suspended = false;
 		this.#refreshSession();
 		this.#loadedSessions.delete(this.#sessionKey);
 		await this.#loadCurrentSession();
+		if (!isCurrent()) {
+			this.#suspended = true;
+			if (this.#timer !== undefined) this.#clearTimer(this.#timer);
+			this.#timer = undefined;
+			return;
+		}
 		this.#armTimer();
 	}
 
@@ -337,6 +388,8 @@ export class CronManager {
 
 	dispose(): void {
 		this.#disposed = true;
+		this.#refreshGeneration++;
+		this.#cancelRefreshRetry();
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
 		this.#timer = undefined;
 	}
@@ -400,6 +453,12 @@ export class CronManager {
 				}
 			});
 		}
+	}
+
+	#cancelRefreshRetry(): void {
+		if (this.#refreshRetryTimer === undefined) return;
+		this.#clearTimer(this.#refreshRetryTimer);
+		this.#refreshRetryTimer = undefined;
 	}
 
 	#refreshSession(): void {

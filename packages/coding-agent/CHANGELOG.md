@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--service-tier` to override the OpenAI service tier for a session. The flag takes precedence over the configured `tier.openai` setting and over a resumed session's recorded tier, leaves the Anthropic and Google tiers alone, and persists across resumes; `none` omits `service_tier` from the request.
+- Added `session.start`, `session.resume`, `session.replay`, `session.result`, `session.steer`, and `session.watch` to RPC mode, giving an external supervisor a durable append-only record of a session beside its transcript. A run claims an identity so a retried dispatch resolves against the existing episode instead of launching a second one, events carry a sequence a reconnecting supervisor can replay from, steering is acknowledged and redelivered when it was accepted but never injected, and the terminal result is sealed once and returned identically to every later reader. Clients that do not send `session.start` or `session.resume` are unaffected: nothing is recorded and events stream as before.
+- Added `cron_create`, `cron_list`, and `cron_delete`, which schedule a prompt on a standard five-field cron expression evaluated in local time. A fired job arrives as a system notification: an active turn takes it after its next completed tool call, and an idle session wakes a turn for it. Jobs are session-scoped and in memory by default; `durable: true` persists them beside the session transcript and replays a missed one-shot on resume. The three tools are hidden, so activate them by name, as in `--tools read,bash,cron_create,cron_list,cron_delete`.
+
+### Changed
+
+- `omp://` documentation pages now declare who they are written for with an HTML comment on their first line, `<!-- omp-audience: maintainer -->`. Pages carrying it document how OMP itself is built; they stay readable at their exact `omp://` path and no longer appear in the `omp://` listing or in completions, which drops the browsable corpus from 122 pages to 69. Set `docs.hideMaintainer = false` to list everything while working on OMP's own source.
+
+### Fixed
+
+- Fixed provider session metadata disclosure by recording only bounded effective compaction and tokenizer settings while preserving session identity; raw config paths are excluded.
+- Fixed a supervised process reaching a terminal state without telling the session that launched it. The broker recorded the final snapshot for `hub ps` to read but emitted no event, so an idle owner only learned that a process had exited by polling. The broker now sends one `daemon-completed` notification per terminal exit to the owner socket recorded at launch, and the session turns it into a model-visible message. Restart transitions stay live, and a stale or disposed session drops the notification without changing explicit `hub wait` or persistence behavior.
+
 ## [17.2.5] - 2026-08-03
 
 ### Breaking Changes

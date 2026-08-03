@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { RpcHostToolBridge } from "@oh-my-pi/pi-coding-agent/modes/rpc/host-tools";
 import {
 	dispatchRpcInputFrame,
+	finalizeRpcInputAfterEof,
 	type PendingExtensionRequest,
 	RpcInputDispatcher,
 	type RpcInputFrameDeps,
@@ -229,6 +230,26 @@ describe("dispatchRpcInputFrame", () => {
 	});
 });
 
+test("seals EOF before draining result waiters", async () => {
+	const order: string[] = [];
+	let sealed = false;
+
+	await finalizeRpcInputAfterEof(
+		async () => {
+			sealed = true;
+			order.push("seal");
+		},
+		async () => {
+			expect(sealed).toBe(true);
+			order.push("input");
+		},
+		async () => {
+			order.push("background");
+		},
+	);
+
+	expect(order).toEqual(["seal", "input", "background"]);
+});
 describe("RpcInputDispatcher", () => {
 	test("control frames resolve extension UI requests while an ordinary command is active", async () => {
 		let depsRef: RpcInputFrameDeps;

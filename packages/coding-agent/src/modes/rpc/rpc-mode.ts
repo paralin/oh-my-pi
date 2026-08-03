@@ -27,6 +27,7 @@ import {
 	type ExtensionWidgetOptions,
 	getExtensionUISelectOptionLabel,
 } from "../../extensibility/extensions";
+import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
@@ -74,11 +75,26 @@ export function isRpcCustodyRestrictedPrompt(message: string): boolean {
 	return name === "move" || name === "compact";
 }
 
+export function startRpcResidualPrompt<T>(
+	owner: Pick<RpcHarnessSessionOwner, "assertAcceptingWork"> | undefined,
+	start: () => T,
+): T {
+	owner?.assertAcceptingWork();
+	return start();
+}
+
 export function hasPendingRpcContinuation(
-	session: Pick<AgentSession, "hasPendingAsyncWork" | "isCompacting" | "isStreaming" | "queuedMessageCount">,
+	session: Pick<
+		AgentSession,
+		"hasPendingAsyncWork" | "hasPendingBashMessages" | "hasQueuedAgentMessages" | "isCompacting" | "isStreaming"
+	>,
 ): boolean {
 	return (
-		session.isStreaming || session.isCompacting || session.hasPendingAsyncWork() || session.queuedMessageCount > 0
+		session.isStreaming ||
+		session.isCompacting ||
+		session.hasPendingAsyncWork() ||
+		session.hasPendingBashMessages ||
+		session.hasQueuedAgentMessages
 	);
 }
 
@@ -89,25 +105,48 @@ export function shouldDeferRpcResult(hasPendingContinuation: boolean, force = fa
 	return hasPendingContinuation && !force;
 }
 export async function compactRpcSession<T>(
-	session: { readonly isStreaming: boolean; compact(customInstructions?: string): Promise<T> },
-	customInstructions: string | undefined,
+	isStreaming: boolean,
+	compact: () => Promise<T>,
 	sealResult?: (stopReason: string, outcome: "aborted") => Promise<void>,
 ): Promise<T> {
-	const interruptsPrompt = session.isStreaming;
 	try {
-		return await session.compact(customInstructions);
+		return await compact();
 	} finally {
-		if (interruptsPrompt) await sealResult?.("aborted", "aborted");
+		if (isStreaming) await sealResult?.("aborted", "aborted");
 	}
 }
 
+export async function materializeRpcCustodyTranscript(session: {
+	readonly sessionFile: string | undefined;
+	sessionManager: { ensureOnDisk(): Promise<void> };
+}): Promise<string> {
+	if (!session.sessionFile) throw new Error("Durable RPC custody requires a persisted session");
+	await session.sessionManager.ensureOnDisk();
+	const sessionFile = session.sessionFile;
+	if (!sessionFile) throw new Error("Durable RPC custody requires a persisted session");
+	return sessionFile;
+}
 export function hasActiveRpcSessionWork(
-	session: Pick<AgentSession, "hasPendingAsyncWork" | "isCompacting" | "isStreaming" | "queuedMessageCount">,
+	session: Pick<
+		AgentSession,
+		| "hasPendingAsyncWork"
+		| "hasPendingBashMessages"
+		| "hasPendingExtensionEvents"
+		| "hasQueuedAgentMessages"
+		| "isCompacting"
+		| "isStreaming"
+	>,
 	hasTrackedTasks: boolean,
 	hasActivePrompts: boolean,
 	hasPendingAgentMessageTasks: boolean,
 ): boolean {
-	return hasPendingRpcContinuation(session) || hasTrackedTasks || hasActivePrompts || hasPendingAgentMessageTasks;
+	return (
+		hasPendingRpcContinuation(session) ||
+		session.hasPendingExtensionEvents ||
+		hasTrackedTasks ||
+		hasActivePrompts ||
+		hasPendingAgentMessageTasks
+	);
 }
 
 export async function disposeRpcSessionWithCustody(
@@ -118,8 +157,12 @@ export async function disposeRpcSessionWithCustody(
 	await owner?.dispose();
 }
 
-export function deliverRpcSteeringIfNeeded(alreadyPersisted: boolean, deliver: () => Promise<void>): Promise<void> {
-	return alreadyPersisted ? Promise.resolve() : deliver();
+export async function deliverRpcSteeringIfNeeded(
+	alreadyPersisted: boolean,
+	deliver: () => Promise<boolean | void>,
+): Promise<void> {
+	if (alreadyPersisted) return;
+	if ((await deliver()) === false) throw new Error("Steering delivery was cancelled before the message was queued");
 }
 
 function providerSafeAssistantText(event: AgentSessionEvent): string | undefined {
@@ -318,6 +361,12 @@ export class RpcExtensionUserMessageTracker {
 		}
 	}
 
+	async waitForPendingAgentMessageTasks(): Promise<void> {
+		while (this.#pendingAgentMessageTasks.size > 0) {
+			await Promise.allSettled([...this.#pendingAgentMessageTasks]);
+		}
+	}
+
 	watchPrompt<T>(startPrompt: () => Promise<T>): {
 		prompt: Promise<T>;
 		hasAgentMessageTask: () => boolean;
@@ -373,11 +422,30 @@ export class RpcTerminalTaskTracker {
 		return task;
 	}
 
+	get hasPendingTasks(): boolean {
+		return this.#tasks.size > 0;
+	}
+
 	async wait(): Promise<void> {
 		while (this.#tasks.size > 0) {
-			await Promise.all([...this.#tasks]);
+			await Promise.allSettled([...this.#tasks]);
 		}
 	}
+}
+
+export async function drainRpcTerminalBoundary(
+	session: Pick<AgentSession, "flushPendingBashMessages" | "hasPendingBashMessages">,
+	terminalTasks: RpcTerminalTaskTracker,
+	extensionTasks: RpcExtensionUserMessageTracker,
+): Promise<void> {
+	do {
+		await Promise.all([terminalTasks.wait(), extensionTasks.waitForPendingAgentMessageTasks()]);
+		if (session.hasPendingBashMessages) await session.flushPendingBashMessages();
+	} while (
+		terminalTasks.hasPendingTasks ||
+		extensionTasks.hasPendingAgentMessageTasks ||
+		session.hasPendingBashMessages
+	);
 }
 
 export class RpcCustodyBindingGuard {
@@ -576,6 +644,16 @@ export class RpcInputDispatcher {
 			if (dispatchRpcControlFrame(parsed, this.#deps)) return;
 
 			const command = parsed as RpcCommand;
+			if (command.type === "session.result") {
+				const task = this.#tail.then(
+					() => dispatchRpcInputFrame(command, this.#deps),
+					() => dispatchRpcInputFrame(command, this.#deps),
+				);
+				this.#tasks.add(task);
+				void task.finally(() => this.#tasks.delete(task));
+				return;
+			}
+
 			if (isBackgroundRpcCommand(command)) {
 				dispatchRpcInputFrame(command, this.#deps);
 				return;
@@ -616,6 +694,15 @@ export class RpcInputDispatcher {
 	}
 }
 
+export async function finalizeRpcInputAfterEof(
+	sealLedger: () => Promise<void>,
+	drainInput: () => Promise<void>,
+	drainBackground: () => Promise<void>,
+): Promise<void> {
+	await sealLedger();
+	await drainInput();
+	await drainBackground();
+}
 /**
  * Coordinates deferred shutdown with in-flight background input tasks.
  *
@@ -959,8 +1046,7 @@ export async function runRpcMode(
 	const UNBOUND_RUN_ERROR = "No run is bound: send session.start or session.resume first";
 	const bindHarness = (runId: string) =>
 		bindingGuard.run(async () => {
-			const sessionFile = session.sessionFile;
-			if (!sessionFile) throw new Error("Durable RPC custody requires a persisted session");
+			const sessionFile = await materializeRpcCustodyTranscript(session);
 			const existingOwner = harnessOwner;
 			const owner =
 				existingOwner ??
@@ -1001,7 +1087,7 @@ export async function runRpcMode(
 		const owner = harnessOwner;
 		if (!owner || owner.hasResult) return;
 		owner.beginResultSeal();
-		await terminalTasks.wait();
+		await drainRpcTerminalBoundary(session, terminalTasks, extensionUserMessageTracker);
 		if (shouldDeferRpcResult(hasPendingRpcContinuation(session), force)) {
 			owner.cancelResultSeal();
 			return;
@@ -1256,6 +1342,12 @@ export async function runRpcMode(
 			bindingGuard.assertSessionChangeAllowed();
 			if (harnessOwner) throw new Error("Session changes are unavailable after durable RPC custody is bound");
 		},
+		runCompact: instructionsOrOptions =>
+			compactRpcSession(
+				session.isStreaming,
+				() => runExtensionCompact(session, instructionsOrOptions),
+				harnessOwner ? completeRpcResult : undefined,
+			),
 		uiContext: rpcUiContext,
 	});
 
@@ -1335,7 +1427,7 @@ export async function runRpcMode(
 				if (skillResult) {
 					return success(id, "prompt", skillResult);
 				}
-				const builtinResult = await executeAcpBuiltinSlashCommand(command.message, {
+				const builtinTask = executeAcpBuiltinSlashCommand(command.message, {
 					session,
 					sessionManager: session.sessionManager,
 					settings: session.settings,
@@ -1350,11 +1442,15 @@ export async function runRpcMode(
 						output({ type: "config_update", model: session.model, thinkingLevel: session.thinkingLevel });
 					},
 				});
+				const builtinResult = await (harnessOwner ? terminalTasks.track(builtinTask) : builtinTask);
 				if (builtinResult !== false) {
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: () =>
+								startRpcResidualPrompt(harnessOwner, () =>
+									session.prompt(builtinResult.prompt, { images: command.images }),
+								),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1471,7 +1567,7 @@ export async function runRpcMode(
 						command.message,
 						() =>
 							deliverRpcSteeringIfNeeded(persistedMessage !== undefined, () =>
-								session.steer(command.message, command.images, {
+								session.steerWithResult(command.message, command.images, {
 									idempotencyKey,
 								}),
 							),
@@ -1721,8 +1817,8 @@ export async function runRpcMode(
 					return error(id, "compact", "Handoff compaction is unavailable after durable RPC custody is bound");
 				}
 				const result = await compactRpcSession(
-					session,
-					command.customInstructions,
+					session.isStreaming,
+					() => session.compact(command.customInstructions),
 					harnessOwner ? completeRpcResult : undefined,
 				);
 				return success(id, "compact", result);
@@ -1998,9 +2094,11 @@ export async function runRpcMode(
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
-	await inputDispatcher.drain();
-	await sealLedgerOnExit("stdin_closed", rpcExitOutcome(hasPendingRpcContinuation(session)));
-	await shutdownCoordinator.drain();
+	await finalizeRpcInputAfterEof(
+		() => sealLedgerOnExit("stdin_closed", rpcExitOutcome(hasPendingRpcContinuation(session))),
+		() => inputDispatcher.drain(),
+		() => shutdownCoordinator.drain(),
+	);
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other
 	// bounded teardown run on the stdin-EOF path too (#5643). Idempotent: a

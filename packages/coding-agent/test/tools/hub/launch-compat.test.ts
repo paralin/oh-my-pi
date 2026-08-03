@@ -261,6 +261,32 @@ describe("launch broker protocol compatibility", () => {
 		);
 	});
 
+	it("preserves replayed completions when a resumed owner has no live daemon", async () => {
+		const projectDir = process.cwd();
+		const owner = "owner-session";
+		let preservedPending = false;
+		const client = {
+			projectDir,
+			onCompletion: () => options => {
+				preservedPending = options?.preservePending === true;
+			},
+			request: async () => ({ op: "list", daemons: [] }) as const,
+			close() {},
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+
+		await executeLaunch(
+			{
+				cwd: projectDir,
+				getSessionId: () => owner,
+				queueLaunchCompletion: () => {},
+			} as unknown as ToolSession,
+			{ op: "list" },
+		);
+
+		expect(preservedPending).toBe(true);
+	});
+
 	it("routes a broker completion and releases its sink on session change", async () => {
 		const projectDir = process.cwd();
 		const owner = "owner-session";
@@ -268,6 +294,7 @@ describe("launch broker protocol compatibility", () => {
 		let liveOwner = owner;
 		let deliver: ((notification: DaemonCompletionNotification) => void) | undefined;
 		let sessionChange: (() => void) | undefined;
+		let preservedPending = false;
 		const completion = {
 			event: "daemon-completed",
 			completionId: "completion-id",
@@ -291,7 +318,8 @@ describe("launch broker protocol compatibility", () => {
 			projectDir,
 			onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void) => {
 				deliver = sink;
-				return () => {
+				return options => {
+					preservedPending = options?.preservePending === true;
 					deliver = undefined;
 				};
 			},
@@ -318,6 +346,7 @@ describe("launch broker protocol compatibility", () => {
 		expect(queued).toEqual([completion]);
 		sessionChange?.();
 		expect(deliver).toBeUndefined();
+		expect(preservedPending).toBe(true);
 	});
 
 	it("keeps the completion sink when start delivery is indeterminate", async () => {
@@ -357,8 +386,9 @@ describe("launch broker protocol compatibility", () => {
 			onCompletion: () => () => {
 				unregisters++;
 			},
-			request: async () => {
-				throw new daemonClient.DaemonBrokerRejectedError("name already exists");
+			request: async operation => {
+				if (operation.op === "start") throw new daemonClient.DaemonBrokerRejectedError("name already exists");
+				return { op: "list", daemons: [] };
 			},
 			close() {},
 		} satisfies DaemonBrokerClient;
@@ -378,6 +408,52 @@ describe("launch broker protocol compatibility", () => {
 		).rejects.toThrow("name already exists");
 		expect(unregisters).toBe(1);
 		expect(disposeRemovals).toBe(1);
+	});
+
+	it("keeps a resumed owner's sink when duplicate start finds its live daemon", async () => {
+		const projectDir = process.cwd();
+		const owner = "owner-session";
+		let unregisters = 0;
+		const client = {
+			projectDir,
+			onCompletion: () => () => {
+				unregisters++;
+			},
+			request: async operation => {
+				if (operation.op === "start") throw new daemonClient.DaemonBrokerRejectedError("name already exists");
+				return {
+					op: "list",
+					daemons: [
+						{
+							name: "web",
+							id: "daemon-id",
+							state: "running",
+							createdAt: 1,
+							startedAt: 1,
+							restartCount: 0,
+							outputBytes: 0,
+							owner,
+							persist: false,
+							detached: false,
+						},
+					],
+				};
+			},
+			close() {},
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+		const session = {
+			cwd: projectDir,
+			getSessionId: () => owner,
+			isDisposed: () => false,
+			queueLaunchCompletion: async () => {},
+			registerDisposeCallback: () => {},
+		} as unknown as ToolSession;
+
+		await expect(
+			executeLaunch(session, { op: "start", name: "web", application: process.execPath, args: [] }),
+		).rejects.toThrow("name already exists");
+		expect(unregisters).toBe(0);
 	});
 
 	it("keeps a resumed owner's completion sink after a rejected operation", async () => {

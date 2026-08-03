@@ -44,9 +44,17 @@ export interface DaemonBrokerClientOptions {
 	idleGraceMs?: number;
 }
 
+export interface DaemonCompletionUnregisterOptions {
+	/** Detach this process without deleting broker-persisted pending notifications. */
+	preservePending?: boolean;
+}
+
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
-	onCompletion(owner: string, sink: (notification: DaemonCompletionNotification) => void): () => void;
+	onCompletion(
+		owner: string,
+		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
+	): (options?: DaemonCompletionUnregisterOptions) => void;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
@@ -142,8 +150,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #seenCompletionIds = new Set<string>();
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
-	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => void>();
+	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
 	readonly #completionUnsubscribes = new Set<string>();
+	readonly #inFlightCompletionIds = new Set<string>();
 	readonly #completionSubscriptionId = crypto.randomUUID();
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
@@ -216,14 +225,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
 
-	onCompletion(owner: string, sink: (notification: DaemonCompletionNotification) => void): () => void {
+	onCompletion(
+		owner: string,
+		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
+	): (options?: DaemonCompletionUnregisterOptions) => void {
 		this.#completionUnsubscribes.delete(owner);
 		this.#completionSinks.set(owner, sink);
 		this.#publishCompletionOwners();
-		return () => {
+		return options => {
 			if (this.#completionSinks.get(owner) !== sink) return;
 			this.#completionSinks.delete(owner);
-			this.#completionUnsubscribes.add(owner);
+			if (!options?.preservePending) this.#completionUnsubscribes.add(owner);
 			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
@@ -343,23 +355,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				continue;
 			}
 			if ("event" in message) {
-				if (!this.#seenCompletionIds.has(message.completionId)) {
-					if (this.#seenCompletionIds.size >= 512) {
-						const oldest = this.#seenCompletionIds.values().next().value;
-						if (oldest !== undefined) this.#seenCompletionIds.delete(oldest);
-					}
-					this.#seenCompletionIds.add(message.completionId);
-					try {
-						this.#completionSinks.get(message.owner)?.(message);
-					} catch (error) {
-						logger.warn("Daemon completion sink failed", {
-							owner: message.owner,
-							completionId: message.completionId,
-							error: error instanceof Error ? error.message : String(error),
-						});
-					}
-				}
-				this.#ackCompletion(message.completionId);
+				void this.#deliverCompletion(message);
 				continue;
 			}
 			const response = message;
@@ -377,6 +373,35 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			} catch (error) {
 				pending.reject(error instanceof Error ? error : new Error(String(error)));
 			}
+		}
+	}
+
+	async #deliverCompletion(message: DaemonCompletionNotification): Promise<void> {
+		if (this.#seenCompletionIds.has(message.completionId)) {
+			this.#ackCompletion(message.completionId);
+			return;
+		}
+		if (this.#inFlightCompletionIds.has(message.completionId)) return;
+		const sink = this.#completionSinks.get(message.owner);
+		if (!sink) return;
+		this.#inFlightCompletionIds.add(message.completionId);
+		try {
+			await sink(message);
+			if (this.#seenCompletionIds.size >= 512) {
+				const oldest = this.#seenCompletionIds.values().next().value;
+				if (oldest !== undefined) this.#seenCompletionIds.delete(oldest);
+			}
+			this.#seenCompletionIds.add(message.completionId);
+			this.#ackCompletion(message.completionId);
+		} catch (error) {
+			logger.warn("Daemon completion sink failed", {
+				owner: message.owner,
+				completionId: message.completionId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.#socket?.destroy();
+		} finally {
+			this.#inFlightCompletionIds.delete(message.completionId);
 		}
 	}
 

@@ -135,6 +135,31 @@ describe("YieldQueue", () => {
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["a,b"]);
 	});
 
+	test("resolves delivery receipts only after idle injection succeeds", async () => {
+		const injected = Promise.withResolvers<void>();
+		const scheduledFlushes: Array<() => Promise<void>> = [];
+		const queue = new YieldQueue({
+			isStreaming: () => false,
+			injectIdle: async () => injected.promise,
+			scheduleIdleFlush: run => scheduledFlushes.push(run),
+		});
+		queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		let delivered = false;
+		const receipt = queue.enqueueWithReceipt("items", { id: "durable" }).then(() => {
+			delivered = true;
+		});
+
+		const flush = scheduledFlushes[0]!();
+		await Promise.resolve();
+		expect(delivered).toBe(false);
+		injected.resolve();
+		await flush;
+		await receipt;
+		expect(delivered).toBe(true);
+	});
+
 	test("isStale drops stale entries and keeps survivors", async () => {
 		const harness = createHarness(true);
 		let survivorIds: string[] = [];

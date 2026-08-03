@@ -1,4 +1,5 @@
 import { toError } from "@oh-my-pi/pi-utils";
+import { sessionSidecarDir } from "./session-paths";
 import type {
 	SessionStorage,
 	SessionStorageStat,
@@ -318,7 +319,7 @@ export class IndexedSessionStorage implements SessionStorage {
 		const sessionEntry = this.#index.get(sessionPath);
 		if (!sessionEntry) throw enoent(sessionPath);
 
-		const artifactsDir = sessionPath.slice(0, -6);
+		const artifactsDir = sessionSidecarDir(sessionPath);
 		const prefix = artifactsDir.endsWith("/") ? artifactsDir : `${artifactsDir}/`;
 		const paths = [sessionPath];
 		for (const key of this.#index.keys()) {

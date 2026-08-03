@@ -1780,7 +1780,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
 			getClientBridge: () => session?.clientBridge,
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
-			queueLaunchCompletion: notification => session?.queueLaunchCompletion(notification),
+			queueLaunchCompletion: notification =>
+				session?.queueLaunchCompletion(notification) ??
+				Promise.reject(new Error("Session unavailable for launch completion delivery")),
 			registerDisposeCallback: callback => {
 				disposeCallbacks.add(callback);
 				return () => disposeCallbacks.delete(callback);
@@ -3338,7 +3340,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
 			},
-			queueLaunchCompletion: notification => session?.queueLaunchCompletion(notification),
+			queueLaunchCompletion: notification =>
+				session?.queueLaunchCompletion(notification) ??
+				Promise.reject(new Error("Session unavailable for launch completion delivery")),
 			getAgentId: () => "advisor",
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no
@@ -3489,7 +3493,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 			onSessionTransition: () => cronManager.refresh(),
 			beginSessionFork: () => cronManager.suspendForFork(),
-			completeSessionFork: result => cronManager.completeFork(result),
+			completeSessionFork: (result, isCurrent) => cronManager.completeFork(result, isCurrent),
 		});
 		hasSession = true;
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {

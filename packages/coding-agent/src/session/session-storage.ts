@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@oh-my-pi/pi-utils";
+import { sessionSidecarDir } from "./session-paths";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
@@ -429,16 +430,12 @@ export class FileSessionStorage implements SessionStorage {
 		return new FileSessionStorageWriter(path, options);
 	}
 
-	/**
-	 * Delete a session file and its artifacts directory.
-	 * Artifacts are stored in a sibling directory with the same name minus .jsonl extension.
-	 */
+	/** Delete a session file and its canonical sidecar directory. */
 	async deleteSessionWithArtifacts(sessionPath: string): Promise<void> {
 		// Delete the session file itself
 		await this.unlink(sessionPath);
 
-		// Compute artifacts directory: /path/to/session.jsonl -> /path/to/session
-		const artifactsDir = sessionPath.slice(0, -6);
+		const artifactsDir = sessionSidecarDir(sessionPath);
 
 		// Delete artifacts directory if it exists. Missing directories are fine, but
 		// surface real cleanup failures because the session file is already gone.

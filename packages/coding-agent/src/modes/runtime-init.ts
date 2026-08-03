@@ -8,7 +8,7 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-import type { ExtensionError, ExtensionUIContext } from "../extensibility/extensions/types";
+import type { CompactOptions, ExtensionError, ExtensionUIContext } from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 
@@ -32,6 +32,8 @@ export interface InitializeExtensionsOptions {
 	assertAgentWorkAllowed?: () => void;
 	/** Rejects extension command context operations that would change the active session. */
 	assertSessionChangeAllowed?: () => void;
+	/** Overrides extension-initiated compaction for modes with a custom terminal boundary. */
+	runCompact?: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 }
 
 /**
@@ -53,6 +55,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 		markAgentInvokingMessage,
 		assertSessionChangeAllowed,
 		trackAgentInvokingMessage,
+		runCompact = instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 	} = options;
 	const shutdown = onShutdown ?? (() => {});
 
@@ -116,7 +119,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			getSystemPrompt: () => session.systemPrompt,
 			compact: instructionsOrOptions => {
 				assertAgentWorkAllowed?.();
-				return runExtensionCompact(session, instructionsOrOptions);
+				return runCompact(instructionsOrOptions);
 			},
 		},
 		// ExtensionCommandContextActions — commands invokable via prompt("/command")
@@ -152,7 +155,7 @@ export async function initializeExtensions(session: AgentSession, options: Initi
 			},
 			compact: instructionsOrOptions => {
 				assertAgentWorkAllowed?.();
-				return runExtensionCompact(session, instructionsOrOptions);
+				return runCompact(instructionsOrOptions);
 			},
 		},
 		uiContext,

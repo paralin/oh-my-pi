@@ -11,6 +11,12 @@ describe("readDocAudience", () => {
 		expect(readDocAudience("  <!--   omp-audience:   maintainer   -->\n")).toBe("maintainer");
 	});
 
+	it("reads and strips a marker after a UTF-8 BOM", () => {
+		const body = "\uFEFF<!-- omp-audience: maintainer -->\n\n# Natives\n";
+		expect(readDocAudience(body)).toBe("maintainer");
+		expect(stripDocAudienceMarker(body)).toBe("\n\n# Natives\n");
+	});
+
 	it("defaults an unmarked page to the agent audience", () => {
 		expect(readDocAudience("# Hooks\n\nThis document describes hooks.\n")).toBe("agent");
 		expect(readDocAudience("")).toBe("agent");

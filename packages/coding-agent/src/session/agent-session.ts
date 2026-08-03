@@ -341,6 +341,7 @@ import {
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
 import { buildEffectiveSessionProfile, buildSessionMetadata } from "./session-metadata";
+import { sessionSidecarDir } from "./session-paths";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -454,7 +455,10 @@ export class AgentSession {
 	readonly #onSessionTransition: (() => void) | undefined;
 	readonly #beginSessionFork: (() => Promise<void>) | undefined;
 	readonly #completeSessionFork:
-		| ((result: { oldSessionFile: string; newSessionFile: string } | undefined) => Promise<void>)
+		| ((
+				result: { oldSessionFile: string; newSessionFile: string } | undefined,
+				isCurrent?: () => boolean,
+		  ) => Promise<void>)
 		| undefined;
 	#sessionServiceTransitionGeneration = 0;
 	fileSnapshotStore?: InMemorySnapshotStore;
@@ -492,6 +496,7 @@ export class AgentSession {
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
+	#pendingExtensionEventCount = 0;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
@@ -2762,13 +2767,21 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				// Public agent_end is held out of the eager display pass and emitted
-				// here after maintenance routing, tagged isTerminal so subscribers can
-				// tell final settles from scheduled continuations.
-				await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
-				void this.#emitAgentEndNotification(activeMessages, options).catch(err => {
-					logger.error("Agent end extension notification failed", { err });
-				});
+				this.#pendingExtensionEventCount++;
+				try {
+					// Public agent_end is held out of the eager display pass and emitted
+					// here after maintenance routing, tagged isTerminal so subscribers can
+					// tell final settles from scheduled continuations.
+					await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
+				} catch (error) {
+					this.#pendingExtensionEventCount--;
+					throw error;
+				}
+				void this.#emitAgentEndNotification(activeMessages, options)
+					.catch(err => {
+						logger.error("Agent end extension notification failed", { err });
+					})
+					.finally(() => this.#pendingExtensionEventCount--);
 			};
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
@@ -5688,6 +5701,15 @@ export class AgentSession {
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
 	async steer(text: string, images?: ImageContent[], options?: { idempotencyKey?: string }): Promise<void> {
+		await this.steerWithResult(text, images, options);
+	}
+
+	/** Queue steering and report whether usage preflight accepted it. */
+	async steerWithResult(
+		text: string,
+		images?: ImageContent[],
+		options?: { idempotencyKey?: string },
+	): Promise<boolean> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -5699,12 +5721,13 @@ export class AgentSession {
 					.peekSteeringQueue()
 					.some(message => message.role === "user" && message.idempotencyKey === idempotencyKey))
 		) {
-			return;
+			return true;
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		if (!(await this.#runUsageAwarePreflight())) return;
+		if (!(await this.#runUsageAwarePreflight())) return false;
 		await this.#queueUserMessage(expandedText, images, "steer", options?.idempotencyKey);
+		return true;
 	}
 
 	/**
@@ -5845,10 +5868,14 @@ export class AgentSession {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
-	queueLaunchCompletion(notification: DaemonCompletionNotification): void {
-		if (this.#isDisposed) return;
-		this.yieldQueue.enqueue<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, notification);
+	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
+		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
+		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
+			LAUNCH_COMPLETION_MESSAGE_TYPE,
+			notification,
+		);
 		this.yieldQueue.requestIdleFlush();
+		return delivered;
 	}
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
@@ -6216,6 +6243,16 @@ export class AgentSession {
 		);
 	}
 
+	/** Whether any agent or next-turn message remains queued, including hidden extension messages. */
+	get hasQueuedAgentMessages(): boolean {
+		return this.agent.hasQueuedMessages() || this.#pendingNextTurnMessages.length > 0;
+	}
+
+	/** Whether an extension lifecycle handler can still enqueue work from the current custody boundary. */
+	get hasPendingExtensionEvents(): boolean {
+		return this.#pendingExtensionEventCount > 0;
+	}
+
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
 		return {
 			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
@@ -6500,12 +6537,18 @@ export class AgentSession {
 			}
 		}
 
-		this.#disconnectFromAgent();
-		let advisorRecordersDetached = false;
 		await this.abort();
-		this.#cancelOwnAsyncJobs();
-		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
+		const sessionServicesSuspended = await this.#suspendSessionServices();
+		let advisorRecordersDetached = false;
+		try {
+			this.#disconnectFromAgent();
+			this.#cancelOwnAsyncJobs();
+			this.#closeAllProviderSessions("new session");
+			await this.#bash.flushPending();
+		} catch (error) {
+			await this.#resumeSessionServices(sessionServicesSuspended, false, "new session");
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
@@ -6576,6 +6619,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "new session");
 		}
 	}
 
@@ -6587,13 +6631,37 @@ export class AgentSession {
 		return setSessionName.call(this.sessionManager, name, source, trigger);
 	}
 
+	async #suspendSessionServices(): Promise<boolean> {
+		if (!this.#beginSessionFork) return false;
+		this.#sessionServiceTransitionGeneration++;
+		await this.#beginSessionFork();
+		return true;
+	}
+
+	async #resumeSessionServices(suspended: boolean, committed: boolean, transition: string): Promise<void> {
+		if (!suspended) return;
+		try {
+			await this.#completeSessionFork?.(undefined);
+		} catch (error) {
+			if (!committed) throw error;
+			logger.warn(`Failed to resume session services after committed ${transition}`, {
+				sessionFile: this.sessionFile,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			this.#scheduleSessionServiceRecovery(undefined);
+		}
+	}
+
 	#scheduleSessionServiceRecovery(result: { oldSessionFile: string; newSessionFile: string } | undefined): void {
 		if (!this.#completeSessionFork || this.#isDisposed) return;
 		const generation = this.#sessionServiceTransitionGeneration;
 		const retry = (): void => {
 			const timer = setTimeout(() => {
 				if (this.#isDisposed || generation !== this.#sessionServiceTransitionGeneration) return;
-				void this.#completeSessionFork?.(result).catch(error => {
+				void this.#completeSessionFork?.(
+					result,
+					() => !this.#isDisposed && generation === this.#sessionServiceTransitionGeneration,
+				).catch(error => {
 					logger.warn("Failed to recover session services after committed transition", {
 						sessionFile: this.sessionFile,
 						error: error instanceof Error ? error.message : String(error),
@@ -6628,22 +6696,18 @@ export class AgentSession {
 			}
 		}
 
-		await this.#bash.flushPending();
-		// Flush current session to ensure all entries are written
-		await this.sessionManager.flush();
+		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let advisorRecordersDetached = false;
-		let sessionForkStarted = false;
+		let sessionForkStarted = sessionServicesSuspended;
 		try {
+			await this.#bash.flushPending();
+			// Flush current session to ensure all entries are written
+			await this.sessionManager.flush();
 			advisorRecordersDetached = true;
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
 			const bashTransition = this.#bash.beginSessionTransition();
-			if (this.#beginSessionFork) {
-				this.#sessionServiceTransitionGeneration++;
-				await this.#beginSessionFork();
-				sessionForkStarted = true;
-			}
 
 			// Fork the session (creates new session file with same entries)
 			let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
@@ -6661,8 +6725,8 @@ export class AgentSession {
 			this.#bash.finishSessionTransition(bashTransition, true);
 
 			// Copy artifacts directory if it exists
-			const oldArtifactDir = forkResult.oldSessionFile.slice(0, -6);
-			const newArtifactDir = forkResult.newSessionFile.slice(0, -6);
+			const oldArtifactDir = sessionSidecarDir(forkResult.oldSessionFile);
+			const newArtifactDir = sessionSidecarDir(forkResult.newSessionFile);
 
 			try {
 				const oldDirStat = await fs.promises.stat(oldArtifactDir);
@@ -7343,6 +7407,11 @@ export class AgentSession {
 		return this.#bash.hasPendingMessages;
 	}
 
+	/** Persist pending bash result messages before a terminal or session boundary. */
+	flushPendingBashMessages(): Promise<void> {
+		return this.#bash.flushPending();
+	}
+
 	// =========================================================================
 	// User-Initiated Python Execution
 	// =========================================================================
@@ -7673,13 +7742,18 @@ export class AgentSession {
 			}
 		}
 
-		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
-
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
+		const sessionServicesSuspended = await this.#suspendSessionServices();
+		try {
+			this.#disconnectFromAgent();
+			await this.#sessionBeforeSwitchReconciler?.();
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+		} catch (error) {
+			await this.#resumeSessionServices(sessionServicesSuspended, false, "session switch");
+			throw error;
+		}
 		const previousSessionState = this.sessionManager.captureState();
 		const bashTransition = this.#bash.beginSessionTransition();
 		// Only same-session reloads compare against the prior context to detect
@@ -7724,6 +7798,7 @@ export class AgentSession {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
+		let sessionTransitioned = false;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -7878,6 +7953,7 @@ export class AgentSession {
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
+			sessionTransitioned = true;
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -7934,6 +8010,8 @@ export class AgentSession {
 			}
 			this.#bash.finishSessionTransition(bashTransition, false);
 			throw error;
+		} finally {
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session switch");
 		}
 	}
 
@@ -7977,21 +8055,22 @@ export class AgentSession {
 			skipConversationRestore = result?.skipConversationRestore ?? false;
 		}
 
-		// Clear pending messages (bound to old session state)
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-
-		await this.#bash.flushPending();
-		// Flush pending writes before branching
-		await this.sessionManager.flush();
-		const bashTransition = this.#bash.beginSessionTransition();
-		this.#cancelOwnAsyncJobs();
-		this.#abortAutolearnCapture();
-		await this.#drainAutolearnCapture();
-
+		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			// Clear pending messages (bound to old session state)
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+
+			await this.#bash.flushPending();
+			// Flush pending writes before branching
+			await this.sessionManager.flush();
+			const bashTransition = this.#bash.beginSessionTransition();
+			this.#cancelOwnAsyncJobs();
+			this.#abortAutolearnCapture();
+			await this.#drainAutolearnCapture();
+
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -8041,6 +8120,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
 		}
 	}
 
@@ -8079,34 +8159,35 @@ export class AgentSession {
 			}
 		}
 
-		await this.#cancelPostPromptTasks();
-		if (
-			this.isBashRunning ||
-			this.isEvalRunning ||
-			this.isCompacting ||
-			this.isGeneratingHandoff ||
-			this.isRetrying
-		) {
-			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
-		}
-
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		this.agent.replaceQueues([], []);
-		if (this.isStreaming) {
-			await this.abort({ goalReason: "internal", reason: "branching /btw" });
-			this.agent.replaceQueues([], []);
-		}
-		await this.#bash.flushPending();
-		await this.sessionManager.flush();
-		const bashTransition = this.#bash.beginSessionTransition();
-		this.#cancelOwnAsyncJobs();
-		this.#abortAutolearnCapture();
-		await this.#drainAutolearnCapture();
-
+		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			await this.#cancelPostPromptTasks();
+			if (
+				this.isBashRunning ||
+				this.isEvalRunning ||
+				this.isCompacting ||
+				this.isGeneratingHandoff ||
+				this.isRetrying
+			) {
+				throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+			}
+
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			this.agent.replaceQueues([], []);
+			if (this.isStreaming) {
+				await this.abort({ goalReason: "internal", reason: "branching /btw" });
+				this.agent.replaceQueues([], []);
+			}
+			await this.#bash.flushPending();
+			await this.sessionManager.flush();
+			const bashTransition = this.#bash.beginSessionTransition();
+			this.#cancelOwnAsyncJobs();
+			this.#abortAutolearnCapture();
+			await this.#drainAutolearnCapture();
+
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -8154,6 +8235,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
 		}
 	}
 

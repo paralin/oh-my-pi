@@ -186,13 +186,10 @@ export class SessionHandoff {
 					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
 					signal: handoffSignal,
-					metadata:
-						options?.metadataCompactionStrategy === undefined
-							? undefined
-							: overrideSessionMetadataCompactionStrategy(
-									this.#host.agent.metadataForProvider(model.provider),
-									options.metadataCompactionStrategy,
-								),
+					metadata: overrideSessionMetadataCompactionStrategy(
+						this.#host.agent.metadataForProvider(model.provider),
+						options?.metadataCompactionStrategy ?? "handoff",
+					),
 				},
 				model.provider,
 			);
