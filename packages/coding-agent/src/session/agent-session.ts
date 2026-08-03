@@ -2072,6 +2072,11 @@ export class AgentSession {
 		return this.#hasPendingAsyncWake();
 	}
 
+	/** Whether a queued notification can start an idle follow-up turn. */
+	hasPendingYieldWake(): boolean {
+		return this.yieldQueue.hasPendingIdleWake();
+	}
+
 	/**
 	 * Settle one generation of owner-scoped async work: wait for running owner
 	 * jobs to finish, deliver their queued results (which enqueue async-result
