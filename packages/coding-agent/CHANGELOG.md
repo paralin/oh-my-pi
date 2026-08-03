@@ -339,6 +339,32 @@
 - Fixed install.sh falsely reporting success on musl-based systems (such as Alpine Linux) when the binary fails to start; the installer now smoke-tests the binary, exits non-zero on failure, and provides remediation steps.
 - Fixed Codex config.toml discovery incorrectly importing MCP servers that are configured with enabled = false.
 - Fixed bash.patterns allow rules rejecting valid commands when quoted arguments contained shell metacharacters (such as Cargo benchmark regex filters).
+### Added
+
+- Added an opt-in typed client for listing local GLaDOS World sessions and resolving deterministic dispatch identities through the daemon Console socket. It reads `world.socket` or `OMP_WORLD_SOCKET` and stays inert until one is set.
+- Added `session.start`, `session.resume`, `session.replay`, `session.result`, `session.steer`, and `session.watch` to RPC mode, giving an external supervisor a durable append-only record of a session beside its transcript. A run claims an identity so a retried dispatch resolves against the existing episode instead of launching a second one, events carry a sequence a reconnecting supervisor can replay from, steering is acknowledged and redelivered when it was accepted but never injected, and the terminal result is sealed only after the transcript and accepted extension work settle. Clients that do not bind durable custody are unaffected.
+- Added `cron_create`, `cron_list`, and `cron_delete`, which schedule session-scoped prompts from five-field cron expressions evaluated in local time. Durable jobs persist beside the transcript, survive supported session transitions, and replay a missed one-shot on resume.
+- Added the `claude-code/{model}` Task selector, Claude Agent SDK runtime, `task.claudeCode.executable` setting, and configured effort discovery, with structured OMP Yield validation and live usage accounting.
+- Added OMP Task and Hub coordination to isolated Claude Code peers, including retained peer state, ordered asynchronous delivery, metadata-only persistence, and exact-session revival.
+
+### Changed
+
+- Replaced arktype with `@oh-my-pi/omptype` across all tool parameter and config schemas: ~100x faster schema construction removes the arktype startup tax (the `scope({}, { jitless: true })` workarounds are gone). Config schema errors now report via `OmpErrors` entries with the same `path`/`problem` shape.
+- Scratch handoff is now an explicit compaction strategy. Checkpoints are created lazily, existing checkpoints close out through targeted edits, verified no-delta handoffs cancel before context loss, and shake compaction preserves checkpoint continuity and rewrite accounting.
+- `omp://` documentation pages now declare their intended audience with a first-line HTML comment. Maintainer pages stay directly readable while remaining hidden from default listings and completions.
+
+### Fixed
+
+- Fixed extension/custom/hook tool wrappers stripping schema methods off `parameters`: `applyToolProxy` bound every callable property, and binding a schema (a plain function carrying `toJsonSchema`/`assert`) dropped those properties, breaking wire-schema detection and crashing the status-line token estimator with `JSON.stringify(schema) === undefined`. Prototype methods are still bound; own data properties and schema callables now pass through untouched.
+- Fixed bug where `agent()` calls in eval cells ignored turn cancellation and continued running indefinitely
+- Fixed the built-in `tail` printing `tail: Broken pipe` and failing when a downstream pipeline reader exited early (e.g. `tail -c N file.jsonl | jq …` with jq aborting on a parse error); it now exits silently with 141 (128+SIGPIPE) like a real tail, in every output path including `--follow`.
+- Fixed the in-process ps shell builtin rejecting common procps/BSD format specifiers (`ps -o tpgid,...` failed with `unknown output format specifier`); added `tpgid`, `pri`, `flags`, real/effective user and group columns, `wchan`, fault counters, `sz`, and the STAT `+` foreground flag.
+### Fixed
+
+- Fixed `install.sh` reporting success (exit 0) for a musl binary that cannot start: the installer now smoke-runs the downloaded binary and, on failure, prints the captured error plus the `apk add libstdc++ libgcc` remediation for musl targets and exits non-zero. Documented the Alpine/musl runtime requirement in the README ([#7545](https://github.com/can1357/oh-my-pi/issues/7545)).
+- Fixed provider session metadata disclosure by recording only bounded effective compaction and tokenizer settings while preserving session identity; raw config paths are excluded.
+- Fixed pending idle compaction firing against a stale idle gate after its settings changed.
+- Fixed Claude Code Task runs losing Yield schema-retry ownership at the MCP boundary, ignoring explicit tool allowlists, or retaining baseline-only files during isolated branch capture.
 
 ## [17.2.6] - 2026-08-03
 
