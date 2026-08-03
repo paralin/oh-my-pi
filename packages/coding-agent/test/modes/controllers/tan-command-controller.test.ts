@@ -10,6 +10,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry
 import type { CreateAgentSessionOptions, CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sessionSidecarDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 interface CapturedJobRunContext {
@@ -88,11 +89,12 @@ function createContext(overrides?: {
 	agentId?: string;
 	parentPromptCacheKey?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
+	explicitParentPath?: boolean;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
-	const parentFile = path.join(tempDir.path(), "parent.jsonl");
+	const parentFile = path.join(tempDir.path(), overrides?.explicitParentPath ? "parent" : "parent.jsonl");
 	// The clone nests inside the parent's artifact directory, like a subagent.
-	const cloneFile = path.join(parentFile.slice(0, -6), "clone.jsonl");
+	const cloneFile = path.join(sessionSidecarDir(parentFile), "clone.jsonl");
 	let capturedRun: CapturedJobRun | undefined;
 	let capturedOptions: AsyncJobRegisterOptions | undefined;
 	const sequence: string[] = [];
@@ -119,7 +121,7 @@ function createContext(overrides?: {
 			sequence.push("sendCustomMessage");
 		}),
 	} as unknown as InteractiveModeContext["session"];
-	const parentArtifactsDir = parentFile.slice(0, -6);
+	const parentArtifactsDir = sessionSidecarDir(parentFile);
 	const getArtifactsDir = vi.fn(() => parentArtifactsDir);
 	const getSessionId = vi.fn(() => "parent-local-session");
 	const sessionManager = {
@@ -209,7 +211,7 @@ describe("TanCommandController", () => {
 		expect(forkSpy).toHaveBeenCalledWith(
 			harness.parentFile,
 			harness.tempDir.path(),
-			harness.parentFile.slice(0, -6),
+			sessionSidecarDir(harness.parentFile),
 			undefined,
 			{ suppressBreadcrumb: true, sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/) },
 		);
@@ -232,6 +234,22 @@ describe("TanCommandController", () => {
 		);
 		expect(harness.ctx.rebuildChatFromMessages).toHaveBeenCalled();
 		expect(harness.ctx.showStatus).toHaveBeenCalledWith("Dispatched background tan job-123");
+	});
+
+	it("nests clones in the canonical sidecar of an explicit session path", async () => {
+		const harness = createContext({ explicitParentPath: true });
+		const forkSpy = vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("inspect explicit session");
+
+		expect(forkSpy).toHaveBeenCalledWith(
+			harness.parentFile,
+			harness.tempDir.path(),
+			sessionSidecarDir(harness.parentFile),
+			undefined,
+			{ suppressBreadcrumb: true, sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/) },
+		);
 	});
 
 	it("keeps the dispatching session's local:// root after the interactive session switches", async () => {

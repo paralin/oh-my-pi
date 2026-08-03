@@ -6,6 +6,7 @@ import { getResolvedThemeColors, getThemeExportColors } from "../../modes/theme/
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
 import { loadEntriesFromFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
+import { sessionSidecarDir } from "../../session/session-paths";
 import type { ExportThemeNames } from "./args";
 import templateCssPath from "./template.css" with { type: "file" };
 import templateHtmlPath from "./template.html" with { type: "file" };
@@ -200,17 +201,15 @@ export function buildSessionData(sm: SessionManager, state?: AgentState): Sessio
 }
 
 /**
- * Collect subagent session transcripts stored next to a session file.
+ * Collect subagent session transcripts stored in a session's sidecar directory.
  *
- * A session at `<dir>/<name>.jsonl` keeps its subagent sessions at `<dir>/<name>/<AgentId>.jsonl`;
- * each subagent's own children nest the same way under `<dir>/<name>/<AgentId>/`. Keys in the
- * returned record are slash-joined ids relative to the main session ("ToolAsk", "ToolAsk/Helper").
+ * Each subagent's own children nest under its id. Keys in the returned record
+ * are slash-joined ids relative to the main session ("ToolAsk", "ToolAsk/Helper").
  * Corrupt or empty files are skipped silently.
  */
 export async function collectSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
 	const result: Record<string, SubSession> = {};
-	if (!sessionFile.endsWith(".jsonl")) return result;
-	await collectSubSessionsFromDir(sessionFile.slice(0, -6), null, result);
+	await collectSubSessionsFromDir(sessionSidecarDir(sessionFile), null, result);
 	return result;
 }
 

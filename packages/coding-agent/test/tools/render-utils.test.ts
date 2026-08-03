@@ -12,6 +12,7 @@ import {
 	formatExpandHint,
 	formatParseErrors,
 	formatScreenshot,
+	shortenEmbeddedPaths,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -114,6 +115,25 @@ describe("formatScreenshot", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
 		expect(shortenPath(sibling, home)).toBe(sibling);
+	});
+
+	it("shortens assignment-prefixed and URI-prefixed home paths", () => {
+		const home = os.homedir();
+		const rendered = shortenEmbeddedPaths(
+			`inspect path=${home}/private and file://${home}/cache; keep ${home}-shared`,
+		);
+
+		expect(rendered).toBe(`inspect path=~/private and file://~/cache; keep ${home}-shared`);
+		expect(rendered).not.toContain(`${home}/private`);
+		expect(rendered).not.toContain(`${home}/cache`);
+	});
+
+	it("shortens home paths after opening grouping punctuation", () => {
+		const home = os.homedir();
+		const rendered = shortenEmbeddedPaths(`inspect(${home}/private) [file](${home}/secret) {cache:${home}/cache}`);
+
+		expect(rendered).toBe("inspect(~/private) [file](~/secret) {cache:~/cache}");
+		expect(rendered).not.toContain(home);
 	});
 
 	it("formats non-home path without tilde", () => {

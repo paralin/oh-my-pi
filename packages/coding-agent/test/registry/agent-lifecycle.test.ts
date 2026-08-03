@@ -600,6 +600,22 @@ describe("AgentLifecycleManager", () => {
 		expect(lifecycle.has("8-Sub")).toBe(true);
 	});
 
+	it("registers persisted subagents from a non-jsonl session sidecar", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-sidecar-");
+		const rootSessionFile = path.join(tempDir.path(), "named-session");
+		const workerId = "Persisted-Sub";
+		await Bun.write(rootSessionFile, "");
+		await Bun.write(path.join(tempDir.path(), "named-session.d", `${workerId}.jsonl`), "");
+
+		await registerPersistedSubagents(registry, rootSessionFile);
+
+		expect(registry.get(workerId)).toMatchObject({
+			id: workerId,
+			sessionFile: path.join(tempDir.path(), "named-session.d", `${workerId}.jsonl`),
+			status: "parked",
+		});
+	});
+
 	it("tombstone release keeps a killed ref as terminal `aborted` so a persisted-subagent rescan cannot resurrect it as parked", async () => {
 		using tempDir = TempDir.createSync("@omp-lifecycle-tombstone-");
 		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");

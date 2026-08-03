@@ -36,6 +36,28 @@ describe("SqlSessionStorage (SQLite backend)", () => {
 		await client.end();
 	});
 
+	it("coordinates leases across storage instances and expires stale holders", async () => {
+		const client = new SQL("sqlite::memory:");
+		const first = await SqlSessionStorage.create({ client });
+		const second = await SqlSessionStorage.create({ client });
+		const lease = "/sessions/p/scheduled_tasks.json.delivery";
+
+		expect(await first.acquireLease(lease, "first", 2_000, 1_000)).toBe(true);
+		expect(await second.acquireLease(lease, "second", 2_000, 1_000)).toBe(false);
+		expect(await first.renewLease(lease, "first", 4_000, 1_500)).toBe(true);
+		expect(await second.renewLease(lease, "second", 4_000, 1_500)).toBe(false);
+		await second.releaseLease(lease, "second");
+		expect(await second.acquireLease(lease, "second", 5_000, 2_001)).toBe(false);
+		expect(await first.renewLease(lease, "first", 5_000, 4_001)).toBe(false);
+		expect(await second.acquireLease(lease, "second", 5_000, 4_001)).toBe(true);
+		await first.releaseLease(lease, "first");
+		expect(await first.acquireLease(lease, "third", 5_000, 4_001)).toBe(false);
+		await first.refresh();
+		expect(first.existsSync(lease)).toBe(false);
+
+		await client.end();
+	});
+
 	it("create() warms the metadata index without selecting full content", async () => {
 		const client = new SQL("sqlite::memory:");
 		await client.unsafe(

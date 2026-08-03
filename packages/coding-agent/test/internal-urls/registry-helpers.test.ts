@@ -11,6 +11,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	artifactsDirsFromRegistry,
 	hasResolvableTranscript,
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
@@ -90,6 +91,20 @@ describe("hasResolvableTranscript", () => {
 		} finally {
 			await removeWithRetries(dir);
 		}
+	});
+
+	it("uses the canonical sidecar for a parked non-jsonl session", () => {
+		const sessionFile = path.join(os.tmpdir(), "named-session");
+		AgentRegistry.global().register({
+			id: "Explicit",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+
+		expect(artifactsDirsFromRegistry()).toEqual([`${sessionFile}.d`]);
 	});
 
 	it("falls back to the artifacts-dir disk scan for unregistered agents", async () => {

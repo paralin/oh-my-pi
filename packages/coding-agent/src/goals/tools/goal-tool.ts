@@ -231,7 +231,10 @@ export const goalToolRenderer = {
 		);
 
 		const lines: string[] = [];
-		const objectiveText = truncateToWidth(replaceTabs(goal.objective.trim()), TRUNCATE_LENGTHS.LONG);
+		const objectiveText = truncateToWidth(
+			replaceTabs(sanitizeStatusText(goal.objective.trim())),
+			TRUNCATE_LENGTHS.LONG,
+		);
 		lines.push(uiTheme.italic(uiTheme.fg("muted", `"${objectiveText}"`)));
 
 		const used = formatNumber(goal.tokensUsed);

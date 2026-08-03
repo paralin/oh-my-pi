@@ -63,4 +63,24 @@ describe("report bundle logs", () => {
 		expect(logsText).toContain("later invocation");
 		expect(logsText.indexOf(crashedName)).toBeLessThan(logsText.indexOf(currentName));
 	});
+
+	it("collects artifacts for an explicit non-JSONL session path", async () => {
+		cleanupRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-report-sidecar-"));
+		const xdgStateHome = path.join(cleanupRoot, "state");
+		await fs.mkdir(path.join(xdgStateHome, "omp"), { recursive: true });
+		process.env.XDG_STATE_HOME = xdgStateHome;
+		setAgentDir(fallbackAgentDir);
+
+		const sessionFile = path.join(cleanupRoot, "explicit-session");
+		await Bun.write(sessionFile, '{"type":"session","id":"session-1"}\n');
+		await fs.mkdir(`${sessionFile}.d`, { recursive: true });
+		await Bun.write(path.join(`${sessionFile}.d`, "0.read.log"), "artifact body");
+
+		const result = await createReportBundle({ sessionFile });
+
+		expect(result.files).toContain("artifacts/0.read.log");
+		const archive = new Bun.Archive(await Bun.file(result.path).bytes());
+		const files = await archive.files();
+		expect(await files.get("artifacts/0.read.log")?.text()).toBe("artifact body");
+	});
 });
