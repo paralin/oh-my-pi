@@ -17,7 +17,12 @@ function createContainer() {
 }
 
 function createCwdContext(sourceDir: string, isStreaming = false) {
-	const state = { cwd: sourceDir, executedCwds: [] as string[] };
+	const state = {
+		cwd: sourceDir,
+		streaming: isStreaming,
+		executedCwds: [] as string[],
+		transition: [] as string[],
+	};
 	const executeBash = vi.fn(async (command: string) => {
 		state.executedCwds.push(state.cwd);
 		return {
@@ -32,18 +37,36 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 			workingDir: state.cwd,
 		};
 	});
+	const moveTo = vi.fn(async (cwd: string) => {
+		state.transition.push("move");
+		state.cwd = cwd;
+	});
+	const abort = vi.fn(async () => {
+		state.transition.push("abort");
+		state.streaming = false;
+	});
+	// Stands in for AgentSession.moveSession: suspend the session services, abort
+	// a live turn, then commit the relocation through the session manager.
+	const moveSession = vi.fn(async (cwd: string) => {
+		state.transition.push("suspend");
+		if (state.streaming) await abort();
+		await moveTo(cwd);
+		state.transition.push("resume");
+	});
 	const pendingMessagesContainer = createContainer();
 	const present = vi.fn();
 	const ctx = {
 		session: {
-			isStreaming,
+			get isStreaming() {
+				return state.streaming;
+			},
 			executeBash,
+			abort,
+			moveSession,
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,
-			moveTo: vi.fn(async (cwd: string) => {
-				state.cwd = cwd;
-			}),
+			moveTo,
 		},
 		chatContainer: createContainer(),
 		pendingMessagesContainer,
@@ -58,7 +81,7 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
 	} as unknown as InteractiveModeContext;
-	return { ctx, executeBash, pendingMessagesContainer, present, state };
+	return { ctx, abort, executeBash, moveSession, moveTo, pendingMessagesContainer, present, state };
 }
 
 describe("bash shortcut command", () => {
@@ -162,6 +185,44 @@ describe("bash shortcut command", () => {
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir);
 			expect(ctx.updateEditorBorderColor).toHaveBeenCalledTimes(2);
 			expect(ctx.reloadTodos).toHaveBeenCalledTimes(2);
+			expect(ctx.showError).not.toHaveBeenCalled();
+		} finally {
+			await fs.rm(sourceDir, { recursive: true, force: true });
+		}
+	});
+
+	it("suspends and aborts a wake that starts during a standalone cd", async () => {
+		const sourceDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bash-cd-wake-"));
+		const childDir = path.join(sourceDir, "child");
+		await fs.mkdir(childDir);
+		try {
+			const { ctx, abort, executeBash, moveSession, moveTo, state } = createCwdContext(sourceDir);
+			executeBash.mockImplementationOnce(async () => {
+				state.executedCwds.push(state.cwd);
+				// A cron wake fires while the interactive shell is still running.
+				state.streaming = true;
+				return {
+					output: "",
+					exitCode: 0,
+					cancelled: false,
+					truncated: false,
+					totalLines: 0,
+					totalBytes: 0,
+					outputLines: 0,
+					outputBytes: 0,
+					workingDir: childDir,
+				};
+			});
+			const controller = new CommandController(ctx);
+
+			await controller.handleBashCommand("cd child");
+
+			expect(moveSession).toHaveBeenCalledWith(childDir);
+			expect(abort).toHaveBeenCalledTimes(1);
+			expect(moveTo).toHaveBeenCalledTimes(1);
+			expect(state.transition).toEqual(["suspend", "abort", "move", "resume"]);
+			expect(state.cwd).toBe(childDir);
+			expect(ctx.applyCwdChange).toHaveBeenCalledWith(childDir);
 			expect(ctx.showError).not.toHaveBeenCalled();
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });

@@ -89,6 +89,15 @@ describe("collectSubSessions", () => {
 		expect(html).not.toContain(subPreviousPath);
 	});
 
+	test("uses the canonical sidecar for a non-jsonl session path", async () => {
+		const explicitSession = path.join(root, "named-session");
+		await Bun.write(path.join(root, "named-session.d/Alpha.jsonl"), sessionJsonl("alpha", ["a1"]));
+
+		const subs = await collectSubSessions(explicitSession);
+
+		expect(subs.Alpha).toMatchObject({ agentId: "Alpha", leafId: "a1" });
+	});
+
 	test("skips corrupt, empty, backup, and non-jsonl files", async () => {
 		await Bun.write(path.join(root, "main/Good.jsonl"), sessionJsonl("good", ["g1"]));
 		await Bun.write(path.join(root, "main/corrupt.jsonl"), "{not json\n");

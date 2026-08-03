@@ -14,6 +14,14 @@ export interface YieldDispatcher<P> {
 
 export interface YieldQueueOptions {
 	isStreaming: () => boolean;
+	/**
+	 * Gate for idle wake turns. The idle flush is the only path that starts a
+	 * provider turn on its own, so a mode holding durable custody of the session
+	 * can refuse the wake the same way it refuses a peer IRC wake. Refusing
+	 * retains every queued entry untouched: the owed notifications still reach
+	 * the model through a later flush or the next run's lazy aside drain.
+	 */
+	canWakeIdle?: () => boolean;
 	injectStreaming?(msg: AgentMessage): void;
 	injectIdle(messages: AgentMessage[]): Promise<void>;
 	scheduleIdleFlush(run: () => Promise<void>): void;
@@ -88,6 +96,10 @@ export class YieldQueue {
 		return promise;
 	}
 
+	/** Append the whole arrival before dispatching it. Entries that come due
+	 *  together — simultaneous scheduled prompts — must land in the queue before
+	 *  the streaming flush drains it, or the first one steers alone and the rest
+	 *  follow as separate notifications instead of one batch. */
 	#enqueueMany(kind: string, incoming: StoredEntry[]): boolean {
 		if (incoming.length === 0) return true;
 		const dispatcher = this.#dispatchers.get(kind);
@@ -128,9 +140,13 @@ export class YieldQueue {
 	}
 
 	/** Flush every registered kind, or only `onlyKind` when one is named. */
-	async flush(mode: YieldFlushMode, onlyKind?: string): Promise<void> {
+	async flush(mode: YieldFlushMode, onlyKind?: string): Promise<Set<string>> {
+		const drainedKinds = new Set<string>();
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
+			// Wake boundary. Checked before the first #drain so a refusal leaves the
+			// entries queued rather than settling receipts for work that never ran.
+			if (this.#options.canWakeIdle?.() === false) return drainedKinds;
 		}
 		const idleMessages: BuiltMessage[] = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
@@ -138,6 +154,7 @@ export class YieldQueue {
 			if (mode === "idle" && dispatcher.skipIdleFlush) continue;
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
+			drainedKinds.add(kind);
 			const built = this.#build(kind, dispatcher, entries);
 			if (!built) continue;
 			if (mode === "streaming") {
@@ -172,6 +189,7 @@ export class YieldQueue {
 				throw error;
 			}
 		}
+		return drainedKinds;
 	}
 
 	/**

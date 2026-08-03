@@ -8,7 +8,9 @@ import {
 	disposeRpcSessionWithCustody,
 	RpcCustodyBindingGuard,
 	type RpcSessionEventStreamDeps,
+	RpcShutdownCoordinator,
 	RpcTerminalTaskTracker,
+	shouldForceLedgerSeal,
 	streamRpcSessionEvent,
 	summarizeRpcEpisode,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
@@ -95,6 +97,14 @@ describe("RpcTerminalTaskTracker", () => {
 		delivery.resolve();
 		await terminal;
 		expect(sealed).toBe(true);
+	});
+
+	test("settles rejected application tasks before opening the terminal boundary", async () => {
+		const tracker = new RpcTerminalTaskTracker();
+		tracker.track(Promise.reject(new Error("reported command failure"))).catch(() => {});
+
+		await expect(tracker.wait()).resolves.toBeUndefined();
+		expect(tracker.hasPendingTasks).toBe(false);
 	});
 });
 
@@ -250,7 +260,7 @@ describe("streamRpcSessionEvent", () => {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
 	});
-	test("falls back to the direct stream after the terminal result is sealed", async () => {
+	test("drops events emitted after the terminal result is sealed", async () => {
 		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-stream-"));
 		try {
 			const ledger = await RpcHarnessSessionOwner.open("session-1", path.join(tmp, "session", "rpc.jsonl"));
@@ -265,7 +275,7 @@ describe("streamRpcSessionEvent", () => {
 			streamRpcSessionEvent(notice("after"), deps);
 			await Promise.resolve();
 
-			expect(frames).toEqual([notice("after")]);
+			expect(frames).toEqual([]);
 			expect(failures).toEqual([]);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
@@ -287,6 +297,118 @@ describe("streamRpcSessionEvent", () => {
 			await Promise.resolve();
 
 			expect(failures.map(([command]) => command)).toEqual(["session.watch"]);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("shouldForceLedgerSeal", () => {
+	const zeroUsage = () => ({ input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+
+	/**
+	 * Wires a coordinator the way `runRpcMode` does: the forced seal is gated on
+	 * ledger seal availability, a background `session.result` read is tracked so
+	 * the drain waits on it, and the first reported failure requests shutdown.
+	 */
+	function wireShutdown(ledger: RpcHarnessSessionOwner) {
+		const reported = Promise.withResolvers<void>();
+		const failures: string[] = [];
+		const performed: string[] = [];
+		const sealed: string[] = [];
+		const shutdownState = { requested: false };
+		const coordinator = new RpcShutdownCoordinator({
+			isShutdownRequested: () => shutdownState.requested,
+			prepareShutdown: async () => {
+				if (!shouldForceLedgerSeal(ledger)) return;
+				sealed.push("shutdown_requested");
+				await ledger.completeResult({
+					outcome: "completed",
+					stopReason: "shutdown_requested",
+					finalMessage: "",
+					usage: zeroUsage(),
+				});
+			},
+			performShutdown: async () => {
+				performed.push("shutdown");
+			},
+		});
+		const waiter = ledger.waitResult().then(
+			() => "resolved",
+			() => "rejected",
+		);
+		coordinator.track(waiter.then(() => undefined));
+		const onLedgerFailure = (command: string) => {
+			failures.push(command);
+			shutdownState.requested = true;
+			reported.resolve();
+			void coordinator.checkShutdownRequested();
+		};
+		return { coordinator, failures, onLedgerFailure, performed, reported, sealed, waiter };
+	}
+
+	const steeringDelivery = () =>
+		({
+			type: "message_end",
+			message: { role: "user", content: "hello", timestamp: 0, idempotencyKey: "rpc:session-1:steer-1" },
+		}) as unknown as AgentSessionEvent;
+
+	test("forces a usable ledger to terminal state after a transcript persistence failure", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-stream-"));
+		try {
+			const ledger = await RpcHarnessSessionOwner.open("session-1", path.join(tmp, "session", "rpc.jsonl"));
+			await ledger.steer("steer-1", "hello", async () => {});
+			const wiring = wireShutdown(ledger);
+			const { deps } = collect({
+				ledger: () => ledger,
+				// A full disk fails the transcript flush; the ledger is untouched.
+				waitForMessagePersistence: async () => {
+					throw new Error("transcript write failed");
+				},
+				onLedgerFailure: wiring.onLedgerFailure,
+			});
+
+			streamRpcSessionEvent(steeringDelivery(), deps);
+			await wiring.reported.promise;
+			await wiring.coordinator.checkShutdownRequested();
+
+			expect(wiring.failures).toEqual(["session.steer"]);
+			// The reported failure never reached the ledger, so shutdown still seals.
+			expect(shouldForceLedgerSeal(ledger)).toBe(true);
+			expect(wiring.sealed).toEqual(["shutdown_requested"]);
+			expect(ledger.hasResult).toBe(true);
+			expect((await ledger.waitResult()).stopReason).toBe("shutdown_requested");
+			// The tracked session.result waiter resolved, so the drain reached disposal.
+			expect(await wiring.waiter).toBe("resolved");
+			expect(wiring.coordinator.hasTrackedTasks).toBe(false);
+			expect(wiring.performed).toEqual(["shutdown"]);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	test("skips the forced seal when a latched ledger failure took sealing away", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-rpc-stream-"));
+		try {
+			const sidecar = path.join(tmp, "session");
+			const ledger = await RpcHarnessSessionOwner.open("session-1", path.join(sidecar, "rpc.jsonl"));
+			// Occupying the sidecar directory name with a regular file makes the
+			// append fail the way a full or read-only disk would.
+			await fs.writeFile(sidecar, "");
+			const wiring = wireShutdown(ledger);
+			const { deps } = collect({ ledger: () => ledger, onLedgerFailure: wiring.onLedgerFailure });
+
+			streamRpcSessionEvent(notice("first"), deps);
+			await wiring.reported.promise;
+			await wiring.coordinator.checkShutdownRequested();
+
+			expect(wiring.failures).toEqual(["session.watch"]);
+			expect(shouldForceLedgerSeal(ledger)).toBe(false);
+			expect(wiring.sealed).toEqual([]);
+			expect(ledger.hasResult).toBe(false);
+			// The latch already rejected the waiter, so the drain still completes.
+			expect(await wiring.waiter).toBe("rejected");
+			expect(wiring.performed).toEqual(["shutdown"]);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}

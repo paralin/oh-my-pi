@@ -294,6 +294,105 @@ describe("cron scheduling", () => {
 		}
 	});
 
+	it("waits for accepted durable consumption before disposal resolves", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cron-dispose-drain-"));
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const deliveryStarted = Promise.withResolvers<void>();
+		const acceptDelivery = Promise.withResolvers<void>();
+		const manager = new CronManager({
+			sessionFile: path.join(directory, "session.jsonl"),
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => {
+				deliveryStarted.resolve();
+				await acceptDelivery.promise;
+			},
+		});
+		try {
+			await manager.load();
+			const job = await manager.create({
+				expression: "1 10 * * *",
+				prompt: "consume before teardown",
+				recurring: false,
+				durable: true,
+			});
+			const store = manager.storePath();
+			const consumptionStarted = Promise.withResolvers<void>();
+			const releaseConsumption = Promise.withResolvers<void>();
+			let consumed = false;
+			let leaseReleased = false;
+			const originalWrite = FileSessionStorage.prototype.writeTextAtomic;
+			const originalRelease = FileSessionStorage.prototype.releaseLease;
+			const atomicWrite = vi
+				.spyOn(FileSessionStorage.prototype, "writeTextAtomic")
+				.mockImplementation(async function (this: FileSessionStorage, file, text) {
+					consumptionStarted.resolve();
+					await releaseConsumption.promise;
+					await originalWrite.call(this, file, text);
+					consumed = true;
+				});
+			const releaseLease = vi.spyOn(FileSessionStorage.prototype, "releaseLease").mockImplementation(async function (
+				this: FileSessionStorage,
+				leasePath,
+				owner,
+			) {
+				await originalRelease.call(this, leasePath, owner);
+				leaseReleased = true;
+			});
+			try {
+				clock.setNow(job.nextFireAt);
+				clock.timers.shift()?.();
+				await deliveryStarted.promise;
+				acceptDelivery.resolve();
+				// The prompt is accepted and the consuming write is held open, so the
+				// occurrence is owned by neither the store nor a retry right now.
+				await consumptionStarted.promise;
+
+				let disposed = false;
+				const disposal = manager.dispose().then(() => {
+					disposed = true;
+				});
+				await settle();
+				expect(disposed).toBe(false);
+				expect(consumed).toBe(false);
+				expect(leaseReleased).toBe(false);
+
+				releaseConsumption.resolve();
+				await disposal;
+				expect(consumed).toBe(true);
+				expect(leaseReleased).toBe(true);
+				expect(await Bun.file(store).json()).toEqual([]);
+			} finally {
+				atomicWrite.mockRestore();
+				releaseLease.mockRestore();
+			}
+		} finally {
+			await manager.dispose();
+			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("disposes without deadlock when a delivery tears the scheduler down", async () => {
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		let disposedFromDelivery = false;
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => {
+				await manager.dispose();
+				disposedFromDelivery = true;
+			},
+		});
+		const job = await manager.create({ expression: "0 11 * * *", prompt: "tear down" });
+		clock.setNow(job.nextFireAt);
+		clock.timers.shift()?.();
+
+		await waitFor(() => disposedFromDelivery, "disposal from inside a delivery never resolved");
+		expect(clock.timers).toHaveLength(0);
+	});
+
 	it("claims a durable occurrence before overlapping managers deliver it", async () => {
 		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cron-delivery-claim-"));
 		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
@@ -360,6 +459,101 @@ describe("cron scheduling", () => {
 			managerA.dispose();
 			managerB.dispose();
 			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("serializes durable view refresh with an in-flight due delivery", async () => {
+		const storage = new MemorySessionStorage();
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const deliveryStarted = Promise.withResolvers<void>();
+		const acceptDelivery = Promise.withResolvers<void>();
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			sessionFile: path.join(os.tmpdir(), `cron-refresh-delivery-${crypto.randomUUID()}.jsonl`),
+			storage,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+				deliveryStarted.resolve();
+				await acceptDelivery.promise;
+			},
+		});
+		try {
+			const job = await manager.create({
+				expression: "1 10 * * *",
+				prompt: "deliver once",
+				recurring: false,
+				durable: true,
+			});
+			await manager.load();
+			clock.setNow(job.nextFireAt);
+			clock.timers.at(-1)?.();
+			await deliveryStarted.promise;
+
+			let refreshed = false;
+			const refresh = manager.load().then(() => {
+				refreshed = true;
+			});
+			await settle();
+			expect(refreshed).toBe(false);
+
+			acceptDelivery.resolve();
+			await refresh;
+			expect(prompts).toEqual(["deliver once"]);
+			expect(manager.list()).toEqual([]);
+		} finally {
+			manager.dispose();
+		}
+	});
+
+	it("preserves an occurrence that becomes due during durable view refresh", async () => {
+		const storage = new MemorySessionStorage();
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			sessionFile: path.join(os.tmpdir(), `cron-refresh-crosses-due-${crypto.randomUUID()}.jsonl`),
+			storage,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		try {
+			const job = await manager.create({
+				expression: "1 10 * * *",
+				prompt: "crossed due boundary",
+				recurring: false,
+				durable: true,
+			});
+			const readStarted = Promise.withResolvers<void>();
+			const releaseRead = Promise.withResolvers<void>();
+			const readStore = storage.readText.bind(storage);
+			let pause = true;
+			vi.spyOn(storage, "readText").mockImplementation(async file => {
+				if (pause) {
+					pause = false;
+					readStarted.resolve();
+					await releaseRead.promise;
+				}
+				return readStore(file);
+			});
+
+			const refresh = manager.load();
+			await readStarted.promise;
+			clock.setNow(job.nextFireAt);
+			releaseRead.resolve();
+			await refresh;
+
+			expect(manager.list()[0]?.nextFireAt).toBe(job.nextFireAt);
+			clock.timers.at(-1)?.();
+			await waitFor(() => prompts.length > 0, "the refreshed due occurrence was skipped");
+			expect(prompts).toEqual(["crossed due boundary"]);
+		} finally {
+			manager.dispose();
 		}
 	});
 
@@ -484,6 +678,122 @@ describe("cron scheduling", () => {
 		}
 	});
 
+	it("delivers session-only work in a mixed batch when the durable backend fails", async () => {
+		const storage = new MemorySessionStorage();
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const timers: Array<() => void> = [];
+		const delays: number[] = [];
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			sessionFile: path.join(os.tmpdir(), `cron-mixed-batch-${crypto.randomUUID()}.jsonl`),
+			storage,
+			now: clock.now,
+			setTimer: (callback, delay) => {
+				timers.push(callback);
+				delays.push(delay);
+				return {} as CronTimer;
+			},
+			clearTimer: () => undefined,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		let acquireLease: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			const durable = await manager.create({
+				expression: "1 10 * * *",
+				prompt: "durable occurrence",
+				recurring: true,
+				durable: true,
+			});
+			await manager.create({
+				expression: "1 10 * * *",
+				prompt: "session-only occurrence",
+				recurring: false,
+				durable: false,
+			});
+			await manager.load();
+			acquireLease = vi.spyOn(storage, "acquireLease").mockImplementation(async () => {
+				throw new Error("durable backend offline");
+			});
+
+			clock.setNow(durable.nextFireAt);
+			timers.at(-1)?.();
+			await waitFor(() => prompts.length > 0, "durable failure starved the session-only occurrence");
+			await settle();
+
+			// The session-only half lands; the durable half waits on the ladder.
+			expect(prompts).toEqual(["session-only occurrence"]);
+			expect(manager.list().map(job => job.prompt)).toEqual(["durable occurrence"]);
+			// Never re-arm at zero delay: that is what spun the failing backend.
+			expect(delays.at(-1)).toBe(1_000);
+			expect(acquireLease.mock.calls.length).toBe(1);
+
+			// The retry wake probes durable storage once more, still without spinning.
+			clock.setNow(durable.nextFireAt + 1_000);
+			timers.at(-1)?.();
+			await settle();
+			expect(prompts).toEqual(["session-only occurrence"]);
+			expect(acquireLease.mock.calls.length).toBe(2);
+			expect(delays.at(-1)).toBe(2_000);
+		} finally {
+			acquireLease?.mockRestore();
+			manager.dispose();
+		}
+	});
+
+	it("backs off an expired durable occurrence instead of waking on its stale expiry", async () => {
+		const storage = new MemorySessionStorage();
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const timers: Array<() => void> = [];
+		const delays: number[] = [];
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			sessionFile: path.join(os.tmpdir(), `cron-stale-expiry-${crypto.randomUUID()}.jsonl`),
+			storage,
+			now: clock.now,
+			setTimer: (callback, delay) => {
+				timers.push(callback);
+				delays.push(delay);
+				return {} as CronTimer;
+			},
+			clearTimer: () => undefined,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		let acquireLease: ReturnType<typeof vi.spyOn> | undefined;
+		try {
+			const durable = await manager.create({
+				expression: "1 10 * * *",
+				prompt: "expired durable occurrence",
+				recurring: true,
+				durable: true,
+			});
+			await manager.load();
+			acquireLease = vi.spyOn(storage, "acquireLease").mockImplementation(async () => {
+				throw new Error("durable backend offline");
+			});
+
+			// Past its lifetime, so the sweep wants to retire it but cannot.
+			const expiresAt = durable.expiresAt;
+			expect(expiresAt).toBeDefined();
+			clock.setNow((expiresAt ?? 0) + 60_000);
+			timers.at(-1)?.();
+			await waitFor(() => delays.length >= 2, "failed expiry sweep did not re-arm");
+			await settle();
+
+			expect(prompts).toEqual([]);
+			expect(manager.list().map(job => job.prompt)).toEqual(["expired durable occurrence"]);
+			// A retirement that failed leaves `expiresAt` in the past; the wake has
+			// to follow the retry instead.
+			expect(delays.at(-1)).toBe(1_000);
+			expect(acquireLease.mock.calls.length).toBe(1);
+		} finally {
+			acquireLease?.mockRestore();
+			manager.dispose();
+		}
+	});
 	it("keeps the final canonical store when one write observes an A to B to A move", async () => {
 		const storage = new MemorySessionStorage();
 		const sessionA = path.join(os.tmpdir(), `cron-a-${crypto.randomUUID()}.jsonl`);
@@ -570,6 +880,202 @@ describe("cron scheduling", () => {
 		manager.dispose();
 	});
 
+	it("keeps retrying an initial schedule load past the startup attempt window", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionFile = path.join(os.tmpdir(), `cron-load-outage-${crypto.randomUUID()}.jsonl`);
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const job = {
+			id: "cron-outage-survivor",
+			expression: "0 11 * * *",
+			prompt: "survive the outage",
+			recurring: false,
+			durable: true,
+			createdAt: clock.now(),
+			nextFireAt: new Date(2026, 0, 1, 11, 0).getTime(),
+		};
+		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
+		await storage.writeText(store, JSON.stringify([job]));
+		const readStore = storage.readText.bind(storage);
+		// Two failures beyond the six attempts the old finite window allowed, so
+		// the recovery below is only reachable if the ladder outlives it.
+		let failures = 8;
+		const readText = vi.spyOn(storage, "readText").mockImplementation(async target => {
+			if (failures > 0) {
+				failures--;
+				throw new Error("backend unavailable");
+			}
+			return readStore(target);
+		});
+		const manager = new CronManager({
+			sessionFile,
+			storage,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => undefined,
+		});
+
+		try {
+			manager.refresh();
+			await settle();
+
+			const ladder: number[] = [];
+			for (let wake = 0; wake < 8; wake++) {
+				ladder.push(clock.delays.at(-1) ?? -1);
+				clock.timers.at(-1)?.();
+				await settle();
+			}
+
+			// Bounded backoff that saturates instead of ending: the sixth entry is
+			// where the old horizon dropped the session with no timer armed.
+			expect(ladder).toEqual([250, 500, 1_000, 2_000, 4_000, 8_000, 16_000, 30_000]);
+			expect(manager.list()).toEqual([job]);
+			expect(failures).toBe(0);
+		} finally {
+			readText.mockRestore();
+			manager.dispose();
+		}
+	});
+
+	it("creates and fires a session-only job while the durable store is unreadable", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionFile = path.join(os.tmpdir(), `cron-session-only-outage-${crypto.randomUUID()}.jsonl`);
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const prompts: string[] = [];
+		const stored = {
+			id: "cron-durable-stored",
+			expression: "0 11 * * *",
+			prompt: "durable occurrence",
+			recurring: false,
+			durable: true,
+			createdAt: clock.now(),
+			nextFireAt: new Date(2026, 0, 1, 11, 0).getTime(),
+		};
+		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
+		await storage.writeText(store, JSON.stringify([stored]));
+		const readStore = storage.readText.bind(storage);
+		let offline = true;
+		const readText = vi.spyOn(storage, "readText").mockImplementation(async target => {
+			if (offline) throw new Error("backend unavailable");
+			return readStore(target);
+		});
+		const manager = new CronManager({
+			sessionFile,
+			storage,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+
+		try {
+			manager.refresh();
+			await settle();
+			const retryWake = clock.timers[0];
+
+			// The store is unreadable, so the durable view has not landed. A job
+			// that needs no persistence must not be held hostage by that.
+			const sessionOnly = await manager.create({
+				expression: "30 10 * * *",
+				prompt: "session-only occurrence",
+				recurring: false,
+				durable: false,
+			});
+			const cancelled = await manager.create({
+				expression: "45 10 * * *",
+				prompt: "cancel during outage",
+				recurring: false,
+				durable: false,
+			});
+			expect(await manager.delete(cancelled.id)).toBe(true);
+			// The session is still not marked loaded: only the in-memory job is
+			// visible, so nothing can arm against a map missing the stored one.
+			expect(manager.list().map(entry => entry.prompt)).toEqual(["session-only occurrence"]);
+
+			clock.setNow(sessionOnly.nextFireAt);
+			clock.timers.at(-1)?.();
+			await waitFor(() => prompts.length > 0, "the store outage starved the session-only occurrence");
+			await settle();
+
+			// It fires on its own schedule, before the durable view recovers.
+			expect(prompts).toEqual(["session-only occurrence"]);
+			expect(manager.list()).toEqual([]);
+
+			offline = false;
+			retryWake?.();
+			await waitFor(() => manager.list().length > 0, "the retry ladder never landed the durable view");
+			await settle();
+
+			// The ladder lands the durable view and reconciles the stored job.
+			expect(manager.list().map(entry => entry.prompt)).toEqual(["durable occurrence"]);
+
+			clock.setNow(stored.nextFireAt);
+			clock.timers.at(-1)?.();
+			await waitFor(() => prompts.length > 1, "the recovered durable occurrence never fired");
+			await settle();
+
+			expect(prompts).toEqual(["session-only occurrence", "durable occurrence"]);
+			expect(manager.list()).toEqual([]);
+		} finally {
+			readText.mockRestore();
+			manager.dispose();
+		}
+	});
+
+	it("reloads durable jobs a peer manager added after the first load", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionFile = path.join(os.tmpdir(), `cron-shared-reload-${crypto.randomUUID()}.jsonl`);
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const prompts: string[] = [];
+		const managerA = new CronManager({
+			sessionFile,
+			storage,
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		const managerB = new CronManager({
+			sessionFile,
+			storage,
+			now: clock.now,
+			setTimer: () => ({}) as CronTimer,
+			clearTimer: () => undefined,
+			enqueuePrompt: async () => undefined,
+		});
+
+		try {
+			await managerA.load();
+			expect(managerA.list()).toEqual([]);
+
+			const peerJob = await managerB.create({
+				expression: "1 10 * * *",
+				prompt: "peer durable occurrence",
+				recurring: false,
+				durable: true,
+			});
+			await managerB.dispose();
+
+			// The store is shared. Marking the session loaded used to pin A to the
+			// store as it stood at its first load, so a peer's durable job stayed
+			// invisible and unarmed even though `cron_list` calls `load()`.
+			await managerA.load();
+			expect(managerA.list().map(job => job.prompt)).toEqual(["peer durable occurrence"]);
+
+			clock.setNow(peerJob.nextFireAt);
+			clock.timers.at(-1)?.();
+			await waitFor(() => prompts.length > 0, "the peer's durable job was never armed");
+			await settle();
+
+			expect(prompts).toEqual(["peer durable occurrence"]);
+		} finally {
+			await managerA.dispose();
+		}
+	});
 	it("does not recopy a fork store when scheduler resumption is retried", async () => {
 		const manager = new CronManager({
 			sessionFile: path.join(os.tmpdir(), `cron-retry-${crypto.randomUUID()}.jsonl`),
@@ -826,6 +1332,152 @@ describe("cron scheduling", () => {
 		manager.dispose();
 	});
 
+	it("delivers a recurring occurrence due exactly at expiry", async () => {
+		const clock = fakeClock(new Date(2026, 0, 2, 0, 0).getTime());
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		const job = await manager.create({ expression: "0 0 * * 5", prompt: "weekly" });
+		if (job.expiresAt === undefined) throw new Error("Expected a recurring expiry");
+		expect(job.nextFireAt).toBe(job.expiresAt);
+
+		clock.setNow(job.expiresAt);
+		clock.timers.shift()?.();
+		await settle();
+
+		expect(prompts).toEqual(["weekly"]);
+		expect(manager.list()).toEqual([]);
+		manager.dispose();
+	});
+
+	it("schedules the final recurrence landing exactly on expiry", async () => {
+		// Fri 2026-01-02 00:00 + the 7-day recurring lifetime lands on Fri
+		// 2026-01-09 00:00, so a Mon/Fri expression fires once on the Monday and
+		// then matches exactly on `expiresAt`. Advancing off that earlier
+		// occurrence must schedule the boundary match rather than retire the job.
+		const clock = fakeClock(new Date(2026, 0, 2, 0, 0).getTime());
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+			},
+		});
+		const job = await manager.create({ expression: "0 0 * * 1,5", prompt: "boundary" });
+		const expiresAt = job.expiresAt;
+		if (expiresAt === undefined) throw new Error("Expected a recurring expiry");
+		expect(job.nextFireAt).toBe(new Date(2026, 0, 5, 0, 0).getTime());
+		expect(expiresAt).toBe(new Date(2026, 0, 9, 0, 0).getTime());
+
+		clock.setNow(job.nextFireAt);
+		clock.timers.shift()?.();
+		await settle();
+
+		// The occurrence before expiry delivers and the job survives, now armed
+		// for the match that falls exactly on `expiresAt`.
+		expect(prompts).toEqual(["boundary"]);
+		expect(manager.list().map(entry => entry.nextFireAt)).toEqual([expiresAt]);
+
+		clock.setNow(expiresAt);
+		clock.timers.shift()?.();
+		await settle();
+
+		// The boundary occurrence is delivered exactly once, then retired.
+		expect(prompts).toEqual(["boundary", "boundary"]);
+		expect(manager.list()).toEqual([]);
+
+		manager.dispose();
+	});
+
+	it("retries a final occurrence whose delivery failed on the expiry boundary", async () => {
+		// Same Mon/Fri construction as above, so the last match lands exactly on
+		// `expiresAt` and its retry necessarily falls past expiry.
+		const clock = fakeClock(new Date(2026, 0, 2, 0, 0).getTime());
+		const prompts: string[] = [];
+		let failNext = false;
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				if (failNext) {
+					failNext = false;
+					throw new Error("session busy");
+				}
+				prompts.push(prompt);
+			},
+		});
+		const job = await manager.create({ expression: "0 0 * * 1,5", prompt: "boundary" });
+		const expiresAt = job.expiresAt;
+		if (expiresAt === undefined) throw new Error("Expected a recurring expiry");
+
+		clock.setNow(job.nextFireAt);
+		clock.timers.shift()?.();
+		await settle();
+		expect(prompts).toEqual(["boundary"]);
+
+		// The occurrence landing exactly on expiry fails to enqueue.
+		failNext = true;
+		clock.setNow(expiresAt);
+		clock.timers.shift()?.();
+		await settle();
+
+		// Retained with its attempt parked past `expiresAt` rather than retired:
+		// the occurrence came due inside the lifetime, so it is still owed one.
+		expect(prompts).toEqual(["boundary"]);
+		expect(manager.list().map(entry => entry.nextFireAt)).toEqual([expiresAt]);
+
+		clock.setNow(expiresAt + 1_000);
+		clock.timers.shift()?.();
+		await settle();
+
+		// The retry lands the final prompt, then the strictly-later match retires.
+		expect(prompts).toEqual(["boundary", "boundary"]);
+		expect(manager.list()).toEqual([]);
+
+		manager.dispose();
+	});
+
+	it("retires a final occurrence that never delivers within the retry grace", async () => {
+		const clock = fakeClock(new Date(2026, 0, 2, 0, 0).getTime());
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => {
+				throw new Error("session busy");
+			},
+		});
+		const job = await manager.create({ expression: "0 0 * * 1,5", prompt: "boundary" });
+		const expiresAt = job.expiresAt;
+		if (expiresAt === undefined) throw new Error("Expected a recurring expiry");
+
+		clock.setNow(expiresAt);
+		clock.timers.at(-1)?.();
+		await settle();
+
+		// Held for the retry rather than retired on the wall clock alone.
+		expect(manager.list().map(entry => entry.prompt)).toEqual(["boundary"]);
+
+		// The delivery ladder caps but never gives up, so the reprieve is bounded:
+		// past the grace an undeliverable occurrence is abandoned instead of
+		// retrying every minute for the rest of the session.
+		clock.setNow(expiresAt + 5 * 60 * 1_000 + 1);
+		clock.timers.at(-1)?.();
+		await settle();
+
+		expect(manager.list()).toEqual([]);
+
+		manager.dispose();
+	});
 	it("treats a store removed during load as empty", async () => {
 		const sessionFile = path.join(os.tmpdir(), `removed-${crypto.randomUUID()}.jsonl`);
 		const manager = new CronManager({ sessionFile, enqueuePrompt: async () => undefined });
@@ -1307,6 +1959,53 @@ describe("cron scheduling", () => {
 		}
 	});
 
+	it("refreshes a stale indexed view before merging a durable mutation", async () => {
+		const storage = new MemorySessionStorage();
+		const sessionFile = path.join(os.tmpdir(), `cron-stale-index-${crypto.randomUUID()}.jsonl`);
+		const now = new Date(2026, 0, 1, 10, 0).getTime();
+		const originalReadText = storage.readText.bind(storage);
+		const originalExists = storage.exists.bind(storage);
+		let stale = false;
+		const indexedStorage = storage as MemorySessionStorage & { refresh(): Promise<void> };
+		indexedStorage.refresh = vi.fn(async () => {
+			stale = false;
+		});
+		vi.spyOn(storage, "readText").mockImplementation(file =>
+			stale
+				? Promise.reject(Object.assign(new Error(`No such file: ${file}`), { code: "ENOENT" }))
+				: originalReadText(file),
+		);
+		vi.spyOn(storage, "exists").mockImplementation(file => (stale ? Promise.resolve(false) : originalExists(file)));
+		const options = { sessionFile, storage, now: () => now, enqueuePrompt: async () => undefined };
+		const managerA = new CronManager(options);
+		const managerB = new CronManager(options);
+		try {
+			await Promise.all([managerA.load(), managerB.load()]);
+			await managerB.create({
+				expression: "0 11 * * *",
+				prompt: "peer",
+				recurring: false,
+				durable: true,
+			});
+
+			stale = true;
+			await managerA.create({
+				expression: "0 12 * * *",
+				prompt: "local",
+				recurring: false,
+				durable: true,
+			});
+
+			expect(indexedStorage.refresh).toHaveBeenCalled();
+			expect(
+				(JSON.parse(await originalReadText(managerA.storePath())) as CronJob[]).map(job => job.prompt).sort(),
+			).toEqual(["local", "peer"]);
+		} finally {
+			managerA.dispose();
+			managerB.dispose();
+		}
+	});
+
 	it("sanitizes and bounds pending delete identifiers", async () => {
 		const theme = await getThemeByName("dark");
 		if (!theme) throw new Error("Expected dark theme");
@@ -1433,5 +2132,25 @@ describe("cron scheduling", () => {
 		expect(rendered).toContain("failed opening ~/private/store errorlinked");
 		expect(rendered).not.toContain("\u001b");
 		expect(rendered).not.toContain(os.homedir());
+	});
+
+	it("bounds a long cron error line", async () => {
+		const theme = await getThemeByName("dark");
+		if (!theme) throw new Error("Expected dark theme");
+		const rendered = Bun.stripANSI(
+			cronCreateToolRenderer
+				.renderResult(
+					{
+						content: [{ type: "text", text: `storage rejected the job: ${"y".repeat(400)}` }],
+						isError: true,
+					},
+					{ expanded: false, isPartial: false },
+					theme,
+				)
+				.render(240)
+				.join("\n"),
+		);
+		expect(rendered).toContain("storage rejected the job:");
+		expect(rendered).not.toContain("y".repeat(160));
 	});
 });

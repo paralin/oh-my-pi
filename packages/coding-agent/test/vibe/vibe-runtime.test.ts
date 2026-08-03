@@ -30,6 +30,7 @@ import {
 	SessionManager,
 	SessionPersistenceIndeterminateError,
 } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sessionSidecarDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import {
 	FileSessionStorage,
 	type SessionStorage,
@@ -331,12 +332,13 @@ describe("vibe session registry", () => {
 	const persistedManagers: SessionManager[] = [];
 	const tempRoots: string[] = [];
 
-	async function createPersistedParent(storage?: SessionStorage): Promise<SessionManager> {
+	async function createPersistedParent(storage?: SessionStorage, explicitPath = false): Promise<SessionManager> {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vibe-resume-"));
 		tempRoots.push(root);
 		const cwd = path.join(root, "workspace");
 		await fs.mkdir(cwd, { recursive: true });
 		const manager = SessionManager.create(cwd, path.join(root, "sessions"), storage);
+		if (explicitPath) await manager.setSessionFile(path.join(root, "explicit-session"));
 		persistedManagers.push(manager);
 		return manager;
 	}
@@ -623,11 +625,11 @@ describe("vibe session registry", () => {
 
 	it("rehydrates an idle worker after a process boundary and continues turn two with prior context", async () => {
 		installPersistedSpawnMock();
-		const parentManager = await createPersistedParent();
+		const parentManager = await createPersistedParent(undefined, true);
 		parentManager.appendModeChange("vibe");
 		const parentSessionFile = parentManager.getSessionFile();
 		if (!parentSessionFile) throw new Error("Persisted parent session file was not created");
-		expect(await fileExists(parentSessionFile)).toBe(false);
+		expect(await fileExists(parentSessionFile)).toBe(true);
 		const firstManager = createManager();
 		const firstSession = createSession({ manager: firstManager, sessionManager: parentManager });
 		const firstRegistry = VibeSessionRegistry.global();
@@ -681,7 +683,7 @@ describe("vibe session registry", () => {
 		expect(outcome.mode).toBe("turn");
 		const turnJob = resumedJobs.getJob(outcome.jobId!)!;
 		await turnJob.promise;
-		expect(revived.sessionFile).toBe(path.join(parentSessionFile.slice(0, -6), "push-fixes.jsonl"));
+		expect(revived.sessionFile).toBe(path.join(sessionSidecarDir(parentSessionFile), "push-fixes.jsonl"));
 		expect(revived.prompts).toEqual([INITIAL_VIBE_TASK, FOLLOW_UP_VIBE_TASK]);
 		expect(turnJob.resultText).toContain('turn="2"');
 		expect(turnJob.resultText).toContain(RESTORED_VIBE_RESPONSE);

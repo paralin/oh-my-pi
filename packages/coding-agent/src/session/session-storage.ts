@@ -72,6 +72,8 @@ export interface SessionStorage {
 	statSync(path: string): SessionStorageStat;
 	listFilesSync(dir: string, pattern: string): string[];
 
+	/** Refresh a process-local index from the authoritative backend before reading shared state. */
+	refresh?(): Promise<void>;
 	exists(path: string): Promise<boolean>;
 	readText(path: string): Promise<string>;
 	/** Read the requested UTF-8 byte windows from the head and tail of the file. */

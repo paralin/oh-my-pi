@@ -23,11 +23,13 @@ function messageText(message: AgentMessage): string {
 
 function createHarness(initialStreaming: boolean) {
 	let streaming = initialStreaming;
+	let wakeAllowed = true;
 	const streamingMessages: AgentMessage[] = [];
 	const idleBatches: AgentMessage[][] = [];
 	const scheduledFlushes: Array<() => Promise<void>> = [];
 	const queue = new YieldQueue({
 		isStreaming: () => streaming,
+		canWakeIdle: () => wakeAllowed,
 		injectStreaming: message => {
 			streamingMessages.push(message);
 		},
@@ -45,6 +47,9 @@ function createHarness(initialStreaming: boolean) {
 		scheduledFlushes,
 		setStreaming: (value: boolean) => {
 			streaming = value;
+		},
+		setWakeAllowed: (value: boolean) => {
+			wakeAllowed = value;
 		},
 	};
 }
@@ -124,6 +129,55 @@ describe("YieldQueue", () => {
 
 		expect(harness.idleBatches).toHaveLength(1);
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["a,b"]);
+	});
+
+	test("refused wake retains entries and delivers them on the next allowed flush", async () => {
+		const harness = createHarness(false);
+		harness.queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.setWakeAllowed(false);
+
+		let delivered = false;
+		const receipt = harness.queue.enqueueWithReceipt("items", { id: "owed" }).then(() => {
+			delivered = true;
+		});
+		await harness.scheduledFlushes[0]!();
+
+		// The wake was refused, so no turn started — and the entry was neither
+		// dropped nor settled, because it is still owed.
+		expect(harness.idleBatches).toHaveLength(0);
+		expect(harness.queue.has("items")).toBe(true);
+		expect(delivered).toBe(false);
+
+		// The refusal cleared the pending latch, so a later request re-arms the flush.
+		harness.setWakeAllowed(true);
+		harness.queue.requestIdleFlush();
+		await harness.scheduledFlushes[1]!();
+		await receipt;
+
+		expect(harness.idleBatches.map(batch => batch.map(messageText))).toEqual([["owed"]]);
+		expect(delivered).toBe(true);
+		expect(harness.queue.has("items")).toBe(false);
+	});
+
+	test("refused wake leaves entries for the lazy aside drain", async () => {
+		const harness = createHarness(false);
+		harness.queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.setWakeAllowed(false);
+
+		harness.queue.enqueue("items", { id: "owed" });
+		await harness.scheduledFlushes[0]!();
+		expect(harness.idleBatches).toHaveLength(0);
+
+		// A run started through some other path still collects the retained entry
+		// at its aside boundary; the gate only suppresses autonomous wakes.
+		const thunks = harness.queue.drainLazy();
+		expect(thunks).toHaveLength(1);
+		const message = thunks[0]!();
+		expect(message && messageText(message)).toBe("owed");
 	});
 
 	test("resolves delivery receipts only after idle injection succeeds", async () => {
