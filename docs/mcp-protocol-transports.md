@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # MCP Protocol and Transport Internals
 
 This document describes how coding-agent implements MCP JSON-RPC messaging and how protocol concerns are split from transport concerns.

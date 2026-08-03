@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Session tree architecture (current)
 
 Reference: [session.md](../docs/session.md)

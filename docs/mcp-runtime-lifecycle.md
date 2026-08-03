@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # MCP runtime lifecycle
 
 This document describes how MCP servers are discovered, connected, exposed as tools, refreshed, and torn down in the coding-agent runtime.

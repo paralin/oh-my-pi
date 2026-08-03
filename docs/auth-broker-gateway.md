@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Auth Broker and Auth Gateway
 
 The auth broker and auth gateway are two cooperating HTTP services that move OAuth refresh tokens and provider access tokens off developer laptops and into a single broker host.

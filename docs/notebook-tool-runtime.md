@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Notebook file runtime internals
 
 This document describes current `.ipynb` handling in `coding-agent` and its relationship to the kernel-backed Python runtime.

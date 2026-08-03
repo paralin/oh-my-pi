@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Session Operations: export, dump, share, fresh, clear, fork, resume/continue
 
 This document describes operator-visible behavior for session export, sharing, conversation reset, lifecycle, fork, and resume operations as currently implemented.
