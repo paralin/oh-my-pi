@@ -33,6 +33,10 @@ export interface TestSessionOptions {
 	extensionRunner?: ExtensionRunner;
 	/** Secret obfuscator to wire into the session (e.g. to test deobfuscation of persisted tool arguments) */
 	obfuscator?: SecretObfuscator;
+	/** Suspend session-bound services before a test session changes history. */
+	beginSessionFork?: () => Promise<void>;
+	/** Resume session-bound services after a test session history change. */
+	completeSessionFork?: () => Promise<void>;
 }
 
 /**
@@ -116,6 +120,8 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 		modelRegistry,
 		extensionRunner: options.extensionRunner,
 		obfuscator: options.obfuscator,
+		beginSessionFork: options.beginSessionFork,
+		completeSessionFork: options.completeSessionFork,
 	});
 
 	// Must subscribe to enable session persistence
