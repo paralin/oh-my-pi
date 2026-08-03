@@ -6,6 +6,7 @@ import {
 	AppendOnlyContextManager,
 	type CompactionSummaryMessage,
 	countTokens,
+	getTokenizerMode,
 	resolveTelemetry,
 	type StreamFn,
 	ThinkingLevel,
@@ -96,7 +97,7 @@ import { formatSessionDumpText } from "./session-dump-format";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
-import { buildSessionMetadata } from "./session-metadata";
+import { buildEffectiveSessionProfile, buildSessionMetadata } from "./session-metadata";
 import type { YieldQueue } from "./yield-queue";
 
 const ADVISOR_CODEX_SSE_MAX_ATTEMPTS = 1;
@@ -497,7 +498,20 @@ export class SessionAdvisors {
 		advisor.agent.getApiKey = requestModel => this.#host.modelRegistry.resolver(requestModel, providerSessionId);
 		advisor.agent.setMetadataResolver(
 			providerSessionId
-				? provider => buildSessionMetadata(providerSessionId, provider, this.#host.modelRegistry.authStorage)
+				? provider => {
+						const model = advisor.agent.state.model;
+						return buildSessionMetadata(
+							providerSessionId,
+							provider,
+							this.#host.modelRegistry.authStorage,
+							buildEffectiveSessionProfile(
+								this.#host.settings,
+								getTokenizerMode(),
+								model?.contextWindow ?? 0,
+								model ? model.input.includes("image") : true,
+							),
+						);
+					}
 				: undefined,
 		);
 
@@ -1452,7 +1466,15 @@ export class SessionAdvisors {
 			// requests carry the advisor session id like every other advisor call
 			// (issue #6625).
 			const advisorMetadata = advisorProviderSessionId
-				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage)
+				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage, {
+						...buildEffectiveSessionProfile(
+							this.#host.settings,
+							getTokenizerMode(),
+							candidate.contextWindow ?? 0,
+							candidate.input.includes("image"),
+						),
+						strategy: "context-full",
+					})
 				: undefined;
 			try {
 				compactResult = await compact(
