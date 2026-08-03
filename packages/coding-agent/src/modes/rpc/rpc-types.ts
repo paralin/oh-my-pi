@@ -452,11 +452,13 @@ export type RpcAgentEventPayload =
 export type RpcSequencedAgentEvent = RpcAgentEventPayload & { sequence: number };
 
 /**
- * An event frame on stdout. `sequence` is present only while a durable run is
- * bound through `session.start` or `session.resume`; without one the stream is
- * unsequenced and nothing is recorded.
+ * An agent event published on stdout. `sequence` is present only while a
+ * durable run is bound through `session.start` or `session.resume`.
  */
-export type RpcSessionEventFrame = (RpcAgentEventPayload & { sequence?: number }) | RpcSubagentFrame;
+export type RpcPublishedAgentEvent = RpcAgentEventPayload & { sequence?: number };
+
+/** An event frame published on stdout. */
+export type RpcSessionEventFrame = RpcPublishedAgentEvent | RpcSubagentFrame;
 
 // ============================================================================
 // Extension UI Events (stdout)

@@ -32,6 +32,7 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcPublishedAgentEvent,
 	RpcResponse,
 	RpcSessionEventFrame,
 	RpcSessionResult,
@@ -76,7 +77,7 @@ export interface RpcClientOptions {
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
 
 export type RpcEventListener = (event: AgentEvent) => void;
-export type RpcSessionEventListener = (event: RpcAgentEventPayload) => void;
+export type RpcSessionEventListener = (event: RpcPublishedAgentEvent) => void;
 export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["payload"]) => void;
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
