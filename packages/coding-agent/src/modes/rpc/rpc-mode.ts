@@ -92,10 +92,9 @@ export function startRpcResidualPrompt<T>(
  * Whether the episode still owes work that must land before a terminal result.
  *
  * Advisor reviews count even though every primary-facing signal here can read
- * idle while one is running: advisors review out of band, and a review that
- * lands late persists a card into the transcript or resumes the primary through
- * a trigger-turn blocker. Sealing on the primary signals alone writes the
- * terminal result over work that then appears after it.
+ * idle while one is running. Queued yield entries also count when their
+ * dispatchers can start an idle follow-up turn. Sealing on the primary signals
+ * alone writes the terminal result over work that then appears after it.
  */
 export function hasPendingRpcContinuation(
 	session: Pick<
@@ -106,12 +105,14 @@ export function hasPendingRpcContinuation(
 		| "hasQueuedAgentMessages"
 		| "isCompacting"
 		| "isStreaming"
+		| "hasPendingYieldWake"
 	>,
 ): boolean {
 	return (
 		session.isStreaming ||
 		session.isCompacting ||
 		session.hasPendingAsyncWork() ||
+		session.hasPendingYieldWake() ||
 		session.hasPendingBashMessages ||
 		session.hasQueuedAgentMessages ||
 		session.hasPendingAdvisorReviews
@@ -158,7 +159,9 @@ export function rpcResultSealAcceptance(
 export function retryRpcResultSealAfterAdvisorSettlement(
 	session: Pick<AgentSession, "onAdvisorReviewsSettled">,
 	retry: () => void,
+	cancelPending?: () => void,
 ): () => void {
+	cancelPending?.();
 	let active = true;
 	let unsubscribe = () => {};
 	const settled = () => {
@@ -277,6 +280,7 @@ export function hasActiveRpcSessionWork(
 		| "hasQueuedAgentMessages"
 		| "isCompacting"
 		| "isStreaming"
+		| "hasPendingYieldWake"
 	>,
 	hasTrackedTasks: boolean,
 	hasActivePrompts: boolean,
@@ -1410,19 +1414,23 @@ export async function runRpcMode(
 				rpcResultSealAcceptance(owner, () => session.yieldQueue.requestIdleFlush()),
 			))
 		) {
-			if (session.hasPendingAdvisorReviews && !pendingAdvisorSealRetryUnsubscribe) {
-				pendingAdvisorSealRetryUnsubscribe = retryRpcResultSealAfterAdvisorSettlement(session, () => {
-					pendingAdvisorSealRetryUnsubscribe = undefined;
-					void completeRpcResult(stopReason, outcome).catch(errorValue => {
-						output(
-							error(
-								undefined,
-								"session.result",
-								errorValue instanceof Error ? errorValue.message : String(errorValue),
-							),
-						);
-					});
-				});
+			if (session.hasPendingAdvisorReviews) {
+				pendingAdvisorSealRetryUnsubscribe = retryRpcResultSealAfterAdvisorSettlement(
+					session,
+					() => {
+						pendingAdvisorSealRetryUnsubscribe = undefined;
+						void completeRpcResult(stopReason, outcome).catch(errorValue => {
+							output(
+								error(
+									undefined,
+									"session.result",
+									errorValue instanceof Error ? errorValue.message : String(errorValue),
+								),
+							);
+						});
+					},
+					pendingAdvisorSealRetryUnsubscribe,
+				);
 			}
 			return;
 		}

@@ -113,6 +113,22 @@ describe("YieldQueue", () => {
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["done"]);
 		expect(harness.queue.has("advisor")).toBe(true);
 	});
+	test("distinguishes idle wake entries from lazy-only entries", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.register<Entry>("completion", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+
+		harness.queue.enqueue("advisor", { id: "advice" });
+		expect(harness.queue.hasPendingIdleWake()).toBe(false);
+
+		harness.queue.enqueue("completion", { id: "done" });
+		expect(harness.queue.hasPendingIdleWake()).toBe(true);
+	});
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {

@@ -129,6 +129,14 @@ export class YieldQueue {
 		return false;
 	}
 
+	/** Whether any queued entry can start an idle follow-up turn. */
+	hasPendingIdleWake(): boolean {
+		for (const [kind, dispatcher] of this.#dispatchers) {
+			if (!dispatcher.skipIdleFlush && this.has(kind)) return true;
+		}
+		return false;
+	}
+
 	/** Arrange an idle flush for entries queued near the end of a streaming run. */
 	requestIdleFlush(): void {
 		for (const [kind, dispatcher] of this.#dispatchers) {
