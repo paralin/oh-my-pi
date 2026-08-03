@@ -18,7 +18,7 @@ import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus"
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
-import { AgentSession } from "../../session/agent-session";
+import { isAgentSession } from "../../session/agent-session";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import {
@@ -70,9 +70,7 @@ export function resolveMessageTimeoutMs(settings: Settings, explicit?: number): 
 /** Session-buffered inbox drain used before parking a bus waiter. */
 export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
 	const session = registry.get(senderId)?.session;
-	return session instanceof AgentSession
-		? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0]
-		: undefined;
+	return isAgentSession(session) ? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0] : undefined;
 }
 
 /** `wait` result carrying a consumed message. */
@@ -329,7 +327,7 @@ export function executeInbox(
 ): AgentToolResult<CoordinationDetails> {
 	const busMessages = IrcBus.global().inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
-	const pendingMessages = session instanceof AgentSession ? session.drainPendingIrcInboxMessages(senderId) : [];
+	const pendingMessages = isAgentSession(session) ? session.drainPendingIrcInboxMessages(senderId) : [];
 	const messages = [...busMessages, ...pendingMessages].sort((a, b) => a.ts - b.ts);
 	if (messages.length === 0) {
 		return {

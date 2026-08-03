@@ -4,6 +4,7 @@ import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { type AgentRef, MAIN_AGENT_ID } from "../../registry/agent-registry";
+import { isAgentSession } from "../../session/agent-session";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession } from "../session-observer-registry";
@@ -103,9 +104,10 @@ export function formatResolvedModelBadge(
  */
 export function modelBadge(ref: AgentRef, observed: ObservableSession | undefined): string | undefined {
 	const progress = observed?.progress;
-	const liveThinkingLevel = ref.session?.thinkingLevel;
+	const session = isAgentSession(ref.session) ? ref.session : undefined;
+	const liveThinkingLevel = session?.thinkingLevel;
 	const fallbackSelector =
-		ref.session?.retryFallbackModel ??
+		session?.retryFallbackModel ??
 		(progress?.resolvedModelIsFallback ? progress.resolvedModel : undefined) ??
 		(ref.history?.resolvedModelIsFallback ? ref.history.resolvedModel : undefined);
 	if (fallbackSelector) {
@@ -113,7 +115,7 @@ export function modelBadge(ref: AgentRef, observed: ObservableSession | undefine
 	}
 	const resolvedModel = progress?.resolvedModel ?? ref.history?.resolvedModel;
 	if (resolvedModel) return formatResolvedModelBadge(resolvedModel, false, liveThinkingLevel);
-	const model = ref.session?.model;
+	const model = session?.model;
 	if (!model) return undefined;
 	const level = model.thinking ? liveThinkingLevel : undefined;
 	return formatModelBadge(model.id, level);

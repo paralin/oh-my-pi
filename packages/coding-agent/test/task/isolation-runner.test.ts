@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import {
 	applyEligibleNestedPatches,
 	mergeIsolatedChanges,
