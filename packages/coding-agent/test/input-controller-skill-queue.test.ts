@@ -679,6 +679,30 @@ describe("AgentSession derived queued custom display", () => {
 		]);
 	});
 
+	it("cancels stale service recovery when a newer transition starts", async () => {
+		const finalized: Array<{ oldSessionFile: string; newSessionFile: string } | undefined> = [];
+		fixture = await createRealSession({
+			persisted: true,
+			beginSessionFork: async () => {},
+			completeSessionFork: async result => {
+				finalized.push(result);
+				if (finalized.length === 1) throw new Error("fork resume failed");
+			},
+		});
+		const { session, tempDir } = fixture;
+		await session.sessionManager.ensureOnDisk();
+		await expect(session.fork()).resolves.toBe(true);
+		const newCwd = path.join(tempDir.path(), "newer-transition");
+		await fs.mkdir(newCwd);
+
+		await session.moveSession(newCwd);
+		await Bun.sleep(400);
+
+		expect(finalized).toHaveLength(2);
+		expect(finalized[0]).toBeDefined();
+		expect(finalized[1]).toBeUndefined();
+	});
+
 	it("suspends session services while moving persisted artifacts", async () => {
 		let suspended = false;
 		const transitions: string[] = [];

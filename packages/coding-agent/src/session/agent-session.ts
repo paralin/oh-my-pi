@@ -456,6 +456,7 @@ export class AgentSession {
 	readonly #completeSessionFork:
 		| ((result: { oldSessionFile: string; newSessionFile: string } | undefined) => Promise<void>)
 		| undefined;
+	#sessionServiceTransitionGeneration = 0;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
 	editClipboard?: Clipboard;
@@ -6588,15 +6589,16 @@ export class AgentSession {
 
 	#scheduleSessionServiceRecovery(result: { oldSessionFile: string; newSessionFile: string } | undefined): void {
 		if (!this.#completeSessionFork || this.#isDisposed) return;
+		const generation = this.#sessionServiceTransitionGeneration;
 		const retry = (): void => {
 			const timer = setTimeout(() => {
-				if (this.#isDisposed) return;
+				if (this.#isDisposed || generation !== this.#sessionServiceTransitionGeneration) return;
 				void this.#completeSessionFork?.(result).catch(error => {
 					logger.warn("Failed to recover session services after committed transition", {
 						sessionFile: this.sessionFile,
 						error: error instanceof Error ? error.message : String(error),
 					});
-					if (!this.#isDisposed) retry();
+					if (!this.#isDisposed && generation === this.#sessionServiceTransitionGeneration) retry();
 				});
 			}, 250);
 			timer.unref();
@@ -6638,6 +6640,7 @@ export class AgentSession {
 			await this.#advisors.drainAndDetachRecorders();
 			const bashTransition = this.#bash.beginSessionTransition();
 			if (this.#beginSessionFork) {
+				this.#sessionServiceTransitionGeneration++;
 				await this.#beginSessionFork();
 				sessionForkStarted = true;
 			}
@@ -6730,6 +6733,7 @@ export class AgentSession {
 		let failure: unknown;
 		try {
 			if (this.#beginSessionFork) {
+				this.#sessionServiceTransitionGeneration++;
 				await this.#beginSessionFork();
 				sessionServicesSuspended = true;
 			}

@@ -552,12 +552,12 @@ esac
 		const runtimeDir = await tempDir("omp-daemon-recovered-exit-runtime-");
 		const owner = "recovered-detached-owner";
 		const first = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-		let recovered: DaemonBrokerClient | undefined;
 		let pid: number | undefined;
-		let unregister: (() => void) | undefined;
-		let unregisterFirst: (() => void) | undefined;
+		let completion: DaemonSnapshot | undefined;
+		const unregister = first.onCompletion(owner, notification => {
+			completion = notification.daemon;
+		});
 		try {
-			unregisterFirst = first.onCompletion(owner, () => {});
 			const started = await first.request({
 				op: "start",
 				spec: {
@@ -577,7 +577,6 @@ esac
 				throw new Error("detached daemon did not start");
 			pid = started.daemon.pid;
 			await first.request({ op: "shutdown" });
-			first.close();
 			expect(
 				await waitUntil(
 					() =>
@@ -590,21 +589,12 @@ esac
 			const launchedPid = pid;
 			expect(processExists(launchedPid)).toBeTrue();
 
-			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
-			await recovered.request({ op: "ping" });
-			expect(await waitUntil(() => !processExists(launchedPid), 4_000)).toBeTrue();
-
-			let completion: DaemonSnapshot | undefined;
-			unregister = recovered.onCompletion(owner, notification => {
-				completion = notification.daemon;
-			});
-			expect(await waitUntil(() => completion !== undefined, 2_000)).toBeTrue();
+			expect(await waitUntil(() => completion !== undefined, 5_000)).toBeTrue();
 			expect(completion).toMatchObject({ name: "recovered-exit", state: "exited", exitCode: undefined });
 		} finally {
-			unregister?.();
-			unregisterFirst?.();
-			first.close();
-			if (recovered) await shutdown(recovered);
+			unregister();
+			if (completion !== undefined) await shutdown(first);
+			else first.close();
 			if (pid !== undefined && processExists(pid)) {
 				const rescue = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 1_000 });
 				try {

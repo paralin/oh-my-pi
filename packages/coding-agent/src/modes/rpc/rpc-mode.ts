@@ -85,6 +85,9 @@ export function hasPendingRpcContinuation(
 export function rpcExitOutcome(hasIncompleteWork: boolean): "aborted" | "completed" {
 	return hasIncompleteWork ? "aborted" : "completed";
 }
+export function shouldDeferRpcResult(hasPendingContinuation: boolean, force = false): boolean {
+	return hasPendingContinuation && !force;
+}
 export async function compactRpcSession<T>(
 	session: { readonly isStreaming: boolean; compact(customInstructions?: string): Promise<T> },
 	customInstructions: string | undefined,
@@ -990,12 +993,16 @@ export async function runRpcMode(
 			}
 		});
 
-	const completeRpcResult = async (stopReason: string, outcome: "completed" | "failed" | "aborted" = "completed") => {
+	const completeRpcResult = async (
+		stopReason: string,
+		outcome: "completed" | "failed" | "aborted" = "completed",
+		force = false,
+	) => {
 		const owner = harnessOwner;
 		if (!owner || owner.hasResult) return;
 		owner.beginResultSeal();
 		await terminalTasks.wait();
-		if (hasPendingRpcContinuation(session)) {
+		if (shouldDeferRpcResult(hasPendingRpcContinuation(session), force)) {
 			owner.cancelResultSeal();
 			return;
 		}
@@ -1014,7 +1021,7 @@ export async function runRpcMode(
 	 */
 	const sealLedgerOnExit = async (stopReason: string, outcome: "completed" | "failed" | "aborted" = "completed") => {
 		try {
-			await completeRpcResult(stopReason, outcome);
+			await completeRpcResult(stopReason, outcome, true);
 		} catch (errorValue) {
 			output(
 				error(undefined, "session.result", errorValue instanceof Error ? errorValue.message : String(errorValue)),

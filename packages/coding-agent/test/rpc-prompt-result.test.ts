@@ -8,6 +8,7 @@ import {
 	RpcExtensionUserMessageTracker,
 	reportLocalOnlyPromptResult,
 	rpcExitOutcome,
+	shouldDeferRpcResult,
 	watchAndReportLocalOnlyPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type {
@@ -134,6 +135,11 @@ describe("RPC durable custody prompts", () => {
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
 		session.queuedMessageCount = 0;
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("completed");
+	});
+
+	test("forces aborted exit results despite pending continuations", () => {
+		expect(shouldDeferRpcResult(true)).toBe(true);
+		expect(shouldDeferRpcResult(true, true)).toBe(false);
 	});
 
 	test("seals a streaming episode after manual compaction aborts it", async () => {

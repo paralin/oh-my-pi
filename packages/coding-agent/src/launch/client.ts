@@ -149,6 +149,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
 	#closed = false;
+	#completionReconnectTimer: NodeJS.Timeout | undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -207,6 +208,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		clearTimeout(this.#completionReconnectTimer);
+		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
 		this.#socket = undefined;
@@ -221,13 +224,33 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (this.#completionSinks.get(owner) !== sink) return;
 			this.#completionSinks.delete(owner);
 			this.#completionUnsubscribes.add(owner);
+			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
+				clearTimeout(this.#completionReconnectTimer);
+				this.#completionReconnectTimer = undefined;
+			}
 			this.#publishCompletionOwners();
 		};
 	}
 
 	#publishCompletionOwners(): void {
 		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => undefined);
+		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+	}
+
+	#scheduleCompletionReconnect(): void {
+		if (
+			this.#closed ||
+			this.#completionSinks.size === 0 ||
+			this.#completionReconnectTimer !== undefined ||
+			(this.#socket !== undefined && !this.#socket.destroyed)
+		) {
+			return;
+		}
+		this.#completionReconnectTimer = setTimeout(() => {
+			this.#completionReconnectTimer = undefined;
+			this.#publishCompletionOwners();
+		}, CONNECT_RETRY_MS);
+		this.#completionReconnectTimer.unref();
 	}
 
 	async #connect(): Promise<void> {
@@ -293,6 +316,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		socket.on("close", () => {
 			if (this.#socket === socket) this.#socket = undefined;
 			this.#rejectPending(new Error("Daemon broker connection closed"));
+			this.#scheduleCompletionReconnect();
 		});
 	}
 
