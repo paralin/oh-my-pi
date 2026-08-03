@@ -1,6 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, expectTypeOf, test } from "bun:test";
 import {
 	compactRpcSession,
+	completeRpcResultAfterTranscriptFlush,
 	deliverRpcSteeringIfNeeded,
 	drainRpcTerminalBoundary,
 	hasActiveRpcSessionWork,
@@ -26,6 +27,7 @@ import type {
 	ExtensionCommandContextActions,
 	ExtensionContextActions,
 } from "../src/extensibility/extensions/types";
+import type { RpcSessionEventListener } from "../src/modes/rpc/rpc-client";
 import { initializeExtensions } from "../src/modes/runtime-init";
 import type { AgentSession } from "../src/session/agent-session";
 
@@ -125,6 +127,42 @@ describe("RPC durable custody prompts", () => {
 
 		await expect(waitForRpcMessageDurability(session, {} as never)).rejects.toBe(failure);
 		expect(order).toEqual(["message", "flush"]);
+	});
+
+	test("flushes the transcript before completing the durable result", async () => {
+		const order: string[] = [];
+		const failure = new Error("transcript append failed");
+		const owner = {
+			beginResultSeal: () => order.push("seal"),
+			completeResult: async () => {
+				order.push("complete");
+				return {} as never;
+			},
+		};
+		const result = {
+			outcome: "completed" as const,
+			stopReason: "stop",
+			finalMessage: "done",
+			usage: { input: 0, output: 0, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		await expect(
+			completeRpcResultAfterTranscriptFlush(
+				{
+					flush: async () => {
+						order.push("flush");
+						throw failure;
+					},
+				},
+				owner,
+				result,
+			),
+		).rejects.toBe(failure);
+		expect(order).toEqual(["seal", "flush"]);
+	});
+
+	test("exposes the optional durable sequence to session event listeners", () => {
+		expectTypeOf<Parameters<RpcSessionEventListener>[0]["sequence"]>().toEqualTypeOf<number | undefined>();
 	});
 
 	test("reuses an idempotent run binding without entering a custody transition", () => {
@@ -232,10 +270,25 @@ describe("RPC durable custody prompts", () => {
 			hasPendingAsyncWork: () => false,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
+			hasPendingExtensionEvents: false,
 		};
 
 		expect(rpcForcedExitOutcome(session, terminalTasks)).toBe("aborted");
 		pending.resolve();
+	});
+
+	test("marks a forced exit aborted while an extension handler is running", () => {
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			hasPendingAdvisorReviews: false,
+			hasPendingAsyncWork: () => false,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+			hasPendingExtensionEvents: true,
+		};
+
+		expect(rpcForcedExitOutcome(session, { hasPendingTasks: false })).toBe("aborted");
 	});
 
 	test("treats an outstanding advisor review as active pre-custody work", () => {
