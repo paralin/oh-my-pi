@@ -12,6 +12,22 @@ export interface EffectiveSessionProfile {
 	tokenizerMode: TokenizerMode;
 }
 
+/**
+ * Effective threshold policy for requests the idle compaction timer triggers.
+ *
+ * Idle compaction has its own gate and its own token count
+ * (`compaction.idleEnabled` / `compaction.idleThresholdTokens`, applied by
+ * `#scheduleIdleCompaction`) and still runs when `compaction.enabled` is false,
+ * so an idle-triggered request is never governed by the normal
+ * `compaction.threshold*` policy that {@link EffectiveSessionProfile} records.
+ */
+export interface EffectiveIdleThreshold {
+	/** Whether the idle threshold is in force for this session at all. */
+	enabled: boolean;
+	/** Token count above which idle compaction triggers; 0 when unconfigured. */
+	thresholdTokens: number;
+}
+
 const MAX_METADATA_USER_ID_LENGTH = 256;
 
 function serializeBoundedUserId(userId: Record<string, unknown>): string {
@@ -82,15 +98,45 @@ export function buildEffectiveSessionProfile(
 	contextWindow: number,
 	imageInputSupported = true,
 ): EffectiveSessionProfile {
+	const strategy = resolveProfileCompactionStrategy(settings, imageInputSupported);
 	return {
-		thresholdTokens: resolveThresholdTokens(contextWindow, settings.getGroup("compaction")),
-		strategy: resolveProfileCompactionStrategy(settings, imageInputSupported),
+		thresholdTokens: strategy === "off" ? 0 : resolveThresholdTokens(contextWindow, settings.getGroup("compaction")),
+		strategy,
 		tokenizerMode,
 	};
 }
+
+export function buildEffectiveIdleThreshold(settings: Pick<Settings, "getGroup">): EffectiveIdleThreshold {
+	const { idleEnabled, idleThresholdTokens } = settings.getGroup("compaction");
+	// The idle timer compares usage against the configured count directly — no
+	// context-window clamp and no reserve — so the raw value is the policy.
+	return {
+		enabled: idleEnabled,
+		thresholdTokens: Number.isFinite(idleThresholdTokens) && idleThresholdTokens > 0 ? idleThresholdTokens : 0,
+	};
+}
+
+/**
+ * Relabel the profile a live request already carries with the compaction policy
+ * that actually governs that request.
+ *
+ * `strategy` is the action the request performs, which can differ from the
+ * session's configured strategy: an auto-handoff that fell back to a
+ * context-full summary, or idle compaction running while `compaction.enabled` is
+ * false and the profile therefore reports `off`.
+ *
+ * `idleThreshold` additionally relabels the threshold for idle-triggered
+ * requests, which fire on `compaction.idleThresholdTokens`. Leaving the normal
+ * `compaction.threshold*` value in place would attribute them to a threshold
+ * that did not fire — and, with `compaction.enabled` false, to one that is not in
+ * force at all. A disabled idle gate reports `0`, distinguishing "no threshold
+ * governs this request" from "the threshold is N". Omit it for ordinary
+ * compaction, whose profile already records the threshold that governs it.
+ */
 export function overrideSessionMetadataCompactionStrategy(
 	metadata: Record<string, unknown> | undefined,
 	strategy: SettingValue<"compaction.strategy">,
+	idleThreshold?: EffectiveIdleThreshold,
 ): Record<string, unknown> | undefined {
 	if (typeof metadata?.user_id !== "string") return metadata;
 	try {
@@ -98,11 +144,14 @@ export function overrideSessionMetadataCompactionStrategy(
 		if (typeof userId !== "object" || userId === null || Array.isArray(userId)) return metadata;
 		const profile = "profile" in userId ? userId.profile : undefined;
 		if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return metadata;
+		const thresholdOverride = idleThreshold
+			? { t: idleThreshold.enabled ? idleThreshold.thresholdTokens : 0 }
+			: undefined;
 		return {
 			...metadata,
 			user_id: serializeBoundedUserId({
 				...userId,
-				profile: { ...profile, s: strategy },
+				profile: { ...profile, ...thresholdOverride, s: strategy },
 			}),
 		};
 	} catch {
@@ -128,6 +177,8 @@ export function overrideSessionMetadataCompactionStrategy(
  *
  * `provider` is the target provider string (e.g. `"anthropic"`) and gates the
  * `account_uuid` and `device_id` lookups — only `"anthropic"` requests carry them.
+ * It also gates the 256-character `user_id` bounding, which is Anthropic's own
+ * limit: other providers forward the caller-supplied session id verbatim.
  *
  * `sessionId` is forwarded to the auth-storage session-sticky lookup so that
  * multi-credential setups attribute to the same OAuth account used for the
@@ -165,5 +216,12 @@ export function buildSessionMetadata(
 			userId.device_id = deriveClaudeDeviceId(getInstallId(), accountUuid);
 		}
 	}
-	return { user_id: serializeBoundedUserId(userId) };
+	// The 256-character cap is Anthropic's own `metadata.user_id` limit, so only
+	// Anthropic requests are bounded. Other providers receive this value as the
+	// caller-supplied session identity and key prompt affinity on it (in the
+	// Anthropic-format transports an explicit `metadata.user_id` takes precedence
+	// over the prompt-cache-key fallback), so truncating and hash-suffixing a long
+	// `--provider-session-id` there would both drop the identity the caller passed
+	// in full and rotate the affinity key of an already-warmed session on resume.
+	return { user_id: provider === "anthropic" ? serializeBoundedUserId(userId) : JSON.stringify(userId) };
 }

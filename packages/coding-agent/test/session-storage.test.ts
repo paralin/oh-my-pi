@@ -403,6 +403,84 @@ class PausableWriteFullBackend implements SessionStorageBackend {
 		return Promise.resolve();
 	}
 }
+class RefreshRaceBackend implements SessionStorageBackend {
+	readonly loadStarted = Promise.withResolvers<void>();
+	readonly releaseLoad = Promise.withResolvers<void>();
+	readonly #files = new Map<string, { content: string; mtimeMs: number }>();
+	#pauseNextLoad = false;
+
+	pauseNextLoad(): void {
+		this.#pauseNextLoad = true;
+	}
+
+	init(): Promise<void> {
+		return Promise.resolve();
+	}
+	async loadIndex(): Promise<Iterable<SessionStorageIndexEntry>> {
+		const snapshot = [...this.#files].map(([path, file]) => ({
+			path,
+			size: Buffer.byteLength(file.content),
+			mtimeMs: file.mtimeMs,
+		}));
+		if (this.#pauseNextLoad) {
+			this.#pauseNextLoad = false;
+			this.loadStarted.resolve();
+			await this.releaseLoad.promise;
+		}
+		return snapshot;
+	}
+	readFull(path: string): Promise<string | null> {
+		return Promise.resolve(this.#files.get(path)?.content ?? null);
+	}
+	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]> {
+		const content = this.#files.get(path)?.content ?? "";
+		return Promise.resolve([content.slice(0, prefixBytes), suffixBytes > 0 ? content.slice(-suffixBytes) : ""]);
+	}
+	writeFull(path: string, content: string, mtimeMs: number): Promise<void> {
+		this.#files.set(path, { content, mtimeMs });
+		return Promise.resolve();
+	}
+	append(path: string, line: string, mtimeMs: number): Promise<void> {
+		const content = `${this.#files.get(path)?.content ?? ""}${line}`;
+		this.#files.set(path, { content, mtimeMs });
+		return Promise.resolve();
+	}
+	updateSessionTitle(): Promise<void> {
+		return Promise.resolve();
+	}
+	truncate(path: string, mtimeMs: number): Promise<void> {
+		this.#files.set(path, { content: "", mtimeMs });
+		return Promise.resolve();
+	}
+	remove(paths: string[]): Promise<void> {
+		for (const path of paths) this.#files.delete(path);
+		return Promise.resolve();
+	}
+	move(src: string, dst: string, mtimeMs: number): Promise<void> {
+		const file = this.#files.get(src);
+		if (file) this.#files.set(dst, { ...file, mtimeMs });
+		this.#files.delete(src);
+		return Promise.resolve();
+	}
+}
+
+describe("IndexedSessionStorage refresh", () => {
+	it("preserves a write that starts while the backend index is loading", async () => {
+		const backend = new RefreshRaceBackend();
+		const storage = new IndexedSessionStorage(backend);
+		await storage.initialize();
+		backend.pauseNextLoad();
+		const refresh = storage.refresh();
+		await backend.loadStarted.promise;
+
+		await storage.writeText("/sessions/new.jsonl", "new session");
+		backend.releaseLoad.resolve();
+		await refresh;
+
+		expect(storage.existsSync("/sessions/new.jsonl")).toBe(true);
+		expect(await storage.readText("/sessions/new.jsonl")).toBe("new session");
+	});
+});
 
 describe("IndexedSessionStorage.writeTextAtomic commitGuard", () => {
 	it("aborts before touching the backend when the guard rejects up front", async () => {

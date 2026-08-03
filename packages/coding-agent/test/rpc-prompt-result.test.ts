@@ -12,8 +12,11 @@ import {
 	RpcExtensionUserMessageTracker,
 	RpcTerminalTaskTracker,
 	reportLocalOnlyPromptResult,
+	retryRpcResultSealAfterAdvisorSettlement,
 	reuseRpcHarnessBinding,
 	rpcExitOutcome,
+	rpcForcedExitOutcome,
+	rpcResultSealAcceptance,
 	startRpcResidualPrompt,
 	waitForRpcMessageDurability,
 	watchAndReportLocalOnlyPromptResult,
@@ -46,6 +49,7 @@ describe("RPC durable custody prompts", () => {
 		const session = {
 			isStreaming: false,
 			isCompacting: false,
+			hasPendingAdvisorReviews: false,
 			hasPendingAsyncWork: () => true,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
@@ -59,6 +63,7 @@ describe("RPC durable custody prompts", () => {
 		const session = {
 			isStreaming: false,
 			isCompacting: false,
+			hasPendingAdvisorReviews: false,
 			hasPendingAsyncWork: () => false,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: true,
@@ -72,6 +77,7 @@ describe("RPC durable custody prompts", () => {
 		const session = {
 			isStreaming: false,
 			isCompacting: false,
+			hasPendingAdvisorReviews: false,
 			hasPendingAsyncWork: () => false,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
@@ -200,6 +206,7 @@ describe("RPC durable custody prompts", () => {
 		const session = {
 			isStreaming: false,
 			isCompacting: false,
+			hasPendingAdvisorReviews: false,
 			hasPendingAsyncWork: () => true,
 			hasPendingBashMessages: false,
 			hasQueuedAgentMessages: false,
@@ -214,7 +221,138 @@ describe("RPC durable custody prompts", () => {
 		session.hasQueuedAgentMessages = false;
 		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("completed");
 	});
+	test("marks a forced exit aborted while an accepted terminal task is running", () => {
+		const pending = Promise.withResolvers<void>();
+		const terminalTasks = new RpcTerminalTaskTracker();
+		terminalTasks.track(pending.promise);
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			hasPendingAdvisorReviews: false,
+			hasPendingAsyncWork: () => false,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+		};
 
+		expect(rpcForcedExitOutcome(session, terminalTasks)).toBe("aborted");
+		pending.resolve();
+	});
+
+	test("treats an outstanding advisor review as active pre-custody work", () => {
+		// `session.start` binds through this predicate. An advisor still reviewing
+		// the pre-custody turn would otherwise have its output bound into the new
+		// run as if the run had produced it.
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			hasPendingAdvisorReviews: true,
+			hasPendingAsyncWork: () => false,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+			hasPendingExtensionEvents: false,
+		};
+
+		expect(hasActiveRpcSessionWork(session, false, false, false)).toBe(true);
+	});
+
+	test("refuses to seal while an advisor review is still outstanding", () => {
+		// Every primary-facing signal reads idle here: advisors review out of band.
+		// A late concern persists a card after the terminal result, and a late
+		// blocker resumes the primary through a trigger turn outside the ledger.
+		const session = {
+			isStreaming: false,
+			isCompacting: false,
+			hasPendingAdvisorReviews: true,
+			hasPendingAsyncWork: () => false,
+			hasPendingBashMessages: false,
+			hasQueuedAgentMessages: false,
+		};
+
+		expect(hasPendingRpcContinuation(session)).toBe(true);
+		expect(rpcExitOutcome(hasPendingRpcContinuation(session))).toBe("aborted");
+		session.hasPendingAdvisorReviews = false;
+		expect(hasPendingRpcContinuation(session)).toBe(false);
+	});
+
+	test("drains an advisor review inside the terminal boundary", async () => {
+		let pendingAdvisor = true;
+		let cardPersisted = false;
+		let drains = 0;
+
+		await drainRpcTerminalBoundary(
+			{
+				hasPendingBashMessages: false,
+				flushPendingBashMessages: async () => {},
+				hasPendingExtensionEvents: false,
+				waitForPendingExtensionEvents: async () => {},
+				get hasPendingAdvisorReviews() {
+					return pendingAdvisor;
+				},
+				waitForPendingAdvisorReviews: async () => {
+					drains++;
+					// The review lands and its card persists — inside the boundary,
+					// which is the whole point of draining here rather than after.
+					cardPersisted = true;
+					pendingAdvisor = false;
+				},
+			},
+			new RpcTerminalTaskTracker(),
+			new RpcExtensionUserMessageTracker(),
+		);
+
+		expect(drains).toBe(1);
+		expect(cardPersisted).toBe(true);
+		expect(pendingAdvisor).toBe(false);
+	});
+
+	test("gives up on a stalled advisor instead of spinning the terminal boundary", async () => {
+		// The advisor drain is bounded, so an advisor that never catches up leaves
+		// the flag set. The boundary must exit anyway — the leftover is reported by
+		// the continuation predicate, which refuses the seal.
+		let drains = 0;
+
+		await drainRpcTerminalBoundary(
+			{
+				hasPendingBashMessages: false,
+				flushPendingBashMessages: async () => {},
+				hasPendingExtensionEvents: false,
+				waitForPendingExtensionEvents: async () => {},
+				hasPendingAdvisorReviews: true,
+				waitForPendingAdvisorReviews: async () => {
+					drains++;
+				},
+			},
+			new RpcTerminalTaskTracker(),
+			new RpcExtensionUserMessageTracker(),
+		);
+
+		expect(drains).toBe(1);
+	});
+	test("retries a refused seal when a silent advisor review settles", () => {
+		let settlementListener: (() => void) | undefined;
+		let unsubscribeCalls = 0;
+		let retryCalls = 0;
+		const cancel = retryRpcResultSealAfterAdvisorSettlement(
+			{
+				onAdvisorReviewsSettled(listener) {
+					settlementListener = listener;
+					return () => {
+						unsubscribeCalls++;
+					};
+				},
+			},
+			() => {
+				retryCalls++;
+			},
+		);
+
+		settlementListener?.();
+		settlementListener?.();
+		cancel();
+
+		expect(retryCalls).toBe(1);
+		expect(unsubscribeCalls).toBe(1);
+	});
 	test("flushes deferred bash results before opening the terminal boundary", async () => {
 		let pendingBash = true;
 		let flushes = 0;
@@ -229,6 +367,8 @@ describe("RPC durable custody prompts", () => {
 					flushes++;
 					pendingBash = false;
 				},
+				hasPendingAdvisorReviews: false,
+				waitForPendingAdvisorReviews: async () => {},
 			},
 			new RpcTerminalTaskTracker(),
 			new RpcExtensionUserMessageTracker(),
@@ -258,6 +398,8 @@ describe("RPC durable custody prompts", () => {
 						return pendingExtension;
 					},
 					waitForPendingExtensionEvents: async () => extensionEvent,
+					hasPendingAdvisorReviews: false,
+					waitForPendingAdvisorReviews: async () => {},
 				},
 				terminalTasks,
 				extensionTasks,
@@ -282,6 +424,93 @@ describe("RPC durable custody prompts", () => {
 		expect(drainCalls).toBe(0);
 	});
 
+	test("takes the terminal decision with acceptance already closed", async () => {
+		// The window this closes: the old order checked for a continuation, then
+		// yielded, then sealed. Anything the custody gate admitted in that gap ran
+		// on under a terminal result. The check must never be consulted while the
+		// gate is still open, and the gate must stay closed through the seal.
+		const openAtCheck: boolean[] = [];
+		let accepting = true;
+
+		const sealed = await prepareRpcResultSeal(
+			false,
+			async () => {},
+			() => {
+				openAtCheck.push(accepting);
+				return false;
+			},
+			{
+				close: () => {
+					accepting = false;
+				},
+				reopen: () => {
+					accepting = true;
+				},
+			},
+		);
+
+		expect(sealed).toBe(true);
+		expect(openAtCheck).toEqual([false]);
+		expect(accepting).toBe(false);
+	});
+
+	test("cancels the seal and re-arms parked wakes when work is admitted during the boundary drain", async () => {
+		// A yield-queue idle flush wakes while the boundary is still draining.
+		// Acceptance is legitimately open there, so the work is admitted — and the
+		// attempt must then abandon rather than seal over it.
+		const events: string[] = [];
+		let accepting = true;
+		let pendingContinuation = false;
+		let drains = 0;
+
+		const sealed = await prepareRpcResultSeal(
+			false,
+			async () => {
+				drains++;
+				if (drains === 1 && accepting) {
+					pendingContinuation = true;
+					events.push("admitted");
+				}
+			},
+			() => pendingContinuation,
+			{
+				close: () => {
+					accepting = false;
+					events.push("closed");
+				},
+				reopen: () => {
+					accepting = true;
+					events.push("reopened");
+				},
+			},
+		);
+
+		expect(sealed).toBe(false);
+		// The second drain is what gives work admitted during the first one a
+		// boundary to reach before the check decides.
+		expect(drains).toBe(2);
+		expect(events).toEqual(["admitted", "closed", "reopened"]);
+		expect(accepting).toBe(true);
+	});
+
+	test("abandoning a seal reopens custody and re-arms the idle flush it parked", () => {
+		// Reopening alone is silent: the gate stops refusing, but nothing
+		// re-evaluates the wakes it already parked, so a missing re-arm strands
+		// them until disposal with no error and no log. Assert the pairing.
+		const calls: string[] = [];
+		const acceptance = rpcResultSealAcceptance(
+			{
+				beginResultSeal: () => calls.push("beginResultSeal"),
+				cancelResultSeal: () => calls.push("cancelResultSeal"),
+			},
+			() => calls.push("requestIdleFlush"),
+		);
+
+		acceptance.close();
+		acceptance.reopen();
+
+		expect(calls).toEqual(["beginResultSeal", "cancelResultSeal", "requestIdleFlush"]);
+	});
 	test("rechecks custody before starting an ACP residual prompt", () => {
 		let started = false;
 		expect(() =>
