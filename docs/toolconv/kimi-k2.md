@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Kimi K2 tool-calling format
 
 Native tool-calling convention of Moonshot AI's **Kimi K2** family (`moonshotai/Kimi-K2-Instruct` and `-Base`, `model_type: "kimi_k2"`, 1T-param MoE). It is a ChatML-like envelope built on a TikToken tokenizer (160K vocab): every turn is `<|im_{class}|>{name}<|im_middle|>{body}<|im_end|>`, and tool calls are emitted inside the assistant turn wrapped by a dedicated `<|tool_calls_section_begin|>…<|tool_calls_section_end|>` block. All control tokens are plain ASCII `<|…|>` forms (no fullwidth/unicode variants, unlike DeepSeek). An inference server turns the raw stream into OpenAI-style `tool_calls` with a parser: vLLM and SGLang both expose `--tool-call-parser kimi_k2` (vLLM additionally requires `--enable-auto-tool-choice`). The chat template (a standalone `chat_template.jinja` since the 2025.8.11 update) injects the tool schemas and renders the per-turn markers.

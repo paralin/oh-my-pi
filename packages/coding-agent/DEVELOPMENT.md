@@ -161,5 +161,22 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | A provider | [adding-a-provider.md](../../docs/adding-a-provider.md) |
 | Programmatic/SDK use | [sdk.md](../../docs/sdk.md) |
 
+## Writing a doc
+
+Everything under `docs/` is embedded at build time and served over `omp://`, so
+a page written for someone working on omp lands in the same corpus an agent
+browses while working on an unrelated project. Say who a page is for with an
+HTML comment on its first line:
+
+```markdown
+<!-- omp-audience: maintainer -->
+```
+
+Markdown renderers drop the comment, so it shows up nowhere. A page carrying it
+stays readable at its exact `omp://` path and stops appearing in the `omp://`
+listing and in completions; a page without it is offered to every session. Set
+`docs.hideMaintainer = false` to list the whole corpus while working on omp
+itself.
+
 See also `AGENTS.md` at the repo root for repo-wide conventions (Bun-over-Node,
 logging, TUI sanitization, generated files, changelog, releasing).

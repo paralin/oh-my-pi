@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Addon Loader Runtime
 
 This page documents `packages/natives/native/loader-state.js`, the runtime between an ESM entrypoint and a validated `pi_natives.*.node` addon.

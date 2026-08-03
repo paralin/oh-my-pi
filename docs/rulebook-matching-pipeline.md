@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Rulebook Matching Pipeline
 
 This document describes how coding-agent discovers rules from supported config formats, normalizes them into a single `Rule` shape, resolves precedence conflicts, and splits the result into:
