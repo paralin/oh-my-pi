@@ -355,6 +355,13 @@ export * from "./agent-session-events";
 export * from "./agent-session-types";
 export type { AdvisorStats, PerAdvisorStat } from "./session-advisors";
 
+const persistenceSafeAgentEvents = new WeakMap<object, AgentSessionEvent>();
+
+/** Returns the provider-safe source event behind a deobfuscated display event. */
+export function persistenceSafeAgentSessionEvent(event: AgentSessionEvent): AgentSessionEvent {
+	return (persistenceSafeAgentEvents.get(event) ?? event) as AgentSessionEvent;
+}
+
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
@@ -2196,7 +2203,7 @@ export class AgentSession {
 		const key = sessionMessagePersistenceKey(message);
 		if (!key) return undefined;
 		const previous = this.#messageEndPersistenceTail;
-		const { promise, resolve } = Promise.withResolvers<void>();
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		const clear = () => {
 			if (this.#pendingMessageEndPersistence.get(key) === promise) {
 				this.#pendingMessageEndPersistence.delete(key);
@@ -2210,8 +2217,11 @@ export class AgentSession {
 				await previous;
 				try {
 					persistMessage();
-				} finally {
 					resolve();
+				} catch (error) {
+					reject(error);
+					throw error;
+				} finally {
 					clear();
 				}
 			},
@@ -2226,6 +2236,11 @@ export class AgentSession {
 		const key = sessionMessagePersistenceKey(message);
 		if (!key) return;
 		await this.#pendingMessageEndPersistence.get(key);
+	}
+
+	/** Resolves after a completed message has been appended to the session transcript. */
+	waitForMessagePersistence(message: AgentMessage): Promise<void> {
+		return this.#waitForSessionMessagePersistence(message);
 	}
 
 	/**
@@ -2531,6 +2546,7 @@ export class AgentSession {
 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
 				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
+				persistenceSafeAgentEvents.set(displayEvent, event);
 			}
 		}
 
@@ -5680,16 +5696,44 @@ export class AgentSession {
 		}
 	}
 
+	findUserMessageByIdempotencyKey(idempotencyKey: string): AgentMessage | undefined {
+		return this.agent.state.messages.find(
+			message => message.role === "user" && message.idempotencyKey === idempotencyKey,
+		);
+	}
+
+	findPersistedUserMessageByIdempotencyKey(idempotencyKey: string): AgentMessage | undefined {
+		const branch = this.sessionManager.getBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "message") continue;
+			const message = entry.message;
+			if (message.role === "user" && message.idempotencyKey === idempotencyKey) return message;
+		}
+		return undefined;
+	}
+
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], options?: { idempotencyKey?: string }): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
+		const idempotencyKey = options?.idempotencyKey;
+		if (
+			idempotencyKey &&
+			(this.findUserMessageByIdempotencyKey(idempotencyKey) ||
+				this.agent
+					.peekSteeringQueue()
+					.some(message => message.role === "user" && message.idempotencyKey === idempotencyKey))
+		) {
+			return;
+		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueUserMessage(expandedText, images, "steer");
+		if (!(await this.#runUsageAwarePreflight())) return;
+		await this.#queueUserMessage(expandedText, images, "steer", options?.idempotencyKey);
 	}
 
 	/**
@@ -5737,6 +5781,7 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
+		idempotencyKey?: string,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -5760,6 +5805,7 @@ export class AgentSession {
 				content,
 				attribution: "user",
 				timestamp: Date.now(),
+				...(idempotencyKey ? { idempotencyKey } : {}),
 			});
 		} else {
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
@@ -5769,6 +5815,7 @@ export class AgentSession {
 				steering: true,
 				attribution: "user",
 				timestamp: Date.now(),
+				...(idempotencyKey ? { idempotencyKey } : {}),
 			});
 		}
 		this.#scheduleIdleQueueDrain();
@@ -6600,7 +6647,13 @@ export class AgentSession {
 			try {
 				const oldDirStat = await fs.promises.stat(oldArtifactDir);
 				if (oldDirStat.isDirectory()) {
-					await fs.promises.cp(oldArtifactDir, newArtifactDir, { recursive: true });
+					await fs.promises.cp(oldArtifactDir, newArtifactDir, {
+						recursive: true,
+						filter: source => {
+							const relative = path.relative(oldArtifactDir, source);
+							return relative !== "rpc.jsonl" && !relative.startsWith("rpc.jsonl.");
+						},
+					});
 				}
 			} catch (err) {
 				if (!isEnoent(err)) {
@@ -8936,18 +8989,30 @@ export class AgentSession {
 	 * Useful for /copy command.
 	 * @returns Text content, or undefined if no assistant message exists
 	 */
-	getLastAssistantText(): string | undefined {
+	getLastAssistantText(options: { providerSafe?: boolean } = {}): string | undefined {
 		const lastAssistant = this.#getLastCopyCandidateAssistantMessage();
 		if (!lastAssistant) return undefined;
 
+		const content =
+			!options.providerSafe && this.#obfuscator?.hasSecrets()
+				? deobfuscateAssistantContent(this.#obfuscator, lastAssistant.content)
+				: lastAssistant.content;
 		let text = "";
-		for (const content of lastAssistant.content) {
-			if (content.type === "text") {
-				text += content.text;
+		for (const block of content) {
+			if (block.type === "text") {
+				text += block.text;
 			}
 		}
 
 		return text.trim() || undefined;
+	}
+
+	restoreProviderTextForDisplay(text: string): string {
+		return this.#deobfuscateFromProvider(text);
+	}
+
+	restoreProviderValueForDisplay<T>(value: T): T {
+		return this.#obfuscator?.deobfuscateObject(value) ?? value;
 	}
 
 	hasCopyCandidateAssistantMessage(): boolean {
