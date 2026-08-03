@@ -1,7 +1,13 @@
 import { isAbortError as isStarpcAbortError } from "starpc";
 import { resolveWorldSocketPath, type WorldSocketSources } from "./config.js";
-import type { LookupDispatchIntentResponse, SessionSummary } from "./generated/llmsession.pb.js";
+import type {
+	AgentTreeSnapshot,
+	LookupDispatchIntentResponse,
+	ReadWorldURIResponse,
+	SessionSummary,
+} from "./generated/llmsession.pb.js";
 import { GladosResourceServiceClient } from "./generated/llmsession_srpc.pb.js";
+import type { ProjectionSnapshot } from "./generated/projection.pb.js";
 import { type IntentKeySource, intentKey } from "./intent-key.js";
 import { abortError, callWithAbort, type DialFn, WorldTransport } from "./transport.js";
 
@@ -26,7 +32,18 @@ export interface WorldService {
 		req: { intentKey: string; waitForCustody: boolean },
 		signal?: AbortSignal,
 	): Promise<LookupDispatchIntentResponse>;
+	ReadWorldURI(req: { uri: string; limit: number }, signal?: AbortSignal): Promise<ReadWorldURIResponse>;
 }
+
+/** Largest page one bounded World read will ask the daemon for. */
+export const MAX_WORLD_READ_PAGE = 500;
+
+/** One resolved World read, carrying exactly the arm the daemon returned. */
+export type WorldRead =
+	| { found: false; objectKey: string }
+	| { found: true; objectKey: string; kind: "snapshot"; snapshot: ProjectionSnapshot }
+	| { found: true; objectKey: string; kind: "agentTree"; agentTree: AgentTreeSnapshot }
+	| { found: true; objectKey: string; kind: "listing"; keys: string[]; truncated: boolean };
 
 /**
  * One live session with a World daemon.
@@ -190,6 +207,49 @@ export class WorldClient {
 	}
 
 	/**
+	 * Read one canonical World URI.
+	 *
+	 * The path is sent exactly as given. Nothing is percent-decoded here or at
+	 * the daemon: object keys are restricted to a grammar that survives a URL
+	 * path unchanged, so a decode on either side would be a second reading of
+	 * bytes that already mean one thing. Malformed input is rejected before any
+	 * connection is opened, so a bad URI never dials.
+	 *
+	 * Object versus listing is selected by the URI alone: a trailing `/-` asks
+	 * for the bounded key listing under the resolved key. There is no mode
+	 * option, so the same address always denotes the same read.
+	 */
+	async readWorldURI(uri: string, options: { limit?: number; signal?: AbortSignal } = {}): Promise<WorldRead> {
+		const limit = options.limit ?? MAX_WORLD_READ_PAGE;
+		if (!Number.isInteger(limit) || limit <= 0) {
+			throw new Error(`world read limit must be a positive integer: ${limit}`);
+		}
+		if (limit > MAX_WORLD_READ_PAGE) {
+			throw new Error(`world read limit ${limit} exceeds the ${MAX_WORLD_READ_PAGE} row page bound`);
+		}
+		// Rejected before connecting, so a malformed read performs no dial.
+		assertCanonicalWorldPath(uri);
+		const signal = options.signal;
+		const endpoint = await this.#connect(signal);
+		const response = await this.#call(endpoint, () => endpoint.service.ReadWorldURI({ uri, limit }, signal), signal);
+		const objectKey = response.objectKey ?? "";
+		if (!response.found) return { found: false, objectKey };
+		const read = response.read;
+		if (read?.case === "snapshot") return { found: true, objectKey, kind: "snapshot", snapshot: read.value };
+		if (read?.case === "agentTree") return { found: true, objectKey, kind: "agentTree", agentTree: read.value };
+		if (read?.case === "listing") {
+			return {
+				found: true,
+				objectKey,
+				kind: "listing",
+				keys: read.value.keys ?? [],
+				truncated: read.value.truncated ?? false,
+			};
+		}
+		throw new Error(`world read returned no arm for ${objectKey}`);
+	}
+
+	/**
 	 * Derive the deterministic dispatch intent key for one identity tuple.
 	 *
 	 * Callers compute this before submitting so the submission stays
@@ -202,18 +262,43 @@ export class WorldClient {
 	/**
 	 * Release the connection and refuse further work. Idempotent.
 	 *
-	 * A connect still in flight is cancelled through the client's own lifetime
-	 * signal and then awaited, so `close` does not return while a socket is
-	 * still being opened and cannot leak an endpoint that arrives late.
+	 * Order matters. An established endpoint is released first, while its
+	 * connection scope is still live: the endpoint was opened against the
+	 * lifetime signal, so cancelling that signal first would abort the courtesy
+	 * resource release mid-call and reject it as `ERR_RPC_ABORT` — a failure
+	 * invented by the shutdown itself.
+	 *
+	 * The lifetime is cancelled after, where it does the one job left: stopping
+	 * a connect still in flight. That connect is then awaited, so `close` does
+	 * not return while a socket is still being opened and cannot leak an
+	 * endpoint that arrives late.
 	 */
 	async close(): Promise<void> {
 		this.#closed = true;
-		this.#lifetime.abort(abortError());
 		const connecting = this.#connecting;
-		await this.#discard();
-		if (!connecting) return;
-		const late = await connecting.catch(() => null);
-		if (late) await late.close();
+		let closeFailed = false;
+		let closeError: unknown;
+		try {
+			await this.#discard();
+		} catch (error) {
+			closeFailed = true;
+			closeError = error;
+		}
+		this.#lifetime.abort(abortError());
+		if (connecting) {
+			const late = await connecting.catch(() => null);
+			if (late) {
+				try {
+					await late.close();
+				} catch (error) {
+					if (!closeFailed) {
+						closeFailed = true;
+						closeError = error;
+					}
+				}
+			}
+		}
+		if (closeFailed) throw closeError;
 	}
 
 	async #connect(signal?: AbortSignal): Promise<WorldEndpoint> {
@@ -313,8 +398,11 @@ export async function openResourceEndpoint(
 			},
 			call: (pending, callSignal) => callWithAbort(pending, callSignal),
 			close: async () => {
-				await ref.release();
-				await transport.close();
+				try {
+					await ref.release();
+				} finally {
+					await transport.close();
+				}
 			},
 		};
 	} catch (error) {
@@ -376,4 +464,180 @@ function boundOperation(signal: AbortSignal | undefined, timeoutMs: number): Bou
 function isAbortError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false;
 	return error.name === "AbortError" || isStarpcAbortError(error);
+}
+
+/** Trailing marker that selects the bounded key listing under an address. */
+export const WORLD_LISTING_SELECTOR = "/-";
+
+/**
+ * Reject a World path before it can reach a socket.
+ *
+ * This mirrors the daemon's validation order so the two runtimes agree on what
+ * is malformed, and so an obviously bad URI costs no connection. The listing
+ * selector comes off first because it is structure rather than content; the
+ * byte bans then run before anything is parsed, because a fragment marker or a
+ * traversal cannot be seen once a parse has consumed it. The daemon still
+ * re-checks: this is a fast local guard, not the authority.
+ */
+export function assertCanonicalWorldPath(uri: string): void {
+	if (!uri) throw new Error("world uri is required");
+	const address = uri.endsWith(WORLD_LISTING_SELECTOR)
+		? uri.slice(0, uri.length - WORLD_LISTING_SELECTOR.length)
+		: uri;
+	if (!address) throw new Error("world uri is required");
+	for (const ch of address) {
+		const code = ch.codePointAt(0) ?? 0;
+		if (ch === "%") throw new Error(`world uri must not be percent-encoded: ${uri}`);
+		if (ch === "#") throw new Error(`world uri must not carry a fragment marker: ${uri}`);
+		if (ch === "?") throw new Error(`world uri must not carry a query marker: ${uri}`);
+		if (code <= 0x20 || code === 0x7f) {
+			throw new Error(`world uri must not contain whitespace or control bytes: ${uri}`);
+		}
+		if (code > 0x7f) throw new Error(`world uri must be ASCII: ${uri}`);
+	}
+	const rooted = address.startsWith("/") ? address : `/${address}`;
+	if (cleanWorldPath(rooted) !== rooted) {
+		throw new Error(`world uri is not canonical: ${uri}`);
+	}
+	// The full form is required so an address always names the World it means.
+	// The short forms the parser accepts default to session 1 and an empty
+	// Space, which would silently address whatever the daemon happened to mount.
+	if (!rooted.startsWith("/u/")) {
+		throw new Error(`world uri must use the full /u/{session_idx}/so/{space_id}/-/{objectKey} form: ${uri}`);
+	}
+	if (!rooted.includes("/so/")) throw new Error(`world uri must name a Space with /so/: ${uri}`);
+	if (!rooted.includes(WORLD_SUBPATH_DELIMITER)) {
+		throw new Error(`world uri must name an object key after /-/: ${uri}`);
+	}
+	assertCanonicalWorldParts(rooted, uri);
+}
+
+/** Structural delimiter between an address and the segments it delimits. */
+const WORLD_SUBPATH_DELIMITER = "/-/";
+
+/**
+ * Canonical positive decimal: no zero, no leading zeros, within uint32.
+ *
+ * Positive-only so `formatWorldURI` cannot emit session 0, which no mount
+ * produces and which the daemon refuses.
+ */
+const CANONICAL_SESSION_INDEX = /^[1-9][0-9]*$/;
+
+/** One object-key segment, mirroring the daemon's `ObjectKeySegmentPattern`. */
+const OBJECT_KEY_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._:-]*$/;
+
+/**
+ * Validate what the structural delimiters delimit.
+ *
+ * This runs after the raw bans and the clean check, in the same order the
+ * daemon uses, so a key hazard that only becomes visible once `/-/` is consumed
+ * is caught here rather than at the far end of a socket. Without it an address
+ * carrying a malformed object key is structurally fine and dials before being
+ * refused, which costs a connection to learn something local.
+ *
+ * The Space ID is treated as opaque: it is whatever the mount resolved, so only
+ * its shape is checked here and the daemon's exact comparison against its own
+ * mounted identity owns which values are legitimate.
+ */
+function assertCanonicalWorldParts(rooted: string, uri: string): void {
+	const afterPrefix = rooted.slice("/u/".length);
+	const firstSlash = afterPrefix.indexOf("/");
+	if (firstSlash <= 0) throw new Error(`world uri must name a session index: ${uri}`);
+	const rawSessionIdx = afterPrefix.slice(0, firstSlash);
+	if (!CANONICAL_SESSION_INDEX.test(rawSessionIdx) || Number(rawSessionIdx) > 0xffff_ffff) {
+		throw new Error(`world uri session index must be a canonical positive uint32: ${uri}`);
+	}
+
+	const afterSession = afterPrefix.slice(firstSlash + 1);
+	if (!afterSession.startsWith("so/")) throw new Error(`world uri must name a Space with /so/: ${uri}`);
+	const afterSpacePrefix = afterSession.slice("so/".length);
+	const delimiter = afterSpacePrefix.indexOf(WORLD_SUBPATH_DELIMITER);
+	if (delimiter === -1) throw new Error(`world uri must name an object key after /-/: ${uri}`);
+	const spaceId = afterSpacePrefix.slice(0, delimiter);
+	if (!spaceId) throw new Error(`world uri must name a nonempty Space id: ${uri}`);
+	if (spaceId.includes("/")) throw new Error(`world uri Space id must be one segment: ${uri}`);
+
+	// Exactly one group after the delimiter. A nonempty subpath addresses
+	// something inside an object, which is reserved rather than supported.
+	const groups = afterSpacePrefix.slice(delimiter + WORLD_SUBPATH_DELIMITER.length).split(WORLD_SUBPATH_DELIMITER);
+	if (groups.length !== 1) {
+		throw new Error(`world uri must name exactly one object key, got ${groups.length} segments: ${uri}`);
+	}
+	assertObjectKey(groups[0], uri);
+}
+
+/**
+ * Check one object key against the daemon's canonical grammar.
+ *
+ * A segment is never exactly `-`, `.`, or `..`: the first is the subpath
+ * delimiter marker and the other two are rewritten by path cleaning.
+ */
+function assertObjectKey(objectKey: string, uri: string): void {
+	if (!objectKey) throw new Error(`world uri object key is required: ${uri}`);
+	if (objectKey.startsWith("/") || objectKey.endsWith("/")) {
+		throw new Error(`world uri object key must not start or end with "/": ${uri}`);
+	}
+	for (const segment of objectKey.split("/")) {
+		if (!segment) throw new Error(`world uri object key has an empty segment: ${uri}`);
+		if (segment === "-" || segment === "." || segment === "..") {
+			throw new Error(`world uri object key segment "${segment}" is reserved: ${uri}`);
+		}
+		if (!OBJECT_KEY_SEGMENT.test(segment)) {
+			throw new Error(`world uri object key segment "${segment}" must match ${OBJECT_KEY_SEGMENT.source}: ${uri}`);
+		}
+	}
+}
+
+/** One World address, in the parts the canonical form is built from. */
+export interface WorldAddress {
+	sessionIdx: number;
+	spaceId: string;
+	objectKey: string;
+	/** Ask for the bounded key listing under `objectKey` rather than the object. */
+	listing?: boolean;
+}
+
+/**
+ * Build the canonical World path for one address.
+ *
+ * One formatter exists so every caller — the native protocol handler, the
+ * Claude tool, and any direct client user — produces byte-identical addresses
+ * for the same object. The result is validated before it is returned: a
+ * formatter that can emit something the reader would refuse is a way for an
+ * invalid key to reach a caller as if it were addressable.
+ */
+export function formatWorldURI(address: WorldAddress): string {
+	const path = `/u/${address.sessionIdx}/so/${address.spaceId}/-/${address.objectKey}`;
+	const formatted = address.listing ? `${path}${WORLD_LISTING_SELECTOR}` : path;
+	assertCanonicalWorldPath(formatted);
+	return formatted;
+}
+
+/** The `spacewave://` scheme, with its empty authority. */
+const WORLD_URL_PREFIX = "spacewave://";
+
+/**
+ * Build the canonical `spacewave://` URL for one address.
+ *
+ * The local form has an empty authority — `spacewave:///u/1/...`, three slashes
+ * — because the whole address lives in the path. A nonempty authority would
+ * make the first path segment look like a host, which is a different address
+ * that happens to parse.
+ */
+export function formatWorldURL(address: WorldAddress): string {
+	return `${WORLD_URL_PREFIX}${formatWorldURI(address)}`;
+}
+
+/** Go path.Clean over a rooted path, matching the daemon's identity check. */
+function cleanWorldPath(rooted: string): string {
+	const out: string[] = [];
+	for (const segment of rooted.split("/")) {
+		if (segment === "" || segment === ".") continue;
+		if (segment === "..") {
+			out.pop();
+			continue;
+		}
+		out.push(segment);
+	}
+	return `/${out.join("/")}`;
 }

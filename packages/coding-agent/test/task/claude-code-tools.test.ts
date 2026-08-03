@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { type AgentPeer, AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { claudeCodeNativeTools } from "@oh-my-pi/pi-coding-agent/task/claude-code-runtime";
 import { createClaudeCodeMcpServer } from "@oh-my-pi/pi-coding-agent/task/claude-code-sdk";
 import {
 	createClaudeCodeMcpTools,
@@ -15,6 +16,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, YieldItem } from "@oh-my-pi/pi-coding-agent/task/types";
+import { WORLD_SOCKET_ENV, WorldClient } from "@oh-my-pi/pi-coding-agent/world/index";
 
 const CLAUDE_AGENT: AgentDefinition = {
 	name: "claude-parent",
@@ -317,5 +319,101 @@ describe("Claude Code OMP tools", () => {
 		expect(text(waited)).toContain("OtherPeer: ready");
 		const inbox = await hub.handler({ op: "inbox" });
 		expect(text(inbox)).toBe("Inbox empty.");
+	});
+
+	// world_read is the Claude half of the same World read the native
+	// spacewave:// handler serves. It is conditional on purpose: a root with no
+	// configured daemon has nothing to address, so advertising the tool there
+	// would offer a capability whose every call fails.
+	describe("world_read bridge", () => {
+		const KEY = "glados/live/omp/abc/llm-session";
+		const URI = `/u/1/so/sp1/-/${KEY}`;
+		const WORLD_URL = `spacewave://${URI}`;
+
+		// Awaited inside the try, not returned from it: restoring the variable
+		// before the promise settles would put the bridge back on the ambient
+		// configuration while it is still deciding whether to build the tool.
+		async function withSocket<T>(value: string | undefined, run: () => Promise<T>): Promise<T> {
+			const previous = process.env[WORLD_SOCKET_ENV];
+			if (value === undefined) delete process.env[WORLD_SOCKET_ENV];
+			else process.env[WORLD_SOCKET_ENV] = value;
+			try {
+				return await run();
+			} finally {
+				if (previous === undefined) delete process.env[WORLD_SOCKET_ENV];
+				else process.env[WORLD_SOCKET_ENV] = previous;
+			}
+		}
+
+		it("is absent from an unconfigured root", async () => {
+			const bridge = await withSocket(undefined, () => tools(options(Settings.isolated())));
+			expect(bridge.map(tool => tool.name)).not.toContain("world_read");
+		});
+
+		it("is advertised when a World socket is configured", async () => {
+			const bridge = await withSocket("/run/glados/console.sock", () => tools(options(Settings.isolated())));
+			const worldRead = bridge.find(tool => tool.name === "world_read");
+			if (!worldRead) throw new Error("world_read MCP tool missing");
+			const schema = worldRead.inputSchema as { required?: string[]; properties?: Record<string, unknown> };
+			// url and limit only: no out-of-band mode bit, so the address alone
+			// decides object versus listing.
+			expect(schema.required).toEqual(["url"]);
+			expect(Object.keys(schema.properties ?? {}).sort()).toEqual(["limit", "url"]);
+		});
+
+		it("reports a malformed address as a tool failure without dialing", async () => {
+			const bridge = await withSocket("/run/glados/console.sock", () => tools(options(Settings.isolated())));
+			const worldRead = bridge.find(tool => tool.name === "world_read");
+			if (!worldRead) throw new Error("world_read MCP tool missing");
+			const failed = await worldRead.handler({ url: `${WORLD_URL}#1` });
+			expect(failed.isError).toBe(true);
+			expect(text(failed)).toContain("fragment marker");
+		});
+
+		it("observes World client cleanup failures when the peer aborts", async () => {
+			const observe = vi.fn(() => Promise.resolve());
+			const cleanup = { catch: observe } as unknown as Promise<void>;
+			const close = vi.fn(() => cleanup);
+			vi.spyOn(WorldClient, "create").mockReturnValue({ close } as unknown as WorldClient);
+			const controller = new AbortController();
+			await tools(options(Settings.isolated()), controller.signal);
+
+			controller.abort();
+
+			expect(close).toHaveBeenCalledTimes(1);
+			expect(observe).toHaveBeenCalledTimes(1);
+		});
+
+		it("detaches a completed read from a later peer abort", async () => {
+			let staleReadAborted = false;
+			const readWorldURI = vi.fn(async (_uri: string, readOptions?: { signal?: AbortSignal }) => {
+				readOptions?.signal?.addEventListener("abort", () => {
+					staleReadAborted = true;
+				});
+				return { found: false as const, objectKey: KEY };
+			});
+			const close = vi.fn(async () => {});
+			vi.spyOn(WorldClient, "create").mockReturnValue({
+				readWorldURI,
+				close,
+			} as unknown as WorldClient);
+			const controller = new AbortController();
+			const bridge = await tools(options(Settings.isolated()), controller.signal);
+			const worldRead = bridge.find(tool => tool.name === "world_read");
+			if (!worldRead) throw new Error("world_read MCP tool missing");
+
+			const result = await worldRead.handler({ url: WORLD_URL });
+			expect(result.isError).not.toBe(true);
+			expect(readWorldURI.mock.calls[0]?.[0]).toBe(URI);
+			controller.abort();
+
+			expect(staleReadAborted).toBe(false);
+			expect(close).toHaveBeenCalledTimes(1);
+		});
+
+		it("keeps world_read admissible for a restricted child", () => {
+			expect(() => claudeCodeNativeTools(["read", "world_read"])).not.toThrow();
+			expect(() => claudeCodeNativeTools(["read", "not_a_tool"])).toThrow(/Unsupported restricted/);
+		});
 	});
 });

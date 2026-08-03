@@ -1,0 +1,210 @@
+{
+  "space": "test-space",
+  "objectKey": "glados/live/omp/abc/llm-session",
+  "accepted": [
+    {
+      "name": "live session",
+      "uri": "/u/1/so/test-space/-/glados/live/omp/abc/llm-session"
+    },
+    {
+      "name": "dispatch intent",
+      "uri": "/u/1/so/test-space/-/di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra"
+    },
+    {
+      "name": "attempt dispatch lane",
+      "uri": "/u/1/so/test-space/-/di:yom4a33uzh2gx5u2y5lhhjtxex6vtvxfqljzcmyavhj4zwyzywra/attempt/1/dispatch"
+    },
+    {
+      "name": "reserved agent tree",
+      "uri": "/u/1/so/test-space/-/glados/projections/agent-tree"
+    },
+    {
+      "name": "projection listing",
+      "uri": "/u/1/so/test-space/-/glados/projections/-"
+    },
+    {
+      "name": "underscore first segment",
+      "uri": "/u/1/so/test-space/-/_internal/thing"
+    },
+    {
+      "name": "dotted segment",
+      "uri": "/u/1/so/test-space/-/glados/live/run.1/llm-session"
+    },
+    {
+      "name": "single segment key",
+      "uri": "/u/1/so/test-space/-/glados"
+    }
+  ],
+  "rejected": [
+    {
+      "name": "empty uri",
+      "uri": "",
+      "reason": "an address with no bytes names nothing"
+    },
+    {
+      "name": "fragment marker",
+      "uri": "/u/1/so/test-space/-/di:abc#1",
+      "reason": "a fragment truncates the path before anything reads it"
+    },
+    {
+      "name": "query marker",
+      "uri": "/u/1/so/test-space/-/glados/live/thing?x=1",
+      "reason": "a query truncates the path before anything reads it"
+    },
+    {
+      "name": "percent encoded",
+      "uri": "/u/1/so/test-space/-/glados/thi%2Fng",
+      "reason": "nothing decodes, so a percent can only mean the caller encoded"
+    },
+    {
+      "name": "bare percent",
+      "uri": "/u/1/so/test-space/-/glados/100%",
+      "reason": "nothing decodes, so a percent can only mean the caller encoded"
+    },
+    {
+      "name": "space byte",
+      "uri": "/u/1/so/test-space/-/glados/some thing",
+      "reason": "whitespace is trimmed or escaped differently by every reader"
+    },
+    {
+      "name": "tab byte",
+      "uri": "/u/1/so/test-space/-/glados/some\tthing",
+      "reason": "whitespace is trimmed or escaped differently by every reader"
+    },
+    {
+      "name": "newline byte",
+      "uri": "/u/1/so/test-space/-/glados/some\nthing",
+      "reason": "whitespace is trimmed or escaped differently by every reader"
+    },
+    {
+      "name": "control byte",
+      "uri": "/u/1/so/test-space/-/glados/some\u0001thing",
+      "reason": "control bytes are not addressable text"
+    },
+    {
+      "name": "nul byte",
+      "uri": "/u/1/so/test-space/-/glados/some\u0000thing",
+      "reason": "control bytes are not addressable text"
+    },
+    {
+      "name": "non ascii",
+      "uri": "/u/1/so/test-space/-/glados/na\u00efve",
+      "reason": "a multi-byte rune has more than one spelling once normalized"
+    },
+    {
+      "name": "dot segment",
+      "uri": "/u/1/so/test-space/-/glados/./thing",
+      "reason": "path cleaning would rewrite it into a different address"
+    },
+    {
+      "name": "dotdot segment",
+      "uri": "/u/1/so/test-space/-/glados/../thing",
+      "reason": "path cleaning would rewrite it into a different address"
+    },
+    {
+      "name": "doubled slash",
+      "uri": "/u/1/so/test-space/-/glados//thing",
+      "reason": "path cleaning would rewrite it into a different address"
+    },
+    {
+      "name": "trailing slash",
+      "uri": "/u/1/so/test-space/-/glados/thing/",
+      "reason": "path cleaning would rewrite it into a different address"
+    },
+    {
+      "name": "empty space id",
+      "uri": "/u/1/so//-/glados/live/thing",
+      "reason": "an empty Space segment collapses under path cleaning"
+    },
+    {
+      "name": "multi segment space id",
+      "uri": "/u/1/so/one/two/-/glados/live/thing",
+      "reason": "a multi-segment Space makes the Space and the key ambiguous"
+    },
+    {
+      "name": "short form bare key",
+      "uri": "glados/live/thing",
+      "reason": "the parser would default it to session 1 and an empty Space"
+    },
+    {
+      "name": "short form rooted key",
+      "uri": "/glados/live/thing",
+      "reason": "the parser would default it to session 1 and an empty Space"
+    },
+    {
+      "name": "missing so marker",
+      "uri": "/u/1/glados/live/thing",
+      "reason": "the address names no Space"
+    },
+    {
+      "name": "missing subpath delimiter",
+      "uri": "/u/1/so/test-space",
+      "reason": "the address names no object key"
+    },
+    {
+      "name": "colon first segment",
+      "uri": "/u/1/so/test-space/-/:leading/thing",
+      "reason": "a segment starts with a letter, digit, or underscore"
+    },
+    {
+      "name": "dash first segment",
+      "uri": "/u/1/so/test-space/-/-leading/thing",
+      "reason": "a segment starts with a letter, digit, or underscore"
+    },
+    {
+      "name": "dot first segment",
+      "uri": "/u/1/so/test-space/-/.hidden/thing",
+      "reason": "a segment starts with a letter, digit, or underscore"
+    },
+    {
+      "name": "at sign",
+      "uri": "/u/1/so/test-space/-/glados/a@b",
+      "reason": "outside the segment grammar"
+    },
+    {
+      "name": "backslash",
+      "uri": "/u/1/so/test-space/-/glados\\thing",
+      "reason": "outside the segment grammar"
+    },
+    {
+      "name": "reserved dash segment",
+      "uri": "/u/1/so/test-space/-/glados/-/thing",
+      "reason": "a bare dash segment is the subpath delimiter marker"
+    },
+    {
+      "name": "nested subpath",
+      "uri": "/u/1/so/test-space/-/glados/live/thing/-/nested",
+      "reason": "addressing inside an object is not served"
+    },
+    {
+      "name": "session zero",
+      "uri": "/u/0/so/test-space/-/glados/live/thing",
+      "reason": "no mount produces session 0"
+    },
+    {
+      "name": "session leading zero",
+      "uri": "/u/01/so/test-space/-/glados/live/thing",
+      "reason": "01 parses as 1, so two spellings would name one session"
+    },
+    {
+      "name": "session padded zero",
+      "uri": "/u/001/so/test-space/-/glados/live/thing",
+      "reason": "001 parses as 1, so two spellings would name one session"
+    },
+    {
+      "name": "session overflow",
+      "uri": "/u/4294967296/so/test-space/-/glados/live/thing",
+      "reason": "beyond uint32"
+    },
+    {
+      "name": "session negative",
+      "uri": "/u/-1/so/test-space/-/glados/live/thing",
+      "reason": "not a canonical unsigned decimal"
+    },
+    {
+      "name": "session not a number",
+      "uri": "/u/x/so/test-space/-/glados/live/thing",
+      "reason": "not a canonical unsigned decimal"
+    }
+  ]
+}

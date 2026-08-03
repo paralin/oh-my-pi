@@ -1,13 +1,16 @@
 import { describe, expect, test } from "bun:test";
 import {
 	DEFAULT_LOOKUP_TIMEOUT_MS,
+	formatWorldURI,
 	MAX_SESSION_PAGE,
+	MAX_WORLD_READ_PAGE,
+	WORLD_LISTING_SELECTOR,
 	WorldClient,
 	type WorldEndpoint,
 	type WorldService,
 } from "../client.js";
 import { WORLD_SOCKET_ENV } from "../config.js";
-import type { LookupDispatchIntentResponse, SessionSummary } from "../generated/llmsession.pb.js";
+import type { LookupDispatchIntentResponse, ReadWorldURIResponse, SessionSummary } from "../generated/llmsession.pb.js";
 import type { DialFn } from "../transport.js";
 
 const SOCKET = "/run/glados/console.sock";
@@ -29,6 +32,8 @@ interface FakeEndpointOptions {
 	hang?: boolean;
 	/** Consulted per call, so one fake can answer first and hang later. */
 	hangNow?: () => boolean;
+	/** Response the ReadWorldURI fake returns. */
+	read?: ReadWorldURIResponse;
 	/** Fail the next call with this error, retiring the endpoint. */
 	failWith?: Error;
 	/** Consulted per call, so one fake can fail once and then serve. */
@@ -55,7 +60,13 @@ function starpcAbortLike(): Error {
 	return new Error("ERR_RPC_ABORT");
 }
 
+interface FakeWorldRead {
+	uri: string;
+	limit: number;
+}
+
 interface FakeEndpointLog {
+	reads: FakeWorldRead[];
 	opens: number;
 	limits: number[];
 	lookups: string[];
@@ -69,7 +80,7 @@ interface FakeEndpointLog {
  * own bounding, absence handling, and endpoint lifecycle without a daemon.
  */
 function fakeEndpoints(options: FakeEndpointOptions = {}) {
-	const log: FakeEndpointLog = { opens: 0, limits: [], lookups: [], lookupWaits: [], closes: 0 };
+	const log: FakeEndpointLog = { reads: [], opens: 0, limits: [], lookups: [], lookupWaits: [], closes: 0 };
 	const retire: Array<() => void> = [];
 	const openEndpoint = async (): Promise<WorldEndpoint> => {
 		log.opens++;
@@ -84,6 +95,13 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 				if (failure) throw failure;
 				if (options.hang || options.hangNow?.()) return await new Promise(() => {});
 				return { sessions: (options.sessions ?? []).slice(0, req.limit) };
+			},
+			ReadWorldURI: async req => {
+				log.reads.push({ uri: req.uri, limit: req.limit });
+				const failure = options.failWith ?? options.failNow?.();
+				if (failure) throw failure;
+				if (options.hang || options.hangNow?.()) return await new Promise(() => {});
+				return options.read ?? { objectKey: req.uri, found: false };
 			},
 			LookupDispatchIntent: async req => {
 				log.lookups.push(req.intentKey);
@@ -307,6 +325,73 @@ describe("direct dispatch intent lookup", () => {
 });
 
 describe("cancellation, close, and reconnect", () => {
+	// The endpoint is opened against the client's lifetime signal, so releasing
+	// it has to happen while that scope is still live. Cancelling the lifetime
+	// first would abort the courtesy resource release mid-call and reject it as
+	// ERR_RPC_ABORT — a failure the shutdown invented, surfacing to whoever
+	// called close and, from a fire-and-forget abort handler, as an unhandled
+	// rejection that fails the process.
+	test("releases the endpoint before cancelling its own lifetime", async () => {
+		let released = 0;
+		let releasedAfterAbort = false;
+		let lifetime: AbortSignal | undefined;
+		const openEndpoint = async (_socketPath: string, signal: AbortSignal): Promise<WorldEndpoint> => {
+			lifetime = signal;
+			return {
+				service: {
+					ListSessions: async () => ({ sessions: [] }),
+					LookupDispatchIntent: async () => ({ found: false }),
+					ReadWorldURI: async req => ({ objectKey: req.uri, found: false }),
+				},
+				usable: true,
+				call: async pending => await pending,
+				close: async () => {
+					released++;
+					if (signal.aborted) {
+						// Exactly what starpc does to a call whose scope is gone.
+						releasedAfterAbort = true;
+						throw starpcAbortLike();
+					}
+				},
+			};
+		};
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		await client.listSessions(1);
+
+		// Rejecting here is the regression: close is the caller's clean shutdown.
+		await client.close();
+
+		expect(released).toBe(1);
+		expect(releasedAfterAbort).toBe(false);
+		// The lifetime is still cancelled, just after the release rather than before.
+		expect(lifetime?.aborted).toBe(true);
+	});
+
+	test("cancels its lifetime when endpoint release fails", async () => {
+		let lifetime: AbortSignal | undefined;
+		const openEndpoint = async (_socketPath: string, signal: AbortSignal): Promise<WorldEndpoint> => {
+			lifetime = signal;
+			return {
+				service: {
+					ListSessions: async () => ({ sessions: [] }),
+					LookupDispatchIntent: async () => ({ found: false }),
+					ReadWorldURI: async req => ({ objectKey: req.uri, found: false }),
+				},
+				usable: true,
+				call: async pending => await pending,
+				close: async () => {
+					throw new Error("release failed");
+				},
+			};
+		};
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		await client.listSessions(1);
+
+		await expect(client.close()).rejects.toThrow("release failed");
+
+		expect(lifetime?.aborted).toBe(true);
+	});
+
 	// starpc cancels the one call on the signal it is already handed, so an
 	// abort must not cost the session. Retiring the transport per abort would
 	// make every cancelled operation charge the next caller a full re-dial and
@@ -364,6 +449,7 @@ describe("cancellation, close, and reconnect", () => {
 			service: {
 				ListSessions: async () => await Promise.reject(null),
 				LookupDispatchIntent: async () => ({ found: false }),
+				ReadWorldURI: async () => ({ objectKey: "", found: false }),
 			},
 			call: async pending => await pending,
 			close: async () => {
@@ -474,6 +560,8 @@ describe("cancellation, close, and reconnect", () => {
 						? await stalled.promise
 						: { sessions: [{ sessionObjectKey: "glados/live/omp/replacement/llm-session" }] },
 				LookupDispatchIntent: async () => ({ found: false }),
+				// Unused here; this test is about endpoint lifetime, not reads.
+				ReadWorldURI: async req => ({ objectKey: req.uri, found: false }),
 			};
 			return {
 				service,
@@ -572,5 +660,138 @@ describe("cancellation, close, and reconnect", () => {
 		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
 		await expect(client.listSessions(1, AbortSignal.abort())).rejects.toThrow(/aborted/);
 		expect(log.opens).toBe(0);
+	});
+});
+
+// The World read seen from the client. Its contract is that
+// a malformed or unconfigured read costs nothing: no socket, no daemon round
+// trip. Everything rejected below is rejected before #connect runs.
+describe("canonical world read", () => {
+	const SPACE = "sp1";
+	const KEY = "glados/live/omp/abc/llm-session";
+	const URI = `/u/1/so/${SPACE}/-/${KEY}`;
+
+	test("an unconfigured root performs no read and no dial", () => {
+		const { dial, calls } = recordingDial();
+		expect(WorldClient.create({ env: {}, setting: undefined, dial })).toBeUndefined();
+		expect(calls).toEqual([]);
+	});
+
+	test("a malformed uri never dials", async () => {
+		const { dial, calls } = recordingDial();
+		const client = WorldClient.create({ env: {}, setting: SOCKET, dial })!;
+		const malformed = [
+			"",
+			`${URI}#1`,
+			`${URI}?x=1`,
+			`/u/1/so/${SPACE}/-/glados/thi%2Fng`,
+			`/u/1/so/${SPACE}/-/glados/some thing`,
+			`/u/1/so/${SPACE}/-/glados/na\u00efve`,
+			`/u/1/so/${SPACE}/-/glados/./thing`,
+			`/u/1/so/${SPACE}/-/glados/../thing`,
+			`/u/1/so/${SPACE}/-/glados//thing`,
+			`/u/1/so/${SPACE}/-/glados/thing/`,
+			// An empty Space collapses under path cleaning, so it is not canonical.
+			`/u/1/so//-/${KEY}`,
+			// Short forms the Spacewave parser would silently default.
+			KEY,
+			`/${KEY}`,
+			`/u/1/${KEY}`,
+			`/u/1/so/${SPACE}`,
+		];
+		for (const uri of malformed) {
+			await expect(client.readWorldURI(uri)).rejects.toThrow();
+		}
+		// The whole point: not one of those reached a socket.
+		expect(calls).toEqual([]);
+		expect(client.connected).toBe(false);
+	});
+
+	test("rejects a non-positive or oversized bound before dialing", async () => {
+		const { dial, calls } = recordingDial();
+		const client = WorldClient.create({ env: {}, setting: SOCKET, dial })!;
+		for (const limit of [0, -1, 1.5, Number.NaN]) {
+			await expect(client.readWorldURI(URI, { limit })).rejects.toThrow(/positive integer/);
+		}
+		await expect(client.readWorldURI(URI, { limit: MAX_WORLD_READ_PAGE + 1 })).rejects.toThrow(/page bound/);
+		expect(calls).toEqual([]);
+	});
+
+	test("sends the uri unchanged with its bound", async () => {
+		const { openEndpoint, log } = fakeEndpoints({ read: { objectKey: KEY, found: false } });
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		await client.readWorldURI(URI, { limit: 25 });
+		// Unchanged: no encode, no normalization, no decoration.
+		expect(log.reads).toEqual([{ uri: URI, limit: 25 }]);
+	});
+
+	test("maps a typed absence", async () => {
+		const { openEndpoint } = fakeEndpoints({ read: { objectKey: KEY, found: false } });
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		const read = await client.readWorldURI(URI);
+		expect(read).toEqual({ found: false, objectKey: KEY });
+	});
+
+	test("maps the projection arm", async () => {
+		const { openEndpoint } = fakeEndpoints({
+			read: {
+				objectKey: KEY,
+				found: true,
+				read: { case: "snapshot", value: { objectKey: KEY, rows: [{ objectKey: KEY, title: "one" }] } },
+			},
+		});
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		const read = await client.readWorldURI(URI);
+		expect(read.found).toBe(true);
+		if (!read.found || read.kind !== "snapshot") throw new Error("expected the snapshot arm");
+		expect(read.snapshot.rows?.[0]?.title).toBe("one");
+	});
+
+	test("maps the agent-tree arm without flattening it", async () => {
+		const { openEndpoint } = fakeEndpoints({
+			read: {
+				objectKey: "glados/projections/agent-tree",
+				found: true,
+				read: { case: "agentTree", value: { revision: 7n, agents: [{ agentObjectKey: "glados/agents/root" }] } },
+			},
+		});
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		const read = await client.readWorldURI(`/u/1/so/${SPACE}/-/glados/projections/agent-tree`);
+		if (!read.found || read.kind !== "agentTree") throw new Error("expected the agent-tree arm");
+		expect(read.agentTree.agents?.[0]?.agentObjectKey).toBe("glados/agents/root");
+	});
+
+	// The listing is selected by the address alone. There is no mode option to
+	// disagree with the URI, so the same string always means the same read.
+	test("maps the listing arm and carries truncation", async () => {
+		const { openEndpoint, log } = fakeEndpoints({
+			read: {
+				objectKey: "glados/live",
+				found: true,
+				read: { case: "listing", value: { keys: [KEY], truncated: true } },
+			},
+		});
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		const listingUri = `/u/1/so/${SPACE}/-/glados/live${WORLD_LISTING_SELECTOR}`;
+		const read = await client.readWorldURI(listingUri, { limit: 1 });
+		if (!read.found || read.kind !== "listing") throw new Error("expected the listing arm");
+		expect(read.keys).toEqual([KEY]);
+		// Truncation is carried, not inferred from a short page.
+		expect(read.truncated).toBe(true);
+		// The selector travels in the address, untouched.
+		expect(log.reads[0]?.uri).toBe(listingUri);
+	});
+
+	test("formats the canonical address one way", () => {
+		expect(formatWorldURI({ sessionIdx: 1, spaceId: SPACE, objectKey: KEY })).toBe(URI);
+		expect(formatWorldURI({ sessionIdx: 1, spaceId: SPACE, objectKey: "glados/live", listing: true })).toBe(
+			`/u/1/so/${SPACE}/-/glados/live${WORLD_LISTING_SELECTOR}`,
+		);
+	});
+
+	test("rejects a response carrying no arm", async () => {
+		const { openEndpoint } = fakeEndpoints({ read: { objectKey: KEY, found: true } });
+		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
+		await expect(client.readWorldURI(URI)).rejects.toThrow(/no arm/);
 	});
 });
