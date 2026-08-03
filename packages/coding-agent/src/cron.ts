@@ -424,10 +424,7 @@ export class CronManager {
 	async copyForkStore(oldSessionFile: string, newSessionFile: string): Promise<void> {
 		const oldStore = path.join(sessionSidecarDir(oldSessionFile), "scheduled_tasks.json");
 		const newStore = path.join(sessionSidecarDir(newSessionFile), "scheduled_tasks.json");
-		const text = await this.#storage.readText(oldStore).catch(async error => {
-			if (isEnoent(error) || !(await this.#storage.exists(oldStore))) return undefined;
-			throw error;
-		});
+		const text = await this.#readDurableStore(oldStore);
 		if (text !== undefined) await this.#storage.writeTextAtomic(newStore, text);
 	}
 
@@ -658,15 +655,22 @@ export class CronManager {
 		const sessionFile = this.#sessionFile;
 		const sessionKey = this.#sessionKey;
 		const jobs = this.#jobs;
+		const generation = this.#refreshGeneration;
 		if (!sessionFile) throw new Error("Durable cron jobs require a persisted session.");
 		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
 		let claim: CronDeliveryClaim | undefined;
 		while (!claim) {
-			if (this.#disposed) throw new Error("Cron manager is disposed.");
-			claim = await acquireDeliveryClaim(store, this.#storage, this.#now());
-			if (!claim) {
-				await Bun.sleep(DURABLE_MUTATION_CLAIM_RETRY_MS);
+			if (
+				this.#disposed ||
+				this.#suspended ||
+				generation !== this.#refreshGeneration ||
+				this.#sessionFile !== sessionFile ||
+				this.#sessionKey !== sessionKey
+			) {
+				throw new Error("Cron session changed while acquiring durable storage.");
 			}
+			claim = await acquireDeliveryClaim(store, this.#storage, this.#now());
+			if (!claim) await Bun.sleep(DURABLE_MUTATION_CLAIM_RETRY_MS);
 		}
 		const maintenance = maintainDeliveryClaim(claim, this.#now);
 		try {
