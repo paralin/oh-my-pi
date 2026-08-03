@@ -22,7 +22,7 @@ The objective is ready only when all five of the following are pinned down. Keep
 
 1. Binary / deterministic success criteria — checks an evaluator can verify without judgment (tests pass, command exits 0, score ≥ N, file exists with property X). Reject subjective "works well / clean / done".
 2. Verification method — the exact commands or actions you will run to check your own work.
-3. Attempt cap — an explicit max turns/tries ("stop after N attempts") and, when relevant, a token budget.
+3. Attempt cap — an explicit max turns/tries ("stop after N attempts").
 4. Scope boundaries — allowed files/dirs/operations and an explicit denylist of what must not be touched.
 5. Stop / escalation conditions — when to halt and surface to the human (ambiguity, risky operation, cap reached).
 
@@ -32,7 +32,7 @@ Anti-patterns to re-ask until fixed:
 - Uncapped iteration ("until CI is green", "keep going until it works")
 - Self-graded success without a verification command
 
-Once all five are settled, call the `goal` tool with `op: "create"`, the final objective, and `token_budget` if the user gave one. The objective MUST be structured markdown with exactly these sections, in this order:
+Once all five are settled, call the `goal` tool with `op: "create"` and the final objective. The objective MUST be structured markdown with exactly these sections, in this order:
 
 ## Objective
 ## Success criteria

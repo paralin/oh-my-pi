@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "bun:test";
 import { completionBudgetReport, GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
 import type { Goal, GoalModeState, GoalTokenUsage } from "@oh-my-pi/pi-coding-agent/goals/state";
-import { GoalTool } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { GoalTool, goalToolRenderer } from "@oh-my-pi/pi-coding-agent/goals/tools/goal-tool";
+import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 function createUsage(overrides: Partial<GoalTokenUsage> = {}): GoalTokenUsage {
@@ -56,6 +58,37 @@ function createRuntimeHarness(initialState?: GoalModeState) {
 }
 
 describe("GoalTool", () => {
+	it("refuses to start or resume a goal while plan mode is active or paused", async () => {
+		const planSignals: Array<Partial<ToolSession>> = [
+			{ getPlanModeState: () => ({ enabled: true, planFilePath: "plan.md" }) satisfies PlanModeState },
+			// A paused plan clears getPlanModeState but stays logically active.
+			{ getPlanModeState: () => undefined, isPlanModePaused: () => true },
+		];
+		for (const planSignal of planSignals) {
+			const runtime = {
+				setGoal: vi.fn(),
+				createGoal: vi.fn(),
+				replaceGoal: vi.fn(),
+				resumeGoal: vi.fn(),
+			};
+			const tool = new GoalTool(
+				createToolSession({
+					getGoalRuntime: () => runtime as unknown as GoalRuntime,
+					getGoalModeState: () => undefined,
+					...planSignal,
+				}),
+			);
+
+			for (const op of ["create", "set", "resume"] as const) {
+				await expect(tool.execute("call", { op, objective: "Ship it" })).rejects.toThrow(/plan mode/i);
+			}
+			expect(runtime.setGoal).not.toHaveBeenCalled();
+			expect(runtime.createGoal).not.toHaveBeenCalled();
+			expect(runtime.replaceGoal).not.toHaveBeenCalled();
+			expect(runtime.resumeGoal).not.toHaveBeenCalled();
+		}
+	});
+
 	it("routes create/get/complete operations and returns completion budget details", async () => {
 		const createGoalState: GoalModeState = {
 			enabled: true,
@@ -90,7 +123,7 @@ describe("GoalTool", () => {
 			op: "create",
 			objective: "  Create route  ",
 		});
-		expect(runtime.createGoal).toHaveBeenCalledWith({ objective: "Create route" });
+		expect(runtime.createGoal).toHaveBeenCalledWith({ objective: "Create route" }, expect.any(Function));
 		expect(created.details).toMatchObject({
 			op: "create",
 			goal: createGoalState.goal,
@@ -147,7 +180,26 @@ describe("GoalTool", () => {
 		expect(harness.getState()?.enabled).toBe(true);
 	});
 
-	it("replaces the active goal with op=set", async () => {
+	it("serializes concurrent op=set calls through the runtime owner", async () => {
+		const harness = createRuntimeHarness();
+		const tool = new GoalTool(
+			createToolSession({
+				getGoalRuntime: () => harness.runtime,
+				getGoalModeState: () => harness.getState(),
+			}),
+		);
+
+		const [first, second] = await Promise.all([
+			tool.execute("call-set-first", { op: "set", objective: "First goal" }),
+			tool.execute("call-set-second", { op: "set", objective: "Second goal" }),
+		]);
+
+		expect(first.details?.goal?.objective).toBe("First goal");
+		expect(second.details?.goal?.objective).toBe("Second goal");
+		expect(harness.getState()?.goal.objective).toBe("Second goal");
+	});
+
+	it("replaces the active goal with op=set while preserving its operator budget", async () => {
 		const harness = createRuntimeHarness({
 			enabled: true,
 			mode: "active",
@@ -168,16 +220,16 @@ describe("GoalTool", () => {
 		expect(result.details?.goal).toMatchObject({
 			objective: "New goal",
 			status: "active",
-			tokenBudget: undefined,
+			tokenBudget: 10,
 		});
 		expect(harness.getState()?.goal.objective).toBe("New goal");
 	});
 
-	it("replaces a paused goal with op=set", async () => {
+	it("replaces a paused goal with op=set while preserving its operator budget", async () => {
 		const harness = createRuntimeHarness({
 			enabled: false,
 			mode: "active",
-			goal: createGoal({ objective: "Paused", status: "paused" }),
+			goal: createGoal({ objective: "Paused", status: "paused", tokenBudget: 20 }),
 		});
 		const tool = new GoalTool(
 			createToolSession({
@@ -191,7 +243,7 @@ describe("GoalTool", () => {
 		expect(result.details?.goal).toMatchObject({
 			objective: "New goal",
 			status: "active",
-			tokenBudget: undefined,
+			tokenBudget: 20,
 		});
 		const state = harness.getState();
 		expect(state?.enabled).toBe(true);
@@ -365,5 +417,47 @@ describe("GoalTool", () => {
 		expect(result.details?.op).toBe("drop");
 		expect(result.details?.goal?.status).toBe("dropped");
 		expect(harness.getState()).toBeUndefined();
+	});
+
+	it("expands tabs in pending and completed objective renderings", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const options = { expanded: false, isPartial: false };
+		const call = Bun.stripANSI(
+			goalToolRenderer.renderCall({ op: "create", objective: "Ship\tit" }, options, theme!).render(120).join("\n"),
+		);
+		const result = Bun.stripANSI(
+			goalToolRenderer
+				.renderResult(
+					{
+						content: [],
+						details: { op: "get", goal: createGoal({ objective: "Ship\tit" }) },
+					},
+					options,
+					theme!,
+				)
+				.render(120)
+				.join("\n"),
+		);
+
+		expect(call).not.toContain("\t");
+		expect(result).not.toContain("\t");
+		expect(call).toContain("Ship");
+		expect(result).toContain("Ship");
+	});
+
+	it("collapses multiline objectives before truncating the status preview", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const objective = Array.from({ length: 80 }, (_, index) => `part-${index}`).join("\n");
+
+		const lines = goalToolRenderer
+			.renderCall({ op: "set", objective }, { expanded: false, isPartial: false }, theme!)
+			.render(120)
+			.map(Bun.stripANSI);
+
+		expect(lines).toHaveLength(1);
+		expect(lines[0]!.length).toBeLessThanOrEqual(120);
+		expect(lines[0]).toContain("part-0 part-1");
 	});
 });

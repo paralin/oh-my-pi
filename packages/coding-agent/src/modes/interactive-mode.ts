@@ -2216,6 +2216,9 @@ export class InteractiveMode implements InteractiveModeContext {
 						paused: this.planModePaused,
 					}
 				: undefined;
+		// Mirror the paused flag onto the session so tools (e.g. goal) can treat a
+		// paused plan as still in plan mode; runs after every plan-state transition.
+		this.session.setPlanModePaused(this.planModePaused);
 		this.statusLine.setPlanModeStatus(status);
 		this.ui.requestRender();
 	}
@@ -2259,6 +2262,17 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#resetGoalContinuationSuppression(): void {
 		this.#goalSuppressNextContinuation = false;
+	}
+
+	#goalBlocksModeEntry(): boolean {
+		const state = this.session.getGoalModeState();
+		return (
+			this.goalModeEnabled ||
+			this.goalModePaused ||
+			state?.enabled === true ||
+			state?.goal.status === "paused" ||
+			state?.goal.status === "budget-limited"
+		);
 	}
 
 	#getPausedGoalState(): GoalModeState | undefined {
@@ -2526,10 +2540,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			});
 			this.goalModeEnabled = restored?.enabled === true;
 			this.goalModePaused = restored?.enabled !== true && restored?.goal.status === "paused";
-			// sdk.ts excludes "goal" from the initial active tool set unconditionally.
-			// Re-add it now so the agent can call resume, complete, or drop on this goal.
+			// Keep the full enabled tool set (including "goal", which is now always
+			// available when the setting is on) as the restore target, so a later
+			// restore through setActiveToolsByName does not drop the goal tool.
 			if (restored?.goal) {
-				const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+				const previousTools = this.session.getEnabledToolNames();
 				this.#goalModePreviousTools = previousTools;
 				await this.session.setActiveToolsByName([...new Set([...previousTools, "goal"])]);
 			}
@@ -2563,22 +2578,29 @@ export class InteractiveMode implements InteractiveModeContext {
 		planFilePath?: string;
 		workflow?: "parallel" | "iterative";
 		preserveRestoredModel?: boolean;
-	}): Promise<void> {
+	}): Promise<boolean> {
 		if (this.planModeEnabled) {
-			return;
+			return true;
 		}
-		if (this.goalModeEnabled || this.goalModePaused) {
+		if (this.#goalBlocksModeEntry()) {
 			this.showWarning("Exit goal mode first.");
-			return;
+			return false;
 		}
 		if (this.vibeModeEnabled) {
 			this.showWarning("Exit vibe mode first.");
-			return;
+			return false;
 		}
 
+		const previousPlanModePaused = this.planModePaused;
 		this.planModePaused = false;
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
+		if (this.#goalBlocksModeEntry()) {
+			this.planModePaused = previousPlanModePaused;
+			this.#updatePlanModeStatus();
+			this.showWarning("Exit goal mode first.");
+			return false;
+		}
 		const previousTools = this.session.getEnabledToolNames();
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
 		// `write` and refine it with `edit`, and plan approval itself is a `write`
@@ -2594,22 +2616,43 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.session.hasBuiltInTool("write")) {
 			planAugmentations.push("write");
 		}
-		const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
+		// Keep the built-in goal out of the active plan tool set (the two modes are
+		// mutually exclusive), but retain shadowing extension and SDK tools whose
+		// activation remains under the caller's control.
+		const planTools = this.session.hasBuiltInTool("goal")
+			? previousTools.filter(name => name !== "goal")
+			: previousTools;
+		const uniquePlanTools = [...new Set([...planTools, ...planAugmentations])];
 
-		this.#planModePreviousTools = previousTools;
-		this.planModePlanFilePath = planFilePath;
-		this.planModeEnabled = true;
-		// Suppress cache-miss marker on the next turn: plan mode changes the system
-		// prompt, which predictably invalidates the cache.
-		this.lastAssistantUsage = undefined;
-
-		await this.session.setActiveToolsByName(uniquePlanTools);
-		this.session.setPlanModeState({
+		const planModeState = {
 			enabled: true,
 			planFilePath,
 			workflow: options?.workflow ?? "parallel",
 			reentry: this.#planModeHasEntered,
-		});
+		} as const;
+		this.#planModePreviousTools = previousTools;
+		this.planModePlanFilePath = planFilePath;
+		this.planModeEnabled = true;
+		this.session.setPlanModeState(planModeState);
+		try {
+			await this.session.setActiveToolsByName(uniquePlanTools);
+		} catch (error) {
+			this.session.setPlanModeState(undefined);
+			this.#planModePreviousTools = undefined;
+			this.planModePlanFilePath = undefined;
+			this.planModeEnabled = false;
+			this.planModePaused = previousPlanModePaused;
+			this.#updatePlanModeStatus();
+			throw error;
+		}
+		if (this.#goalBlocksModeEntry()) {
+			await this.#exitPlanMode({ silent: true, persistModeChange: false });
+			this.showWarning("Exit goal mode first.");
+			return false;
+		}
+		// Suppress cache-miss marker on the next turn: plan mode changes the system
+		// prompt, which predictably invalidates the cache.
+		this.lastAssistantUsage = undefined;
 		this.session.setPlanProposalHandler?.(title => this.session.preparePlanForReview(title));
 		if (this.session.isStreaming) {
 			await this.session.sendPlanModeContext({ deliverAs: "steer" });
@@ -2624,6 +2667,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#updatePlanModeStatus();
 		this.sessionManager.appendModeChange("plan", { planFilePath });
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
+		return true;
 	}
 
 	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
@@ -2660,7 +2704,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #exitPlanMode(options?: { silent?: boolean; paused?: boolean; deferModelRestore?: boolean }): Promise<void> {
+	async #exitPlanMode(options?: {
+		silent?: boolean;
+		paused?: boolean;
+		deferModelRestore?: boolean;
+		persistModeChange?: boolean;
+	}): Promise<void> {
 		if (!this.planModeEnabled) {
 			return;
 		}
@@ -2671,6 +2720,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planModeModelState = this.session.model
 			? { model: this.session.model, thinkingLevel: this.session.configuredThinkingLevel() }
 			: undefined;
+		const previousPlanModePaused = this.planModePaused;
+		this.planModePaused = options?.paused ?? false;
+		this.session.setPlanModePaused(this.planModePaused);
 		this.session.setPlanModeState(undefined);
 		try {
 			if (this.#planModePreviousTools !== undefined) {
@@ -2688,6 +2740,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			// flushPendingModelSwitch() later clobbers the restored/execution model.
 			if (this.#planModePreviousModelState) this.#clearPendingPlanModelSwitch();
 		} catch (error) {
+			this.planModePaused = previousPlanModePaused;
+			this.session.setPlanModePaused(previousPlanModePaused);
 			this.session.setPlanModeState(planModeState);
 			if (
 				planModeModelState &&
@@ -2721,13 +2775,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Suppress cache-miss marker on the next turn: plan exit changes the system
 		// prompt, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
-		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousTools = undefined;
 		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
-		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
+		if (options?.persistModeChange !== false) this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
 		if (!options?.silent) {
 			this.showStatus(paused ? "Plan mode paused." : "Plan mode disabled.");
 		}
@@ -2745,7 +2798,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
-		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
+		const previousTools = this.session.getEnabledToolNames();
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
 		this.goalModePaused = false;
@@ -3319,8 +3372,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Plan mode is disabled. Enable it in settings (plan.enabled).");
 			return;
 		}
-		await this.#enterPlanMode();
-		if (initialPrompt && this.onInputCallback) {
+		const entered = await this.#enterPlanMode();
+		if (entered && initialPrompt && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
 		}
 	}
@@ -3345,23 +3398,23 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit goal mode first.");
 			return;
 		}
-		await this.#enterVibeMode();
-		if (initialPrompt && this.onInputCallback) {
+		const entered = await this.#enterVibeMode();
+		if (entered && initialPrompt && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
 		}
 	}
 
-	async #enterVibeMode(options?: { persistModeChange?: boolean }): Promise<void> {
+	async #enterVibeMode(options?: { persistModeChange?: boolean }): Promise<boolean> {
 		if (this.vibeModeEnabled) {
-			return;
+			return true;
 		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.showWarning("Exit plan mode first.");
-			return;
+			return false;
 		}
-		if (this.goalModeEnabled || this.goalModePaused) {
+		if (this.#goalBlocksModeEntry()) {
 			this.showWarning("Exit goal mode first.");
-			return;
+			return false;
 		}
 
 		const vibeRegistry = VibeSessionRegistry.global();
@@ -3370,14 +3423,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const previousTools = this.session.getEnabledToolNames();
 		const vibeBaseTools = ["read"];
 		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
-		await this.session.activateVibeTools(vibeBaseTools);
 		this.#vibeModePreviousTools = previousTools;
 		this.#vibeModeOwnerScope = ownerScope;
 		this.vibeModeEnabled = true;
+		this.session.setVibeModeState({ enabled: true });
+		try {
+			await this.session.activateVibeTools(vibeBaseTools);
+		} catch (error) {
+			this.session.setVibeModeState(undefined);
+			this.vibeModeEnabled = false;
+			this.#vibeModePreviousTools = undefined;
+			this.#vibeModeOwnerScope = undefined;
+			throw error;
+		}
+		if (this.#goalBlocksModeEntry()) {
+			await this.#exitVibeMode();
+			this.showWarning("Exit goal mode first.");
+			return false;
+		}
 		// Suppress cache-miss marker on the next turn: vibe mode changes the
 		// injected context, which predictably invalidates the cache.
 		this.lastAssistantUsage = undefined;
-		this.session.setVibeModeState({ enabled: true });
 		if (this.session.isStreaming) {
 			await this.session.sendVibeModeContext({ deliverAs: "steer" });
 		}
@@ -3386,6 +3452,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.showStatus(
 			"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
 		);
+		return true;
 	}
 
 	async #exitVibeMode(): Promise<void> {
@@ -3507,11 +3574,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 
 			// Expose the goal tool for the interview so the agent can finish by
-			// calling `goal create`. Record the pre-interview toolset first: the
-			// tool-driven create flips goalModeEnabled via `goal_updated`, and the
-			// eventual goal exit restores this set (dropping the goal tool again).
+			// calling `goal create`. Preserve the full pre-interview set so dropping
+			// the created goal returns to the normal default tools.
 			const enabledTools = this.session.getEnabledToolNames();
-			this.#goalModePreviousTools = enabledTools.filter(name => name !== "goal");
+			this.#goalModePreviousTools = enabledTools;
 			if (!enabledTools.includes("goal")) {
 				await this.session.setActiveToolsByName([...enabledTools, "goal"]);
 			}
