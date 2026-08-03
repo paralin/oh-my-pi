@@ -5657,6 +5657,12 @@ export const SETTINGS_SCHEMA = {
 		default: "unset" as const,
 	},
 
+	// World (hidden; the integration is inert until a socket path is configured)
+	"world.socket": {
+		type: "string",
+		default: undefined,
+	},
+
 	"gc.blobs": { type: "boolean", default: true },
 
 	"gc.archive": { type: "boolean", default: true },
@@ -5958,6 +5964,23 @@ export interface GcSettings {
 	retainNewestPerCwd: number;
 }
 
+export interface WorldSettings {
+	/**
+	 * Absolute path to the GLaDOS daemon Console socket — the value of
+	 * `GLADOS_CONSOLE_SOCKET`, defaulting to `<state>/glados/console.sock`.
+	 *
+	 * It has to be that socket specifically. Only the Console socket serves the
+	 * GLaDOS resource surface as its root resource; the Spacewave socket also
+	 * answers the ResourceClient handshake, so pointing this at it connects
+	 * cleanly and then fails every call with an unknown-service error.
+	 *
+	 * Unset means the World integration is inactive: no transport is
+	 * constructed and no socket is dialed. `OMP_WORLD_SOCKET` takes precedence
+	 * over this value.
+	 */
+	socket: string | undefined;
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -5980,6 +6003,7 @@ export interface GroupTypeMap {
 	shellMinimizer: ShellMinimizerSettings;
 	codexResets: CodexResetsSettings;
 	gc: GcSettings;
+	world: WorldSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;
