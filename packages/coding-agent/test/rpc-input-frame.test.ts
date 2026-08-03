@@ -230,25 +230,28 @@ describe("dispatchRpcInputFrame", () => {
 	});
 });
 
-test("seals EOF before draining result waiters", async () => {
+test("drains queued serial input before sealing EOF and releasing result waiters", async () => {
 	const order: string[] = [];
+	let inputDrained = false;
 	let sealed = false;
 
 	await finalizeRpcInputAfterEof(
 		async () => {
+			inputDrained = true;
+			order.push("input");
+		},
+		async () => {
+			expect(inputDrained).toBe(true);
 			sealed = true;
 			order.push("seal");
 		},
 		async () => {
 			expect(sealed).toBe(true);
-			order.push("input");
-		},
-		async () => {
 			order.push("background");
 		},
 	);
 
-	expect(order).toEqual(["seal", "input", "background"]);
+	expect(order).toEqual(["input", "seal", "background"]);
 });
 describe("RpcInputDispatcher", () => {
 	test("control frames resolve extension UI requests while an ordinary command is active", async () => {

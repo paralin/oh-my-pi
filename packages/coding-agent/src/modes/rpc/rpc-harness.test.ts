@@ -20,7 +20,7 @@ afterEach(async () => {
 });
 
 function recordFile(sessionId = "session"): string {
-	return path.join(tmp, sessionId, "rpc.jsonl");
+	return path.join(tmp, sessionId, "rpc-ledger", "events.jsonl");
 }
 
 function runIndexFile(): string {
@@ -67,10 +67,10 @@ async function claimRunInChild(
 describe("RPC harness session owner", () => {
 	it("derives the record path from the transcript path", () => {
 		expect(rpcHarnessRecordFileForSessionFile(path.join(tmp, "20260101-120000_abc.jsonl"))).toBe(
-			path.join(tmp, "20260101-120000_abc", "rpc.jsonl"),
+			path.join(tmp, "20260101-120000_abc", "rpc-ledger", "events.jsonl"),
 		);
 		expect(rpcHarnessRecordFileForSessionFile(path.join(tmp, "transcript"))).toBe(
-			path.join(tmp, "transcript.d", "rpc.jsonl"),
+			path.join(tmp, "transcript.d", "rpc-ledger", "events.jsonl"),
 		);
 	});
 

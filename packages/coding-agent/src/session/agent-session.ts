@@ -6735,7 +6735,7 @@ export class AgentSession {
 						recursive: true,
 						filter: source => {
 							const relative = path.relative(oldArtifactDir, source);
-							return relative !== "rpc.jsonl" && !relative.startsWith("rpc.jsonl.");
+							return relative !== "rpc-ledger" && !relative.startsWith(`rpc-ledger${path.sep}`);
 						},
 					});
 				}

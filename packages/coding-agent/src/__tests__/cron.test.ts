@@ -7,7 +7,13 @@ import { CronManager, type CronTimer, nextCronFire, parseCronExpression } from "
 import { getThemeByName } from "../modes/theme/theme";
 import { sessionSidecarDir } from "../session/session-paths";
 import { FileSessionStorage, MemorySessionStorage } from "../session/session-storage";
-import { CronCreateTool, CronDeleteTool, cronCreateToolRenderer, cronDeleteToolRenderer } from "../tools/cron";
+import {
+	CronCreateTool,
+	CronDeleteTool,
+	CronListTool,
+	cronCreateToolRenderer,
+	cronDeleteToolRenderer,
+} from "../tools/cron";
 
 function fakeClock(start: number) {
 	let current = start;
@@ -42,6 +48,30 @@ describe("cron tool policy", () => {
 	it("requires write approval for schedule mutations", () => {
 		expect(new CronCreateTool({} as never).approval).toBe("write");
 		expect(new CronDeleteTool({} as never).approval).toBe("write");
+	});
+
+	it("includes a sanitized prompt summary when listing jobs", async () => {
+		const tool = new CronListTool({
+			cronManager: {
+				load: async () => {},
+				list: () => [
+					{
+						id: "job-1",
+						expression: "5 * * * *",
+						prompt: "Rotate logs\nnow",
+						recurring: true,
+						durable: false,
+						createdAt: 1,
+						nextFireAt: 2,
+					},
+				],
+			},
+		} as never);
+
+		const result = await tool.execute();
+
+		expect(result.content[0]).toMatchObject({ type: "text" });
+		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("prompt Rotate logs now");
 	});
 });
 

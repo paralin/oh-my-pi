@@ -34,7 +34,8 @@ type CronDeleteParams = typeof cronDeleteSchema.infer;
 
 function formatJob(job: CronJob): string {
 	const expiry = job.expiresAt === undefined ? "no expiry" : `expires ${new Date(job.expiresAt).toLocaleString()}`;
-	return `${job.id} | ${job.expression} | next ${new Date(job.nextFireAt).toLocaleString()} | ${job.recurring ? `recurring, ${expiry}` : "one-shot"} | ${job.durable ? "durable" : "session-only"}`;
+	const prompt = truncateToWidth(cronDisplayLine(shortenEmbeddedPaths(job.prompt)), 160);
+	return `${job.id} | ${job.expression} | prompt ${prompt} | next ${new Date(job.nextFireAt).toLocaleString()} | ${job.recurring ? `recurring, ${expiry}` : "one-shot"} | ${job.durable ? "durable" : "session-only"}`;
 }
 
 export class CronCreateTool implements AgentTool<typeof cronCreateSchema> {

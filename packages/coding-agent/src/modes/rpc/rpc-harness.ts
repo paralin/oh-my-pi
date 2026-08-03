@@ -93,7 +93,7 @@ async function processBirthId(pid: number): Promise<string | undefined> {
 
 /** Returns the durable RPC record path beside an OMP session transcript. */
 export function rpcHarnessRecordFileForSessionFile(sessionFile: string): string {
-	return path.join(sessionSidecarDir(sessionFile), "rpc.jsonl");
+	return path.join(sessionSidecarDir(sessionFile), "rpc-ledger", "events.jsonl");
 }
 
 /**

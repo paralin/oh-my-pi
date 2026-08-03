@@ -8,6 +8,7 @@ import {
 	type SessionStorageBackend,
 	type SessionStorageIndexEntry,
 } from "@oh-my-pi/pi-coding-agent/session/indexed-session-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { sessionSidecarDir } from "@oh-my-pi/pi-coding-agent/session/session-paths";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { type SessionTitleUpdate, serializeTitleSlot } from "@oh-my-pi/pi-coding-agent/session/session-title-slot";
@@ -199,6 +200,26 @@ describe("FileSessionStorage.deleteSessionWithArtifacts", () => {
 
 		expect(fs.existsSync(sessionPath)).toBe(false);
 		expect(fs.existsSync(artifactsDir)).toBe(false);
+	});
+
+	it("migrates a legacy sidecar when opening an explicit non-jsonl session", async () => {
+		const sessionPath = path.join(tempDir, "explicit-session");
+		const legacyDir = sessionPath.slice(0, -".jsonl".length);
+		const canonicalDir = sessionSidecarDir(sessionPath);
+		await Bun.write(
+			sessionPath,
+			`${JSON.stringify({ type: "session", version: 3, id: "session-id", timestamp: "2025-01-01T00:00:00Z", cwd: tempDir })}\n`,
+		);
+		await fsp.mkdir(legacyDir, { recursive: true });
+		await Bun.write(path.join(legacyDir, "artifact-1.txt"), "historical");
+
+		const manager = await SessionManager.open(sessionPath, tempDir, storage);
+		try {
+			expect(await Bun.file(path.join(canonicalDir, "artifact-1.txt")).text()).toBe("historical");
+			expect(fs.existsSync(legacyDir)).toBe(false);
+		} finally {
+			await manager.close();
+		}
 	});
 
 	it("throws when artifact cleanup fails after the session file is deleted", async () => {

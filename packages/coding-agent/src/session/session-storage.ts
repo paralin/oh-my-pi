@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { hasFsCode, isEnoent, logger, peekFileEnds, Snowflake, toError } from "@oh-my-pi/pi-utils";
-import { sessionSidecarDir } from "./session-paths";
+import { legacySessionSidecarDir, sessionSidecarDir } from "./session-paths";
 import { overlayTitleSlotContent, type SessionTitleUpdate, serializeTitleSlot } from "./session-title-slot";
 
 const utf8Decoder = new TextDecoder("utf-8");
@@ -78,6 +78,7 @@ export interface SessionStorage {
 	writeText(path: string, content: string): Promise<void>;
 	writeTextAtomic(path: string, content: string, options?: WriteTextAtomicOptions): Promise<void>;
 	rename(path: string, nextPath: string): Promise<void>;
+	migrateLegacySessionSidecar(sessionPath: string): Promise<void>;
 	unlink(path: string): Promise<void>;
 	deleteSessionWithArtifacts(sessionPath: string): Promise<void>;
 	openWriter(path: string, options?: { flags?: "a" | "w"; onError?: (err: Error) => void }): SessionStorageWriter;
@@ -416,6 +417,16 @@ export class FileSessionStorage implements SessionStorage {
 		}
 	}
 
+	async migrateLegacySessionSidecar(sessionPath: string): Promise<void> {
+		const legacyDir = legacySessionSidecarDir(sessionPath);
+		if (!legacyDir || !(await this.exists(legacyDir))) return;
+		const canonicalDir = sessionSidecarDir(sessionPath);
+		if (await this.exists(canonicalDir)) {
+			throw new Error(`Both legacy and canonical session sidecar directories exist: ${legacyDir}, ${canonicalDir}`);
+		}
+		await this.rename(legacyDir, canonicalDir);
+	}
+
 	unlink(path: string): Promise<void> {
 		return fs.promises.unlink(path);
 	}
@@ -750,6 +761,28 @@ export class MemorySessionStorage implements SessionStorage {
 		if (!entry) return Promise.reject(new Error(`File not found: ${path}`));
 		this.#files.set(nextPath, entry);
 		this.#files.delete(path);
+		return Promise.resolve();
+	}
+
+	migrateLegacySessionSidecar(sessionPath: string): Promise<void> {
+		const legacyDir = legacySessionSidecarDir(sessionPath);
+		if (!legacyDir) return Promise.resolve();
+		const canonicalDir = sessionSidecarDir(sessionPath);
+		const legacyPrefix = `${legacyDir}/`;
+		const moves = [...this.#files.keys()]
+			.filter(file => file.startsWith(legacyPrefix))
+			.map(file => [file, `${canonicalDir}/${file.slice(legacyPrefix.length)}`] as const);
+		if (moves.some(([, target]) => this.#files.has(target))) {
+			return Promise.reject(
+				new Error(`Both legacy and canonical session sidecar files exist: ${legacyDir}, ${canonicalDir}`),
+			);
+		}
+		for (const [source, target] of moves) {
+			const entry = this.#files.get(source);
+			if (!entry) continue;
+			this.#files.set(target, entry);
+			this.#files.delete(source);
+		}
 		return Promise.resolve();
 	}
 

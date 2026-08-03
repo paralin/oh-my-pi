@@ -695,12 +695,12 @@ export class RpcInputDispatcher {
 }
 
 export async function finalizeRpcInputAfterEof(
-	sealLedger: () => Promise<void>,
 	drainInput: () => Promise<void>,
+	sealLedger: () => Promise<void>,
 	drainBackground: () => Promise<void>,
 ): Promise<void> {
-	await sealLedger();
 	await drainInput();
+	await sealLedger();
 	await drainBackground();
 }
 /**
@@ -2095,8 +2095,8 @@ export async function runRpcMode(
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	await finalizeRpcInputAfterEof(
-		() => sealLedgerOnExit("stdin_closed", rpcExitOutcome(hasPendingRpcContinuation(session))),
 		() => inputDispatcher.drain(),
+		() => sealLedgerOnExit("stdin_closed", rpcExitOutcome(hasPendingRpcContinuation(session))),
 		() => shutdownCoordinator.drain(),
 	);
 	subagentRegistry?.dispose();

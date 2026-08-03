@@ -1391,6 +1391,58 @@ esac
 			}
 		}
 	}, 12_000);
+
+	it("preserves an owner's pending completion while its sink is detached", async () => {
+		if (process.platform === "win32") return;
+		const projectDir = await tempDir("omp-daemon-preserve-owner-project-");
+		const runtimeDir = await tempDir("omp-daemon-preserve-owner-runtime-");
+		const owner = "preserved-owner";
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 200 });
+		let recovered: DaemonBrokerClient | undefined;
+		const unregister = client.onCompletion(owner, () => {});
+		try {
+			await client.request({
+				op: "start",
+				spec: {
+					name: "preserved-owner-exit",
+					application: "/bin/sh",
+					args: ["-c", "sleep 0.2; exit 0"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+				owner,
+			});
+			unregister({ preservePending: true });
+			expect(
+				await waitUntil(async () => {
+					const listed = await client.request({ op: "list" });
+					return listed.op === "list" && listed.daemons[0]?.state === "exited";
+				}, 3_000),
+			).toBeTrue();
+
+			client.close();
+			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 200 });
+			const received = Promise.withResolvers<void>();
+			const unregisterRecovered = recovered.onCompletion(owner, () => received.resolve());
+			try {
+				await recovered.request({ op: "list" });
+				await received.promise;
+			} finally {
+				unregisterRecovered();
+			}
+		} finally {
+			client.close();
+			recovered?.close();
+			if (await Bun.file(path.join(runtimeDir, "broker.sock")).exists()) {
+				const rescue = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 200 });
+				await shutdown(rescue);
+			}
+		}
+	}, 12_000);
 	it("drops a completion when its owner unsubscribes during settlement", async () => {
 		if (process.platform === "win32") return;
 		const projectDir = await tempDir("omp-daemon-settle-unsubscribe-project-");

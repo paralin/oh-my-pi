@@ -152,6 +152,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #pending = new Map<string, PendingRequest>();
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
 	readonly #completionUnsubscribes = new Set<string>();
+	readonly #preservedCompletionOwners = new Set<string>();
 	readonly #inFlightCompletionIds = new Set<string>();
 	readonly #completionSubscriptionId = crypto.randomUUID();
 	#socket: net.Socket | undefined;
@@ -200,7 +201,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			`${JSON.stringify({
 				id,
 				token: this.#token,
-				owners: [...this.#completionSinks.keys()],
+				owners: [...this.#completionSinks.keys(), ...this.#preservedCompletionOwners],
 				completionEvents: true,
 				completionUnsubscribes,
 				completionSubscriptionId: this.#completionSubscriptionId,
@@ -221,6 +222,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
+		this.#preservedCompletionOwners.clear();
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
@@ -230,12 +232,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void {
 		this.#completionUnsubscribes.delete(owner);
+		this.#preservedCompletionOwners.delete(owner);
 		this.#completionSinks.set(owner, sink);
 		this.#publishCompletionOwners();
 		return options => {
 			if (this.#completionSinks.get(owner) !== sink) return;
 			this.#completionSinks.delete(owner);
-			if (!options?.preservePending) this.#completionUnsubscribes.add(owner);
+			if (options?.preservePending) {
+				this.#preservedCompletionOwners.add(owner);
+			} else {
+				this.#preservedCompletionOwners.delete(owner);
+				this.#completionUnsubscribes.add(owner);
+			}
 			if (this.#completionSinks.size === 0 && this.#completionReconnectTimer) {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
@@ -412,7 +420,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			`${JSON.stringify({
 				id: crypto.randomUUID(),
 				token: this.#token,
-				owners: [...this.#completionSinks.keys()],
+				owners: [...this.#completionSinks.keys(), ...this.#preservedCompletionOwners],
 				completionEvents: true,
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],

@@ -1,5 +1,5 @@
 import { toError } from "@oh-my-pi/pi-utils";
-import { sessionSidecarDir } from "./session-paths";
+import { legacySessionSidecarDir, sessionSidecarDir } from "./session-paths";
 import type {
 	SessionStorage,
 	SessionStorageStat,
@@ -299,6 +299,20 @@ export class IndexedSessionStorage implements SessionStorage {
 			this.#index.set(src, entry);
 			throw toError(err);
 		}
+	}
+
+	async migrateLegacySessionSidecar(sessionPath: string): Promise<void> {
+		const legacyDir = legacySessionSidecarDir(sessionPath);
+		if (!legacyDir) return;
+		const canonicalDir = sessionSidecarDir(sessionPath);
+		const legacyPrefix = `${legacyDir}/`;
+		const moves = [...this.#index.keys()]
+			.filter(file => file.startsWith(legacyPrefix))
+			.map(file => [file, `${canonicalDir}/${file.slice(legacyPrefix.length)}`] as const);
+		if (moves.some(([, target]) => this.#index.has(target))) {
+			throw new Error(`Both legacy and canonical session sidecar files exist: ${legacyDir}, ${canonicalDir}`);
+		}
+		for (const [source, target] of moves) await this.rename(source, target);
 	}
 
 	async unlink(path: string): Promise<void> {
