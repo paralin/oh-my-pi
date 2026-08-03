@@ -1,6 +1,114 @@
+import { resolveThresholdTokens, type TokenizerMode } from "@oh-my-pi/pi-agent-core";
 import { deriveClaudeDeviceId } from "@oh-my-pi/pi-ai";
 import { getInstallId } from "@oh-my-pi/pi-utils";
+import type { Settings } from "../config/settings";
+import type { SettingValue } from "../config/settings-schema";
 import type { AuthStorage } from "./auth-storage";
+import { resolveCompactionStrategy } from "./compaction-strategy";
+
+export interface EffectiveSessionProfile {
+	thresholdTokens: number;
+	strategy: SettingValue<"compaction.strategy">;
+	tokenizerMode: TokenizerMode;
+}
+
+const MAX_METADATA_USER_ID_LENGTH = 256;
+
+function serializeBoundedUserId(userId: Record<string, unknown>): string {
+	let serialized = JSON.stringify(userId);
+	if (serialized.length <= MAX_METADATA_USER_ID_LENGTH) return serialized;
+
+	delete userId.profile;
+	serialized = JSON.stringify(userId);
+	if (serialized.length <= MAX_METADATA_USER_ID_LENGTH) return serialized;
+
+	const sessionId = String(userId.session_id);
+	for (const key of ["device_id", "account_uuid"]) {
+		const candidate = { ...userId };
+		delete candidate[key];
+		if (JSON.stringify(candidate).length <= MAX_METADATA_USER_ID_LENGTH) return JSON.stringify(candidate);
+	}
+
+	for (const key of ["device_id", "account_uuid"]) {
+		userId.session_id = "";
+		if (JSON.stringify(userId).length <= MAX_METADATA_USER_ID_LENGTH) {
+			userId.session_id = sessionId;
+			break;
+		}
+		delete userId[key];
+	}
+	userId.session_id = sessionId;
+
+	const sessionIdSuffix = `-${Bun.hash(sessionId).toString(16).padStart(16, "0")}`;
+	const serializeSessionId = (length: number): string => {
+		userId.session_id = `${sessionId.slice(0, length)}${sessionIdSuffix}`;
+		return JSON.stringify(userId);
+	};
+	serialized = serializeSessionId(0);
+	if (serialized.length > MAX_METADATA_USER_ID_LENGTH) {
+		for (const key of ["device_id", "account_uuid"]) {
+			delete userId[key];
+			serialized = serializeSessionId(0);
+			if (serialized.length <= MAX_METADATA_USER_ID_LENGTH) break;
+		}
+	}
+
+	let low = 0;
+	let high = sessionId.length;
+	while (low < high) {
+		const candidateLength = Math.ceil((low + high) / 2);
+		serialized = serializeSessionId(candidateLength);
+		if (serialized.length <= MAX_METADATA_USER_ID_LENGTH) {
+			low = candidateLength;
+		} else {
+			high = candidateLength - 1;
+		}
+	}
+	serialized = serializeSessionId(low);
+	return serialized;
+}
+
+function resolveProfileCompactionStrategy(
+	settings: Pick<Settings, "get">,
+	imageInputSupported: boolean,
+): SettingValue<"compaction.strategy"> {
+	const strategy = resolveCompactionStrategy(settings.get("compaction.enabled"), settings.get("compaction.strategy"));
+	return strategy === "snapcompact" && !imageInputSupported ? "context-full" : strategy;
+}
+
+export function buildEffectiveSessionProfile(
+	settings: Pick<Settings, "get" | "getGroup">,
+	tokenizerMode: TokenizerMode,
+	contextWindow: number,
+	imageInputSupported = true,
+): EffectiveSessionProfile {
+	return {
+		thresholdTokens: resolveThresholdTokens(contextWindow, settings.getGroup("compaction")),
+		strategy: resolveProfileCompactionStrategy(settings, imageInputSupported),
+		tokenizerMode,
+	};
+}
+export function overrideSessionMetadataCompactionStrategy(
+	metadata: Record<string, unknown> | undefined,
+	strategy: SettingValue<"compaction.strategy">,
+): Record<string, unknown> | undefined {
+	if (typeof metadata?.user_id !== "string") return metadata;
+	try {
+		const userId: unknown = JSON.parse(metadata.user_id);
+		if (typeof userId !== "object" || userId === null || Array.isArray(userId)) return metadata;
+		const profile = "profile" in userId ? userId.profile : undefined;
+		if (typeof profile !== "object" || profile === null || Array.isArray(profile)) return metadata;
+		return {
+			...metadata,
+			user_id: serializeBoundedUserId({
+				...userId,
+				profile: { ...profile, s: strategy },
+			}),
+		};
+	} catch {
+		return metadata;
+	}
+}
 
 /**
  * Build the per-request `metadata` payload for the Anthropic provider, shaped
@@ -33,8 +141,16 @@ export function buildSessionMetadata(
 	sessionId: string,
 	provider: string,
 	authStorage: AuthStorage | undefined,
+	profile?: EffectiveSessionProfile,
 ): Record<string, unknown> {
-	const userId: Record<string, string> = { session_id: sessionId };
+	const userId: Record<string, unknown> = { session_id: sessionId };
+	if (provider === "anthropic" && profile) {
+		userId.profile = {
+			t: profile.thresholdTokens,
+			s: profile.strategy,
+			z: profile.tokenizerMode,
+		};
+	}
 	// Only look up account_uuid when the request is going to Anthropic. Injecting
 	// a Claude OAuth account_uuid into requests bound for other providers (including
 	// Anthropic-format-compatible proxies like cloudflare-ai-gateway or gitlab-duo)
@@ -49,5 +165,5 @@ export function buildSessionMetadata(
 			userId.device_id = deriveClaudeDeviceId(getInstallId(), accountUuid);
 		}
 	}
-	return { user_id: JSON.stringify(userId) };
+	return { user_id: serializeBoundedUserId(userId) };
 }

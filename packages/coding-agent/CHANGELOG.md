@@ -94,6 +94,9 @@
 
 - Fixed Claude Code Task runs losing Yield schema-retry ownership at the MCP boundary and ignoring explicit agent tool allowlists.
 - Fixed isolated branch capture retaining baseline-only files when Git emits mnemonic or no-index diff prefixes.
+### Fixed
+
+- Fixed provider session metadata disclosure by recording only bounded effective compaction and tokenizer settings while preserving session identity; raw config paths are excluded.
 
 ## [17.2.4] - 2026-08-01
 

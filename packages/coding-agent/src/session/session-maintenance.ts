@@ -78,6 +78,7 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
 import { buildCompactionMeasurement } from "./measurement-events";
+import { resolveCompactionStrategy } from "./compaction-strategy";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
@@ -94,6 +95,7 @@ import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, ScratchCompactionModes, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import { overrideSessionMetadataCompactionStrategy } from "./session-metadata";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 
 export type CompactionCheckResult = Readonly<{
@@ -1791,7 +1793,10 @@ export class SessionMaintenance {
 					signal,
 					{
 						...options,
-						metadata: this.#host.agent.metadataForProvider(candidate.provider),
+						metadata: overrideSessionMetadataCompactionStrategy(
+							this.#host.agent.metadataForProvider(candidate.provider),
+							"context-full",
+						),
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						// Honor the user's /model thinking selection (incl. `off`) on
@@ -2373,7 +2378,11 @@ export class SessionMaintenance {
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
+		const compactionStrategy = resolveCompactionStrategy(
+			reason === "idle" || compactionSettings.enabled,
+			compactionSettings.strategy,
+		);
+		if (compactionStrategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
@@ -2386,7 +2395,7 @@ export class SessionMaintenance {
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
-		if (compactionSettings.strategy === "shake") {
+		if (compactionStrategy === "shake") {
 			const outcome = await this.#runAutoShake(
 				reason,
 				willRetry,
@@ -2409,7 +2418,7 @@ export class SessionMaintenance {
 			reason !== "overflow" &&
 			reason !== "incomplete" &&
 			reason !== "idle" &&
-			compactionSettings.strategy === "handoff"
+			compactionStrategy === "handoff"
 		) {
 			this.#host.schedulePostPromptTask(
 				async signal => {
@@ -2437,7 +2446,7 @@ export class SessionMaintenance {
 		// beneath that boundary; otherwise rebuild from the scratch document alone.
 		const scratch = this.#host.scratchHandoff();
 		let action = resolveAutoCompactionAction({
-			strategy: compactionSettings.strategy,
+			strategy: compactionStrategy,
 			reason,
 			suppressHandoff,
 			hasScratchHandoff: scratch.displayPath !== undefined,
@@ -2936,7 +2945,10 @@ export class SessionMaintenance {
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
 									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
-									metadata: this.#host.agent.metadataForProvider(candidate.provider),
+									metadata: overrideSessionMetadataCompactionStrategy(
+										this.#host.agent.metadataForProvider(candidate.provider),
+										"context-full",
+									),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 									localSummaryMode: composeScratchHandoff

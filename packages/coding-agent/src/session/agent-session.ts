@@ -37,6 +37,7 @@ import {
 	type AsideMessage,
 	type BeforeToolCallContext,
 	type BeforeToolCallResult,
+	getTokenizerMode,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -332,7 +333,7 @@ import {
 } from "./session-maintenance";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
-import { buildSessionMetadata } from "./session-metadata";
+import { buildEffectiveSessionProfile, buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
@@ -3643,9 +3644,20 @@ export class AgentSession {
 	#syncAgentSessionId(sessionId?: string): void {
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
-		this.agent.setMetadataResolver((provider: string) =>
-			buildSessionMetadata(sid, provider, this.#modelRegistry.authStorage),
-		);
+		this.agent.setMetadataResolver((provider: string) => {
+			const model = this.model;
+			return buildSessionMetadata(
+				sid,
+				provider,
+				this.#modelRegistry.authStorage,
+				buildEffectiveSessionProfile(
+					this.settings,
+					getTokenizerMode(),
+					model?.contextWindow ?? 0,
+					model ? model.input.includes("image") : true,
+				),
+			);
+		});
 		// Restore the session's recorded provider accounts before the first
 		// request routes: sticky rows are process-local under a remote auth
 		// broker, and losing them re-ranks onto a different account, cold-missing
