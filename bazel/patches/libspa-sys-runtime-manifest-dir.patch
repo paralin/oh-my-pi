@@ -1,0 +1,19 @@
+Resolve the manifest directory when the build script runs.
+
+Bazel compiles and runs Cargo build scripts in separate sandboxes. Rust's
+env! macro embeds the compilation sandbox path, which is gone by the time
+libspa-sys compiles bindgen's generated static-function wrappers.
+
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -57,7 +57,7 @@ fn main() {
+     }
+
+     let mut cc = cc::Build::new();
+     cc.files(cc_files);
+-    cc.include(env!("CARGO_MANIFEST_DIR"));
++    cc.include(env::var("CARGO_MANIFEST_DIR").unwrap());
+     cc.includes(libs.all_include_paths());
+
+     #[cfg(feature = "v0_3_65")]
