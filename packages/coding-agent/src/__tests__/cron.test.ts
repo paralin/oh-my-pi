@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "bun:test";
+import { describe, expect, it, type Mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -187,6 +187,34 @@ describe("cron scheduling", () => {
 		accepted.resolve();
 		await settle();
 		expect(manager.list()).toEqual([]);
+		manager.dispose();
+	});
+
+	it("advances a recurring job from delayed acceptance", async () => {
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const accepted = Promise.withResolvers<void>();
+		const prompts: string[] = [];
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async prompt => {
+				prompts.push(prompt);
+				await accepted.promise;
+			},
+		});
+		const job = await manager.create({ expression: "* * * * *", prompt: "recurring", recurring: true });
+		clock.setNow(job.nextFireAt);
+		clock.timers.at(-1)?.();
+		await waitFor(() => prompts.length === 1, "recurring delivery did not start");
+
+		clock.setNow(job.nextFireAt + 3 * 60_000);
+		accepted.resolve();
+		await settle();
+
+		expect(prompts).toEqual(["recurring"]);
+		expect(manager.list()[0]?.nextFireAt).toBe(nextCronFire(job.expression, new Date(clock.now())).getTime());
+		expect(clock.delays.at(-1)).toBe(60_000);
 		manager.dispose();
 	});
 
@@ -642,7 +670,7 @@ describe("cron scheduling", () => {
 			},
 		});
 		const readStarted = Promise.withResolvers<void>();
-		let readText: ReturnType<typeof vi.spyOn> | undefined;
+		let readText: Mock<FileSessionStorage["readText"]> | undefined;
 		try {
 			const job = await manager.create({
 				expression: "1 10 * * *",
@@ -698,7 +726,7 @@ describe("cron scheduling", () => {
 				prompts.push(prompt);
 			},
 		});
-		let acquireLease: ReturnType<typeof vi.spyOn> | undefined;
+		let acquireLease: Mock<MemorySessionStorage["acquireLease"]> | undefined;
 		try {
 			const durable = await manager.create({
 				expression: "1 10 * * *",
@@ -762,7 +790,7 @@ describe("cron scheduling", () => {
 				prompts.push(prompt);
 			},
 		});
-		let acquireLease: ReturnType<typeof vi.spyOn> | undefined;
+		let acquireLease: Mock<MemorySessionStorage["acquireLease"]> | undefined;
 		try {
 			const durable = await manager.create({
 				expression: "1 10 * * *",
