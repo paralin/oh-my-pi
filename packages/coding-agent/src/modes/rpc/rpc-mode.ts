@@ -244,6 +244,17 @@ export async function waitForRpcMessageDurability(
 	await session.sessionManager.flush();
 }
 
+/** Seals a durable result only after every accepted transcript append is visible. */
+export async function completeRpcResultAfterTranscriptFlush(
+	sessionManager: Pick<AgentSession["sessionManager"], "flush">,
+	owner: Pick<RpcHarnessSessionOwner, "beginResultSeal" | "completeResult">,
+	result: Parameters<RpcHarnessSessionOwner["completeResult"]>[0],
+): Promise<void> {
+	owner.beginResultSeal();
+	await sessionManager.flush();
+	await owner.completeResult(result);
+}
+
 export function reuseRpcHarnessBinding(
 	owner: Pick<RpcHarnessSessionOwner, "isBoundToRun" | "sessionId"> | undefined,
 	runId: string,
@@ -564,10 +575,12 @@ export class RpcTerminalTaskTracker {
 	}
 }
 export function rpcForcedExitOutcome(
-	session: Parameters<typeof hasPendingRpcContinuation>[0],
+	session: Parameters<typeof hasPendingRpcContinuation>[0] & Pick<AgentSession, "hasPendingExtensionEvents">,
 	terminalTasks: Pick<RpcTerminalTaskTracker, "hasPendingTasks">,
 ): "aborted" | "completed" {
-	return rpcExitOutcome(hasPendingRpcContinuation(session) || terminalTasks.hasPendingTasks);
+	return rpcExitOutcome(
+		hasPendingRpcContinuation(session) || session.hasPendingExtensionEvents || terminalTasks.hasPendingTasks,
+	);
 }
 
 export async function drainRpcTerminalBoundary(
@@ -1415,8 +1428,7 @@ export async function runRpcMode(
 		}
 		pendingAdvisorSealRetryUnsubscribe?.();
 		pendingAdvisorSealRetryUnsubscribe = undefined;
-		owner.beginResultSeal();
-		await owner.completeResult({
+		await completeRpcResultAfterTranscriptFlush(session.sessionManager, owner, {
 			outcome,
 			stopReason,
 			finalMessage: episodeFinalMessage,
