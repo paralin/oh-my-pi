@@ -17,6 +17,8 @@ import {
 	ListSessionsResponse,
 	LookupDispatchIntentRequest,
 	LookupDispatchIntentResponse,
+	ReadWorldURIRequest,
+	ReadWorldURIResponse,
 	ResumeSessionRequest,
 	SendInputRequest,
 	SessionSnapshot,
@@ -92,6 +94,17 @@ export const GladosResourceServiceDefinition = {
 			kind: MethodKind.Unary,
 		},
 		/**
+		 * ReadWorldURI resolves one canonical spacewave:// path to a bounded read.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.GladosResourceService.ReadWorldURI
+		 */
+		ReadWorldURI: {
+			name: "ReadWorldURI",
+			I: ReadWorldURIRequest,
+			O: ReadWorldURIResponse,
+			kind: MethodKind.Unary,
+		},
+		/**
 		 * WatchAgentTree streams Agent, Goal, and dispatch custody projections.
 		 *
 		 * @generated from rpc glados.sdk.llmsession.GladosResourceService.WatchAgentTree
@@ -164,6 +177,13 @@ export interface GladosResourceService {
 	): Promise<LookupDispatchIntentResponse>;
 
 	/**
+	 * ReadWorldURI resolves one canonical spacewave:// path to a bounded read.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.ReadWorldURI
+	 */
+	ReadWorldURI(request: ReadWorldURIRequest, abortSignal?: AbortSignal): Promise<ReadWorldURIResponse>;
+
+	/**
 	 * WatchAgentTree streams Agent, Goal, and dispatch custody projections.
 	 *
 	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.WatchAgentTree
@@ -191,6 +211,7 @@ export class GladosResourceServiceClient implements GladosResourceService {
 		this.SubmitSession = this.SubmitSession.bind(this);
 		this.ResumeSession = this.ResumeSession.bind(this);
 		this.LookupDispatchIntent = this.LookupDispatchIntent.bind(this);
+		this.ReadWorldURI = this.ReadWorldURI.bind(this);
 		this.WatchAgentTree = this.WatchAgentTree.bind(this);
 		this.AccessSession = this.AccessSession.bind(this);
 	}
@@ -278,6 +299,22 @@ export class GladosResourceServiceClient implements GladosResourceService {
 			abortSignal || undefined,
 		);
 		return LookupDispatchIntentResponse.fromBinary(result);
+	}
+
+	/**
+	 * ReadWorldURI resolves one canonical spacewave:// path to a bounded read.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.ReadWorldURI
+	 */
+	async ReadWorldURI(request: ReadWorldURIRequest, abortSignal?: AbortSignal): Promise<ReadWorldURIResponse> {
+		const requestMsg = ReadWorldURIRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			GladosResourceServiceDefinition.methods.ReadWorldURI.name,
+			ReadWorldURIRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return ReadWorldURIResponse.fromBinary(result);
 	}
 
 	/**
