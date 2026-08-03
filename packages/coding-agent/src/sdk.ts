@@ -63,6 +63,7 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
+import { CronManager } from "./cron";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
@@ -1612,6 +1613,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
+	// The scheduler hands a fired job to the session that can run it. Durable
+	// jobs are keyed on the transcript path, so a `/new` session switch moves the
+	// scheduler to that session's jobs rather than replaying the previous set.
+	const cronManager = new CronManager({
+		getSessionFile: () => sessionManager.getSessionFile(),
+		getSessionId: () => sessionManager.getSessionId(),
+		storage: sessionManager.getStorage(),
+		enqueuePrompt: async promptText => session?.deliverScheduledPrompt(promptText),
+	});
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
@@ -1790,6 +1800,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+			cronManager,
 		};
 
 		// Wire process-wide internal URL singletons owned by their real classes.
@@ -3479,6 +3490,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// resource frame would otherwise report every server as empty.
 			advisorMcpResources: cursorMcpResources,
 			titleSystemPrompt: options.titleSystemPrompt,
+			onSessionTransition: () => cronManager.refresh(),
+			beginSessionFork: () => cronManager.suspendForFork(),
+			completeSessionFork: result => cronManager.completeFork(result),
 		});
 		hasSession = true;
 		// Extension factories normally register tools before session construction,
@@ -3596,6 +3610,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			build: buildLateDiagnosticsBatchMessage,
 			isStale: entry => entry.isStale(),
 		});
+		await cronManager.load();
 
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
@@ -3630,6 +3645,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
+					cronManager.dispose();
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
@@ -3931,6 +3947,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
 		// for already-removed listeners.
 		unsubscribeCredentialDisabled?.();
+		cronManager.dispose();
 		try {
 			if (hasSession) {
 				await session.dispose();

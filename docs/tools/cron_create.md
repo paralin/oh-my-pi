@@ -8,6 +8,9 @@
 - Scheduler: `packages/coding-agent/src/cron.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/cron-create.md`
 
+## Availability
+
+The cron tools are not part of the default tool set. Activate them with `--tools` alongside the tools the session needs, for example `--tools read,bash,cron_create,cron_list,cron_delete`.
 ## Inputs
 
 | Field | Type | Required | Description |
@@ -23,7 +26,7 @@ The text result names the job ID, expression, next-fire time, recurrence, expiry
 
 ## Flow
 
-`CronCreateTool` forwards the validated input to the session's `CronManager`. A fired job enters the owning session as a system notification. Active turns receive it at the next tool boundary; idle sessions wake a turn. One-shot jobs delete themselves after firing. Recurring jobs expire after seven days by default.
+`CronCreateTool` forwards the validated input to the session's `CronManager`. A fired job reaches `AgentSession.deliverScheduledPrompt` as a system notification. Active turns receive it at the next tool boundary, and an idle session wakes a turn for it. One-shot jobs delete themselves after firing. Recurring jobs expire after seven days by default.
 
 ## Errors
 

@@ -46,6 +46,7 @@ import { BrowserTool } from "./browser";
 import { type BuiltinToolName, type HiddenToolName, NO_TOOLS_SENTINEL, normalizeToolNames } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, type CompletedRewindState, RewindTool } from "./checkpoint";
 import { ComputerTool } from "./computer";
+import { CronCreateTool, CronDeleteTool, CronListTool } from "./cron";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -307,6 +308,8 @@ export interface ToolSession {
 	 * session never borrows the owning session's manager by accident.
 	 */
 	asyncJobManager?: AsyncJobManager;
+	/** Scheduler the cron tools create, list, and delete jobs through. */
+	cronManager?: CronManager;
 	/** MCP manager visible to subagents without relying on the process-global singleton. */
 	mcpManager?: MCPManager;
 	/** Local protocol root to propagate to nested subagents and eval-created agents. */
@@ -458,6 +461,9 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	think: () => new ThinkTool(),
 	yield: s => new YieldTool(s),
 	goal: s => new GoalTool(s),
+	cron_create: s => new CronCreateTool(s),
+	cron_list: s => new CronListTool(s),
+	cron_delete: s => new CronDeleteTool(s),
 };
 
 export type ToolName = BuiltinToolName;

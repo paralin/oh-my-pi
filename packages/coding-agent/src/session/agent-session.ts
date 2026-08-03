@@ -490,6 +490,15 @@ export class AgentSession {
 	/** Entries of tools mounted under `xd://`; empty when virtual devices are unmounted. */
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
+	readonly #scheduledPromptDeliveries = new Map<string, PromiseWithResolvers<void>>();
+	readonly #streamingScheduledPrompts = new Set<string>();
+	readonly #scheduledPromptBatch = new Set<string>();
+	#scheduledPromptBatchTask: PromiseWithResolvers<void> | undefined;
+	readonly #onSessionTransition: (() => void) | undefined;
+	readonly #beginSessionFork: (() => Promise<void>) | undefined;
+	readonly #completeSessionFork:
+		| ((result: { oldSessionFile: string; newSessionFile: string } | undefined) => Promise<void>)
+		| undefined;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
 	editClipboard?: Clipboard;
@@ -997,6 +1006,9 @@ export class AgentSession {
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
+		this.#onSessionTransition = config.onSessionTransition;
+		this.#beginSessionFork = config.beginSessionFork;
+		this.#completeSessionFork = config.completeSessionFork;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
@@ -1245,15 +1257,15 @@ export class AgentSession {
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
+			injectStreaming: message => this.agent.steer(message),
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
 				this.#beginInFlight();
-				try {
-					await this.agent.prompt(messages.length === 1 ? first : messages);
-				} finally {
-					this.#endInFlight();
-				}
+				const promptTask = this.agent.prompt(messages.length === 1 ? first : messages);
+				this.#trackPostPromptTask(promptTask);
+				void promptTask.finally(() => this.#endInFlight()).catch(() => {});
+				await Promise.race([promptTask, Promise.resolve()]);
 			},
 			scheduleIdleFlush: run => {
 				const keepalive = new EventLoopKeepalive();
@@ -1284,6 +1296,14 @@ export class AgentSession {
 			isStale: entry =>
 				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
+		});
+		// A fired scheduled prompt is a system notification. `interruptStreaming`
+		// hands it to `Agent.steer` as soon as it is enqueued during a live turn,
+		// which folds it in after the next completed tool call; an idle enqueue
+		// wakes a turn instead. Neither path synthesizes a user-role message.
+		this.yieldQueue.register<ScheduledNotificationEntry>(SCHEDULED_NOTIFICATION_KIND, {
+			build: buildScheduledNotification,
+			interruptStreaming: true,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -2677,6 +2697,7 @@ export class AgentSession {
 			this.#scratchHandoff.recordToolExecutionStart(event.toolCallId, event.args);
 			this.#recordToolExecutionStart(event);
 		}
+		if (event.type === "message_end") this.#settleScheduledPrompts(event.message);
 
 		if (event.type !== "agent_end") {
 			try {
@@ -3993,6 +4014,11 @@ export class AgentSession {
 		this.#detachUsageBeforeQueueDequeue = undefined;
 		this.#detachUsageBeforeModelCall?.();
 		this.#detachUsageBeforeModelCall = undefined;
+		const deliveryError = new Error("Session disposed before scheduled prompt delivery.");
+		this.#rejectScheduledPromptDeliveries(deliveryError);
+		this.#scheduledPromptBatch.clear();
+		this.#scheduledPromptBatchTask?.reject(deliveryError);
+		this.#scheduledPromptBatchTask = undefined;
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -5016,8 +5042,15 @@ export class AgentSession {
 	#clearSessionScopedToolState(): void {
 		this.agent.clearDeferredToolDirectives();
 		this.#toolChoiceQueue.clear();
+		this.yieldQueue.clear(SCHEDULED_NOTIFICATION_KIND);
+		const transitionError = new Error("Session changed before scheduled prompt delivery.");
+		this.#rejectScheduledPromptDeliveries(transitionError);
+		this.#scheduledPromptBatch.clear();
+		this.#scheduledPromptBatchTask?.reject(transitionError);
+		this.#scheduledPromptBatchTask = undefined;
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
+		this.#onSessionTransition?.();
 	}
 
 	/**
@@ -6478,6 +6511,37 @@ export class AgentSession {
 		});
 	}
 
+	#settleScheduledPrompt(prompt: string, error?: unknown): void {
+		const delivery = this.#scheduledPromptDeliveries.get(prompt);
+		this.#streamingScheduledPrompts.delete(prompt);
+		if (!delivery) return;
+		this.#scheduledPromptDeliveries.delete(prompt);
+		if (error === undefined) delivery.resolve();
+		else delivery.reject(error);
+	}
+
+	#settleScheduledPrompts(message: AgentMessage, error?: unknown): void {
+		if (
+			message.role !== "custom" ||
+			message.customType !== "scheduled:notification" ||
+			!message.details ||
+			typeof message.details !== "object" ||
+			!("prompts" in message.details) ||
+			!Array.isArray(message.details.prompts)
+		) {
+			return;
+		}
+		for (const promptText of message.details.prompts) {
+			if (typeof promptText !== "string") continue;
+			if (error === undefined && !this.#streamingScheduledPrompts.has(promptText)) continue;
+			this.#settleScheduledPrompt(promptText, error);
+		}
+	}
+
+	#rejectScheduledPromptDeliveries(error: unknown): void {
+		for (const prompt of this.#scheduledPromptDeliveries.keys()) this.#settleScheduledPrompt(prompt, error);
+	}
+
 	/** Clear queued messages and return the user-restorable ones (text plus any attached images).
 	 *  Only user-authored messages (plain user turns, `attribution:"user"` custom like `/skill`) are
 	 *  returned for editor restore. Other queued messages stay in the agent-core queues so a continuing
@@ -6497,6 +6561,15 @@ export class AgentSession {
 		const keep: (m: AgentMessage) => boolean = options?.forInterrupt
 			? isAdvisorCard
 			: m => !isUserQueuedMessage(m) && !isHiddenUserCompanion(m);
+		if (options?.forInterrupt) {
+			const error = new Error("Scheduled prompt discarded by session interrupt.");
+			for (const message of steeringAll) {
+				if (!keep(message)) this.#settleScheduledPrompts(message, error);
+			}
+			for (const message of followUpAll) {
+				if (!keep(message)) this.#settleScheduledPrompts(message, error);
+			}
+		}
 		this.agent.replaceQueues(steeringAll.filter(keep), followUpAll.filter(keep));
 		this.#reconcileQueuedMessageDrain();
 		return { steering, followUp };
@@ -6890,6 +6963,24 @@ export class AgentSession {
 		return setSessionName.call(this.sessionManager, name, source, trigger);
 	}
 
+	#scheduleSessionServiceRecovery(result: { oldSessionFile: string; newSessionFile: string } | undefined): void {
+		if (!this.#completeSessionFork || this.#isDisposed) return;
+		const retry = (): void => {
+			const timer = setTimeout(() => {
+				if (this.#isDisposed) return;
+				void this.#completeSessionFork?.(result).catch(error => {
+					logger.warn("Failed to recover session services after committed transition", {
+						sessionFile: this.sessionFile,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					if (!this.#isDisposed) retry();
+				});
+			}, 250);
+			timer.unref();
+		};
+		retry();
+	}
+
 	/**
 	 * Fork the current session, creating a new session file with the exact same state.
 	 * Copies all entries and artifacts to the new session.
@@ -6917,12 +7008,17 @@ export class AgentSession {
 		// Flush current session to ensure all entries are written
 		await this.sessionManager.flush();
 		let advisorRecordersDetached = false;
+		let sessionForkStarted = false;
 		try {
 			advisorRecordersDetached = true;
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
 			const bashTransition = this.#bash.beginSessionTransition();
+			if (this.#beginSessionFork) {
+				await this.#beginSessionFork();
+				sessionForkStarted = true;
+			}
 
 			// Fork the session (creates new session file with same entries)
 			let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
@@ -6966,6 +7062,20 @@ export class AgentSession {
 					});
 				}
 			}
+			if (this.#completeSessionFork) {
+				try {
+					await this.#completeSessionFork(forkResult);
+					sessionForkStarted = false;
+				} catch (error) {
+					logger.warn("Failed to finalize committed session fork", {
+						oldSessionFile: forkResult.oldSessionFile,
+						newSessionFile: forkResult.newSessionFile,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					sessionForkStarted = false;
+					this.#scheduleSessionServiceRecovery(forkResult);
+				}
+			}
 
 			// Update agent session ID
 			this.#freshProviderSessionId = undefined;
@@ -6988,6 +7098,7 @@ export class AgentSession {
 
 			return true;
 		} finally {
+			if (sessionForkStarted) await this.#completeSessionFork?.(undefined);
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
 		}
 	}
@@ -6995,7 +7106,35 @@ export class AgentSession {
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
 		this.#assertVibeSessionTransitionAllowed("move the session");
-		await this.sessionManager.moveTo(newCwd, targetSessionDir);
+		let sessionServicesSuspended = false;
+		let moveCommitted = false;
+		let failure: unknown;
+		try {
+			if (this.#beginSessionFork) {
+				await this.#beginSessionFork();
+				sessionServicesSuspended = true;
+			}
+			await this.sessionManager.moveTo(newCwd, targetSessionDir);
+			moveCommitted = true;
+		} catch (error) {
+			failure = error;
+		}
+		if (sessionServicesSuspended) {
+			try {
+				await this.#completeSessionFork?.(undefined);
+			} catch (error) {
+				if (!moveCommitted) {
+					failure ??= error;
+				} else {
+					logger.warn("Failed to resume session services after committed move", {
+						sessionFile: this.sessionFile,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					this.#scheduleSessionServiceRecovery(undefined);
+				}
+			}
+		}
+		if (failure !== undefined) throw failure;
 	}
 
 	// =========================================================================
@@ -7652,6 +7791,58 @@ export class AgentSession {
 	/** Surfaces and consumes pending IRC records before automatic injection. */
 	drainPendingIrcInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
 		return this.#irc.drainInboxMessages(agentId, opts);
+	}
+
+	/**
+	 * Deliver a fired cron job into this session as a system notification. A live
+	 * turn takes it as a steer at the next tool-call boundary; an idle session
+	 * wakes a turn for it. It never synthesizes a user-role message.
+	 */
+	deliverScheduledPrompt(promptText: string): Promise<void> {
+		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before scheduled prompt delivery."));
+		const prompt = promptText.trim();
+		if (!prompt) return Promise.resolve();
+		const existing = this.#scheduledPromptDeliveries.get(prompt);
+		if (existing) return existing.promise;
+		const delivery = Promise.withResolvers<void>();
+		delivery.promise.catch(() => {});
+		this.#scheduledPromptDeliveries.set(prompt, delivery);
+		this.#scheduledPromptBatch.add(prompt);
+		if (this.#scheduledPromptBatchTask) return delivery.promise;
+		const task = Promise.withResolvers<void>();
+		task.promise.catch(() => {});
+		this.#scheduledPromptBatchTask = task;
+		setImmediate(async () => {
+			if (this.#scheduledPromptBatchTask !== task) return;
+			this.#scheduledPromptBatchTask = undefined;
+			const prompts = [...this.#scheduledPromptBatch];
+			this.#scheduledPromptBatch.clear();
+			if (this.#isDisposed) {
+				const error = new Error("Session disposed before scheduled prompt delivery.");
+				for (const prompt of prompts) this.#settleScheduledPrompt(prompt, error);
+				task.reject(error);
+				return;
+			}
+			try {
+				const streaming = this.isStreaming;
+				if (streaming) {
+					for (const prompt of prompts) this.#streamingScheduledPrompts.add(prompt);
+				}
+				this.yieldQueue.enqueueMany<ScheduledNotificationEntry>(
+					SCHEDULED_NOTIFICATION_KIND,
+					prompts.map(prompt => ({ prompt })),
+				);
+				if (!streaming) {
+					await this.yieldQueue.flush("idle", SCHEDULED_NOTIFICATION_KIND);
+					for (const prompt of prompts) this.#settleScheduledPrompt(prompt);
+				}
+				task.resolve();
+			} catch (error) {
+				for (const prompt of prompts) this.#settleScheduledPrompt(prompt, error);
+				task.reject(error);
+			}
+		});
+		return delivery.promise;
 	}
 
 	/** Delivers an IRC message into this recipient session. */

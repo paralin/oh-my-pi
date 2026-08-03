@@ -182,6 +182,12 @@ export interface AgentSessionConfig {
 	setActiveToolNames?: (names: Iterable<string>) => void;
 	/** Registers the write transport when runtime xdev mounts first need it. */
 	ensureWriteRegistered?: () => Promise<boolean>;
+	/** Refreshes session-bound services after a logical session transition. */
+	onSessionTransition?: () => void;
+	/** Suspends session-bound services before a fork changes the live session path. */
+	beginSessionFork?: () => Promise<void>;
+	/** Copies backend artifacts and resumes services after a fork, or only resumes when the fork failed. */
+	completeSessionFork?: (result: { oldSessionFile: string; newSessionFile: string } | undefined) => Promise<void>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */

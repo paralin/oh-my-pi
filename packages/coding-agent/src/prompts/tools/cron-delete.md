@@ -1,0 +1,1 @@
+Delete a scheduled prompt by the exact job id returned by cron_create or cron_list. Deletion is immediate and prevents any future enqueue; it is safe to call for an already-fired one-shot or an expired recurring job.
