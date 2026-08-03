@@ -11,10 +11,11 @@
  * a daemon mounted — is the daemon's, and lives in the Go tests. Client-only
  * behavior lives here.
  */
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
+import { InternalUrlRouter } from "../../src/internal-urls/router";
 import {
 	readWorldAddress,
 	renderWorldRead,
@@ -22,12 +23,13 @@ import {
 	worldAddressFromUrl,
 } from "../../src/internal-urls/spacewave-protocol";
 import type { ProtocolHandler } from "../../src/internal-urls/types";
-import type { WorldClient, WorldRead } from "../../src/world/index.js";
+import type { WorldRead } from "../../src/world/index.js";
 import {
 	assertCanonicalWorldPath,
 	formatWorldURI,
 	formatWorldURL,
 	WORLD_LISTING_SELECTOR,
+	WorldClient,
 } from "../../src/world/index.js";
 import vectors from "./world-uri-vectors.json" with { type: "json" };
 
@@ -204,6 +206,21 @@ describe("spacewave reads", () => {
 		expect(bound.reads).toEqual([URI, `/u/1/so/${SPACE}/-/glados`]);
 		// The handler does not own the client's lifetime; its owner closes it.
 		expect(bound.closes).toBe(0);
+	});
+
+	test("the router closes its bound World client once", async () => {
+		const bound = fakeClient();
+		const create = spyOn(WorldClient, "create").mockReturnValue(bound.client);
+		InternalUrlRouter.resetForTests();
+		try {
+			InternalUrlRouter.instance();
+			await InternalUrlRouter.closeWorldClient();
+			await InternalUrlRouter.closeWorldClient();
+			expect(bound.closes).toBe(1);
+		} finally {
+			InternalUrlRouter.resetForTests();
+			create.mockRestore();
+		}
 	});
 
 	// No write hook at all, so the router reports the scheme as not writable

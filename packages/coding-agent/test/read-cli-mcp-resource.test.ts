@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -75,4 +75,22 @@ describe("omp read MCP resources", () => {
 		expect(output).toContain("fixture content for test://beta");
 		expect(error).toContain('No MCP server has resource "test://missing"');
 	}, 30_000);
+
+	it("closes the World client after a standalone read", async () => {
+		const [{ runReadCommand }, { InternalUrlRouter }] = await Promise.all([
+			import("../src/cli/read-cli"),
+			import("../src/internal-urls/router"),
+		]);
+		const notePath = path.join(projectDir, "note.txt");
+		await Bun.write(notePath, "one-shot read\n");
+		const close = spyOn(InternalUrlRouter, "closeWorldClient").mockResolvedValue();
+		const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
+		try {
+			await runReadCommand({ path: notePath });
+			expect(close).toHaveBeenCalledTimes(1);
+		} finally {
+			stdout.mockRestore();
+			close.mockRestore();
+		}
+	});
 });
