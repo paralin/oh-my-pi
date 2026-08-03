@@ -122,11 +122,26 @@ export type DaemonRpcResult =
 export interface DaemonWireRequest {
 	id: string;
 	token: string;
+	owners?: string[];
+	completionEvents?: boolean;
+	completionAcks?: string[];
+	completionUnsubscribes?: string[];
+	completionSubscriptionId?: string;
 	operation: DaemonOperation;
 }
 
 /** Response envelope kept raw until matched with its pending operation. */
 export type DaemonWireResponse = { id: string; ok: true; result: unknown } | { id: string; ok: false; error: string };
+
+/** Unsolicited terminal completion sent to the socket that owns a daemon. */
+export interface DaemonCompletionNotification {
+	event: "daemon-completed";
+	completionId: string;
+	owner: string;
+	daemon: DaemonSnapshot;
+}
+
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -268,6 +283,21 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 	return {
 		id: stringValue(source.id, "request.id"),
 		token: stringValue(source.token, "request.token"),
+		owners: source.owners === undefined ? undefined : stringArray(source.owners, "request.owners"),
+		completionEvents:
+			source.completionEvents === undefined
+				? undefined
+				: booleanValue(source.completionEvents, "request.completionEvents"),
+		completionAcks:
+			source.completionAcks === undefined ? undefined : stringArray(source.completionAcks, "request.completionAcks"),
+		completionUnsubscribes:
+			source.completionUnsubscribes === undefined
+				? undefined
+				: stringArray(source.completionUnsubscribes, "request.completionUnsubscribes"),
+		completionSubscriptionId:
+			source.completionSubscriptionId === undefined
+				? undefined
+				: stringValue(source.completionSubscriptionId, "request.completionSubscriptionId"),
 		operation: parseDaemonOperation(source.operation),
 	};
 }
@@ -279,6 +309,20 @@ export function parseDaemonWireResponse(value: unknown): DaemonWireResponse {
 	if (source.ok === true) return { id, ok: true, result: source.result };
 	if (source.ok === false) return { id, ok: false, error: stringValue(source.error, "response.error") };
 	throw new Error("response.ok must be a boolean");
+}
+
+/** Decode one broker response or unsolicited completion notification. */
+export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
+	const source = record(value, "daemon message");
+	if (source.event === "daemon-completed") {
+		return {
+			event: "daemon-completed",
+			completionId: stringValue(source.completionId, "completion.id"),
+			owner: stringValue(source.owner, "completion.owner"),
+			daemon: parseDaemonSnapshot(source.daemon),
+		};
+	}
+	return parseDaemonWireResponse(value);
 }
 
 function parseDaemonOperation(value: unknown): DaemonOperation {

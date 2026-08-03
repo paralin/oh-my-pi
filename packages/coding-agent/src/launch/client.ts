@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getGlobalDaemonRuntimeDir, isEexist, isEisdir, isEnoent, postmortem } from "@oh-my-pi/pi-utils";
+import { getGlobalDaemonRuntimeDir, isEexist, isEisdir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
@@ -11,11 +11,12 @@ import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_RUNTIME_DIR_ENV,
+	type DaemonCompletionNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
-	type DaemonWireResponse,
+	type DaemonWireMessage,
 	parseDaemonRpcResult,
-	parseDaemonWireResponse,
+	parseDaemonWireMessage,
 } from "./protocol";
 import { resolveDaemonSpawnOptions } from "./spawn-options";
 
@@ -45,11 +46,15 @@ export interface DaemonBrokerClientOptions {
 
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
+	onCompletion(owner: string, sink: (notification: DaemonCompletionNotification) => void): () => void;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
 	close(): void;
 }
+
+/** A request reached the broker and the broker rejected the operation. */
+export class DaemonBrokerRejectedError extends Error {}
 
 async function canonicalProjectDir(projectDir: string): Promise<string> {
 	const resolved = path.resolve(projectDir);
@@ -134,8 +139,12 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #runtimeDir: string;
 	readonly #endpoint: string;
 	readonly #token: string;
+	readonly #seenCompletionIds = new Set<string>();
 	readonly #idleGraceMs: number | undefined;
 	readonly #pending = new Map<string, PendingRequest>();
+	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => void>();
+	readonly #completionUnsubscribes = new Set<string>();
+	readonly #completionSubscriptionId = crypto.randomUUID();
 	#socket: net.Socket | undefined;
 	#connectPromise: Promise<void> | undefined;
 	#buffer = "";
@@ -156,6 +165,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
+		const completionUnsubscribes = [...this.#completionUnsubscribes];
 		const id = crypto.randomUUID();
 		const { promise, resolve, reject } = Promise.withResolvers<DaemonRpcResult>();
 		const timer = setTimeout(() => {
@@ -176,16 +186,48 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			pending.removeAbort = () => signal.removeEventListener("abort", abort);
 		}
 		this.#pending.set(id, pending);
-		socket.write(`${JSON.stringify({ id, token: this.#token, operation })}\n`);
-		return promise;
+		socket.write(
+			`${JSON.stringify({
+				id,
+				token: this.#token,
+				owners: [...this.#completionSinks.keys()],
+				completionEvents: true,
+				completionUnsubscribes,
+				completionSubscriptionId: this.#completionSubscriptionId,
+				operation,
+			})}\n`,
+		);
+		const result = await promise;
+		for (const owner of completionUnsubscribes) {
+			if (!this.#completionSinks.has(owner)) this.#completionUnsubscribes.delete(owner);
+		}
+		return result;
 	}
 
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#socket?.destroy();
+		this.#completionSinks.clear();
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
+	}
+
+	onCompletion(owner: string, sink: (notification: DaemonCompletionNotification) => void): () => void {
+		this.#completionUnsubscribes.delete(owner);
+		this.#completionSinks.set(owner, sink);
+		this.#publishCompletionOwners();
+		return () => {
+			if (this.#completionSinks.get(owner) !== sink) return;
+			this.#completionSinks.delete(owner);
+			this.#completionUnsubscribes.add(owner);
+			this.#publishCompletionOwners();
+		};
+	}
+
+	#publishCompletionOwners(): void {
+		if (this.#closed) return;
+		void this.request({ op: "ping" }).catch(() => undefined);
 	}
 
 	async #connect(): Promise<void> {
@@ -262,21 +304,48 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			const line = this.#buffer.slice(0, newline);
 			this.#buffer = this.#buffer.slice(newline + 1);
 			if (line.length === 0) continue;
-			let response: DaemonWireResponse;
+			let decoded: unknown;
 			try {
-				const decoded: unknown = JSON.parse(line);
-				response = parseDaemonWireResponse(decoded);
+				decoded = JSON.parse(line);
 			} catch (error) {
 				this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
 				continue;
 			}
+			let message: DaemonWireMessage;
+			try {
+				message = parseDaemonWireMessage(decoded);
+			} catch (error) {
+				this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
+				continue;
+			}
+			if ("event" in message) {
+				if (!this.#seenCompletionIds.has(message.completionId)) {
+					if (this.#seenCompletionIds.size >= 512) {
+						const oldest = this.#seenCompletionIds.values().next().value;
+						if (oldest !== undefined) this.#seenCompletionIds.delete(oldest);
+					}
+					this.#seenCompletionIds.add(message.completionId);
+					try {
+						this.#completionSinks.get(message.owner)?.(message);
+					} catch (error) {
+						logger.warn("Daemon completion sink failed", {
+							owner: message.owner,
+							completionId: message.completionId,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				}
+				this.#ackCompletion(message.completionId);
+				continue;
+			}
+			const response = message;
 			const pending = this.#pending.get(response.id);
 			if (!pending) continue;
 			this.#pending.delete(response.id);
 			clearTimeout(pending.timer);
 			pending.removeAbort?.();
 			if (!response.ok) {
-				pending.reject(new Error(response.error));
+				pending.reject(new DaemonBrokerRejectedError(response.error));
 				continue;
 			}
 			try {
@@ -285,6 +354,23 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				pending.reject(error instanceof Error ? error : new Error(String(error)));
 			}
 		}
+	}
+
+	#ackCompletion(completionId: string): void {
+		const socket = this.#socket;
+		if (!socket || socket.destroyed) return;
+		socket.write(
+			`${JSON.stringify({
+				id: crypto.randomUUID(),
+				token: this.#token,
+				owners: [...this.#completionSinks.keys()],
+				completionEvents: true,
+				completionAcks: [completionId],
+				completionUnsubscribes: [...this.#completionUnsubscribes],
+				completionSubscriptionId: this.#completionSubscriptionId,
+				operation: { op: "ping" },
+			})}\n`,
+		);
 	}
 
 	#rejectPending(error: Error): void {

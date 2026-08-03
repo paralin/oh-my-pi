@@ -77,12 +77,23 @@ export class YieldQueue {
 		return false;
 	}
 
+	/** Arrange an idle flush for entries queued near the end of a streaming run. */
+	requestIdleFlush(): void {
+		for (const [kind, dispatcher] of this.#dispatchers) {
+			if (!dispatcher.skipIdleFlush && this.has(kind)) {
+				this.#scheduleIdleFlush();
+				return;
+			}
+		}
+	}
+
 	async flush(mode: YieldFlushMode): Promise<void> {
 		if (mode === "idle") {
 			this.#idleFlushPending = false;
 		}
 		const idleMessages: AgentMessage[] = [];
 		for (const [kind, dispatcher] of this.#dispatchers) {
+			if (mode === "idle" && dispatcher.skipIdleFlush) continue;
 			const entries = this.#drain(kind);
 			if (entries.length === 0) continue;
 			const message = this.#build(kind, dispatcher, entries);

@@ -145,6 +145,7 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
+import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
@@ -273,6 +274,12 @@ import {
 } from "./exit-diagnostics";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
 import { buildLlmUsageEvent } from "./measurement-events";
+import {
+	buildLaunchCompletionBatchMessage,
+	isLaunchCompletionOwner,
+	LAUNCH_COMPLETION_MESSAGE_TYPE,
+	type LaunchCompletionEntry,
+} from "./launch-completion";
 import {
 	type BashExecutionMessage,
 	buildReplanTitleContext,
@@ -461,6 +468,8 @@ export class AgentSession {
 	#deliberatePrefixResetPending = false;
 	#eventListeners: AgentSessionEventListener[] = [];
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
+	#sessionChangeCallbacks = new Set<() => void>();
+	#observedSessionId: string | undefined;
 
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
@@ -686,6 +695,7 @@ export class AgentSession {
 		if (onSettled) this.#inFlightSettledCallbacks.push(onSettled);
 		this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
 		if (this.#promptInFlightCount !== 0) return;
+		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -867,6 +877,7 @@ export class AgentSession {
 
 	#resetInFlight(): void {
 		this.#promptInFlightCount = 0;
+		this.yieldQueue.requestIdleFlush();
 		this.#releasePowerAssertion();
 		this.#flushPendingAgentEnd();
 		if (this.#inFlightSettledCallbacks.length === 0) {
@@ -1150,7 +1161,12 @@ export class AgentSession {
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
-				await this.agent.prompt(messages.length === 1 ? first : messages);
+				this.#beginInFlight();
+				try {
+					await this.agent.prompt(messages.length === 1 ? first : messages);
+				} finally {
+					this.#endInFlight();
+				}
 			},
 			scheduleIdleFlush: run => {
 				this.#schedulePostPromptTask(
@@ -1160,6 +1176,11 @@ export class AgentSession {
 					{ delayMs: 1 },
 				);
 			},
+		});
+		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+			isStale: entry =>
+				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
+			build: buildLaunchCompletionBatchMessage,
 		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
@@ -3567,6 +3588,12 @@ export class AgentSession {
 		};
 	}
 
+	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
+	registerSessionChangeCallback(callback: () => void): () => void {
+		this.#sessionChangeCallbacks.add(callback);
+		return () => this.#sessionChangeCallbacks.delete(callback);
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -3641,7 +3668,14 @@ export class AgentSession {
 	 * (login/logout, token refresh that surfaces a new account UUID) without
 	 * needing to re-call `#syncAgentSessionId()` on every such event.
 	 */
-	#syncAgentSessionId(sessionId?: string): void {
+	#syncAgentSessionId(sessionId?: string, notifyChange = true): void {
+		const currentSessionId = this.sessionManager.getSessionId();
+		if (this.#observedSessionId === undefined) {
+			this.#observedSessionId = currentSessionId;
+		} else if (this.#observedSessionId !== currentSessionId) {
+			this.#observedSessionId = currentSessionId;
+			if (notifyChange) this.#notifySessionChangeCallbacks();
+		}
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
 		this.agent.setMetadataResolver((provider: string) => {
@@ -3672,6 +3706,16 @@ export class AgentSession {
 		// conversation's session id/metadata (issue #6625). Guarded because this
 		// runs once during construction before the advisor controller exists.
 		if (this.#advisors) this.#advisors.refreshProviderIdentity();
+	}
+
+	#notifySessionChangeCallbacks(): void {
+		for (const callback of [...this.#sessionChangeCallbacks]) {
+			try {
+				callback();
+			} catch (error) {
+				logger.warn("Session change callback failed", { error: String(error) });
+			}
+		}
 	}
 
 	/** Run one abortable auto-learn capture outside the primary agent loop. */
@@ -3901,6 +3945,7 @@ export class AgentSession {
 			this.#unsubscribeModelRoles = undefined;
 		}
 		this.#eventListeners = [];
+		this.#sessionChangeCallbacks.clear();
 	}
 
 	#closeAllProviderSessions(reason: string): void {
@@ -5720,6 +5765,12 @@ export class AgentSession {
 		this.#queueHiddenNextTurnMessage(message, true);
 	}
 
+	queueLaunchCompletion(notification: DaemonCompletionNotification): void {
+		if (this.#isDisposed) return;
+		this.yieldQueue.enqueue<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, notification);
+		this.yieldQueue.requestIdleFlush();
+	}
+
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
 		if (!triggerTurn) return;
@@ -7439,7 +7490,7 @@ export class AgentSession {
 				this.#clearInheritedProviderPromptCacheKey();
 				this.#adoptInheritedProviderPromptCacheKey();
 			}
-			this.#syncAgentSessionId();
+			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
 
 			let sessionContext = this.buildDisplaySessionContext();
@@ -7577,11 +7628,14 @@ export class AgentSession {
 				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
+			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
+				this.#notifySessionChangeCallbacks();
+			}
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
-			this.#syncAgentSessionId(previousSessionState.sessionId);
+			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);

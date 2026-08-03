@@ -51,6 +51,21 @@ describe("launch logs compatibility", () => {
 		expect(request.operation).toMatchObject({ ...operation, renderTerminalRows: true });
 	});
 
+	it("preserves completion owner changes on reconnect requests", () => {
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			owners: ["session-owner"],
+			completionUnsubscribes: ["disposed-owner"],
+			completionSubscriptionId: "subscription-1",
+			operation: { op: "list" },
+		});
+
+		expect(request.owners).toEqual(["session-owner"]);
+		expect(request.completionUnsubscribes).toEqual(["disposed-owner"]);
+		expect(request.completionSubscriptionId).toBe("subscription-1");
+	});
+
 	it("decodes raw terminal text from an already-running legacy broker", () => {
 		const result = parseDaemonRpcResult(operation, { ...baseResult, terminalText: "progress\rready" });
 		if (result.op !== "logs") throw new Error("unexpected result");

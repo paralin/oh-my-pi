@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { isLaunchCompletionOwner } from "@oh-my-pi/pi-coding-agent/session/launch-completion";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 
 type Entry = {
@@ -49,6 +50,14 @@ function createHarness(initialStreaming: boolean) {
 	};
 }
 
+describe("launch completion ownership", () => {
+	test("accepts primary and advisor completions for the active session", () => {
+		expect(isLaunchCompletionOwner("session", "session")).toBe(true);
+		expect(isLaunchCompletionOwner("session-advisor", "session")).toBe(true);
+		expect(isLaunchCompletionOwner("old-session-advisor", "session")).toBe(false);
+	});
+});
+
 describe("YieldQueue", () => {
 	test("enqueue while streaming defers until streaming flush", async () => {
 		const harness = createHarness(true);
@@ -68,6 +77,46 @@ describe("YieldQueue", () => {
 		expect(harness.streamingMessages.map(messageText)).toEqual(["a"]);
 	});
 
+	test("requested idle flush waits for an explicit stream-settlement retry", async () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.queue.enqueue("items", { id: "late" });
+		harness.queue.requestIdleFlush();
+		expect(harness.scheduledFlushes).toHaveLength(1);
+
+		await harness.scheduledFlushes[0]!();
+		expect(harness.scheduledFlushes).toHaveLength(1);
+		expect(harness.idleBatches).toHaveLength(0);
+
+		harness.setStreaming(false);
+		harness.queue.requestIdleFlush();
+		await harness.scheduledFlushes[1]!();
+
+		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["late"]);
+	});
+	test("requested idle flush preserves skip-only entries", async () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.register<Entry>("completion", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		harness.queue.enqueue("advisor", { id: "advice" });
+		harness.queue.requestIdleFlush();
+		expect(harness.scheduledFlushes).toHaveLength(0);
+
+		harness.queue.enqueue("completion", { id: "done" });
+		harness.queue.requestIdleFlush();
+		harness.setStreaming(false);
+		await harness.scheduledFlushes[0]!();
+
+		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["done"]);
+		expect(harness.queue.has("advisor")).toBe(true);
+	});
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {
