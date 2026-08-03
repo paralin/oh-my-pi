@@ -32,8 +32,6 @@ export interface FileSlashCommand {
 	_source?: { providerName: string; level: "user" | "project" | "native" };
 }
 
-const EMBEDDED_SLASH_COMMANDS = EMBEDDED_COMMAND_TEMPLATES;
-
 function parseCommandTemplate(
 	content: string,
 	options: { source: string; level?: "off" | "warn" | "fatal" },
@@ -86,7 +84,7 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 	});
 
 	const seenNames = new Set(fileCommands.map(cmd => cmd.name));
-	for (const cmd of EMBEDDED_SLASH_COMMANDS) {
+	for (const cmd of EMBEDDED_COMMAND_TEMPLATES) {
 		const name = cmd.name.replace(/\.md$/, "");
 		if (seenNames.has(name)) continue;
 

@@ -9,9 +9,12 @@
  *    aggregate) — so the caller's own rate shines through unchanged.
  * 4. Skips workers whose AgentRegistry session is detached (parked/reviving),
  *    so a stale roster entry can't contribute a phantom zero.
+ * 5. Skips peers that carry no agent turn state (`state.messages` +
+ *    `isStreaming`) — a ClaudeCodePeer keeps a flat `messages` array and has no
+ *    rate to sample, so it must not be measured.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
+import { type AgentPeer, AgentRegistry, MAIN_AGENT_ID } from "../../src/registry/agent-registry";
 import type { AgentSession } from "../../src/session/agent-session";
 import { aggregateVibeWorkerTokensPerSecond, VibeSessionRegistry } from "../../src/vibe/runtime";
 
@@ -22,12 +25,17 @@ function fakeSession(messages: unknown[], isStreaming: boolean): AgentSession {
 	return { state: { messages }, isStreaming } as unknown as AgentSession;
 }
 
+/** ClaudeCodePeer shape: a flat `messages` log, no `state` and no `isStreaming`. */
+function fakeClaudeCodePeer(messages: unknown[]): AgentPeer {
+	return { messages } as unknown as AgentPeer;
+}
+
 /** A finalized assistant message with a known duration → deterministic tok/s. */
 function assistantMessage(output: number, durationMs: number, timestamp = 1000) {
 	return { role: "assistant", timestamp, duration: durationMs, usage: { output } };
 }
 
-function registerWorker(id: string, session: AgentSession | null, ownerId = OWNER) {
+function registerWorker(id: string, session: AgentPeer | null, ownerId = OWNER) {
 	VibeSessionRegistry.global().registerRecordForTests({ id, ownerId });
 	if (session) {
 		AgentRegistry.global().register({
@@ -81,6 +89,14 @@ describe("aggregateVibeWorkerTokensPerSecond", () => {
 		registerWorker("w1", fakeSession([assistantMessage(100, 1000)], true));
 		// w2 is in the vibe roster but has no live AgentRegistry session.
 		registerWorker("w2", null);
+		expect(aggregateVibeWorkerTokensPerSecond(OWNER)).toBe(100);
+	});
+
+	it("ignores peers that carry no agent turn state", () => {
+		registerWorker("w1", fakeSession([assistantMessage(100, 1000)], true));
+		// A ClaudeCodePeer exposes a flat `messages` log with no `state` and no
+		// `isStreaming`: there is no live turn to sample, so it contributes nothing.
+		registerWorker("w2", fakeClaudeCodePeer([assistantMessage(50, 500)]));
 		expect(aggregateVibeWorkerTokensPerSecond(OWNER)).toBe(100);
 	});
 
