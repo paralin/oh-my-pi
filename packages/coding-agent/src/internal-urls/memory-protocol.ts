@@ -4,7 +4,7 @@ import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { getMemoryRoot } from "../memories";
 import { getMnemopiSessionState, type MnemopiScopedMemoryHit, type MnemopiSessionState } from "../mnemopi/state";
 import { AgentRegistry } from "../registry/agent-registry";
-import { AgentSession } from "../session/agent-session";
+import { hasSessionManager } from "../session/agent-session";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
@@ -24,7 +24,10 @@ export function memoryRootsFromRegistry(): string[] {
 	const roots: string[] = [];
 	for (const ref of AgentRegistry.global().list()) {
 		const session = ref.session;
-		if (!(session instanceof AgentSession)) continue;
+		// The scan reads only `sessionManager.getCwd()`, so it gates on that
+		// capability rather than on the event-stream surface: a peer that carries
+		// session-manager state must contribute its root.
+		if (!hasSessionManager(session)) continue;
 		const sm = session.sessionManager;
 		const root = getMemoryRoot(agentDir, sm.getCwd());
 		if (root && !roots.includes(root)) roots.push(root);
@@ -213,7 +216,10 @@ function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
 	const states: MnemopiSessionState[] = [];
 	for (const ref of AgentRegistry.global().list()) {
 		const session = ref.session;
-		if (!(session instanceof AgentSession)) continue;
+		// Mnemopi state is hung off the session object itself and is only ever
+		// installed on a session-manager-backed peer, so that capability is the
+		// discriminant here too.
+		if (!hasSessionManager(session)) continue;
 		const state = getMnemopiSessionState(session);
 		if (!state) continue;
 		const primary = state.aliasOf ?? state;
