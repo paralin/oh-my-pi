@@ -2,14 +2,13 @@ import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatBytes } from "../tools/render-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, DEFAULT_MAX_LINES } from "./streaming-output-constants";
+
+export { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, DEFAULT_MAX_LINES } from "./streaming-output-constants";
 
 // =============================================================================
 // Constants
 // =============================================================================
-
-export const DEFAULT_MAX_LINES = 3000;
-export const DEFAULT_MAX_BYTES = 50 * 1024; // 50KB
-export const DEFAULT_MAX_COLUMN = 512; // Max chars per grep match line
 
 /**
  * Default artifact-on-disk cap for {@link OutputSink}.

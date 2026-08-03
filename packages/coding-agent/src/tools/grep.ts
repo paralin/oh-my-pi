@@ -58,6 +58,7 @@ import {
 	splitPathAndSelPreferringLiteral,
 	toPathList,
 } from "./path-utils";
+import { PREVIEW_LIMITS } from "./render-constants";
 import {
 	createCachedComponent,
 	formatCodeFrameLine,
@@ -65,7 +66,6 @@ import {
 	formatEmptyMessage,
 	formatErrorMessage,
 	formatMoreItems,
-	PREVIEW_LIMITS,
 	replaceTabs,
 } from "./render-utils";
 import { ToolError } from "./tool-errors";

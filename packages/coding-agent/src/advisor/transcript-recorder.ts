@@ -5,6 +5,7 @@ import type { Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { visitEntriesFromFileStream } from "../session/session-loader";
 import { SessionManager } from "../session/session-manager";
+import { sessionSidecarDir } from "../session/session-paths";
 
 /**
  * Reserved transcript stem for advisor session files. Chosen so it cannot
@@ -49,8 +50,8 @@ export function isAdvisorTranscriptName(name: string): boolean {
  */
 export async function loadAdvisorTranscriptCosts(sessionFile: string | undefined): Promise<Map<string, number>> {
 	const costs = new Map<string, number>();
-	if (!sessionFile?.endsWith(JSONL_SUFFIX)) return costs;
-	const directory = sessionFile.slice(0, -JSONL_SUFFIX.length);
+	if (!sessionFile) return costs;
+	const directory = sessionSidecarDir(sessionFile);
 	const dirents = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
 	for (const dirent of dirents) {
 		if (!dirent.isFile() || !isAdvisorTranscriptName(dirent.name)) continue;
@@ -161,8 +162,8 @@ export class AdvisorTranscriptRecorder {
 				return;
 		}
 		const sessionFile = this.resolveSessionFile();
-		if (!sessionFile?.endsWith(JSONL_SUFFIX)) return;
-		const file = path.join(sessionFile.slice(0, -JSONL_SUFFIX.length), this.#filename);
+		if (!sessionFile) return;
+		const file = path.join(sessionSidecarDir(sessionFile), this.#filename);
 		const cwd = this.resolveCwd();
 		this.#enqueue(async () => {
 			if (file !== this.#file) {

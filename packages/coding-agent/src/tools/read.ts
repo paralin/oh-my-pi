@@ -46,14 +46,13 @@ import { getLanguageFromPath, isMarkdownPath, type Theme } from "../modes/theme/
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
-	DEFAULT_MAX_BYTES,
-	DEFAULT_MAX_LINES,
 	noTruncResult,
 	type TruncationResult,
 	truncateHead,
 	truncateHeadBytes,
 	truncateLine,
 } from "../session/streaming-output";
+import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "../session/streaming-output-constants";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine, tryResolveInternalUrlSync } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
 import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainText } from "../utils/block-context";

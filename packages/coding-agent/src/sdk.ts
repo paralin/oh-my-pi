@@ -3493,7 +3493,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			titleSystemPrompt: options.titleSystemPrompt,
 			onSessionTransition: () => cronManager.refresh(),
 			beginSessionFork: () => cronManager.suspendForFork(),
-			completeSessionFork: result => cronManager.completeFork(result),
+			completeSessionFork: (result, isCurrent) => cronManager.completeFork(result, isCurrent),
 		});
 		hasSession = true;
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
@@ -3503,7 +3503,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isStale: entry => entry.isStale(),
 			build: buildLateDiagnosticsBatchMessage,
 		});
-		await cronManager.load();
+		void cronManager.prepare().catch(error => {
+			logger.warn("Cron session load failed during startup", { error });
+		});
 
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
@@ -3824,6 +3826,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		startDeferredMCPDiscovery?.(session);
+		cronManager.start();
 
 		return {
 			session,

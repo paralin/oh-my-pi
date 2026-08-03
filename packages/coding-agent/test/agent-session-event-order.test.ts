@@ -127,6 +127,48 @@ describe("AgentSession subscriber event order", () => {
 		}
 	});
 
+	it("waits for message persistence barriers before appending the transcript entry", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled test model to exist");
+		const mock = createMockModel({ responses: [{ content: ["persist after ledger"] }] });
+		const agent = new Agent({
+			getApiKey: agentModel => `${agentModel.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (streamModel, context, options) => mock.stream(streamModel, context, options),
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		session.registerMessagePersistenceBarrier(async event => {
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			entered.resolve();
+			await release.promise;
+		});
+
+		const prompt = session.prompt("run");
+		await entered.promise;
+		expect(
+			session.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "message" && entry.message.role === "assistant"),
+		).toBe(false);
+
+		release.resolve();
+		await prompt;
+		expect(
+			session.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "message" && entry.message.role === "assistant"),
+		).toBe(true);
+	});
+
 	it("preserves every completion from a batch of exclusive todo calls", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled test model to exist");
