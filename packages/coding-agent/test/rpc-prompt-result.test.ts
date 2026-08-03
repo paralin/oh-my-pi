@@ -58,6 +58,7 @@ describe("RPC durable custody prompts", () => {
 
 	test("recognizes every parsed move command spelling", () => {
 		expect(isRpcCustodyRestrictedPrompt("/move /existing/dir")).toBe(true);
+		expect(isRpcCustodyRestrictedPrompt("/compact focus on APIs")).toBe(true);
 		expect(isRpcCustodyRestrictedPrompt("/move:/existing/dir")).toBe(true);
 		expect(isRpcCustodyRestrictedPrompt("/model move")).toBe(false);
 	});

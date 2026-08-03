@@ -70,7 +70,8 @@ import type {
 export type * from "./rpc-types";
 
 export function isRpcCustodyRestrictedPrompt(message: string): boolean {
-	return parseSlashCommand(message)?.name === "move";
+	const name = parseSlashCommand(message)?.name;
+	return name === "move" || name === "compact";
 }
 
 export function hasPendingRpcContinuation(
@@ -1316,7 +1317,10 @@ export async function runRpcMode(
 			case "prompt": {
 				harnessOwner?.assertAcceptingWork();
 				if (harnessOwner && isRpcCustodyRestrictedPrompt(command.message)) {
-					return error(id, "prompt", "Session changes are unavailable after durable RPC custody is bound");
+					const name = parseSlashCommand(command.message)?.name;
+					return name === "compact"
+						? error(id, "prompt", "Use the compact RPC command after durable RPC custody is bound")
+						: error(id, "prompt", "Session changes are unavailable after durable RPC custody is bound");
 				}
 				const skillTask = tryRunRpcSkillCommand(session, command.message, command.streamingBehavior);
 				if (harnessOwner) terminalTasks.track(skillTask);

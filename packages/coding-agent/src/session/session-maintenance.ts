@@ -2548,6 +2548,7 @@ export class SessionMaintenance {
 				const handoffResult = await this.#host.runHandoff(handoffFocus, {
 					autoTriggered: true,
 					signal: autoCompactionSignal,
+					metadataCompactionStrategy: compactionStrategy,
 					onSwitchCancelled: () => {
 						handoffSwitchCancelled = true;
 					},

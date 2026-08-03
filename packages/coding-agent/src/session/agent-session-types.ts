@@ -24,6 +24,7 @@ import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async"
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
+import type { SettingValue } from "../config/settings-schema";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { TtsrManager } from "../export/ttsr";
@@ -323,6 +324,7 @@ export interface SessionHandoffOptions {
 	autoTriggered?: boolean;
 	signal?: AbortSignal;
 	onSwitchCancelled?: () => void;
+	metadataCompactionStrategy?: SettingValue<"compaction.strategy">;
 }
 
 /** Result from cycleModel(). */

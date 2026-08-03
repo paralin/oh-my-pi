@@ -1212,6 +1212,8 @@ class DaemonBroker {
 					!terminalState(snapshot.state) &&
 					snapshot.state !== "stopping" &&
 					processRef?.status() === "running";
+				const recoveredDead =
+					spec.detached && !terminalState(snapshot.state) && snapshot.state !== "stopping" && !detached;
 				if (!detached) {
 					// Reap only records that were still alive when the previous broker
 					// exited; already-terminal records keep their real exit time so
@@ -1269,6 +1271,14 @@ class DaemonBroker {
 							: [];
 					})(),
 				};
+				if (recoveredDead && record.completionCapable && snapshot.owner && record.pendingCompletions.length === 0) {
+					record.pendingCompletions.push({
+						event: "daemon-completed",
+						completionId: crypto.randomUUID(),
+						owner: snapshot.owner,
+						daemon: { ...snapshot },
+					});
+				}
 				syncReadyPending(record);
 				this.#records.set(snapshot.name, record);
 				if (snapshot.owner && record.completionCapable && (detached || record.pendingCompletions.length > 0)) {

@@ -68,6 +68,18 @@ describe("session profile metadata", () => {
 		expect(userId.profile.s).toBe("context-full");
 	});
 
+	it("overrides disabled profile metadata for an independent idle handoff", () => {
+		const metadata = buildSessionMetadata(SESSION_ID, "anthropic", undefined, {
+			thresholdTokens: 120_000,
+			strategy: "off",
+			tokenizerMode: "accurate",
+		});
+		const overridden = overrideSessionMetadataCompactionStrategy(metadata, "handoff");
+		const userId = JSON.parse(String(overridden?.user_id)) as { profile: { s: string } };
+
+		expect(userId.profile.s).toBe("handoff");
+	});
+
 	it("reports the tokenizer implementation's module-load mode", async () => {
 		const child = Bun.spawn(
 			[

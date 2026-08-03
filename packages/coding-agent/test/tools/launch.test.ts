@@ -616,6 +616,53 @@ esac
 		}
 	}, 15_000);
 
+	it("replays a detached exit that precedes broker recovery", async () => {
+		if (process.platform === "win32") return;
+		const projectDir = await tempDir("omp-daemon-pre-recovery-exit-project-");
+		const runtimeDir = await tempDir("omp-daemon-pre-recovery-exit-runtime-");
+		const owner = "pre-recovery-exit-owner";
+		const first = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		let recovered: DaemonBrokerClient | undefined;
+		let unregister: (() => void) | undefined;
+		let pid: number | undefined;
+		try {
+			first.onCompletion(owner, () => {});
+			const started = await first.request({
+				op: "start",
+				spec: {
+					name: "pre-recovery-exit",
+					application: "/bin/sh",
+					args: ["-c", "sleep 0.2; exit 7"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: true,
+				},
+				owner,
+			});
+			if (started.op !== "start" || started.daemon.pid === undefined)
+				throw new Error("detached daemon did not start");
+			pid = started.daemon.pid;
+			await first.request({ op: "shutdown" });
+			first.close();
+			expect(await waitUntil(() => !processExists(pid!), 3_000)).toBeTrue();
+
+			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const completions: DaemonSnapshot[] = [];
+			unregister = recovered.onCompletion(owner, notification => completions.push(notification.daemon));
+			await recovered.request({ op: "list" });
+			expect(await waitUntil(() => completions.length === 1, 2_000)).toBeTrue();
+			expect(completions[0]).toMatchObject({ name: "pre-recovery-exit", state: "exited" });
+		} finally {
+			unregister?.();
+			first.close();
+			if (recovered) await shutdown(recovered);
+			if (pid !== undefined && processExists(pid)) process.kill(pid, "SIGKILL");
+		}
+	}, 12_000);
+
 	it("replays every pending generation completion after broker recovery", async () => {
 		if (process.platform === "win32") return;
 		const projectDir = await tempDir("omp-daemon-pending-recovery-project-");
