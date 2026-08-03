@@ -123,9 +123,11 @@ export interface DaemonWireRequest {
 	id: string;
 	token: string;
 	owners?: string[];
+	detachedOwners?: string[];
 	completionEvents?: boolean;
 	completionAcks?: string[];
 	completionUnsubscribes?: string[];
+	completionReplays?: string[];
 	completionSubscriptionId?: string;
 	operation: DaemonOperation;
 }
@@ -284,6 +286,8 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 		id: stringValue(source.id, "request.id"),
 		token: stringValue(source.token, "request.token"),
 		owners: source.owners === undefined ? undefined : stringArray(source.owners, "request.owners"),
+		detachedOwners:
+			source.detachedOwners === undefined ? undefined : stringArray(source.detachedOwners, "request.detachedOwners"),
 		completionEvents:
 			source.completionEvents === undefined
 				? undefined
@@ -294,6 +298,10 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 			source.completionUnsubscribes === undefined
 				? undefined
 				: stringArray(source.completionUnsubscribes, "request.completionUnsubscribes"),
+		completionReplays:
+			source.completionReplays === undefined
+				? undefined
+				: stringArray(source.completionReplays, "request.completionReplays"),
 		completionSubscriptionId:
 			source.completionSubscriptionId === undefined
 				? undefined

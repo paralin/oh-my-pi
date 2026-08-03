@@ -153,6 +153,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	readonly #completionSinks = new Map<string, (notification: DaemonCompletionNotification) => Promise<void> | void>();
 	readonly #completionUnsubscribes = new Set<string>();
 	readonly #preservedCompletionOwners = new Set<string>();
+	readonly #completionReplays = new Set<string>();
 	readonly #inFlightCompletionIds = new Set<string>();
 	readonly #completionSubscriptionId = crypto.randomUUID();
 	#socket: net.Socket | undefined;
@@ -177,6 +178,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
 
 		const completionUnsubscribes = [...this.#completionUnsubscribes];
+		const completionReplays = [...this.#completionReplays];
 		const id = crypto.randomUUID();
 		const { promise, resolve, reject } = Promise.withResolvers<DaemonRpcResult>();
 		const timer = setTimeout(() => {
@@ -201,9 +203,11 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			`${JSON.stringify({
 				id,
 				token: this.#token,
-				owners: [...this.#completionSinks.keys(), ...this.#preservedCompletionOwners],
+				owners: [...this.#completionSinks.keys()],
+				detachedOwners: [...this.#preservedCompletionOwners],
 				completionEvents: true,
 				completionUnsubscribes,
+				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
 				operation,
 			})}\n`,
@@ -211,6 +215,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const result = await promise;
 		for (const owner of completionUnsubscribes) {
 			if (!this.#completionSinks.has(owner)) this.#completionUnsubscribes.delete(owner);
+		}
+		for (const owner of completionReplays) {
+			if (this.#completionSinks.has(owner)) this.#completionReplays.delete(owner);
 		}
 		return result;
 	}
@@ -223,6 +230,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#socket?.destroy();
 		this.#completionSinks.clear();
 		this.#preservedCompletionOwners.clear();
+		this.#completionReplays.clear();
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
 	}
@@ -232,7 +240,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void {
 		this.#completionUnsubscribes.delete(owner);
-		this.#preservedCompletionOwners.delete(owner);
+		if (this.#preservedCompletionOwners.delete(owner)) this.#completionReplays.add(owner);
 		this.#completionSinks.set(owner, sink);
 		this.#publishCompletionOwners();
 		return options => {
@@ -420,7 +428,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			`${JSON.stringify({
 				id: crypto.randomUUID(),
 				token: this.#token,
-				owners: [...this.#completionSinks.keys(), ...this.#preservedCompletionOwners],
+				owners: [...this.#completionSinks.keys()],
+				detachedOwners: [...this.#preservedCompletionOwners],
 				completionEvents: true,
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],

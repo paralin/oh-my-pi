@@ -433,7 +433,7 @@ export async function executeLaunch(
 						listed.op === "list" &&
 						listed.daemons.some(daemon => daemon.owner === owner && !TERMINAL_STATES[daemon.state]);
 					if (ownerStillRunning) completionLease?.retain();
-					else completionLease?.reject();
+					else completionLease?.reject(true);
 				} catch {
 					completionLease?.retain();
 				}

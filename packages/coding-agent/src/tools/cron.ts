@@ -117,6 +117,10 @@ function cronDisplayLine(text: string): string {
 	return replaceTabs(sanitizeText(text)).replace(/[\r\n]+/g, " ");
 }
 
+function cronTitle(text: string): string {
+	return truncateToWidth(cronDisplayLine(shortenEmbeddedPaths(text)), TRUNCATE_LENGTHS.TITLE);
+}
+
 function isCronJob(details: CronRenderDetails | undefined): details is CronJob {
 	return details !== undefined && "expression" in details;
 }
@@ -131,6 +135,7 @@ function cronJobRow(job: CronJob, theme: Theme): string {
 	return [
 		theme.fg("accent", cronDisplayLine(job.expression)),
 		theme.fg("dim", cronDisplayLine(job.id)),
+		theme.fg("dim", truncateToWidth(cronDisplayLine(shortenEmbeddedPaths(job.prompt)), TRUNCATE_LENGTHS.CONTENT)),
 		theme.fg("dim", `next ${new Date(job.nextFireAt).toLocaleString()}`),
 		...cronMode(job).map(value => theme.fg("dim", value)),
 	].join(theme.sep.dot);
@@ -154,9 +159,9 @@ function createCronRenderer(op: CronRenderOperation) {
 					title: `Cron ${op}`,
 					description:
 						op === "create"
-							? truncateToWidth(cronDisplayLine(args.expression ?? ""), TRUNCATE_LENGTHS.TITLE)
+							? cronTitle(args.expression ?? "")
 							: op === "delete"
-								? truncateToWidth(cronDisplayLine(args.id ?? ""), TRUNCATE_LENGTHS.TITLE)
+								? cronTitle(args.id ?? "")
 								: undefined,
 					meta,
 				},
@@ -179,9 +184,9 @@ function createCronRenderer(op: CronRenderOperation) {
 			const body: string[] = [];
 			let description =
 				op === "create"
-					? truncateToWidth(cronDisplayLine(args?.expression ?? ""), TRUNCATE_LENGTHS.TITLE)
+					? cronTitle(args?.expression ?? "")
 					: op === "delete"
-						? truncateToWidth(cronDisplayLine(args?.id ?? ""), TRUNCATE_LENGTHS.TITLE)
+						? cronTitle(args?.id ?? "")
 						: undefined;
 			let meta: string[] = [];
 			let icon: "error" | "warning" | undefined;

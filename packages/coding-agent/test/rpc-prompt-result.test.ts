@@ -7,13 +7,15 @@ import {
 	hasPendingRpcContinuation,
 	isRpcCustodyRestrictedPrompt,
 	materializeRpcCustodyTranscript,
+	prepareRpcResultSeal,
 	RpcCustodyBindingGuard,
 	RpcExtensionUserMessageTracker,
 	RpcTerminalTaskTracker,
 	reportLocalOnlyPromptResult,
+	reuseRpcHarnessBinding,
 	rpcExitOutcome,
-	shouldDeferRpcResult,
 	startRpcResidualPrompt,
+	waitForRpcMessageDurability,
 	watchAndReportLocalOnlyPromptResult,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import type {
@@ -98,6 +100,35 @@ describe("RPC durable custody prompts", () => {
 
 		await expect(materializeRpcCustodyTranscript(session)).resolves.toBe("/tmp/session.jsonl");
 		expect(materialized).toBe(true);
+	});
+
+	test("surfaces a latched transcript failure before steering is marked durable", async () => {
+		const order: string[] = [];
+		const failure = new Error("disk full");
+		const session = {
+			waitForMessagePersistence: async () => {
+				order.push("message");
+			},
+			sessionManager: {
+				flush: async () => {
+					order.push("flush");
+					throw failure;
+				},
+			},
+		};
+
+		await expect(waitForRpcMessageDurability(session, {} as never)).rejects.toBe(failure);
+		expect(order).toEqual(["message", "flush"]);
+	});
+
+	test("reuses an idempotent run binding without entering a custody transition", () => {
+		const owner = { sessionId: "session-1", isBoundToRun: (runId: string) => runId === "run-1" };
+
+		expect(reuseRpcHarnessBinding(owner as never, "run-1")).toEqual({
+			owner,
+			binding: { runId: "run-1", sessionId: "session-1", existing: true },
+		});
+		expect(reuseRpcHarnessBinding(owner as never, "run-2")).toBeUndefined();
 	});
 
 	test("recognizes every parsed move command spelling", () => {
@@ -192,6 +223,8 @@ describe("RPC durable custody prompts", () => {
 				get hasPendingBashMessages() {
 					return pendingBash;
 				},
+				hasPendingExtensionEvents: false,
+				async waitForPendingExtensionEvents() {},
 				async flushPendingBashMessages() {
 					flushes++;
 					pendingBash = false;
@@ -205,9 +238,48 @@ describe("RPC durable custody prompts", () => {
 		expect(pendingBash).toBe(false);
 	});
 
-	test("forces aborted exit results despite pending continuations", () => {
-		expect(shouldDeferRpcResult(true)).toBe(true);
-		expect(shouldDeferRpcResult(true, true)).toBe(false);
+	test("waits for agent-end extension handlers before draining their continuation", async () => {
+		let pendingExtension = true;
+		let continuationFinished = false;
+		const extensionGate = Promise.withResolvers<void>();
+		const terminalTasks = new RpcTerminalTaskTracker();
+		const extensionTasks = new RpcExtensionUserMessageTracker();
+		const extensionEvent = extensionGate.promise.then(async () => {
+			pendingExtension = false;
+			await extensionTasks.trackAgentMessageTask(Promise.resolve().then(() => (continuationFinished = true)));
+		});
+
+		await Promise.all([
+			drainRpcTerminalBoundary(
+				{
+					hasPendingBashMessages: false,
+					flushPendingBashMessages: async () => {},
+					get hasPendingExtensionEvents() {
+						return pendingExtension;
+					},
+					waitForPendingExtensionEvents: async () => extensionEvent,
+				},
+				terminalTasks,
+				extensionTasks,
+			),
+			Promise.resolve().then(() => extensionGate.resolve()),
+		]);
+
+		expect(continuationFinished).toBe(true);
+	});
+
+	test("skips terminal-task draining while forcing an aborted exit result", async () => {
+		let drainCalls = 0;
+		expect(
+			await prepareRpcResultSeal(
+				true,
+				async () => {
+					drainCalls++;
+				},
+				() => true,
+			),
+		).toBe(true);
+		expect(drainCalls).toBe(0);
 	});
 
 	test("rechecks custody before starting an ACP residual prompt", () => {

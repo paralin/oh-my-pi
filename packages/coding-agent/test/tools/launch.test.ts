@@ -49,11 +49,12 @@ async function shutdown(client: DaemonBrokerClient): Promise<void> {
 	client.close();
 }
 
-async function sendStaleCompletionAck(
+async function publishCompletionOwner(
 	projectDir: string,
 	runtimeDir: string,
 	owner: string,
 	subscriptionId: string,
+	completionAcks: string[] = [],
 ): Promise<void> {
 	const socket = net.createConnection(daemonBrokerEndpoint(projectDir, runtimeDir));
 	const connected = Promise.withResolvers<void>();
@@ -73,7 +74,7 @@ async function sendStaleCompletionAck(
 			token: (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim(),
 			owners: [owner],
 			completionEvents: true,
-			completionAcks: ["stale-completion"],
+			completionAcks,
 			completionSubscriptionId: subscriptionId,
 			operation: { op: "ping" },
 		})}\n`,
@@ -755,6 +756,56 @@ esac
 		}
 	}, 12_000);
 
+	it("replays a recovered non-detached daemon exit", async () => {
+		if (process.platform === "win32") return;
+		const projectDir = await tempDir("omp-daemon-attached-recovery-project-");
+		const runtimeDir = await tempDir("omp-daemon-attached-recovery-runtime-");
+		const owner = "attached-recovery-owner";
+		const first = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		let recovered: DaemonBrokerClient | undefined;
+		let unregister: (() => void) | undefined;
+		let daemonPid: number | undefined;
+		try {
+			first.onCompletion(owner, () => {});
+			const started = await first.request({
+				op: "start",
+				spec: {
+					name: "attached-recovery-exit",
+					application: "/bin/sh",
+					args: ["-c", "sleep 30"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+				owner,
+			});
+			if (started.op !== "start" || started.daemon.pid === undefined) throw new Error("daemon did not start");
+			daemonPid = started.daemon.pid;
+			const { pid: brokerPid } = (await Bun.file(path.join(runtimeDir, "broker.pid")).json()) as { pid: number };
+			process.kill(brokerPid, "SIGKILL");
+			expect(await waitUntil(() => !processExists(brokerPid), 3_000)).toBeTrue();
+			first.close();
+
+			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+			const completions: DaemonSnapshot[] = [];
+			unregister = recovered.onCompletion(owner, notification => {
+				completions.push(notification.daemon);
+			});
+			await recovered.request({ op: "list" });
+
+			expect(await waitUntil(() => completions.length === 1, 3_000)).toBeTrue();
+			expect(completions[0]).toMatchObject({ name: "attached-recovery-exit", state: "exited" });
+		} finally {
+			unregister?.();
+			first.close();
+			if (recovered) await shutdown(recovered);
+			if (daemonPid !== undefined && processExists(daemonPid)) process.kill(daemonPid, "SIGKILL");
+		}
+	}, 12_000);
+
 	// Regression: a start whose log pattern matched but whose port never accepted
 	// used to report "Ready: <match>" AND "Readiness timed out" with no hint of
 	// which condition failed. The snapshot now names the unmet condition(s).
@@ -1237,8 +1288,20 @@ esac
 			unregisterSecond = second.onCompletion(owner, notification => {
 				completion = notification.daemon;
 			});
+			const replacementSubscriptionId = crypto.randomUUID();
+			await publishCompletionOwner(projectDir, runtimeDir, owner, replacementSubscriptionId);
+			const replacementMetadata = (await Bun.file(metaPath).json()) as {
+				completionEvents?: boolean;
+				completionSubscriptionId?: string;
+			};
+			expect(replacementMetadata).toMatchObject({
+				completionEvents: true,
+				completionSubscriptionId: replacementSubscriptionId,
+			});
 			await second.request({ op: "ping" });
-			await sendStaleCompletionAck(projectDir, runtimeDir, owner, firstMetadata.completionSubscriptionId);
+			await publishCompletionOwner(projectDir, runtimeDir, owner, firstMetadata.completionSubscriptionId, [
+				"stale-completion",
+			]);
 			unregisterFirst();
 
 			expect(await waitUntil(() => completion !== undefined, 3_000)).toBeTrue();
@@ -1398,8 +1461,8 @@ esac
 		const runtimeDir = await tempDir("omp-daemon-preserve-owner-runtime-");
 		const owner = "preserved-owner";
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 200 });
-		let recovered: DaemonBrokerClient | undefined;
 		const unregister = client.onCompletion(owner, () => {});
+		let recovered: DaemonBrokerClient | undefined;
 		try {
 			await client.request({
 				op: "start",
@@ -1425,6 +1488,16 @@ esac
 			).toBeTrue();
 
 			client.close();
+			expect(
+				await waitUntil(
+					() =>
+						Bun.file(path.join(runtimeDir, "broker.sock"))
+							.exists()
+							.then(exists => !exists),
+					3_000,
+				),
+			).toBeTrue();
+
 			recovered = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 200 });
 			const received = Promise.withResolvers<void>();
 			const unregisterRecovered = recovered.onCompletion(owner, () => received.resolve());
@@ -1443,6 +1516,49 @@ esac
 			}
 		}
 	}, 12_000);
+
+	it("does not let a detached client reclaim a resumed owner", async () => {
+		if (process.platform === "win32") return;
+		const projectDir = await tempDir("omp-daemon-detached-owner-project-");
+		const runtimeDir = await tempDir("omp-daemon-detached-owner-runtime-");
+		const owner = "resumed-owner";
+		const first = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const second = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const unregisterFirst = first.onCompletion(owner, () => {});
+		let unregisterSecond: (() => void) | undefined;
+		let completion: DaemonSnapshot | undefined;
+		try {
+			await first.request({
+				op: "start",
+				spec: {
+					name: "resumed-owner-exit",
+					application: "/bin/sh",
+					args: ["-c", "sleep 0.5; exit 0"],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+				owner,
+			});
+			unregisterFirst({ preservePending: true });
+			unregisterSecond = second.onCompletion(owner, notification => {
+				completion = notification.daemon;
+			});
+			await second.request({ op: "ping" });
+			await first.request({ op: "ping" });
+
+			expect(await waitUntil(() => completion !== undefined, 3_000)).toBeTrue();
+			expect(completion).toMatchObject({ name: "resumed-owner-exit", state: "exited", exitCode: 0 });
+		} finally {
+			unregisterFirst();
+			unregisterSecond?.();
+			first.close();
+			await shutdown(second);
+		}
+	}, 9_000);
 	it("drops a completion when its owner unsubscribes during settlement", async () => {
 		if (process.platform === "win32") return;
 		const projectDir = await tempDir("omp-daemon-settle-unsubscribe-project-");

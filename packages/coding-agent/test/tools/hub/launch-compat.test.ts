@@ -377,14 +377,16 @@ describe("launch broker protocol compatibility", () => {
 		expect(unregisters).toBe(0);
 	});
 
-	it("removes the completion sink when the broker rejects start", async () => {
+	it("detaches the completion sink without deleting pending replay when the broker rejects start", async () => {
 		const projectDir = process.cwd();
 		let unregisters = 0;
+		let preservedPending = false;
 		let disposeRemovals = 0;
 		const client = {
 			projectDir,
-			onCompletion: () => () => {
+			onCompletion: () => options => {
 				unregisters++;
+				preservedPending = options?.preservePending === true;
 			},
 			request: async operation => {
 				if (operation.op === "start") throw new daemonClient.DaemonBrokerRejectedError("name already exists");
@@ -408,6 +410,7 @@ describe("launch broker protocol compatibility", () => {
 		).rejects.toThrow("name already exists");
 		expect(unregisters).toBe(1);
 		expect(disposeRemovals).toBe(1);
+		expect(preservedPending).toBe(true);
 	});
 
 	it("keeps a resumed owner's sink when duplicate start finds its live daemon", async () => {

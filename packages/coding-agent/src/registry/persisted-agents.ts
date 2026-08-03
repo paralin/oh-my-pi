@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { SessionManager } from "../session/session-manager";
+import { sessionSidecarDir } from "../session/session-paths";
 import { persistedVibeChildIds } from "../vibe/runtime";
 import { type AgentRegistry, MAIN_AGENT_ID } from "./agent-registry";
 
@@ -29,10 +30,9 @@ export async function registerPersistedSubagents(
 	registry: AgentRegistry,
 	sessionFile: string | null | undefined,
 ): Promise<void> {
-	if (!sessionFile?.endsWith(".jsonl")) return;
+	if (!sessionFile) return;
 	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile);
-	const root = sessionFile.slice(0, -6);
-	await registerPersistedSubagentsFromDir(registry, root, undefined, vibeOwnedIds);
+	await registerPersistedSubagentsFromDir(registry, sessionSidecarDir(sessionFile), undefined, vibeOwnedIds);
 }
 
 async function registerPersistedSubagentsFromDir(

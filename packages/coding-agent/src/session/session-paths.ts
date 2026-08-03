@@ -212,13 +212,6 @@ export function sessionSidecarDir(sessionFile: string): string {
 	return sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : `${sessionFile}.d`;
 }
 
-/** Return the sidecar directory used before non-JSONL transcript paths gained a `.d` suffix. */
-export function legacySessionSidecarDir(sessionFile: string): string | undefined {
-	if (sessionFile.endsWith(".jsonl")) return undefined;
-	const legacy = sessionFile.slice(0, -".jsonl".length);
-	return legacy && legacy !== sessionSidecarDir(sessionFile) ? legacy : undefined;
-}
-
 // =============================================================================
 // Terminal breadcrumbs: maps terminal (TTY) -> last session file for --continue
 // =============================================================================

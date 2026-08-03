@@ -464,6 +464,7 @@ export class AgentSession {
 	fileSnapshotStore?: InMemorySnapshotStore;
 	/** Per-session `CUT`/`PASTE` clipboard register shared across edit calls. */
 	editClipboard?: Clipboard;
+	#assertBackgroundAgentWorkAllowed: (() => void) | undefined;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -488,6 +489,7 @@ export class AgentSession {
 	#lastLlmUsagePrefixHash: string | undefined;
 	#deliberatePrefixResetPending = false;
 	#eventListeners: AgentSessionEventListener[] = [];
+	#messagePersistenceBarriers = new Set<(event: AgentSessionEvent) => Promise<void>>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
 	#observedSessionId: string | undefined;
@@ -497,6 +499,8 @@ export class AgentSession {
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#queuedMessageDrainScheduled = false;
 	#pendingExtensionEventCount = 0;
+	#pendingExtensionEventsIdle: Promise<void> = Promise.resolve();
+	#resolvePendingExtensionEvents: (() => void) | undefined;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
@@ -779,6 +783,11 @@ export class AgentSession {
 	 *  the agent responds to the peer. Skip only when a queued steer/follow-up will itself drive a
 	 *  resume turn whose aside poll already consumes these (no double-wake). */
 	#resumeStrandedIrcAsides(): void {
+		try {
+			this.#assertBackgroundAgentWorkAllowed?.();
+		} catch {
+			return;
+		}
 		if (this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		const records = this.#irc.drainPending();
@@ -1198,7 +1207,10 @@ export class AgentSession {
 					async () => {
 						await run();
 					},
-					{ delayMs: 1 },
+					{
+						delayMs: 1,
+						onSkip: () => this.yieldQueue.cancelIdleFlushScheduling(),
+					},
 				);
 			},
 		});
@@ -2098,7 +2110,7 @@ export class AgentSession {
 	async #emitSessionEvent(event: AgentSessionEvent): Promise<void> {
 		if (event.type === "message_update") {
 			this.#emit(event);
-			void this.#queueExtensionEvent(event);
+			await this.#queueExtensionEvent(event);
 			return;
 		}
 		// Take a FIFO ticket before the extension emit: extension deliveries for
@@ -2161,11 +2173,13 @@ export class AgentSession {
 			}
 		}
 		if (event.type !== "agent_end") {
+			const tracksExtensionEvent = this.#extensionRunner?.hasHandlers(event.type) === true;
+			if (tracksExtensionEvent) this.#beginPendingExtensionEvent();
 			const processing = this.#processAgentEvent(event);
 			if ((event.type === "message_start" || event.type === "message_end") && isAdvisorCard(event.message)) {
 				this.#advisors.trackCardEvent(processing);
 			}
-			return processing;
+			return tracksExtensionEvent ? processing.finally(() => this.#endPendingExtensionEvent()) : processing;
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#trackPostPromptTask(promise);
@@ -2546,6 +2560,9 @@ export class AgentSession {
 		if (event.type !== "agent_end") {
 			try {
 				await this.#emitSessionEvent(displayEvent);
+				if (displayEvent.type === "message_end") {
+					for (const barrier of [...this.#messagePersistenceBarriers]) await barrier(displayEvent);
+				}
 			} catch (error) {
 				messageEndPersistence?.release();
 				throw error;
@@ -2767,21 +2784,21 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
-				this.#pendingExtensionEventCount++;
+				this.#beginPendingExtensionEvent();
 				try {
 					// Public agent_end is held out of the eager display pass and emitted
 					// here after maintenance routing, tagged isTerminal so subscribers can
 					// tell final settles from scheduled continuations.
 					await this.#emitSessionEvent({ ...event, isTerminal: !options?.willContinue });
 				} catch (error) {
-					this.#pendingExtensionEventCount--;
+					this.#endPendingExtensionEvent();
 					throw error;
 				}
 				void this.#emitAgentEndNotification(activeMessages, options)
 					.catch(err => {
 						logger.error("Agent end extension notification failed", { err });
 					})
-					.finally(() => this.#pendingExtensionEventCount--);
+					.finally(() => this.#endPendingExtensionEvent());
 			};
 			const usage = this.getSessionStats().tokens;
 			await this.#goalRuntime.onAgentEnd({
@@ -3139,6 +3156,7 @@ export class AgentSession {
 				try {
 					await scheduler.wait(delayMs, { signal });
 				} catch {
+					if (signal.aborted) options?.onSkip?.("aborted");
 					return;
 				}
 			}
@@ -3645,6 +3663,15 @@ export class AgentSession {
 		return () => this.#sessionChangeCallbacks.delete(callback);
 	}
 
+	/**
+	 * Register work that must finish after message_end publication and before
+	 * the matching transcript entry is appended.
+	 */
+	registerMessagePersistenceBarrier(barrier: (event: AgentSessionEvent) => Promise<void>): () => void {
+		this.#messagePersistenceBarriers.add(barrier);
+		return () => this.#messagePersistenceBarriers.delete(barrier);
+	}
+
 	subscribeCommandMetadataChanged(listener: CommandMetadataChangedListener): () => void {
 		this.#commandMetadataChangedListeners.push(listener);
 		return () => {
@@ -4002,6 +4029,7 @@ export class AgentSession {
 		}
 		this.#eventListeners = [];
 		this.#sessionChangeCallbacks.clear();
+		this.#messagePersistenceBarriers.clear();
 	}
 
 	#closeAllProviderSessions(reason: string): void {
@@ -4723,16 +4751,19 @@ export class AgentSession {
 		this.#rewoundToolResultIds.clear();
 	}
 
-	/** Drop mutable tool decisions and directives owned by the previous logical session. */
-	#clearSessionScopedToolState(): void {
-		this.agent.clearDeferredToolDirectives();
-		this.#toolChoiceQueue.clear();
+	#cancelScheduledPromptDeliveriesForTransition(): void {
 		this.yieldQueue.clear(SCHEDULED_NOTIFICATION_KIND);
 		const transitionError = new Error("Session changed before scheduled prompt delivery.");
 		this.#rejectScheduledPromptDeliveries(transitionError);
 		this.#scheduledPromptBatch.clear();
 		this.#scheduledPromptBatchTask?.reject(transitionError);
 		this.#scheduledPromptBatchTask = undefined;
+	}
+	/** Drop mutable tool decisions and directives owned by the previous logical session. */
+	#clearSessionScopedToolState(): void {
+		this.agent.clearDeferredToolDirectives();
+		this.#toolChoiceQueue.clear();
+		this.#cancelScheduledPromptDeliveriesForTransition();
 		this.#tools.clearAcpPermissionDecisions();
 		this.#tools.resetAnnouncedMounts();
 		this.#onSessionTransition?.();
@@ -6253,6 +6284,26 @@ export class AgentSession {
 		return this.#pendingExtensionEventCount > 0;
 	}
 
+	/** Wait until extension lifecycle handlers from the current boundary have settled. */
+	waitForPendingExtensionEvents(): Promise<void> {
+		return this.#pendingExtensionEventsIdle;
+	}
+
+	#beginPendingExtensionEvent(): void {
+		if (this.#pendingExtensionEventCount++ > 0) return;
+		const deferred = Promise.withResolvers<void>();
+		this.#pendingExtensionEventsIdle = deferred.promise;
+		this.#resolvePendingExtensionEvents = deferred.resolve;
+	}
+
+	#endPendingExtensionEvent(): void {
+		this.#pendingExtensionEventCount--;
+		if (this.#pendingExtensionEventCount > 0) return;
+		this.#pendingExtensionEventCount = 0;
+		this.#resolvePendingExtensionEvents?.();
+		this.#resolvePendingExtensionEvents = undefined;
+	}
+
 	getQueuedMessages(): { steering: readonly string[]; followUp: readonly string[] } {
 		return {
 			steering: this.agent.peekSteeringQueue().filter(isUserQueuedMessage).map(queueChipText),
@@ -6542,6 +6593,7 @@ export class AgentSession {
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let advisorRecordersDetached = false;
 		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
 			this.#cancelOwnAsyncJobs();
 			this.#closeAllProviderSessions("new session");
 			await this.#bash.flushPending();
@@ -6633,6 +6685,7 @@ export class AgentSession {
 
 	async #suspendSessionServices(): Promise<boolean> {
 		if (!this.#beginSessionFork) return false;
+		this.#cancelScheduledPromptDeliveriesForTransition();
 		this.#sessionServiceTransitionGeneration++;
 		await this.#beginSessionFork();
 		return true;
@@ -6699,7 +6752,9 @@ export class AgentSession {
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let advisorRecordersDetached = false;
 		let sessionForkStarted = sessionServicesSuspended;
+		let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
 		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
 			await this.#bash.flushPending();
 			// Flush current session to ensure all entries are written
 			await this.sessionManager.flush();
@@ -6710,7 +6765,6 @@ export class AgentSession {
 			const bashTransition = this.#bash.beginSessionTransition();
 
 			// Fork the session (creates new session file with same entries)
-			let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
 			try {
 				forkResult = await this.sessionManager.fork();
 			} catch (error) {
@@ -6748,20 +6802,6 @@ export class AgentSession {
 					});
 				}
 			}
-			if (this.#completeSessionFork) {
-				try {
-					await this.#completeSessionFork(forkResult);
-					sessionForkStarted = false;
-				} catch (error) {
-					logger.warn("Failed to finalize committed session fork", {
-						oldSessionFile: forkResult.oldSessionFile,
-						newSessionFile: forkResult.newSessionFile,
-						error: error instanceof Error ? error.message : String(error),
-					});
-					sessionForkStarted = false;
-					this.#scheduleSessionServiceRecovery(forkResult);
-				}
-			}
 
 			// Update agent session ID
 			this.#freshProviderSessionId = undefined;
@@ -6781,10 +6821,24 @@ export class AgentSession {
 					previousSessionFile,
 				});
 			}
+			if (this.#completeSessionFork) {
+				try {
+					await this.#completeSessionFork(forkResult);
+					sessionForkStarted = false;
+				} catch (error) {
+					logger.warn("Failed to finalize committed session fork", {
+						oldSessionFile: forkResult.oldSessionFile,
+						newSessionFile: forkResult.newSessionFile,
+						error: error instanceof Error ? error.message : String(error),
+					});
+					sessionForkStarted = false;
+					this.#scheduleSessionServiceRecovery(forkResult);
+				}
+			}
 
 			return true;
 		} finally {
-			if (sessionForkStarted) await this.#completeSessionFork?.(undefined);
+			if (sessionForkStarted) await this.#completeSessionFork?.(forkResult);
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
 		}
 	}
@@ -6796,11 +6850,8 @@ export class AgentSession {
 		let moveCommitted = false;
 		let failure: unknown;
 		try {
-			if (this.#beginSessionFork) {
-				this.#sessionServiceTransitionGeneration++;
-				await this.#beginSessionFork();
-				sessionServicesSuspended = true;
-			}
+			sessionServicesSuspended = await this.#suspendSessionServices();
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
 			await this.sessionManager.moveTo(newCwd, targetSessionDir);
 			moveCommitted = true;
 		} catch (error) {
@@ -7533,6 +7584,7 @@ export class AgentSession {
 
 	/** Delivers an IRC message into this recipient session. */
 	deliverIrcMessage(msg: IrcMessage, opts?: { expectsReply?: boolean }): Promise<"injected" | "woken"> {
+		this.#assertBackgroundAgentWorkAllowed?.();
 		return this.#irc.deliver(msg, opts);
 	}
 
@@ -7541,6 +7593,11 @@ export class AgentSession {
 		observer: ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,
 	): void {
 		this.#ircWakeTurnObserver = observer;
+	}
+
+	/** Installs a mode-specific guard for peer messages that can start agent work. */
+	setBackgroundAgentWorkGuard(guard: (() => void) | undefined): void {
+		this.#assertBackgroundAgentWorkAllowed = guard;
 	}
 
 	/** Emits an IRC relay observation for UI rendering without persisting it. */
@@ -7745,6 +7802,7 @@ export class AgentSession {
 		await this.abort({ goalReason: "internal" });
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
 			this.#disconnectFromAgent();
 			await this.#sessionBeforeSwitchReconciler?.();
 			await this.#bash.flushPending();
@@ -8059,6 +8117,7 @@ export class AgentSession {
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
+			if (this.isStreaming) await this.abort({ goalReason: "internal" });
 			// Clear pending messages (bound to old session state)
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -8159,24 +8218,28 @@ export class AgentSession {
 			}
 		}
 
+		await this.#cancelPostPromptTasks();
+		if (
+			this.isBashRunning ||
+			this.isEvalRunning ||
+			this.isCompacting ||
+			this.isGeneratingHandoff ||
+			this.isRetrying
+		) {
+			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+		}
+
+		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.agent.replaceQueues([], []);
+		if (this.isStreaming) {
+			await this.abort({ goalReason: "internal", reason: "branching /btw" });
+			this.agent.replaceQueues([], []);
+		}
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
-			await this.#cancelPostPromptTasks();
-			if (
-				this.isBashRunning ||
-				this.isEvalRunning ||
-				this.isCompacting ||
-				this.isGeneratingHandoff ||
-				this.isRetrying
-			) {
-				throw new Error("Cannot branch /btw while session maintenance or user work is still running");
-			}
-
-			this.#pendingNextTurnMessages = [];
-			this.#scheduledHiddenNextTurnGeneration = undefined;
-			this.agent.replaceQueues([], []);
 			if (this.isStreaming) {
 				await this.abort({ goalReason: "internal", reason: "branching /btw" });
 				this.agent.replaceQueues([], []);

@@ -485,10 +485,23 @@ describe("RPC harness session owner", () => {
 	it("reclaims a lease whose PID belongs to a different process birth", async () => {
 		const file = recordFile("session-1");
 		await fs.mkdir(path.dirname(file), { recursive: true });
-		await fs.writeFile(`${file}.owner`, JSON.stringify({ pid: process.pid, birthId: "different", token: "stale" }));
+		await fs.writeFile(
+			`${file}.owner`,
+			JSON.stringify({ pid: process.pid, startToken: "different", token: "stale" }),
+		);
 
 		const owner = await RpcHarnessSessionOwner.open("session-1", file, undefined, runIndexFile());
 		await expect(owner.bindRun("run-1")).resolves.toMatchObject({ sessionId: "session-1" });
+		await owner.dispose();
+	});
+
+	it("keeps a live PID-only lease when start tokens are unavailable", async () => {
+		const file = recordFile("session-1");
+		await fs.mkdir(path.dirname(file), { recursive: true });
+		await fs.writeFile(`${file}.owner`, JSON.stringify({ pid: process.pid, token: "live" }));
+
+		const owner = await RpcHarnessSessionOwner.open("session-1", file, undefined, runIndexFile());
+		await expect(owner.bindRun("run-1")).rejects.toThrow("session ledger already has a live owner");
 		await owner.dispose();
 	});
 
@@ -535,6 +548,29 @@ describe("RPC harness session owner", () => {
 			),
 		).toEqual(["one", " two", " three"]);
 		expect(published.map(event => event.sequence)).toEqual([undefined, undefined, 1]);
+	});
+
+	it("publishes coalesced live deltas after preceding queued events", async () => {
+		const published: RpcHarnessPublishedEvent[] = [];
+		const owner = await RpcHarnessSessionOwner.open("session-1", recordFile(), event => published.push(event));
+		const start = owner.appendEvent({ type: "notice", level: "info", message: "start" });
+		const first = owner.appendEvent({
+			type: "message_update",
+			message: { role: "assistant", content: [{ type: "text", text: "one" }] },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "one" },
+		} as never);
+		const second = owner.appendEvent({
+			type: "message_update",
+			message: { role: "assistant", content: [{ type: "text", text: "one two" }] },
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: " two" },
+		} as never);
+
+		expect(published).toEqual([]);
+		const replay = await owner.replay();
+		await Promise.all([start, first, second]);
+		expect(published.map(event => event.type)).toEqual(["notice", "message_update", "message_update"]);
+		expect(published.map(event => event.sequence)).toEqual([1, undefined, 2]);
+		expect(replay.map(event => event.type)).toEqual(["notice", "message_update"]);
 	});
 
 	it("ends update coalescing at an intervening event", async () => {

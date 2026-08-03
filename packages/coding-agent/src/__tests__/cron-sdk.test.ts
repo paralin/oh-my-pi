@@ -34,7 +34,10 @@ it("delivers overdue durable jobs after session construction and disposes the sc
 		])}\n`,
 	);
 	const delivered = Promise.withResolvers<void>();
+	let factoryReturned = false;
+	let deliveredBeforeReturn = false;
 	const deliver = vi.spyOn(AgentSession.prototype, "deliverScheduledPrompt").mockImplementation(async () => {
+		deliveredBeforeReturn = !factoryReturned;
 		delivered.resolve();
 	});
 	const dispose = vi.spyOn(CronManager.prototype, "dispose");
@@ -53,14 +56,49 @@ it("delivers overdue durable jobs after session construction and disposes the sc
 			enableMCP: false,
 			enableLsp: false,
 		});
+		factoryReturned = true;
 		await delivered.promise;
 		expect(deliver).toHaveBeenCalledWith("catch up now");
+		expect(deliveredBeforeReturn).toBe(false);
 		const disposing = session.dispose();
 		expect(dispose).toHaveBeenCalled();
 		await disposing;
 	} finally {
 		deliver.mockRestore();
 		dispose.mockRestore();
+		authStorage.close();
+	}
+});
+
+it("keeps cron-store read failures from aborting session construction", async () => {
+	using tempDir = TempDir.createSync("@omp-cron-sdk-load-failure-");
+	const authStorage = await AuthStorage.create(":memory:");
+	const sessionFile = path.join(tempDir.path(), "session.jsonl");
+	const sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+	const storage = sessionManager.getStorage();
+	const readText = storage.readText.bind(storage);
+	const read = vi.spyOn(storage, "readText").mockImplementation(file => {
+		if (file.endsWith("scheduled_tasks.json")) return Promise.reject(new Error("transient cron store failure"));
+		return readText(file);
+	});
+	try {
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			modelRegistry: new ModelRegistry(authStorage),
+			settings: Settings.isolated(),
+			sessionManager,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		await session.dispose();
+	} finally {
+		read.mockRestore();
 		authStorage.close();
 	}
 });

@@ -2497,7 +2497,6 @@ export class SessionManager {
 		options?: { initialCwd?: string; suppressBreadcrumb?: boolean },
 	): Promise<SessionManager> {
 		const loaded = await loadEntriesFromFile(filePath, storage);
-		if (loaded.length > 0) await storage.migrateLegacySessionSidecar(filePath);
 		const header = loaded.find(entry => entry.type === "session") as SessionHeader | undefined;
 		// Resume into the session's recorded cwd only when that directory still
 		// exists. A deleted project dir would make the constructor's #cwd — and the

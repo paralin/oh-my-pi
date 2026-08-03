@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import {
 	agentLoop,
@@ -15,6 +15,7 @@ import type {
 	AgentToolContext,
 	ToolCallContext,
 } from "@oh-my-pi/pi-agent-core/types";
+import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -2384,6 +2385,8 @@ describe("agentLoop with AgentMessage", () => {
 		});
 
 		const asideMessage = createUserMessage("bg-job-complete");
+		let asideCommitted = false;
+		Object.defineProperty(asideMessage, ASIDE_MESSAGE_COMMIT, { value: () => (asideCommitted = true) });
 		let asideDelivered = false;
 		const config: AgentLoopConfig = {
 			model: mock.model,
@@ -2424,6 +2427,131 @@ describe("agentLoop with AgentMessage", () => {
 			m => m.role === "user" && typeof m.content === "string" && m.content === "bg-job-complete",
 		);
 		expect(sawAsideInContext).toBe(true);
+		expect(asideCommitted).toBe(true);
+	});
+
+	it("commits initial aside messages when they enter the live context", async () => {
+		const message = createUserMessage("idle completion");
+		let committed = false;
+		Object.defineProperty(message, ASIDE_MESSAGE_COMMIT, { value: () => (committed = true) });
+		const mock = createMockModel({ handler: () => ({ content: ["done"] }) });
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+
+		const stream = agentLoop(
+			[message],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter },
+			undefined,
+			mock.stream,
+		);
+		expect(committed).toBe(true);
+		for await (const _event of stream) {
+			// Drain the loop.
+		}
+	});
+
+	it("discards a drained aside when the deadline expires before insertion", async () => {
+		let now = 100;
+		const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+		try {
+			const toolSchema = type({ value: "string" });
+			let executed = false;
+			const tool: AgentTool<typeof toolSchema, { value: string }> = {
+				name: "echo",
+				label: "Echo",
+				description: "Echo tool",
+				parameters: toolSchema,
+				async execute(_toolCallId, params) {
+					executed = true;
+					return { content: [{ type: "text", text: "done" }], details: { value: params.value } };
+				},
+			};
+			const aside = createUserMessage("completion");
+			let committed = false;
+			let discarded: Error | undefined;
+			Object.defineProperties(aside, {
+				[ASIDE_MESSAGE_COMMIT]: { value: () => (committed = true) },
+				[ASIDE_MESSAGE_DISCARD]: { value: (error: Error) => (discarded = error) },
+			});
+			let delivered = false;
+			const mock = createMockModel({
+				responses: [
+					{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "first" } }] },
+					{ content: ["unused"] },
+				],
+			});
+			const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+			const stream = agentLoop(
+				[createUserMessage("start")],
+				context,
+				{
+					model: mock.model,
+					convertToLlm: identityConverter,
+					deadline: 200,
+					getAsideMessages: async () => {
+						if (!delivered && executed) {
+							delivered = true;
+							now = 200;
+							return [aside];
+						}
+						return [];
+					},
+				},
+				undefined,
+				mock.stream,
+			);
+
+			for await (const _event of stream) {
+				// Drain the loop.
+			}
+
+			expect(committed).toBe(false);
+			expect(discarded?.message).toContain("not committed");
+			expect(context.messages).not.toContain(aside);
+		} finally {
+			nowSpy.mockRestore();
+		}
+	});
+
+	it("discards resolved asides when a later thunk fails", async () => {
+		const aside = createUserMessage("completion");
+		let discarded: Error | undefined;
+		Object.defineProperty(aside, ASIDE_MESSAGE_DISCARD, {
+			value: (error: Error) => {
+				discarded = error;
+			},
+		});
+		let delivered = false;
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const stream = agentLoop(
+			[createUserMessage("hi")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				getAsideMessages: async () => {
+					if (delivered) return [];
+					delivered = true;
+					return [
+						() => aside,
+						() => {
+							throw new Error("later aside failed");
+						},
+					];
+				},
+			},
+			undefined,
+			mock.stream,
+		);
+
+		const drain = async () => {
+			for await (const _event of stream) {
+				// Drain the loop.
+			}
+		};
+		await expect(drain()).rejects.toThrow("later aside failed");
+		expect(discarded?.message).toBe("later aside failed");
 	});
 
 	it("evaluates aside thunks at injection and skips ones that return null", async () => {

@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 
 export interface YieldDispatcher<P> {
@@ -155,12 +155,19 @@ export class YieldQueue {
 			}
 		}
 		if (mode === "idle" && idleMessages.length > 0) {
+			for (const item of idleMessages) this.#attachEntrySettlement(item);
 			try {
 				await this.#options.injectIdle(idleMessages.map(item => item.message));
-				for (const item of idleMessages) this.#resolveEntries(item.entries);
+				for (const item of idleMessages) {
+					(item.message as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
+				}
 			} catch (error) {
 				const dispatchError = error instanceof Error ? error : new Error(String(error));
-				for (const item of idleMessages) this.#rejectEntries(item.entries, dispatchError);
+				for (const item of idleMessages) {
+					(item.message as AgentMessage & { [ASIDE_MESSAGE_DISCARD]?: (error: Error) => void })[
+						ASIDE_MESSAGE_DISCARD
+					]?.(dispatchError);
+				}
 				logger.warn("Yield queue idle dispatch failed", { error: formatError(error) });
 				throw error;
 			}
@@ -183,7 +190,7 @@ export class YieldQueue {
 			thunks.push(() => {
 				const built = this.#build(kind, dispatcher, entries);
 				if (!built) return null;
-				this.#resolveEntries(built.entries);
+				this.#attachEntrySettlement(built);
 				return built.message;
 			});
 		}
@@ -201,6 +208,11 @@ export class YieldQueue {
 		}
 		for (const entries of this.#entries.values()) this.#rejectEntries(entries, error);
 		this.#entries.clear();
+		this.#idleFlushPending = false;
+	}
+
+	/** Clear a scheduled-flush latch when its host task is cancelled before running. */
+	cancelIdleFlushScheduling(): void {
 		this.#idleFlushPending = false;
 	}
 
@@ -260,6 +272,28 @@ export class YieldQueue {
 			logger.warn("Yield queue build failed", { kind, error: formatError(error) });
 			return null;
 		}
+	}
+
+	#attachEntrySettlement(built: BuiltMessage): void {
+		let settled = false;
+		Object.defineProperties(built.message, {
+			[ASIDE_MESSAGE_COMMIT]: {
+				configurable: true,
+				value: () => {
+					if (settled) return;
+					settled = true;
+					this.#resolveEntries(built.entries);
+				},
+			},
+			[ASIDE_MESSAGE_DISCARD]: {
+				configurable: true,
+				value: (error: Error) => {
+					if (settled) return;
+					settled = true;
+					this.#rejectEntries(built.entries, error);
+				},
+			},
+		});
 	}
 
 	#resolveEntries(entries: StoredEntry[]): void {

@@ -477,7 +477,7 @@ class DaemonBroker {
 				}
 				this.#ownerSockets.delete(owner);
 				this.#completionSubscriptions.delete(owner);
-				this.#setRecordCompletionCapability(owner, false);
+				await this.#setRecordCompletionCapability(owner, false);
 				this.#pendingCompletions.delete(owner);
 			}
 			for (const completionId of request.completionAcks ?? []) {
@@ -504,26 +504,39 @@ class DaemonBroker {
 				}
 			}
 			if (publishesCompletionOwners(request)) {
-				const advertisedOwners = new Set(request.owners ?? []);
+				const replayOwners = new Set(request.completionReplays ?? []);
+				const activeOwners = new Set(request.owners ?? []);
+				const detachedOwners = new Set(request.detachedOwners ?? []);
+				const advertisedOwners = new Set([...activeOwners, ...detachedOwners]);
 				for (const [owner, subscriptionId] of this.#completionSubscriptions) {
 					if (subscriptionId !== request.completionSubscriptionId || advertisedOwners.has(owner)) continue;
 					this.#ownerSockets.delete(owner);
 					this.#completionSubscriptions.delete(owner);
-					this.#setRecordCompletionCapability(owner, false);
+					await this.#setRecordCompletionCapability(owner, false);
 					this.#pendingCompletions.delete(owner);
 				}
-				for (const owner of advertisedOwners) {
+				for (const owner of activeOwners) {
 					this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
-					this.#setRecordCompletionCapability(owner, true);
+					await this.#setRecordCompletionCapability(owner, true);
 					const previous = this.#ownerSockets.get(owner);
 					this.#ownerSockets.set(owner, {
 						socket,
 						subscriptionId: request.completionSubscriptionId,
 					});
-					if (previous?.socket === socket) continue;
+					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
 					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
 						socket.write(`${JSON.stringify(completion)}\n`);
 					}
+				}
+				for (const owner of detachedOwners) {
+					const subscriptionId = this.#completionSubscriptions.get(owner);
+					if (this.#completionSubscriptions.has(owner) && subscriptionId !== request.completionSubscriptionId) {
+						continue;
+					}
+					this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
+					await this.#setRecordCompletionCapability(owner, true);
+					const registration = this.#ownerSockets.get(owner);
+					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 				}
 			}
 			const result = await this.#dispatch(request.operation);
@@ -1171,8 +1184,9 @@ class DaemonBroker {
 			});
 	}
 
-	#setRecordCompletionCapability(owner: string, capable: boolean): void {
+	async #setRecordCompletionCapability(owner: string, capable: boolean): Promise<void> {
 		const subscriptionId = capable ? this.#completionSubscriptions.get(owner) : undefined;
+		const persistence: Promise<void>[] = [];
 		for (const record of this.#records.values()) {
 			const clearPendingCompletions = !capable && record.pendingCompletions.length > 0;
 			if (
@@ -1187,7 +1201,9 @@ class DaemonBroker {
 			record.completionSubscriptionId = subscriptionId;
 			if (!capable) record.pendingCompletions = [];
 			this.#persist(record);
+			persistence.push(record.persistQueue);
 		}
+		await Promise.all(persistence);
 	}
 
 	async #recoverRecords(): Promise<void> {
@@ -1207,13 +1223,9 @@ class DaemonBroker {
 				const snapshot = parseDaemonSnapshot(decoded.daemon);
 				const spec = parseDaemonSpec(decoded.spec);
 				const processRef = snapshot.pid === undefined ? null : Process.fromPid(snapshot.pid);
-				const detached =
-					spec.detached &&
-					!terminalState(snapshot.state) &&
-					snapshot.state !== "stopping" &&
-					processRef?.status() === "running";
-				const recoveredDead =
-					spec.detached && !terminalState(snapshot.state) && snapshot.state !== "stopping" && !detached;
+				const recoverableExit = !terminalState(snapshot.state) && snapshot.state !== "stopping";
+				const detached = spec.detached && recoverableExit && processRef?.status() === "running";
+				const recoveredDead = recoverableExit && !detached;
 				if (!detached) {
 					// Reap only records that were still alive when the previous broker
 					// exited; already-terminal records keep their real exit time so
@@ -1309,7 +1321,7 @@ class DaemonBroker {
 	}
 
 	#scheduleIdleShutdown(): void {
-		if (this.#shuttingDown || this.#clients.size > 0 || this.#pendingCompletions.size > 0) return;
+		if (this.#shuttingDown || this.#clients.size > 0) return;
 		clearTimeout(this.#idleTimer);
 		this.#idleTimer = setTimeout(() => {
 			this.#idleTimer = undefined;
@@ -1317,7 +1329,7 @@ class DaemonBroker {
 				const livePersistent = [...this.#records.values()].some(
 					record => record.spec.persist && !terminalState(record.snapshot.state),
 				);
-				if (this.#clients.size > 0 || livePersistent || this.#pendingCompletions.size > 0) return;
+				if (this.#clients.size > 0 || livePersistent) return;
 				if (await hasLiveDaemonProjectPresence(this.#runtimeDir)) {
 					this.#scheduleIdleShutdown();
 					return;

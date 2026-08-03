@@ -28,6 +28,7 @@ import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-r
 import { AgentSession } from "../session/agent-session";
 import type { SessionEntry } from "../session/session-entries";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
+import { sessionSidecarDir } from "../session/session-paths";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
@@ -567,7 +568,7 @@ export class VibeSessionRegistry {
 		for (const record of persistedPending) {
 			if (
 				!parentSessionFile ||
-				path.resolve(parentSessionFile.slice(0, -6), `${record.id}.jsonl`) !== record.childSessionFile
+				path.resolve(sessionSidecarDir(parentSessionFile), `${record.id}.jsonl`) !== record.childSessionFile
 			) {
 				throw new ToolError(`Vibe session "${record.id}" changed parent scope before termination.`);
 			}
@@ -696,7 +697,7 @@ export class VibeSessionRegistry {
 	): Promise<string | undefined> {
 		if (options?.requireAgentMatch !== false && spawn.agent !== VIBE_CLI_AGENT[spawn.cli]) return undefined;
 		if (!/^[A-Za-z0-9_-]+$/.test(spawn.id) || spawn.childSessionFile !== `${spawn.id}.jsonl`) return undefined;
-		const artifactsDir = path.resolve(parentSessionFile.slice(0, -6));
+		const artifactsDir = path.resolve(sessionSidecarDir(parentSessionFile));
 		const childSessionFile = path.resolve(artifactsDir, spawn.childSessionFile);
 		const relative = path.relative(artifactsDir, childSessionFile);
 		if (!relative || path.isAbsolute(relative) || relative.startsWith(`..${path.sep}`) || relative === "..") {
@@ -887,7 +888,7 @@ export class VibeSessionRegistry {
 		const parentSessionFile = scope.parentSessionFile;
 		const childSessionName = `${id}.jsonl`;
 		const childSessionFile = parentSessionFile
-			? path.resolve(parentSessionFile.slice(0, -6), childSessionName)
+			? path.resolve(sessionSidecarDir(parentSessionFile), childSessionName)
 			: undefined;
 		const createdAt = Date.now();
 		const record: VibeRecord = {
@@ -1256,7 +1257,7 @@ export class VibeSessionRegistry {
 		onProgress: (progress: AgentProgress) => void,
 	): Promise<ExecutorOptions> {
 		const sessionFile = session.getSessionFile();
-		const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
+		const sessionArtifactsDir = sessionFile ? sessionSidecarDir(sessionFile) : null;
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
 		await fs.mkdir(artifactsDir, { recursive: true });
 		if (!sessionArtifactsDir) registerArtifactsDir(artifactsDir);
@@ -1360,6 +1361,7 @@ export class VibeSessionRegistry {
 					if (record.childSessionFile && !turnStartedPersisted) {
 						throw new ToolError(`Vibe session "${record.id}" changed parent scope before its turn started.`);
 					}
+					const activeSessionFile = session.getSessionFile();
 					const result = options.first
 						? await runSubprocess(await this.#buildSpawnOptions(session, record, message, signal, onProgress))
 						: await runSubagentFollowUpTurn({
@@ -1370,7 +1372,7 @@ export class VibeSessionRegistry {
 								signal,
 								onProgress,
 								eventBus: session.eventBus,
-								artifactsDir: session.getSessionFile()?.slice(0, -6),
+								artifactsDir: activeSessionFile ? sessionSidecarDir(activeSessionFile) : undefined,
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {

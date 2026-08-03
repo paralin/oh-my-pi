@@ -1,5 +1,5 @@
 import { toError } from "@oh-my-pi/pi-utils";
-import { legacySessionSidecarDir, sessionSidecarDir } from "./session-paths";
+import { sessionSidecarDir } from "./session-paths";
 import type {
 	SessionStorage,
 	SessionStorageStat,
@@ -29,6 +29,9 @@ export interface SessionStorageBackend {
 	readFull(path: string): Promise<string | null>;
 	readSlices(path: string, prefixBytes: number, suffixBytes: number): Promise<[string, string]>;
 	writeFull(path: string, content: string, mtimeMs: number, title?: SessionTitleUpdate): Promise<void>;
+	acquireLease?(path: string, owner: string, expiresAt: number, now: number): Promise<boolean>;
+	renewLease?(path: string, owner: string, expiresAt: number, now: number): Promise<boolean>;
+	releaseLease?(path: string, owner: string): Promise<void>;
 	append(path: string, line: string, mtimeMs: number): Promise<void>;
 	updateSessionTitle(path: string, title: SessionTitleUpdate, mtimeMs: number): Promise<void>;
 	truncate(path: string, mtimeMs: number): Promise<void>;
@@ -224,6 +227,21 @@ export class IndexedSessionStorage implements SessionStorage {
 		return [title ? overlayTitleSlotPrefix(prefix, prefixLimit, title) : prefix, suffix];
 	}
 
+	acquireLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		if (!this.#backend.acquireLease) throw new Error("Session storage backend does not support leases");
+		return this.#backend.acquireLease(path, owner, expiresAt, now);
+	}
+
+	renewLease(path: string, owner: string, expiresAt: number, now: number): Promise<boolean> {
+		if (!this.#backend.renewLease) throw new Error("Session storage backend does not support lease renewal");
+		return this.#backend.renewLease(path, owner, expiresAt, now);
+	}
+
+	releaseLease(path: string, owner: string): Promise<void> {
+		if (!this.#backend.releaseLease) throw new Error("Session storage backend does not support leases");
+		return this.#backend.releaseLease(path, owner);
+	}
+
 	async writeText(path: string, content: string): Promise<void> {
 		await this.#awaitPath(path);
 		const previous = this.#index.get(path);
@@ -299,20 +317,6 @@ export class IndexedSessionStorage implements SessionStorage {
 			this.#index.set(src, entry);
 			throw toError(err);
 		}
-	}
-
-	async migrateLegacySessionSidecar(sessionPath: string): Promise<void> {
-		const legacyDir = legacySessionSidecarDir(sessionPath);
-		if (!legacyDir) return;
-		const canonicalDir = sessionSidecarDir(sessionPath);
-		const legacyPrefix = `${legacyDir}/`;
-		const moves = [...this.#index.keys()]
-			.filter(file => file.startsWith(legacyPrefix))
-			.map(file => [file, `${canonicalDir}/${file.slice(legacyPrefix.length)}`] as const);
-		if (moves.some(([, target]) => this.#index.has(target))) {
-			throw new Error(`Both legacy and canonical session sidecar files exist: ${legacyDir}, ${canonicalDir}`);
-		}
-		for (const [source, target] of moves) await this.rename(source, target);
 	}
 
 	async unlink(path: string): Promise<void> {

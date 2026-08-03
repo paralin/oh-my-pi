@@ -11,7 +11,7 @@ import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize } from "@oh-my-pi/pi-utils";
+import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
@@ -658,16 +658,12 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 }
 
 export function shortenEmbeddedPaths(text: string): string {
-	return text
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			return `${leading}${shortenPath(segment.slice(leading.length, end))}${trailing}`;
-		})
-		.join(" ");
+	const sanitized = sanitizeText(text);
+	const home = os.homedir();
+	if (!home) return sanitized;
+	const escapedHome = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const embeddedHome = new RegExp(`(^|[\\s=,:"'\`([{]|:\\/\\/)${escapedHome}(?=$|[\\\\/])`, "g");
+	return sanitized.replace(embeddedHome, "$1~");
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

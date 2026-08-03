@@ -56,12 +56,14 @@ describe("launch logs compatibility", () => {
 			id: "request-1",
 			token: "token-1",
 			owners: ["session-owner"],
+			detachedOwners: ["parked-owner"],
 			completionUnsubscribes: ["disposed-owner"],
 			completionSubscriptionId: "subscription-1",
 			operation: { op: "list" },
 		});
 
 		expect(request.owners).toEqual(["session-owner"]);
+		expect(request.detachedOwners).toEqual(["parked-owner"]);
 		expect(request.completionUnsubscribes).toEqual(["disposed-owner"]);
 		expect(request.completionSubscriptionId).toBe("subscription-1");
 	});

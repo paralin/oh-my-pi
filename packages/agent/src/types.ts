@@ -31,13 +31,23 @@ export type StreamFn = (
 	...args: Parameters<typeof streamSimple>
 ) => AssistantMessageEventStream | Promise<AssistantMessageEventStream>;
 
+/** Called once an aside has been inserted into the agent's live context. */
+export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
+/** Called when an aside was drained but the agent loop ended before inserting it. */
+export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
+
+export type CommittableAsideMessage = AgentMessage & {
+	[ASIDE_MESSAGE_COMMIT]?: () => void;
+	[ASIDE_MESSAGE_DISCARD]?: (error: Error) => void;
+};
+
 /**
  * An aside entry: a ready {@link AgentMessage}, or a sync thunk evaluated at
  * injection time that returns the message to inject or `null` to skip it. Thunks
  * let the producer make the final inject-or-drop decision against current state
  * (e.g. dropping late diagnostics a newer edit superseded).
  */
-export type AsideMessage = AgentMessage | (() => AgentMessage | null);
+export type AsideMessage = CommittableAsideMessage | (() => CommittableAsideMessage | null);
 
 export interface AgentTurnEndContext {
 	/** Assistant/user message that just completed this turn boundary. */

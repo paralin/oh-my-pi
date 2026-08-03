@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { isLaunchCompletionOwner } from "@oh-my-pi/pi-coding-agent/session/launch-completion";
+import { type AgentMessage, ASIDE_MESSAGE_COMMIT } from "@oh-my-pi/pi-agent-core";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
 
 type Entry = {
@@ -49,14 +48,6 @@ function createHarness(initialStreaming: boolean) {
 		},
 	};
 }
-
-describe("launch completion ownership", () => {
-	test("accepts primary and advisor completions for the active session", () => {
-		expect(isLaunchCompletionOwner("session", "session")).toBe(true);
-		expect(isLaunchCompletionOwner("session-advisor", "session")).toBe(true);
-		expect(isLaunchCompletionOwner("old-session-advisor", "session")).toBe(false);
-	});
-});
 
 describe("YieldQueue", () => {
 	test("enqueue while streaming defers until streaming flush", async () => {
@@ -158,6 +149,34 @@ describe("YieldQueue", () => {
 		await flush;
 		await receipt;
 		expect(delivered).toBe(true);
+	});
+
+	test("resolves an idle receipt when injection commits before the turn finishes", async () => {
+		const finishTurn = Promise.withResolvers<void>();
+		const scheduledFlushes: Array<() => Promise<void>> = [];
+		const queue = new YieldQueue({
+			isStreaming: () => false,
+			injectIdle: async messages => {
+				(messages[0] as AgentMessage & { [ASIDE_MESSAGE_COMMIT]?: () => void })[ASIDE_MESSAGE_COMMIT]?.();
+				await finishTurn.promise;
+			},
+			scheduleIdleFlush: run => scheduledFlushes.push(run),
+		});
+		queue.register<Entry>("items", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+		});
+		const receipt = queue.enqueueWithReceipt("items", { id: "idle-commit" });
+
+		const flush = scheduledFlushes[0]!();
+		await receipt;
+		let flushFinished = false;
+		void flush.then(() => {
+			flushFinished = true;
+		});
+		await Promise.resolve();
+		expect(flushFinished).toBe(false);
+		finishTurn.resolve();
+		await flush;
 	});
 
 	test("isStale drops stale entries and keeps survivors", async () => {
