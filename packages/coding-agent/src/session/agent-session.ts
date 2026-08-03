@@ -6537,11 +6537,11 @@ export class AgentSession {
 			}
 		}
 
+		this.#disconnectFromAgent();
 		await this.abort();
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let advisorRecordersDetached = false;
 		try {
-			this.#disconnectFromAgent();
 			this.#cancelOwnAsyncJobs();
 			this.#closeAllProviderSessions("new session");
 			await this.#bash.flushPending();
