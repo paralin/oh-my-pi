@@ -101,6 +101,7 @@
 ### Fixed
 
 - Fixed a supervised process reaching a terminal state without telling the session that launched it. The broker recorded the final snapshot for `hub ps` to read but emitted no event, so an idle owner only learned that a process had exited by polling. The broker now sends one `daemon-completed` notification per terminal exit to the owner socket recorded at launch, and the session turns it into a model-visible message. Restart transitions stay live, and a stale or disposed session drops the notification without changing explicit `hub wait` or persistence behavior.
+- Added `session.start`, `session.resume`, `session.replay`, `session.result`, `session.steer`, and `session.watch` to RPC mode, giving an external supervisor a durable append-only record of a session beside its transcript. A run claims an identity so a retried dispatch resolves against the existing episode instead of launching a second one, events carry a sequence a reconnecting supervisor can replay from, steering is acknowledged and redelivered when it was accepted but never injected, and the terminal result is sealed once and returned identically to every later reader. Clients that do not send `session.start` or `session.resume` are unaffected: nothing is recorded and events stream as before.
 
 ## [17.2.4] - 2026-08-01
 
