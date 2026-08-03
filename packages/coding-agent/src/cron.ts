@@ -1049,6 +1049,20 @@ export class CronManager {
 						deliveryError ??= outcome.reason;
 					}
 
+					const acceptedAt = this.#now();
+					for (const [index, delivery] of deliveries.entries()) {
+						if (outcomes[index]?.status !== "fulfilled" || !delivery.job.recurring) continue;
+						const next = nextCronFire(
+							delivery.job.expression,
+							new Date(Math.max(delivery.previousNextFireAt, acceptedAt)),
+						);
+						if (delivery.job.expiresAt !== undefined && next.getTime() > delivery.job.expiresAt) {
+							jobs.delete(delivery.job.id);
+						} else {
+							delivery.job.nextFireAt = next.getTime();
+						}
+					}
+
 					const durableAccepted = deliveries.filter(
 						(delivery, index) => delivery.job.durable && outcomes[index]?.status === "fulfilled",
 					);
