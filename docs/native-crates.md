@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Native Crates
 
 Contributor map for Rust workspace members under `crates/`. They are implementation details behind `@oh-my-pi/pi-natives` and its embedded shell; package consumers use JavaScript entrypoints, not these crate APIs.

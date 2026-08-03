@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Natives Binding Contract (JavaScript/TypeScript Side)
 
 This page defines the public JS/TS boundary between `@oh-my-pi/pi-natives` callers and its N-API addon. The authoritative public root surface is `packages/natives/native/index.d.ts` plus the explicit ESM exports in `native/index.js`; Rust internals not present there are not package API.

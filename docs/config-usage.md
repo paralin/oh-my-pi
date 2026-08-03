@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Configuration Discovery and Resolution
 
 This document describes how the coding-agent resolves configuration today: which roots are scanned, how precedence works, and how resolved config is consumed by settings, skills, hooks, tools, and extensions.

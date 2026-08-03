@@ -7,6 +7,7 @@ import { createPublicSecurityScan, redactPrivateSecurityMetadata } from "../secu
 import { createSecurityResource } from "../security/resource-output";
 import type { SecurityScanSummary } from "../security/store";
 import { SecurityStore } from "../security/store";
+import { booleanSettingFromContext } from "./context-settings";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 export type SecurityStoreResolver = (cwd: string, signal?: AbortSignal) => Promise<SecurityStore>;
@@ -17,18 +18,6 @@ export function isSecurityEnabled(): boolean {
 		return settings.get("security.enabled");
 	} catch {
 		return getDefault("security.enabled");
-	}
-}
-
-function securityEnabledFromContext(context?: ResolveContext): boolean | undefined {
-	if (!context?.settings || typeof context.settings !== "object") return undefined;
-	try {
-		const get = Reflect.get(context.settings, "get");
-		if (typeof get !== "function") return undefined;
-		const enabled = Reflect.apply(get, context.settings, ["security.enabled"]);
-		return typeof enabled === "boolean" ? enabled : undefined;
-	} catch {
-		return undefined;
 	}
 }
 
@@ -117,7 +106,8 @@ export class SecurityProtocolHandler implements ProtocolHandler {
 	}
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		if (!(securityEnabledFromContext(context) ?? this.#enabled())) throw new SecurityDisabledError();
+		if (!(booleanSettingFromContext(context, "security.enabled") ?? this.#enabled()))
+			throw new SecurityDisabledError();
 		const parts = splitSecurityPath(url);
 		const store = await this.#store(context);
 		if (parts.length === 0) {
@@ -235,7 +225,7 @@ export class SecurityProtocolHandler implements ProtocolHandler {
 	}
 
 	async complete(query = "", context?: ResolveContext): Promise<UrlCompletion[]> {
-		if (!(securityEnabledFromContext(context) ?? this.#enabled())) return [];
+		if (!(booleanSettingFromContext(context, "security.enabled") ?? this.#enabled())) return [];
 		const store = await this.#store(context);
 		const scans = await store.listScans();
 		const candidates: UrlCompletion[] = [{ value: "scans", label: "Scans", description: "Stored security scans" }];

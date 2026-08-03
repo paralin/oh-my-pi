@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Native Rust task execution and cancellation (`pi-natives`)
 
 This document describes how `crates/pi-natives` schedules native work and how cancellation flows from JS options (`timeoutMs`, `AbortSignal`) into Rust execution.

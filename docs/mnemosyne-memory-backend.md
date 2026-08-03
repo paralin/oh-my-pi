@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # Mnemopi memory backend
 
 Oh My Pi can use `@oh-my-pi/pi-mnemopi` as a local long-term memory backend.

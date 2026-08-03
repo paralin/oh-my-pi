@@ -1,3 +1,5 @@
+<!-- omp-audience: maintainer -->
+
 # DeepSeek tool-calling wire format
 
 DeepSeek's chat models (DeepSeek-V3, V3-0324, R1, R1-0528, and DeepSeek-V3.1) share a
