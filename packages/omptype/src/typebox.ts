@@ -149,7 +149,7 @@ function applyMeta<T>(schema: RuntimeType<T>, opts?: Meta): CompatRuntime<T> {
 }
 
 function withJsonSchemaKeywords<T>(schema: CompatRuntime<T>, keywords: Record<string, unknown>): CompatRuntime<T> {
-	const emitBase = schema.toJsonSchema;
+	const emitBase = schema.toJsonSchema.bind(schema);
 	schema.toJsonSchema = options => ({ ...emitBase(options), ...keywords });
 	return schema;
 }
