@@ -45,9 +45,13 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
+import {
+	type RpcHarnessEvent,
+	RpcHarnessSessionOwner,
+	rpcHarnessRecordFileForSessionFile,
+	rpcSteeringPayloadIdentity,
+} from "./rpc-harness";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
-import { type RpcHarnessEvent, RpcHarnessSessionOwner, rpcHarnessRecordFileForSessionFile } from "./rpc-harness";
-import { claimRpcInput } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
@@ -84,10 +88,24 @@ export function startRpcResidualPrompt<T>(
 	return start();
 }
 
+/**
+ * Whether the episode still owes work that must land before a terminal result.
+ *
+ * Advisor reviews count even though every primary-facing signal here can read
+ * idle while one is running: advisors review out of band, and a review that
+ * lands late persists a card into the transcript or resumes the primary through
+ * a trigger-turn blocker. Sealing on the primary signals alone writes the
+ * terminal result over work that then appears after it.
+ */
 export function hasPendingRpcContinuation(
 	session: Pick<
 		AgentSession,
-		"hasPendingAsyncWork" | "hasPendingBashMessages" | "hasQueuedAgentMessages" | "isCompacting" | "isStreaming"
+		| "hasPendingAdvisorReviews"
+		| "hasPendingAsyncWork"
+		| "hasPendingBashMessages"
+		| "hasQueuedAgentMessages"
+		| "isCompacting"
+		| "isStreaming"
 	>,
 ): boolean {
 	return (
@@ -95,21 +113,102 @@ export function hasPendingRpcContinuation(
 		session.isCompacting ||
 		session.hasPendingAsyncWork() ||
 		session.hasPendingBashMessages ||
-		session.hasQueuedAgentMessages
+		session.hasQueuedAgentMessages ||
+		session.hasPendingAdvisorReviews
 	);
 }
 
 export function rpcExitOutcome(hasIncompleteWork: boolean): "aborted" | "completed" {
 	return hasIncompleteWork ? "aborted" : "completed";
 }
+/**
+ * Acceptance control for one terminal seal attempt.
+ *
+ * Every source of episode work — extension handlers, stranded IRC asides, and
+ * the yield queue's idle flush — asks the custody gate before starting, so
+ * closing that gate is what makes a continuation check final. `reopen()`
+ * abandons the attempt: it must also re-arm whatever the closed gate parked,
+ * because a refused wake leaves its entries queued with no self-rearming timer.
+ */
+export interface RpcResultSealAcceptance {
+	/** Stop admitting episode work, so a continuation check cannot go stale. */
+	close(): void;
+	/** Abandon the attempt: readmit work and re-arm the wakes the gate parked. */
+	reopen(): void;
+}
+
+/** Closes custody for a seal attempt and re-arms parked idle flushes when it is abandoned. */
+export function rpcResultSealAcceptance(
+	owner: Pick<RpcHarnessSessionOwner, "beginResultSeal" | "cancelResultSeal">,
+	requestIdleFlush: () => void,
+): RpcResultSealAcceptance {
+	return {
+		close: () => owner.beginResultSeal(),
+		reopen: () => {
+			owner.cancelResultSeal();
+			// Reopening only stops the gate refusing; nothing re-evaluates the wakes
+			// it already parked, and neither `#endInFlight` nor `#resetInFlight`
+			// does more than re-ask the same gate. Re-arm once here — the same
+			// re-arm `bindHarness` performs once custody settles — or entries parked
+			// by this abandoned attempt wait for disposal.
+			requestIdleFlush();
+		},
+	};
+}
+export function retryRpcResultSealAfterAdvisorSettlement(
+	session: Pick<AgentSession, "onAdvisorReviewsSettled">,
+	retry: () => void,
+): () => void {
+	let active = true;
+	let unsubscribe = () => {};
+	const settled = () => {
+		if (!active) return;
+		active = false;
+		unsubscribe();
+		retry();
+	};
+	unsubscribe = session.onAdvisorReviewsSettled(settled);
+	return () => {
+		if (!active) return;
+		active = false;
+		unsubscribe();
+	};
+}
+
+/**
+ * Decide whether the terminal result may be sealed now.
+ *
+ * A forced exit path seals unconditionally. Otherwise the terminal boundary is
+ * drained and the episode checked for a continuation — but the check on its own
+ * settles nothing, because work enters through a custody gate that stays open
+ * across every `await` here. A check that yields before sealing can have its
+ * answer invalidated by extension, IRC, or yield-queue work admitted in the gap,
+ * and the terminal result would then be written over work that is still running.
+ *
+ * So acceptance closes in the same synchronous step the first drain resolves in,
+ * and the boundary is drained a second time with the gate shut — nothing new can
+ * enter now, and work admitted *during* the first drain reaches a boundary and
+ * becomes visible. Only then does the continuation check decide. Finding a
+ * continuation abandons the attempt and reopens acceptance.
+ */
 export async function prepareRpcResultSeal(
 	force: boolean,
 	drain: () => Promise<void>,
 	hasPendingContinuation: () => boolean,
+	acceptance?: RpcResultSealAcceptance,
 ): Promise<boolean> {
 	if (force) return true;
 	await drain();
-	return !hasPendingContinuation();
+	acceptance?.close();
+	try {
+		await drain();
+		if (!hasPendingContinuation()) return true;
+	} catch (errorValue) {
+		acceptance?.reopen();
+		throw errorValue;
+	}
+	acceptance?.reopen();
+	return false;
 }
 export async function compactRpcSession<T>(
 	isStreaming: boolean,
@@ -160,6 +259,7 @@ export function reuseRpcHarnessBinding(
 export function hasActiveRpcSessionWork(
 	session: Pick<
 		AgentSession,
+		| "hasPendingAdvisorReviews"
 		| "hasPendingAsyncWork"
 		| "hasPendingBashMessages"
 		| "hasPendingExtensionEvents"
@@ -463,13 +563,21 @@ export class RpcTerminalTaskTracker {
 		}
 	}
 }
+export function rpcForcedExitOutcome(
+	session: Parameters<typeof hasPendingRpcContinuation>[0],
+	terminalTasks: Pick<RpcTerminalTaskTracker, "hasPendingTasks">,
+): "aborted" | "completed" {
+	return rpcExitOutcome(hasPendingRpcContinuation(session) || terminalTasks.hasPendingTasks);
+}
 
 export async function drainRpcTerminalBoundary(
 	session: Pick<
 		AgentSession,
 		| "flushPendingBashMessages"
+		| "hasPendingAdvisorReviews"
 		| "hasPendingBashMessages"
 		| "hasPendingExtensionEvents"
+		| "waitForPendingAdvisorReviews"
 		| "waitForPendingExtensionEvents"
 	>,
 	terminalTasks: RpcTerminalTaskTracker,
@@ -479,6 +587,12 @@ export async function drainRpcTerminalBoundary(
 		await session.waitForPendingExtensionEvents();
 		await Promise.all([terminalTasks.wait(), extensionTasks.waitForPendingAgentMessageTasks()]);
 		if (session.hasPendingBashMessages) await session.flushPendingBashMessages();
+		// Give an in-flight advisor review its chance to land inside the boundary
+		// rather than after the terminal result. The wait is bounded, so it is
+		// deliberately absent from the loop condition below: an advisor that never
+		// catches up would otherwise spin here. What it leaves behind stays visible
+		// to `hasPendingRpcContinuation`, which then refuses the seal outright.
+		if (session.hasPendingAdvisorReviews) await session.waitForPendingAdvisorReviews();
 	} while (
 		session.hasPendingExtensionEvents ||
 		terminalTasks.hasPendingTasks ||
@@ -538,10 +652,11 @@ export function streamRpcSessionEvent(
 	deps: RpcSessionEventStreamDeps,
 ): Promise<void> | undefined {
 	const ledger = deps.ledger();
-	if (!ledger || ledger.hasResult) {
+	if (!ledger) {
 		deps.output(event);
 		return undefined;
 	}
+	if (ledger.hasResult) return undefined;
 	const eventPersistence = ledger.appendEvent(persistenceSafeAgentSessionEvent(event), event).then(() => undefined);
 	void eventPersistence.catch(errorValue => {
 		if (ledger.hasResult) return;
@@ -675,12 +790,26 @@ export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps):
 export class RpcInputDispatcher {
 	#tail: Promise<void> = Promise.resolve();
 	#tasks = new Set<Promise<void>>();
+	#resultWaits = new Set<Promise<void>>();
+	#running = new Set<RpcCommand>();
+	#closing = false;
 	readonly #deps: RpcInputFrameDeps;
 	readonly #afterSerialCommand: (() => Promise<void>) | undefined;
+	readonly #isLongRunningSerialCommand: ((command: RpcCommand) => boolean) | undefined;
+	readonly #abortSerialCommand: ((command: RpcCommand) => void) | undefined;
 
-	constructor(options: { deps: RpcInputFrameDeps; afterSerialCommand?: () => Promise<void> }) {
+	constructor(options: {
+		deps: RpcInputFrameDeps;
+		afterSerialCommand?: () => Promise<void>;
+		/** Whether a serial command starts work that only an abort can settle. */
+		isLongRunningSerialCommand?: (command: RpcCommand) => boolean;
+		/** Aborts the started work of a long-running serial command. */
+		abortSerialCommand?: (command: RpcCommand) => void;
+	}) {
 		this.#deps = options.deps;
 		this.#afterSerialCommand = options.afterSerialCommand;
+		this.#isLongRunningSerialCommand = options.isLongRunningSerialCommand;
+		this.#abortSerialCommand = options.abortSerialCommand;
 	}
 
 	/** Accept a parsed input frame without blocking the stdin reader. */
@@ -690,12 +819,19 @@ export class RpcInputDispatcher {
 
 			const command = parsed as RpcCommand;
 			if (command.type === "session.result") {
-				const task = this.#tail.then(
-					() => dispatchRpcInputFrame(command, this.#deps),
-					() => dispatchRpcInputFrame(command, this.#deps),
+				// A result wait can only settle once terminal state exists, and on
+				// the EOF path that state is created by `sealLedgerOnExit()` which
+				// runs *after* `drain()`. Result waits therefore get their own
+				// custody set instead of `#tasks`: the pre-seal drain covers the
+				// serial tail only, and `drainResultWaits()` (post-seal) plus
+				// `trackBackgroundTask` keep shutdown and disposal waiting for the
+				// response frame this command still owes the client.
+				const wait = this.#tail.then(
+					() => this.#dispatchResultWait(command),
+					() => this.#dispatchResultWait(command),
 				);
-				this.#tasks.add(task);
-				void task.finally(() => this.#tasks.delete(task));
+				this.#resultWaits.add(wait);
+				void wait.finally(() => this.#resultWaits.delete(wait)).catch(() => {});
 				return;
 			}
 
@@ -719,21 +855,104 @@ export class RpcInputDispatcher {
 		}
 	}
 
-	/** Await every accepted serial command, including commands queued before EOF. */
+	/**
+	 * Close the accepted serial tail for an exit path.
+	 *
+	 * A serial command that only an abort can settle — `compact` parked on a
+	 * provider summary is the case that wedges the process — is aborted here if
+	 * it has already started, so {@link drain} can finish. The abort has to
+	 * happen before that drain rather than during teardown: the exit path seals
+	 * the ledger after the drain, and `session.dispose()`, which owns this abort
+	 * today, runs only after the seal. Waiting first costs the whole exit and
+	 * buys nothing, because disposal aborts the same work moments later anyway.
+	 *
+	 * A command of that kind still queued has not started, so there is nothing to
+	 * abort; it is refused when its turn comes instead, since starting fresh
+	 * long-running work after the client is gone would re-stall the drain this
+	 * abort just unblocked. Ordinary queued commands are untouched and still run.
+	 * Both refused and aborted commands settle through
+	 * {@link RpcInputDispatcher.dispatch}'s serial path, so each still emits the
+	 * response or error frame it owes the client.
+	 */
+	closeForExit(): void {
+		this.#closing = true;
+		for (const command of this.#running) {
+			if (this.#isLongRunningSerialCommand?.(command)) this.#abortSerialCommand?.(command);
+		}
+	}
+
+	/**
+	 * Await every accepted serial command, including commands queued before EOF.
+	 *
+	 * Deferred `session.result` waits are deliberately excluded — see
+	 * {@link drainResultWaits} — so an exit path can finish this drain and seal
+	 * the terminal result the waiters are blocked on.
+	 */
 	async drain(): Promise<void> {
 		while (this.#tasks.size > 0) {
 			await Promise.allSettled(Array.from(this.#tasks));
 		}
 	}
 
+	/** Whether a `session.result` command still owes the client a response frame. */
+	get hasPendingResultWaits(): boolean {
+		return this.#resultWaits.size > 0;
+	}
+
+	/**
+	 * Await every accepted `session.result` command, including one still queued
+	 * behind the serial tail. Only safe once the terminal result has been sealed.
+	 */
+	async drainResultWaits(): Promise<void> {
+		while (this.#resultWaits.size > 0) {
+			await Promise.allSettled(Array.from(this.#resultWaits));
+		}
+	}
+
+	/**
+	 * Run a deferred `session.result` once the serial tail settles.
+	 *
+	 * {@link dispatchRpcInputFrame} dispatches it in the background and hands the
+	 * wait to `trackBackgroundTask`; that task is intercepted here (and still
+	 * forwarded) so this promise covers the whole command — queue wait, dispatch,
+	 * and the wait for terminal state — and dispatch failures still reach the
+	 * client as a response frame instead of an unhandled rejection.
+	 */
+	async #dispatchResultWait(command: RpcCommand): Promise<void> {
+		let resultWait: Promise<void> | undefined;
+		try {
+			const awaited = dispatchRpcInputFrame(command, {
+				...this.#deps,
+				trackBackgroundTask: task => {
+					resultWait = task;
+					this.#deps.trackBackgroundTask?.(task);
+				},
+			});
+			if (awaited) await awaited;
+			if (resultWait) await resultWait;
+		} catch (err: unknown) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.#deps.output(this.#deps.errorResponse(command.id, command.type, message));
+		}
+	}
+
 	async #dispatchSerialCommand(command: RpcCommand): Promise<void> {
 		try {
+			// Reached its turn only after the exit path closed the tail: starting
+			// long-running work now would re-stall the drain that close unblocked.
+			// Refusing is still custody — the error frame below is the response this
+			// command owes — whereas starting it would strand the exit again.
+			if (this.#closing && this.#isLongRunningSerialCommand?.(command)) {
+				throw new Error("RPC client disconnected before the command started");
+			}
+			this.#running.add(command);
 			const awaited = dispatchRpcInputFrame(command, this.#deps);
 			if (awaited) await awaited;
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
 			this.#deps.output(this.#deps.errorResponse(command.id, command.type, message));
 		} finally {
+			this.#running.delete(command);
 			await this.#afterSerialCommand?.();
 		}
 	}
@@ -748,6 +967,20 @@ export async function finalizeRpcInputAfterEof(
 	await sealLedger();
 	await drainBackground();
 }
+
+/**
+ * Whether an exit path must still force the terminal seal.
+ *
+ * Failure reporting latches on the first durable failure from any path,
+ * including a session transcript flush that never reached the ledger. Only a
+ * latched ledger append failure takes sealing away, so every other failure
+ * still has to seal: an unsealed ledger leaves `session.result` waiters blocked
+ * in the shutdown drain and the episode without terminal state.
+ */
+export function shouldForceLedgerSeal(ledger: RpcHarnessSessionOwner | undefined): boolean {
+	return ledger?.canSealResult === true;
+}
+
 /**
  * Coordinates deferred shutdown with in-flight background input tasks.
  *
@@ -1102,39 +1335,48 @@ export async function runRpcMode(
 			});
 		}
 		const existingOwner = harnessOwner;
-		return bindingGuard.run(async () => {
-			const sessionFile = await materializeRpcCustodyTranscript(session);
-			const owner =
-				existingOwner ??
-				(await RpcHarnessSessionOwner.open(
-					session.sessionId,
-					rpcHarnessRecordFileForSessionFile(sessionFile),
-					event => output(event),
-					path.join(path.dirname(sessionFile), "rpc-runs.jsonl"),
-					{
-						acquireSessionLease: true,
-						displayEvent: event => session.restoreProviderValueForDisplay(event),
-						displayResult: result => ({
-							...result,
-							finalMessage: session.restoreProviderTextForDisplay(result.finalMessage),
-						}),
-					},
-				));
-			try {
-				const binding = await owner.bindRun(runId);
-				if (!harnessOwner) {
-					harnessOwner = owner;
-					const summary = summarizeRpcEpisode(await owner.replayPersisted());
-					episodeFinalMessage = summary.finalMessage;
-					episodeUsage = summary.usage;
+		return bindingGuard
+			.run(async () => {
+				const sessionFile = await materializeRpcCustodyTranscript(session);
+				const owner =
+					existingOwner ??
+					(await RpcHarnessSessionOwner.open(
+						session.sessionId,
+						rpcHarnessRecordFileForSessionFile(sessionFile),
+						event => output(event),
+						path.join(path.dirname(sessionFile), "rpc-runs.jsonl"),
+						{
+							acquireSessionLease: true,
+							displayEvent: event => session.restoreProviderValueForDisplay(event),
+							displayResult: result => ({
+								...result,
+								finalMessage: session.restoreProviderTextForDisplay(result.finalMessage),
+							}),
+						},
+					));
+				try {
+					const binding = await owner.bindRun(runId);
+					if (!harnessOwner) {
+						harnessOwner = owner;
+						const summary = summarizeRpcEpisode(await owner.replayPersisted());
+						episodeFinalMessage = summary.finalMessage;
+						episodeUsage = summary.usage;
+					}
+					return { owner, binding };
+				} catch (error) {
+					if (!existingOwner) await owner.dispose();
+					throw error;
 				}
-				return { owner, binding };
-			} catch (error) {
-				if (!existingOwner) await owner.dispose();
-				throw error;
-			}
-		});
+			})
+			.finally(() => {
+				// Binding parks yield-queue idle wakes instead of dropping them, and a parked
+				// flush has no self-rearming timer. Custody has settled by the time this runs,
+				// so re-arm once: entries still blocked by a sealed episode simply park again
+				// at the next wake check.
+				session.yieldQueue.requestIdleFlush();
+			});
 	};
+	let pendingAdvisorSealRetryUnsubscribe: (() => void) | undefined;
 
 	const completeRpcResult = async (
 		stopReason: string,
@@ -1142,15 +1384,37 @@ export async function runRpcMode(
 		force = false,
 	) => {
 		const owner = harnessOwner;
-		if (!owner || owner.hasResult) return;
+		if (!owner || owner.hasResult) {
+			pendingAdvisorSealRetryUnsubscribe?.();
+			pendingAdvisorSealRetryUnsubscribe = undefined;
+			return;
+		}
 		if (
 			!(await prepareRpcResultSeal(
 				force,
 				() => drainRpcTerminalBoundary(session, terminalTasks, extensionUserMessageTracker),
 				() => hasPendingRpcContinuation(session),
+				rpcResultSealAcceptance(owner, () => session.yieldQueue.requestIdleFlush()),
 			))
-		)
+		) {
+			if (session.hasPendingAdvisorReviews && !pendingAdvisorSealRetryUnsubscribe) {
+				pendingAdvisorSealRetryUnsubscribe = retryRpcResultSealAfterAdvisorSettlement(session, () => {
+					pendingAdvisorSealRetryUnsubscribe = undefined;
+					void completeRpcResult(stopReason, outcome).catch(errorValue => {
+						output(
+							error(
+								undefined,
+								"session.result",
+								errorValue instanceof Error ? errorValue.message : String(errorValue),
+							),
+						);
+					});
+				});
+			}
 			return;
+		}
+		pendingAdvisorSealRetryUnsubscribe?.();
+		pendingAdvisorSealRetryUnsubscribe = undefined;
 		owner.beginResultSeal();
 		await owner.completeResult({
 			outcome,
@@ -1159,7 +1423,6 @@ export async function runRpcMode(
 			usage: episodeUsage,
 		});
 	};
-
 	/**
 	 * Seals the ledger on an exit path. The teardown that follows must run even
 	 * when the terminal result cannot be recorded, so the failure is emitted as a
@@ -1414,6 +1677,11 @@ export async function runRpcMode(
 
 	let requestFatalWatchShutdown: (() => Promise<void>) | undefined;
 	let watchFailureReported = false;
+	/**
+	 * Reports the first durable failure once and requests shutdown. The latch is
+	 * reporting only — whether the ledger can still record terminal state is
+	 * answered by the ledger itself, through {@link shouldForceLedgerSeal}.
+	 */
 	const reportLedgerFailure = (command: string, errorValue: unknown) => {
 		if (watchFailureReported) return;
 		watchFailureReported = true;
@@ -1635,7 +1903,7 @@ export async function runRpcMode(
 									idempotencyKey,
 								}),
 							),
-						Bun.SHA256.hash(JSON.stringify([command.message, command.images ?? []]), "hex"),
+						rpcSteeringPayloadIdentity(command.message, command.images),
 					),
 				);
 				if (persistedMessage) {
@@ -2096,8 +2364,8 @@ export async function runRpcMode(
 	const shutdownCoordinator = new RpcShutdownCoordinator({
 		isShutdownRequested: () => shutdownState.requested,
 		prepareShutdown: async () => {
-			if (!watchFailureReported) {
-				await sealLedgerOnExit("shutdown_requested", rpcExitOutcome(hasPendingRpcContinuation(session)));
+			if (shouldForceLedgerSeal(harnessOwner)) {
+				await sealLedgerOnExit("shutdown_requested", rpcForcedExitOutcome(session, terminalTasks));
 			}
 		},
 		performShutdown: async () => {
@@ -2130,6 +2398,12 @@ export async function runRpcMode(
 	const inputDispatcher = new RpcInputDispatcher({
 		deps: dispatchFrameDeps,
 		afterSerialCommand: () => shutdownCoordinator.checkShutdownRequested(),
+		// `compact` waits on a provider summary that can stall without limit, and
+		// it runs in the serial tail rather than in the background, so nothing but
+		// an abort settles it. Everything else here either answers as soon as its
+		// turn starts or is background-dispatched.
+		isLongRunningSerialCommand: command => command.type === "compact",
+		abortSerialCommand: () => session.abortCompaction(),
 	});
 
 	// Keep the stdin reader moving: side-channel frames dispatch immediately,
@@ -2146,13 +2420,24 @@ export async function runRpcMode(
 
 	// stdin closed — RPC client is gone. Fail pending side-channel requests
 	// first so active/queued commands can settle, then drain accepted work.
+	// Only the serial tail is drained before sealing: a `session.result`
+	// requested before terminal state waits on the seal this path still owes it,
+	// so those waits are drained afterwards together with background tasks.
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
 	hostToolBridge.close("RPC client disconnected before host tool execution completed");
 	hostUriBridge.clear("RPC client disconnected before host URI request completed");
+	// Abort started serial work that only an abort can settle, before the drain
+	// below waits on it. `session.dispose()` aborts the same work, but it runs
+	// after this drain and the seal, so leaving it to disposal means a stalled
+	// `compact` holds the drain open forever and the ledger never seals.
+	inputDispatcher.closeForExit();
 	await finalizeRpcInputAfterEof(
 		() => inputDispatcher.drain(),
-		() => sealLedgerOnExit("stdin_closed", rpcExitOutcome(hasPendingRpcContinuation(session))),
-		() => shutdownCoordinator.drain(),
+		() => sealLedgerOnExit("stdin_closed", rpcForcedExitOutcome(session, terminalTasks)),
+		async () => {
+			await inputDispatcher.drainResultWaits();
+			await shutdownCoordinator.drain();
+		},
 	);
 	subagentRegistry?.dispose();
 	// Dispose the main session before exiting so the browser reaper and other

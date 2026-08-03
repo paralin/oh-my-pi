@@ -16,7 +16,9 @@
 export type DocAudience = "agent" | "maintainer";
 
 const AUDIENCE_MARKER = /^\uFEFF?[ \t]*<!--[ \t]*omp-audience:[ \t]*([^\r\n]*?)[ \t]*-->/;
-const AUDIENCE_DECLARATION = /^\uFEFF?[ \t]*<!--[ \t]*omp-audience:/;
+// Claims the reserved name on its own, before the colon, so a page that omits or
+// spaces the separator fails closed instead of parsing as an unmarked page.
+const AUDIENCE_DECLARATION = /^\uFEFF?[ \t]*<!--[ \t]*omp-audience(?![-\w])/;
 
 /** Read the audience a page declares on its first line, defaulting to `agent`. */
 export function readDocAudience(body: string): DocAudience {

@@ -47,6 +47,13 @@ describe("readDocAudience", () => {
 		}
 	});
 
+	it("rejects a missing or spaced declaration separator", () => {
+		for (const body of ["<!-- omp-audience maintainer -->\n", "<!-- omp-audience : maintainer -->\n"]) {
+			expect(() => readDocAudience(body)).toThrow("Malformed omp-audience declaration");
+			expect(() => stripDocAudienceMarker(body)).toThrow("Malformed omp-audience declaration");
+		}
+	});
+
 	it("preserves first-line content after the marker", () => {
 		const body = "<!-- omp-audience: maintainer --> # Architecture\n\nDetails.\n";
 		expect(readDocAudience(body)).toBe("maintainer");

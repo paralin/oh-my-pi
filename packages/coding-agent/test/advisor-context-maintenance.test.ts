@@ -1,5 +1,11 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { Agent, type AgentMessage, type CompactionSummaryMessage, countTokens } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type CompactionSummaryMessage,
+	countTokens,
+	getTokenizerMode,
+} from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { calculateContextTokens, estimateTokens, resolveThresholdTokens } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -18,6 +24,13 @@ const CONTEXT_WINDOW = 372_000;
 const CACHE_READ_TOKENS = 371_200;
 const INPUT_TOKENS = 200;
 const OUTPUT_TOKENS = 150;
+
+// Threshold-metadata fixtures. The three windows are deliberately distinct so an
+// 80% threshold maps each to its own `profile.t` (160k / 320k / 800k) and the
+// recorded value alone identifies which model it was derived from.
+const ACTIVE_ADVISOR_CONTEXT_WINDOW = 200_000;
+const PROMOTED_ADVISOR_CONTEXT_WINDOW = 400_000;
+const SUMMARIZER_CONTEXT_WINDOW = 1_000_000;
 
 interface MaintenanceHarness {
 	advisor: Agent;
@@ -183,6 +196,111 @@ describe("AgentSession advisor context maintenance", () => {
 			usageAnchor(advisorMock, Date.now() - 1_000),
 		);
 		return { advisor, apiKeySpy, crossProviderModel, nativeModel, sameProviderModel, settings };
+	}
+
+	/**
+	 * Advisor whose own window is far smaller than the largest-context fallback
+	 * `resolveCompactionModelCandidates` appends, so the threshold that arms
+	 * compaction and the summarizing candidate's threshold cannot be confused.
+	 * Passing `promotionContextWindow` additionally arms context promotion onto a
+	 * middle window, which re-arms the gate before compaction runs.
+	 */
+	function createAdvisorThresholdMetadataHarness(promotionContextWindow?: number) {
+		const primaryMock = createMockModel({
+			provider: "anthropic",
+			responses: [{ content: ["primary complete"] }],
+		});
+		const advisorMock = createMockModel({
+			id: "advisor-active",
+			provider: "anthropic",
+			contextWindow: ACTIVE_ADVISOR_CONTEXT_WINDOW,
+			responses: [{ content: ["advisor reviewed current update"] }],
+		});
+		// Never the active advisor model: it only summarizes, so its window gates
+		// nothing and must not reach `profile.t`.
+		const summarizerMock = createMockModel({
+			id: "advisor-compaction-summarizer",
+			provider: "anthropic",
+			contextWindow: SUMMARIZER_CONTEXT_WINDOW,
+			responses: [{ content: ["summarizer summary"] }],
+		});
+		const promotionMock =
+			promotionContextWindow === undefined
+				? undefined
+				: createMockModel({
+						id: "advisor-promotion-target",
+						provider: "anthropic",
+						contextWindow: promotionContextWindow,
+						responses: [{ content: ["promoted advisor output"] }],
+					});
+		if (promotionMock) {
+			Object.assign(advisorMock, { contextPromotionTarget: `${promotionMock.provider}/${promotionMock.id}` });
+		}
+
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": true,
+			"compaction.strategy": "context-full",
+			// Percentage thresholds scale with the window, unlike a fixed token count
+			// that would collapse to the same value for every candidate.
+			"compaction.thresholdTokens": -1,
+			"compaction.thresholdPercent": 80,
+			"contextPromotion.enabled": promotionMock !== undefined,
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primaryMock, systemPrompt: [], tools: [] },
+			streamFn: primaryMock.stream,
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor?.sessionId) throw new Error("Expected advisor agent with a provider session id");
+		advisor.setModel(advisorMock);
+		vi.spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue(
+			promotionMock ? [advisorMock, promotionMock, summarizerMock] : [advisorMock, summarizerMock],
+		);
+		// Two accumulated turns so compaction has older history to summarize, and
+		// enough provider usage (371,550 tokens) to clear every threshold below.
+		advisor.state.messages.push(
+			usageAnchor(advisorMock, Date.now() - 2_000),
+			usageAnchor(advisorMock, Date.now() - 1_000),
+		);
+		return { advisor, advisorMock, promotionMock, settings, summarizerMock };
+	}
+
+	/** The `profile` block a summarization request carries in `metadata.user_id`. */
+	function compactionProfile(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+		const userId = metadata?.user_id;
+		if (typeof userId !== "string") throw new Error("Expected advisor compaction metadata.user_id");
+		const { profile } = JSON.parse(userId) as { profile?: Record<string, unknown> };
+		if (!profile) throw new Error("Expected advisor compaction metadata profile");
+		return profile;
+	}
+
+	/** Fails every candidate but the summarizer, forcing the fallback to run. */
+	function summarizeOnFallback(activeAdvisorModelId: string) {
+		return vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, model) => {
+			if (model.id === activeAdvisorModelId) {
+				throw new Error("advisor-model summarization unavailable");
+			}
+			return {
+				summary: "summarizer summary",
+				shortSummary: "summarizer",
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: 42,
+			};
+		});
 	}
 
 	it("maintains a 371,200-token cached advisor context before the 372,000-token window", async () => {
@@ -553,5 +671,67 @@ describe("AgentSession advisor context maintenance", () => {
 			`${crossProviderModel.provider}/${crossProviderModel.id}`,
 		]);
 		expect(JSON.stringify(advisor.state.messages)).toContain("authenticated fallback summary");
+	});
+
+	it("records the active advisor's threshold when a larger fallback model summarizes", async () => {
+		// `profile.t` must name the threshold that armed compaction. `shouldCompact`
+		// gates on the active advisor's window, but the summarization candidate is
+		// resolved separately and is often the largest-context model available.
+		// Deriving `t` from that candidate reports a threshold that never fired.
+		const { advisor, advisorMock, settings, summarizerMock } = createAdvisorThresholdMetadataHarness();
+		const compactSpy = summarizeOnFallback(advisorMock.id);
+
+		await session.prompt("small current update");
+
+		const compactionSettings = settings.getGroup("compaction");
+		const activeThreshold = resolveThresholdTokens(ACTIVE_ADVISOR_CONTEXT_WINDOW, compactionSettings);
+		const summarizerThreshold = resolveThresholdTokens(SUMMARIZER_CONTEXT_WINDOW, compactionSettings);
+
+		// The advisor model was tried first and the 1M fallback actually summarized,
+		// so the two thresholds are genuinely in play on this one run.
+		expect(compactSpy.mock.calls.map(([, model]) => model.id)).toEqual([advisorMock.id, summarizerMock.id]);
+		expect(activeThreshold).toBe(160_000);
+		expect(summarizerThreshold).toBe(800_000);
+		expect(compactSpy.mock.calls.length).toBeGreaterThan(0);
+		// Pinned with toBe on the exact value: every request reports the advisor's
+		// own gate, including the one issued to the 1M candidate.
+		for (const [, , , , , options] of compactSpy.mock.calls) {
+			const profile = compactionProfile(options?.metadata);
+			expect(profile.t).toBe(activeThreshold);
+			expect(profile).toEqual({ t: activeThreshold, s: "context-full", z: getTokenizerMode() });
+		}
+		expect(JSON.stringify(advisor.state.messages)).toContain("summarizer summary");
+	});
+
+	it("records the promoted advisor's threshold when promotion still requires compaction", async () => {
+		// Promotion re-runs the gate against the promoted model, so once compaction
+		// proceeds anyway it is the promoted window's threshold that fired — not the
+		// pre-promotion advisor's, and not the summarizing candidate's.
+		const { advisor, advisorMock, promotionMock, settings, summarizerMock } = createAdvisorThresholdMetadataHarness(
+			PROMOTED_ADVISOR_CONTEXT_WINDOW,
+		);
+		const compactSpy = summarizeOnFallback(advisorMock.id);
+
+		await session.prompt("small current update");
+
+		const compactionSettings = settings.getGroup("compaction");
+		const prePromotionThreshold = resolveThresholdTokens(ACTIVE_ADVISOR_CONTEXT_WINDOW, compactionSettings);
+		const promotedThreshold = resolveThresholdTokens(PROMOTED_ADVISOR_CONTEXT_WINDOW, compactionSettings);
+		const summarizerThreshold = resolveThresholdTokens(SUMMARIZER_CONTEXT_WINDOW, compactionSettings);
+
+		// Promotion landed and compaction still ran: 371,550 accumulated tokens clear
+		// the promoted 320k threshold as well as the pre-promotion 160k one.
+		expect(promotionMock).toBeDefined();
+		expect(advisor.state.model.id).toBe(promotionMock!.id);
+		expect(compactSpy.mock.calls.map(([, model]) => model.id)).toEqual([advisorMock.id, summarizerMock.id]);
+		expect(promotedThreshold).toBe(320_000);
+		// All three candidate windows yield distinct thresholds, so `t` is unambiguous.
+		expect(new Set([prePromotionThreshold, promotedThreshold, summarizerThreshold]).size).toBe(3);
+		for (const [, , , , , options] of compactSpy.mock.calls) {
+			const profile = compactionProfile(options?.metadata);
+			expect(profile.t).toBe(promotedThreshold);
+			expect(profile).toEqual({ t: promotedThreshold, s: "context-full", z: getTokenizerMode() });
+		}
+		expect(JSON.stringify(advisor.state.messages)).toContain("summarizer summary");
 	});
 });

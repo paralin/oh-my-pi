@@ -48,6 +48,7 @@
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "catalog:",
+    "@aptre/protobuf-es-lite": "catalog:",
     "@babel/parser": "catalog:",
     "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
@@ -72,7 +73,9 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
-    "puppeteer-core": "catalog:"
+    "mupdf": "catalog:",
+    "puppeteer-core": "catalog:",
+    "starpc": "catalog:"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",

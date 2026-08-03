@@ -352,7 +352,7 @@ import {
 } from "./session-maintenance";
 import { cleanupEmptyMoveSession, type SessionManager } from "./session-manager";
 import { SessionMemory, type SessionMemoryHost } from "./session-memory";
-import { buildEffectiveSessionProfile, buildSessionMetadata } from "./session-metadata";
+import { buildEffectiveSessionProfile, buildSessionMetadata, type EffectiveIdleThreshold } from "./session-metadata";
 import { sessionSidecarDir } from "./session-paths";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
@@ -395,7 +395,6 @@ export function hasAgentTurnState(peer: AgentPeer | null | undefined): peer is A
 	const candidate = peer as { state?: { messages?: unknown }; isStreaming?: unknown } | null | undefined;
 	return typeof candidate?.isStreaming === "boolean" && Array.isArray(candidate?.state?.messages);
 }
-
 const SESSION_STOP_CONTINUATION_CAP = 8;
 
 import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
@@ -404,6 +403,13 @@ import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
+/**
+ * How long a custody boundary waits on outstanding advisor reviews. Far shorter
+ * than the headless print-mode drain: this runs on a terminal boundary that may
+ * be an exit path, so an advisor stalled on its own provider has to stop gating
+ * progress well before it stops the process from finishing.
+ */
+const ADVISOR_CUSTODY_DRAIN_TIMEOUT_MS = 5_000;
 
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
@@ -515,7 +521,7 @@ export class AgentSession {
 	getXdevToolEntries: () => Array<{ name: string; summary: string }>;
 	readonly yieldQueue: YieldQueue;
 	readonly #scheduledPromptDeliveries = new Map<string, PromiseWithResolvers<void>>();
-	readonly #streamingScheduledPrompts = new Set<string>();
+	readonly #deferredScheduledPrompts = new Set<string>();
 	readonly #scheduledPromptBatch = new Set<string>();
 	#scheduledPromptBatchTask: PromiseWithResolvers<void> | undefined;
 	readonly #onSessionTransition: (() => void) | undefined;
@@ -849,17 +855,26 @@ export class AgentSession {
 		this.#resumeStrandedIrcAsides();
 	}
 
+	/** Whether a mode-installed custody guard currently permits background work to start an
+	 *  autonomous turn. Every wake path — stranded peer IRC asides and the yield queue's idle
+	 *  flush alike — asks here before waking, and a refusal only skips the wake: the pending
+	 *  records stay queued so the owed delivery survives for the next allowed boundary. */
+	#backgroundAgentWorkAllowed(): boolean {
+		try {
+			this.#assertBackgroundAgentWorkAllowed?.();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	/** IRC records that arrive after the loop's final aside poll — or while an abort skipped that
 	 *  poll — land in pending IRC queues with no loop left to drain them; the queued-message drain's
 	 *  gate (agent.hasQueuedMessages()) does not count peer IRC interrupts. Once idle, wake a turn so
 	 *  the agent responds to the peer. Skip only when a queued steer/follow-up will itself drive a
 	 *  resume turn whose aside poll already consumes these (no double-wake). */
 	#resumeStrandedIrcAsides(): void {
-		try {
-			this.#assertBackgroundAgentWorkAllowed?.();
-		} catch {
-			return;
-		}
+		if (!this.#backgroundAgentWorkAllowed()) return;
 		if (this.#isDisposed || this.isStreaming || !this.#irc.hasPending()) return;
 		if (this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages()) return;
 		const records = this.#irc.drainPending();
@@ -1296,13 +1311,17 @@ export class AgentSession {
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
 			injectStreaming: message => this.agent.steer(message),
+			// The idle flush prompts the agent, so it is background work in exactly the
+			// sense the custody guard governs: a delayed launch completion, late LSP
+			// diagnostic, or MCP notification must not open a turn while an RPC run is
+			// binding or after its episode is sealed.
+			canWakeIdle: () => this.#backgroundAgentWorkAllowed(),
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
 				this.#beginInFlight();
 				const promptTask = this.agent.prompt(messages.length === 1 ? first : messages);
-				this.#trackPostPromptTask(promptTask);
-				void promptTask.finally(() => this.#endInFlight()).catch(() => {});
+				this.#trackPostPromptTask(promptTask.finally(() => this.#endInFlight()));
 				await Promise.race([promptTask, Promise.resolve()]);
 			},
 			scheduleIdleFlush: run => {
@@ -4604,6 +4623,34 @@ export class AgentSession {
 		return this.#advisors.waitForAdvisorCatchup(timeoutMs);
 	}
 
+	/**
+	 * Whether an advisor review or an emitted advisor card is still outstanding.
+	 *
+	 * Advisor work runs beside the primary rather than inside it, so this is true
+	 * at moments when every primary-facing signal reads idle. A custody boundary
+	 * that seals on those signals alone would seal over a review that can still
+	 * persist a card or resume the primary.
+	 */
+	get hasPendingAdvisorReviews(): boolean {
+		return this.#advisors.hasPendingReviews;
+	}
+	onAdvisorReviewsSettled(listener: () => void): () => void {
+		return this.#advisors.onReviewsSettled(listener);
+	}
+
+	/**
+	 * Drain outstanding advisor reviews and their card persistence at a custody
+	 * boundary.
+	 *
+	 * Bounded on purpose: an advisor stalled on its own provider must not hold the
+	 * boundary open, so this gives up at the deadline and leaves the remainder
+	 * visible through {@link hasPendingAdvisorReviews} — the caller then declines
+	 * to seal rather than waiting without limit.
+	 */
+	async waitForPendingAdvisorReviews(timeoutMs = ADVISOR_CUSTODY_DRAIN_TIMEOUT_MS): Promise<void> {
+		await this.#advisors.waitForAdvisorCatchup(timeoutMs);
+	}
+
 	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
@@ -4883,9 +4930,15 @@ export class AgentSession {
 		this.#maintenance.abortCompaction();
 	}
 
-	/** Trigger idle compaction through the automatic maintenance flow. */
-	async runIdleCompaction(): Promise<void> {
-		await this.#maintenance.runIdleCompaction();
+	/**
+	 * Trigger idle compaction through the automatic maintenance flow.
+	 *
+	 * `idleThreshold` carries the gate the idle timer validated as it fired, so
+	 * the request reports the threshold that actually triggered it even if
+	 * settings change while the compaction runs.
+	 */
+	async runIdleCompaction(options: { idleThreshold?: EffectiveIdleThreshold } = {}): Promise<void> {
+		await this.#maintenance.runIdleCompaction(options);
 	}
 
 	/** Toggle automatic compaction. */
@@ -6587,7 +6640,7 @@ export class AgentSession {
 
 	#settleScheduledPrompt(prompt: string, error?: unknown): void {
 		const delivery = this.#scheduledPromptDeliveries.get(prompt);
-		this.#streamingScheduledPrompts.delete(prompt);
+		this.#deferredScheduledPrompts.delete(prompt);
 		if (!delivery) return;
 		this.#scheduledPromptDeliveries.delete(prompt);
 		if (error === undefined) delivery.resolve();
@@ -6607,7 +6660,7 @@ export class AgentSession {
 		}
 		for (const promptText of message.details.prompts) {
 			if (typeof promptText !== "string") continue;
-			if (error === undefined && !this.#streamingScheduledPrompts.has(promptText)) continue;
+			if (error === undefined && !this.#deferredScheduledPrompts.has(promptText)) continue;
 			this.#settleScheduledPrompt(promptText, error);
 		}
 	}
@@ -7964,16 +8017,16 @@ export class AgentSession {
 			}
 			try {
 				const streaming = this.isStreaming;
-				if (streaming) {
-					for (const prompt of prompts) this.#streamingScheduledPrompts.add(prompt);
-				}
+				for (const prompt of prompts) this.#deferredScheduledPrompts.add(prompt);
 				this.yieldQueue.enqueueMany<ScheduledNotificationEntry>(
 					SCHEDULED_NOTIFICATION_KIND,
 					prompts.map(prompt => ({ prompt })),
 				);
 				if (!streaming) {
-					await this.yieldQueue.flush("idle", SCHEDULED_NOTIFICATION_KIND);
-					for (const prompt of prompts) this.#settleScheduledPrompt(prompt);
+					const drainedKinds = await this.yieldQueue.flush("idle", SCHEDULED_NOTIFICATION_KIND);
+					if (drainedKinds.has(SCHEDULED_NOTIFICATION_KIND)) {
+						for (const prompt of prompts) this.#settleScheduledPrompt(prompt);
+					}
 				}
 				task.resolve();
 			} catch (error) {
@@ -8416,6 +8469,7 @@ export class AgentSession {
 				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
+			sessionTransitioned = true;
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
@@ -8635,12 +8689,17 @@ export class AgentSession {
 			}
 		}
 
+		if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
+			throw new Error("Cannot branch /btw: session changed since /btw started");
+		}
+
 		await withTimeout(
 			this.#cancelPostPromptTasks(),
 			POST_PROMPT_DRAIN_TIMEOUT_MS,
 			"Timed out draining post-prompt tasks before /btw branch",
 		);
 		if (
+			this.isStreaming ||
 			this.isBashRunning ||
 			this.isEvalRunning ||
 			this.isCompacting ||
@@ -8653,10 +8712,6 @@ export class AgentSession {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.agent.replaceQueues([], []);
-		if (this.isStreaming) {
-			await this.abort({ goalReason: "internal", reason: "branching /btw" });
-			this.agent.replaceQueues([], []);
-		}
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
@@ -8675,7 +8730,7 @@ export class AgentSession {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
-				if (this.sessionManager.getSessionId() !== sessionId || this.sessionManager.getLeafId() !== leafId) {
+				if (this.sessionManager.getSessionId() !== sessionId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
 				}
 				this.sessionManager.createBranchedSession(leafId);

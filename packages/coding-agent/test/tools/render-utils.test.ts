@@ -117,6 +117,42 @@ describe("formatScreenshot", () => {
 		expect(shortenPath(sibling, home)).toBe(sibling);
 	});
 
+	it("shortens both Windows home separators and file URLs", () => {
+		const home = String.raw`C:\Users\Alice`;
+		const rendered = shortenEmbeddedPaths(
+			String.raw`inspect C:/Users/Alice/private, C:\Users\Alice\cache, and file:///C:/Users/Alice/logs`,
+			home,
+		);
+
+		expect(rendered).toBe("inspect ~/private, ~/cache, and file://~/logs");
+	});
+
+	it("shortens mixed-case Windows home separators and file URLs", () => {
+		const home = String.raw`C:\Users\Alice`;
+		const rendered = shortenEmbeddedPaths(
+			String.raw`inspect c:/users/alice/private, C:\USERS\alice\cache, and file:///c:/Users/ALICE/logs`,
+			home,
+		);
+
+		expect(rendered).toBe("inspect ~/private, ~/cache, and file://~/logs");
+		expect(rendered.toLowerCase()).not.toContain("users");
+	});
+
+	it("shortens a mixed-case UNC home share", () => {
+		const home = String.raw`\\Server\Profiles\Alice`;
+		const rendered = shortenEmbeddedPaths(String.raw`inspect \\server\profiles\ALICE\private`, home);
+
+		expect(rendered).toBe("inspect ~/private");
+	});
+
+	it("keeps POSIX home matching case-sensitive", () => {
+		const home = "/home/alice";
+		// `/home/Alice` is a different account on a case-sensitive filesystem, so
+		// folding case here would redact a path that is not the home directory.
+		const rendered = shortenEmbeddedPaths(`inspect ${home}/private and /home/Alice/private`, home);
+
+		expect(rendered).toBe("inspect ~/private and /home/Alice/private");
+	});
 	it("shortens assignment-prefixed and URI-prefixed home paths", () => {
 		const home = os.homedir();
 		const rendered = shortenEmbeddedPaths(
@@ -134,6 +170,16 @@ describe("formatScreenshot", () => {
 
 		expect(rendered).toBe("inspect(~/private) [file](~/secret) {cache:~/cache}");
 		expect(rendered).not.toContain(home);
+	});
+
+	it("shortens home paths after punctuation without matching path components", () => {
+		const home = "/home/alice";
+		const rendered = shortenEmbeddedPaths(
+			`failed;${home}/private left|${home}/secret keep prefix${home}/nested`,
+			home,
+		);
+
+		expect(rendered).toBe(`failed;~/private left|~/secret keep prefix${home}/nested`);
 	});
 
 	it("formats non-home path without tilde", () => {

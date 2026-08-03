@@ -1190,8 +1190,14 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 	}
 
+	/**
+	 * Relocate the session for a shell-driven `cd`. A cron wake can start while
+	 * the interactive shell is still running, so this goes through
+	 * `AgentSession.moveSession()` — the same suspended, abort-checked transition
+	 * `/move` uses — rather than moving the session manager directly.
+	 */
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
-		await this.ctx.sessionManager.moveTo(resolvedPath);
+		await this.ctx.session.moveSession(resolvedPath);
 		await this.ctx.applyCwdChange(resolvedPath);
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();

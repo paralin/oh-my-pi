@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -133,6 +133,54 @@ describe("EventController idle compaction teardown", () => {
 		vi.advanceTimersByTime(60_000);
 
 		expect(runIdleCompaction).not.toHaveBeenCalled();
+	});
+
+	it("skips idle compaction when the idle gate is disabled while the timer is pending", async () => {
+		const runIdleCompaction = vi.fn();
+		const context = createContext({ runIdleCompaction });
+
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		// `override`, not `set`: this suite seeds the gate through `Settings.init({
+		// overrides })`, and `#rebuildMerged` applies that override layer last, so a
+		// `set` (which writes the global layer) stays shadowed and the effective
+		// value would never move.
+		settings.override("compaction.idleEnabled", false);
+		vi.advanceTimersByTime(60_000);
+
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		controller.dispose();
+	});
+
+	it("skips idle compaction when the threshold is raised past usage while the timer is pending", async () => {
+		const runIdleCompaction = vi.fn();
+		// Fixture usage is 210 tokens, which armed the timer against the 100 default.
+		const context = createContext({ runIdleCompaction });
+
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		settings.override("compaction.idleThresholdTokens", 500);
+		vi.advanceTimersByTime(60_000);
+
+		expect(runIdleCompaction).not.toHaveBeenCalled();
+		controller.dispose();
+	});
+
+	it("carries the threshold in force at fire time, not the one that armed the timer", async () => {
+		const runIdleCompaction = vi.fn();
+		const context = createContext({ runIdleCompaction });
+
+		const controller = new EventController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+		// Still under the 210-token fixture usage, so the run is authorized — but by
+		// 200, not the 100 that armed the timer. The request must report what fired.
+		settings.override("compaction.idleThresholdTokens", 200);
+		vi.advanceTimersByTime(60_000);
+
+		expect(runIdleCompaction).toHaveBeenCalledWith({
+			idleThreshold: { enabled: true, thresholdTokens: 200 },
+		});
+		controller.dispose();
 	});
 
 	it("emits an LLM-generated recap after the default four-minute delay", async () => {

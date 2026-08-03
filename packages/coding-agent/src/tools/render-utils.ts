@@ -657,13 +657,40 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 	return filePath;
 }
 
-export function shortenEmbeddedPaths(text: string): string {
+/**
+ * Whether a directory is rooted the Windows way — a drive letter or a UNC
+ * share. Keyed on the path's own shape rather than `process.platform` so an
+ * explicitly supplied `homeDir` classifies the same on every host, which is
+ * what the Windows render tests depend on. `path.win32.isAbsolute` is
+ * deliberately not reused: it also accepts POSIX `/home/...`, which is harmless
+ * for an optional file-URL slash but would wrongly fold POSIX case.
+ */
+function isWindowsRootedPath(dir: string): boolean {
+	return /^[a-z]:[\\/]/i.test(dir) || /^[\\/]{2}[^\\/]/.test(dir);
+}
+export function shortenEmbeddedPaths(text: string, homeDir?: string): string {
 	const sanitized = sanitizeText(text);
-	const home = os.homedir();
+	const home = homeDir ?? os.homedir();
 	if (!home) return sanitized;
-	const escapedHome = home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	const embeddedHome = new RegExp(`(^|[\\s=,:"'\`([{]|:\\/\\/)${escapedHome}(?=$|[\\\\/])`, "g");
-	return sanitized.replace(embeddedHome, "$1~");
+	const escapedHome = home
+		.split(/[\\/]+/)
+		.map(segment => segment.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+		.join("[\\\\/]");
+	const optionalFileUrlSlash = path.win32.isAbsolute(home) ? "[\\\\/]?" : "";
+	// Windows compares paths case-insensitively, so `C:\Users\Alice` and
+	// `c:\users\alice` name one directory and a case-sensitive match would leave
+	// the absolute home path visible in rendered output. POSIX stays
+	// case-sensitive: `/home/Alice` and `/home/alice` are different users there,
+	// and folding them would redact someone else's path as if it were the home.
+	const flags = isWindowsRootedPath(home) ? "gi" : "g";
+	const embeddedHome = new RegExp(
+		`(^|[^A-Za-z0-9_.~\\\\/\\-]|:\\/\\/)${optionalFileUrlSlash}${escapedHome}($|[\\\\/])`,
+		flags,
+	);
+	return sanitized.replace(
+		embeddedHome,
+		(_match, prefix: string, separator: string) => `${prefix}~${separator ? "/" : ""}`,
+	);
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

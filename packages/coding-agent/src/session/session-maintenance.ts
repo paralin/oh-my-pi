@@ -95,7 +95,11 @@ import type { SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
 import type { CompactionEntry, ScratchCompactionModes, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
-import { overrideSessionMetadataCompactionStrategy } from "./session-metadata";
+import {
+	buildEffectiveIdleThreshold,
+	type EffectiveIdleThreshold,
+	overrideSessionMetadataCompactionStrategy,
+} from "./session-metadata";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 
 export type CompactionCheckResult = Readonly<{
@@ -1160,10 +1164,18 @@ export class SessionMaintenance {
 		this.#autoCompactionAbortController?.abort();
 	}
 
-	/** Trigger idle compaction through the auto-compaction flow (with UI events). */
-	async runIdleCompaction(): Promise<void> {
+	/**
+	 * Trigger idle compaction through the auto-compaction flow (with UI events).
+	 *
+	 * `idleThreshold` is the gate the caller validated immediately before firing —
+	 * the idle timer owns that policy, and settings can change again while this
+	 * run is in flight. Passing it keeps the request's reported threshold the one
+	 * that actually triggered it. Omitted, the current settings are resolved
+	 * instead, which is right for callers that trigger idle compaction directly.
+	 */
+	async runIdleCompaction(options: { idleThreshold?: EffectiveIdleThreshold } = {}): Promise<void> {
 		if (this.#host.isStreaming() || this.isCompacting) return;
-		await this.runAutoCompaction("idle", false, true);
+		await this.runAutoCompaction("idle", false, true, true, { idleThreshold: options.idleThreshold });
 	}
 
 	/**
@@ -2399,6 +2411,7 @@ export class SessionMaintenance {
 			scratchRecentMessages?: readonly AgentMessage[];
 			phase?: CodexCompactionContext["phase"];
 			terminalTextAnswer?: boolean;
+			idleThreshold?: EffectiveIdleThreshold;
 		} = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
@@ -2408,6 +2421,14 @@ export class SessionMaintenance {
 		);
 		if (compactionStrategy === "off") return COMPACTION_CHECK_NONE;
 		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
+		// The idle timer fires on compaction.idleThresholdTokens behind its own
+		// enable gate, so idle requests must report that threshold rather than the
+		// normal compaction.threshold* policy the session profile records. Prefer
+		// the gate the idle timer validated when it fired: settings can change
+		// between arming the timer and building this request, and re-reading them
+		// here would report a threshold that never triggered the run.
+		const metadataIdleThreshold =
+			reason === "idle" ? (options.idleThreshold ?? buildEffectiveIdleThreshold(this.#host.settings)) : undefined;
 		const generation = this.#host.promptGeneration();
 		const terminalTextAnswer =
 			options.terminalTextAnswer ?? isTerminalTextAssistantAnswer(this.#host.findLastAssistantMessage());
@@ -2573,6 +2594,7 @@ export class SessionMaintenance {
 					autoTriggered: true,
 					signal: autoCompactionSignal,
 					metadataCompactionStrategy: compactionStrategy,
+					metadataIdleThreshold,
 					onSwitchCancelled: () => {
 						handoffSwitchCancelled = true;
 					},
@@ -2976,6 +2998,7 @@ export class SessionMaintenance {
 									metadata: overrideSessionMetadataCompactionStrategy(
 										this.#host.agent.metadataForProvider(candidate.provider),
 										"context-full",
+										metadataIdleThreshold,
 									),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),

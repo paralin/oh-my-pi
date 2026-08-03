@@ -179,6 +179,103 @@ describe("AgentSession handoff", () => {
 		expect(userId.profile.s).toBe("handoff");
 	});
 
+	it("labels an idle compaction request with the idle threshold, not the normal one", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.thresholdTokens", 120_000);
+		session.settings.set("compaction.idleEnabled", true);
+		session.settings.set("compaction.idleThresholdTokens", 40_000);
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries[entries.length - 1]?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+
+		await session.runIdleCompaction();
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const userId = JSON.parse(String(compactSpy.mock.calls[0]?.[5]?.metadata?.user_id)) as {
+			profile: { t: number; s: string };
+		};
+		expect(userId.profile).toMatchObject({ t: 40_000, s: "context-full" });
+	});
+
+	it("reports the threshold that armed idle compaction after the idle gate changes", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.thresholdTokens", 120_000);
+		session.settings.set("compaction.idleEnabled", true);
+		session.settings.set("compaction.idleThresholdTokens", 40_000);
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries[entries.length - 1]?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+		// The idle timer armed on 40_000 and validated it as it fired; the user then
+		// retuned the gate before this run reached metadata. Re-reading settings here
+		// would report 90_000 — or 0 once idleEnabled flips off — for a request that
+		// 40_000 triggered.
+		session.settings.set("compaction.idleThresholdTokens", 90_000);
+		session.settings.set("compaction.idleEnabled", false);
+
+		await session.runIdleCompaction({ idleThreshold: { enabled: true, thresholdTokens: 40_000 } });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const userId = JSON.parse(String(compactSpy.mock.calls[0]?.[5]?.metadata?.user_id)) as {
+			profile: { t: number; s: string };
+		};
+		expect(userId.profile).toMatchObject({ t: 40_000, s: "context-full" });
+	});
+	it("labels an idle handoff request with the idle threshold while compaction is disabled", async () => {
+		session.settings.set("compaction.enabled", false);
+		session.settings.set("compaction.strategy", "handoff");
+		session.settings.set("compaction.thresholdTokens", 120_000);
+		session.settings.set("compaction.idleEnabled", true);
+		session.settings.set("compaction.idleThresholdTokens", 40_000);
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue from here");
+
+		await session.runIdleCompaction();
+
+		const call = generateHandoffSpy.mock.calls[0];
+		if (!call) throw new Error("Expected generateHandoffFromContext call");
+		const userId = JSON.parse(String(call[2].streamOptions.metadata?.user_id)) as {
+			profile: { t: number; s: string };
+		};
+		expect(userId.profile).toMatchObject({ t: 40_000, s: "handoff" });
+	});
+
 	it("clears staged preview state when handoff creates the replacement session", async () => {
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
 		session.toolChoiceQueue.registerPendingInvoker("old-session-preview", "ast_edit", async () => ({

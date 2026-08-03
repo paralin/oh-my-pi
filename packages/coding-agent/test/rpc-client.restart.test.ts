@@ -30,7 +30,50 @@ describe("RpcClient lifecycle (issue #4079 B)", () => {
 		]);
 	}, 20_000);
 
-	test("normalizes omitted state fields and a runtime-invalid tokensPerSecond", async () => {
+	test("exposes durable session custody commands", async () => {
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_DURABLE_EVENTS: "1", MOCK_RPC_RESULT_DELAY_MS: "20" },
+		});
+		const eventTypes: string[] = [];
+		client.onSessionEvent(event => eventTypes.push(event.type));
+		await client.start();
+
+		expect(await client.startSession("run-1")).toEqual({
+			run_id: "run-1",
+			session_id: "start:run-1",
+			existing: false,
+		});
+		expect(await client.resumeSession("run-2", { sessionId: "session-1", afterSequence: 7 })).toEqual({
+			run_id: "run-2",
+			session_id: "resume:run-2:session-1:7",
+			existing: false,
+		});
+		expect(await client.replaySession({ afterSequence: 4, limit: 1 })).toEqual({
+			events: [],
+			next_sequence: 4,
+			has_more: true,
+		});
+		expect(await client.watchSession({ afterSequence: 5, limit: 2 })).toEqual({
+			events: [],
+			next_sequence: 5,
+			has_more: false,
+		});
+		await expect(client.getSessionResult(1)).rejects.toThrow("Timeout waiting for response to session.result");
+		expect(await client.getSessionResult()).toMatchObject({
+			outcome: "completed",
+			stopReason: "mock",
+			finalMessage: "mock result",
+		});
+		expect(await client.steerSession("steer-1", "durable message", [])).toEqual({
+			status: "ACCEPTED",
+			steeringSequence: 7,
+		});
+		await Bun.sleep(0);
+		expect(eventTypes).toEqual(["steering_queued", "steering_injected", "steering_rejected", "session_terminal"]);
+	}, 20_000);
+
+	test("normalizes state fields omitted by a legacy RPC server", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,
 			env: { MOCK_RPC_LEGACY_STATE: "1", MOCK_RPC_INVALID_TPS: "1" },

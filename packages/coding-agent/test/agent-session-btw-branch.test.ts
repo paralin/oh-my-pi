@@ -289,9 +289,6 @@ describe("AgentSession.branchFromBtw", () => {
 				providerStarted.resolve();
 				return { content: ["main response"], delayMs: 60_000 };
 			},
-			beginSessionFork: async () => {
-				streamingAtSuspend = session?.isStreaming;
-			},
 		});
 		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
 		await activeSession.sessionManager.flush();
@@ -314,7 +311,6 @@ describe("AgentSession.branchFromBtw", () => {
 
 		await activeSession.abort({ goalReason: "internal", reason: "test cleanup" });
 		await promptPromise;
-
 	});
 
 	it("aborts a wake started during scheduler suspension before replacing session state", async () => {
@@ -370,7 +366,10 @@ describe("AgentSession.branchFromBtw", () => {
 			return createBranch(parentId);
 		});
 
-		const result = await activeSession.branchFromBtw("question", createBtwAssistant());
+		const leafId = activeSession.sessionManager.getLeafId();
+		if (!leafId) throw new Error("Expected branch leaf");
+		const sessionId = activeSession.sessionManager.getSessionId();
+		const result = await activeSession.branchFromBtw("question", createBtwAssistant(), leafId, sessionId);
 		await wakePromise;
 
 		expect(result.cancelled).toBe(false);

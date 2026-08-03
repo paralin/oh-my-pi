@@ -11,6 +11,7 @@
 ## Availability
 
 The cron tools are not part of the default tool set. Activate them with `--tools` alongside the tools the session needs, for example `--tools read,bash,cron_create,cron_list,cron_delete`.
+
 ## Inputs
 
 | Field | Type | Required | Description |

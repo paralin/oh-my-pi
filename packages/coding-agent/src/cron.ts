@@ -1,5 +1,6 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { sessionSidecarDir } from "./session/session-paths";
 import { FileSessionStorage, type SessionStorage } from "./session/session-storage";
 
@@ -8,10 +9,20 @@ const RECURRING_LIFETIME_MS = 7 * 24 * 60 * 60 * 1_000;
 const DELIVERY_RETRY_BASE_MS = 1_000;
 const DELIVERY_RETRY_MAX_MS = 60_000;
 const REFRESH_RETRY_BASE_MS = 250;
-const REFRESH_RETRY_ATTEMPTS = 5;
+const REFRESH_RETRY_MAX_MS = 30_000;
+const EXPIRY_RETRY_GRACE_MS = 5 * 60 * 1_000;
 const DELIVERY_CLAIM_RETRY_MS = 1_000;
 const DELIVERY_LEASE_MS = 5 * 60 * 1_000;
 const DURABLE_MUTATION_CLAIM_RETRY_MS = 10;
+const DISPOSE_DRAIN_TIMEOUT_MS = 5_000;
+
+/**
+ * Marks the async context of a serialized mutation. `suspend()`/`dispose()`
+ * drain the mutation chain, so a delivery that tears down the session it was
+ * handed to would otherwise await itself; the scope lets those callers detect
+ * the re-entry and skip the drain instead of deadlocking.
+ */
+const mutationScope = new AsyncLocalStorage<true>();
 
 export interface CronJob {
 	id: string;
@@ -245,7 +256,13 @@ function parseStoredJobs(text: string, now: number, normalizeOverdue = true): Cr
 		} catch {
 			continue;
 		}
-		if (job.recurring && job.expiresAt !== undefined && job.expiresAt <= now) continue;
+		if (
+			job.recurring &&
+			job.expiresAt !== undefined &&
+			(job.expiresAt < now || (job.expiresAt === now && job.nextFireAt > now))
+		) {
+			continue;
+		}
 		if (normalizeOverdue && !job.recurring && job.nextFireAt <= now) job.nextFireAt = now;
 		if (normalizeOverdue && job.recurring && job.nextFireAt <= now) {
 			job.nextFireAt = nextCronFire(job.expression, new Date(now)).getTime();
@@ -315,7 +332,14 @@ export class CronManager {
 
 	async prepare(): Promise<void> {
 		if (this.#disposed || this.#suspended) return;
+		this.#refreshSession();
+		const wasLoaded = this.#loadedSessions.has(this.#sessionKey);
 		await this.#loadCurrentSession();
+		if (!wasLoaded) return;
+		await this.#serializeMutation(async () => {
+			if (this.#disposed || this.#suspended) return;
+			await this.#syncDurableView();
+		});
 	}
 
 	async load(): Promise<void> {
@@ -332,7 +356,8 @@ export class CronManager {
 
 	/** Refresh jobs and timers after the live AgentSession changes identity. */
 	refresh(): void {
-		if (this.#disposed || this.#suspended || !this.#started) return;
+		if (this.#disposed || this.#suspended) return;
+		this.#started = true;
 		this.#cancelRefreshRetry();
 		const generation = ++this.#refreshGeneration;
 		this.#refreshSession();
@@ -349,11 +374,18 @@ export class CronManager {
 						this.#disposed ||
 						this.#suspended ||
 						generation !== this.#refreshGeneration ||
-						sessionKey !== this.#sessionKey ||
-						attempt >= REFRESH_RETRY_ATTEMPTS
+						sessionKey !== this.#sessionKey
 					) {
 						return;
 					}
+					// Retry for as long as this session stays current instead of
+					// abandoning the load after a fixed attempt count. Durable jobs
+					// only become schedulable once this lands, so a finite window let
+					// an outage that outlived it suppress every persisted job for the
+					// rest of the session. The ladder climbs to a ceiling rather than
+					// ending; the single retry slot means one timer at a time, and
+					// refresh/suspend/dispose all cancel it, so it cannot outlive the
+					// session or stack up.
 					this.#refreshRetryTimer = this.#setTimer(
 						() => {
 							this.#refreshRetryTimer = undefined;
@@ -367,7 +399,7 @@ export class CronManager {
 							}
 							load(attempt + 1);
 						},
-						REFRESH_RETRY_BASE_MS * 2 ** attempt,
+						Math.min(REFRESH_RETRY_BASE_MS * 2 ** attempt, REFRESH_RETRY_MAX_MS),
 					);
 				});
 		};
@@ -381,7 +413,7 @@ export class CronManager {
 		this.#suspended = true;
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
 		this.#timer = undefined;
-		await this.#mutationTail;
+		await this.#drainMutations();
 	}
 
 	async suspendForFork(): Promise<void> {
@@ -432,10 +464,23 @@ export class CronManager {
 
 	create(input: { expression: string; prompt: string; recurring?: boolean; durable?: boolean }): Promise<CronJob> {
 		return this.#serializeMutation(async () => {
-			await this.#loadCurrentSession();
+			const durable = input.durable ?? false;
+			if (durable) {
+				await this.#loadCurrentSession();
+			} else {
+				// A session-only job neither reads nor writes the durable store, so an
+				// unreadable store must not be able to reject it. The session is left
+				// deliberately unloaded on failure: `#armTimer` then schedules only the
+				// session-only half of the map, and `refresh`'s retry ladder still owns
+				// landing the durable view. A later successful load only adds durable
+				// entries, so this job survives that reconciliation.
+				await this.#loadCurrentSession().catch(error => {
+					logger.warn("Cron durable load failed; creating session-only job", { error });
+				});
+			}
 			if (!input.prompt.trim()) throw new Error("Cron prompt cannot be empty.");
-			if (input.durable && !this.#sessionFile) throw new Error("Durable cron jobs require a persisted session.");
-			if (input.durable && !supportsDurableClaims(this.#storage)) {
+			if (durable && !this.#sessionFile) throw new Error("Durable cron jobs require a persisted session.");
+			if (durable && !supportsDurableClaims(this.#storage)) {
 				throw new Error("Durable cron jobs require storage lease support.");
 			}
 			parseCronExpression(input.expression);
@@ -445,7 +490,7 @@ export class CronManager {
 				expression: input.expression.trim(),
 				prompt: input.prompt,
 				recurring: input.recurring ?? true,
-				durable: input.durable ?? false,
+				durable,
 				createdAt: now,
 				expiresAt: input.recurring === false ? undefined : now + RECURRING_LIFETIME_MS,
 				nextFireAt: nextCronFire(input.expression, new Date(now)).getTime(),
@@ -462,6 +507,7 @@ export class CronManager {
 				this.#jobs.delete(job.id);
 				throw error;
 			}
+			this.#started = true;
 			this.#armTimer();
 			return job;
 		});
@@ -474,6 +520,13 @@ export class CronManager {
 
 	delete(id: string): Promise<boolean> {
 		return this.#serializeMutation(async () => {
+			this.#refreshSession();
+			const cached = this.#jobs.get(id);
+			if (cached && !cached.durable) {
+				this.#jobs.delete(id);
+				this.#armTimer();
+				return true;
+			}
 			await this.#loadCurrentSession();
 			let deleted: CronJob | undefined;
 			const remove = (): boolean => {
@@ -483,9 +536,9 @@ export class CronManager {
 				return true;
 			};
 			try {
-				const cached = this.#jobs.get(id);
+				const loaded = this.#jobs.get(id);
 				const didDelete =
-					this.#sessionFile && (!cached || cached.durable) ? await this.#withDurableMutation(remove) : remove();
+					this.#sessionFile && (!loaded || loaded.durable) ? await this.#withDurableMutation(remove) : remove();
 				this.#armTimer();
 				return didDelete;
 			} catch (error) {
@@ -495,12 +548,49 @@ export class CronManager {
 		});
 	}
 
-	dispose(): void {
+	/**
+	 * Stop scheduling, then wait for durable custody that is already in flight.
+	 *
+	 * The guards and timer teardown run before the first await, so no timer,
+	 * refresh, or fresh delivery claim can start once disposal begins. An
+	 * occurrence whose prompt was already accepted still owns its lease and has
+	 * yet to publish `scheduled_tasks.json`, so disposal — and therefore the
+	 * SDK's awaited `session.dispose()` — stays pending until that write and the
+	 * lease release land. Returning earlier lets an embedder close Redis/SQL
+	 * underneath the write and replay the accepted prompt on restart. The drain
+	 * is bounded so a wedged storage backend cannot hold teardown open forever.
+	 */
+	async dispose(): Promise<void> {
 		this.#disposed = true;
 		this.#refreshGeneration++;
 		this.#cancelRefreshRetry();
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
 		this.#timer = undefined;
+		try {
+			await withTimeout(
+				this.#drainMutations(),
+				DISPOSE_DRAIN_TIMEOUT_MS,
+				"Timed out draining cron delivery during dispose",
+			);
+		} catch (error) {
+			logger.warn("Cron delivery did not settle during dispose", { error });
+		}
+	}
+
+	/**
+	 * Await the serialized mutation chain — durable claims, lease renewals, and
+	 * scheduled task writes — until it stops growing. Mutations queued while the
+	 * drain runs (a concurrent `create`/`delete` racing teardown) are covered by
+	 * re-reading the tail. Callers reached from inside a mutation would await
+	 * their own work, so they return immediately instead.
+	 */
+	async #drainMutations(): Promise<void> {
+		if (mutationScope.getStore()) return;
+		let drained: Promise<void> | undefined;
+		while (drained !== this.#mutationTail) {
+			drained = this.#mutationTail;
+			await drained;
+		}
 	}
 
 	storePath(): string {
@@ -595,12 +685,17 @@ export class CronManager {
 		}
 	}
 
-	async #reloadDurableJobs(sessionFile: string, jobs: Map<string, CronJob>): Promise<void> {
-		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
-		const text = await this.#storage.readText(store).catch(async error => {
+	async #readDurableStore(store: string): Promise<string | undefined> {
+		await this.#storage.refresh?.();
+		return this.#storage.readText(store).catch(async error => {
 			if (isEnoent(error) || !(await this.#storage.exists(store))) return undefined;
 			throw error;
 		});
+	}
+
+	async #reloadDurableJobs(sessionFile: string, jobs: Map<string, CronJob>, normalizeOverdue = false): Promise<void> {
+		const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
+		const text = await this.#readDurableStore(store);
 		const retries = new Map<string, CronDeliveryRetry>();
 		for (const job of jobs.values()) {
 			if (!job.durable) continue;
@@ -609,7 +704,7 @@ export class CronManager {
 			jobs.delete(job.id);
 		}
 		if (text === undefined) return;
-		for (const job of parseStoredJobs(text, this.#now(), false)) {
+		for (const job of parseStoredJobs(text, this.#now(), normalizeOverdue)) {
 			jobs.set(job.id, job);
 			const retry = retries.get(`${job.id}\0${job.nextFireAt}`);
 			if (retry) this.#deliveryRetries.set(job, retry);
@@ -641,6 +736,27 @@ export class CronManager {
 		this.#jobsBySession.set(sessionKey, this.#jobs);
 	}
 
+	/**
+	 * Re-read the durable half of the current session's store. `#loadedSessions`
+	 * records only that a first load happened, so on its own it pins this manager
+	 * to whatever the store held then — but the store is shared, and a peer
+	 * manager on the same session can add a durable job and exit before its fire
+	 * time. `prepare()` runs this on every entry (`load()`, and so `cron_list`)
+	 * so a peer's job becomes visible and gets a timer instead of waiting for a
+	 * session transition, restart, or local durable mutation.
+	 *
+	 * Session-only jobs and delivery retries are preserved by `#reloadDurableJobs`.
+	 * `prepare()` serializes this refresh with create, delete, and due delivery, so
+	 * it cannot reinsert an occurrence while its delivery is awaiting acceptance.
+	 * No durable claim is needed because this only publishes a snapshot that a
+	 * peer writer committed atomically.
+	 */
+	async #syncDurableView(): Promise<void> {
+		this.#refreshSession();
+		const sessionFile = this.#sessionFile;
+		if (!sessionFile || !this.#loadedSessions.has(this.#sessionKey)) return;
+		await this.#reloadDurableJobs(sessionFile, this.#jobs);
+	}
 	async #loadCurrentSession(): Promise<void> {
 		this.#refreshSession();
 		const sessionKey = this.#sessionKey;
@@ -652,10 +768,7 @@ export class CronManager {
 			load = (async () => {
 				if (sessionFile) {
 					const store = path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json");
-					const text = await this.#storage.readText(store).catch(async error => {
-						if (isEnoent(error) || !(await this.#storage.exists(store))) return undefined;
-						throw error;
-					});
+					const text = await this.#readDurableStore(store);
 					if (text !== undefined) {
 						for (const job of parseStoredJobs(text, this.#now())) jobs.set(job.id, job);
 					}
@@ -673,17 +786,92 @@ export class CronManager {
 		return Math.max(job.nextFireAt, this.#deliveryRetries.get(job)?.retryAt ?? 0);
 	}
 
+	/**
+	 * Push a job's next attempt onto the bounded exponential ladder. Every
+	 * failure path shares this so a job can never come back due at the same
+	 * instant it failed, which is what keeps `#armTimer` from re-entering the
+	 * due loop with a zero delay.
+	 */
+	#backOffDelivery(job: CronJob, failedAt: number, delivered?: boolean): void {
+		const prior = this.#deliveryRetries.get(job);
+		const attempts = (prior?.attempts ?? 0) + 1;
+		const retryDelay = Math.min(DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6), DELIVERY_RETRY_MAX_MS);
+		this.#deliveryRetries.set(job, {
+			attempts,
+			retryAt: failedAt + retryDelay,
+			delivered: delivered ?? prior?.delivered ?? false,
+		});
+	}
+
+	/**
+	 * Hold a durable occurrence back for another pass. Contention with a peer
+	 * that holds the claim is expected and retries flat; a durable backend that
+	 * failed outright climbs the ladder so an outage cannot be re-probed on
+	 * every wake.
+	 */
+	#deferDurableAttempt(job: CronJob, now: number, failed: boolean): void {
+		if (failed) {
+			this.#backOffDelivery(job, now);
+			return;
+		}
+		this.#deliveryRetries.set(job, {
+			attempts: 0,
+			retryAt: now + DELIVERY_CLAIM_RETRY_MS,
+			delivered: false,
+		});
+	}
+
+	#isRecurringExpired(job: CronJob, now: number): boolean {
+		if (!job.recurring || job.expiresAt === undefined) return false;
+		// An occurrence that came due inside the lifetime is still owed its
+		// delivery. `#backOffDelivery` parks the retry past `expiresAt`, so
+		// retiring on the wall clock alone drops the final prompt precisely
+		// because its first attempt failed. Retirement therefore keys off when the
+		// occurrence was DUE (`job.nextFireAt`) rather than when it will next be
+		// attempted (`#nextAttemptAt`, which folds in `retryAt`), and only while a
+		// retry is actually pending — without that a long-overdue occurrence would
+		// also be resurrected after a suspend, which nothing asks for.
+		//
+		// The reprieve is bounded. The delivery ladder caps at
+		// `DELIVERY_RETRY_MAX_MS` and never gives up, so an occurrence that can
+		// never be delivered would otherwise retry every minute for the life of
+		// the session. `EXPIRY_RETRY_GRACE_MS` past `expiresAt` the job retires
+		// undelivered, which is the old behaviour, just no longer immediate.
+		if (
+			this.#deliveryRetries.get(job) !== undefined &&
+			job.nextFireAt <= job.expiresAt &&
+			now <= job.expiresAt + EXPIRY_RETRY_GRACE_MS
+		) {
+			return false;
+		}
+		return job.expiresAt < now || (job.expiresAt === now && this.#nextAttemptAt(job) > now);
+	}
+
 	#armTimer(): void {
 		if (this.#disposed || this.#suspended || !this.#started) return;
 		this.#refreshSession();
-		if (!this.#loadedSessions.has(this.#sessionKey)) return;
+		// `#loadedSessions` records that the durable view is authoritative, which
+		// is a precondition for scheduling durable jobs only — arming on a map that
+		// is missing every entry of an unreadable store would be a silent partial
+		// schedule. Session-only jobs need no storage at all, so while the load is
+		// still outstanding the loop arms for those alone rather than not at all;
+		// otherwise a durable outage starves work that never touches the store, and
+		// a session-only job accepted during the outage would never fire.
+		const durableLoaded = this.#loadedSessions.has(this.#sessionKey);
 		if (this.#timer !== undefined) this.#clearTimer(this.#timer);
 		let wakeAt: number | undefined;
 		for (const job of this.#jobs.values()) {
+			if (!durableLoaded && job.durable) continue;
 			const nextAttemptAt = this.#nextAttemptAt(job);
-			const candidate = job.recurring
-				? Math.min(nextAttemptAt, job.expiresAt ?? Number.POSITIVE_INFINITY)
-				: nextAttemptAt;
+			// A recurring job also wakes the loop at its expiry so the sweep can
+			// retire it, but that instant is already in the past once retiring a
+			// durable entry has failed. Honour the retry there too, otherwise the
+			// stale expiry pins the delay at zero and spins the failing backend.
+			const expiryWakeAt =
+				job.expiresAt === undefined
+					? Number.POSITIVE_INFINITY
+					: Math.max(job.expiresAt, this.#deliveryRetries.get(job)?.retryAt ?? 0);
+			const candidate = job.recurring ? Math.min(nextAttemptAt, expiryWakeAt) : nextAttemptAt;
 			if (wakeAt === undefined || candidate < wakeAt) wakeAt = candidate;
 		}
 		if (wakeAt === undefined) {
@@ -694,15 +882,20 @@ export class CronManager {
 		this.#timer = this.#setTimer(() => {
 			this.#timer = undefined;
 			if (this.#disposed || this.#suspended) return;
-			void this.#serializeMutation(async () => {
-				await this.#loadCurrentSession();
-				await this.#processDue();
-			});
+			// `#processDue` opens with the same load, so calling it here too would
+			// only duplicate it — and now that the loop can be armed before the
+			// durable view lands, a rejection here would escape this `void` instead
+			// of being contained by the pass.
+			void this.#serializeMutation(() => this.#processDue());
 		}, delay);
 	}
 
 	#serializeMutation<T>(mutation: () => Promise<T>): Promise<T> {
-		const task = this.#mutationTail.then(mutation, mutation);
+		// Run the body inside the mutation scope so anything it awaits — notably
+		// `#enqueuePrompt`, which can hand control to session teardown — is seen
+		// as re-entrant by `#drainMutations`.
+		const scoped = (): Promise<T> => mutationScope.run(true, mutation);
+		const task = this.#mutationTail.then(scoped, scoped);
 		this.#mutationTail = task.then(
 			() => undefined,
 			() => undefined,
@@ -712,7 +905,13 @@ export class CronManager {
 
 	async #processDue(): Promise<void> {
 		if (this.#disposed || this.#suspended) return;
-		await this.#loadCurrentSession();
+		// An unreadable durable store must not abort the pass. The due loop below
+		// contains durable work behind its own claim and reload and defers it when
+		// either fails, so session-only occurrences still reach delivery; the
+		// session stays unloaded, so durable entries keep waiting for the ladder.
+		await this.#loadCurrentSession().catch(error => {
+			logger.warn("Cron session load failed", { error });
+		});
 		if (this.#processing) return;
 		this.#processing = true;
 		let sessionFile = this.#sessionFile;
@@ -732,30 +931,45 @@ export class CronManager {
 				const needsDurableClaim = [...jobs.values()].some(
 					candidate =>
 						candidate.durable &&
-						(this.#nextAttemptAt(candidate) <= now ||
-							(candidate.recurring && candidate.expiresAt !== undefined && candidate.expiresAt <= now)),
+						(this.#nextAttemptAt(candidate) <= now || this.#isRecurringExpired(candidate, now)),
 				);
-				const claim =
-					needsDurableClaim && sessionFile
-						? await acquireDeliveryClaim(
-								path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json"),
-								this.#storage,
-								now,
-							)
-						: undefined;
+				// A failing durable backend must not take the whole batch down with
+				// it: claiming and reloading are contained here so session-only
+				// occurrences, which need neither, still reach delivery below.
+				let durableFailed = false;
+				let claim: CronDeliveryClaim | undefined;
+				if (needsDurableClaim && sessionFile) {
+					try {
+						claim = await acquireDeliveryClaim(
+							path.join(sessionSidecarDir(sessionFile), "scheduled_tasks.json"),
+							this.#storage,
+							now,
+						);
+					} catch (error) {
+						durableFailed = true;
+						logger.warn("Cron durable delivery claim failed", { error });
+					}
+				}
 				const maintenance = maintainDeliveryClaim(claim, this.#now);
 				try {
-					if (claim && sessionFile) await this.#reloadDurableJobs(sessionFile, jobs);
+					if (claim && sessionFile) {
+						try {
+							await this.#reloadDurableJobs(sessionFile, jobs);
+						} catch (error) {
+							// The durable view is now unreliable, so durable entries are
+							// deferred rather than acted on; the claim is still released
+							// by this block's `finally`.
+							durableFailed = true;
+							logger.warn("Cron durable job reload failed", { error });
+						}
+					}
+					const durableReady = claim !== undefined && !durableFailed;
 
 					let durableExpired = false;
 					for (const candidate of jobs.values()) {
-						if (candidate.recurring && candidate.expiresAt !== undefined && candidate.expiresAt <= now) {
-							if (candidate.durable && !claim) {
-								this.#deliveryRetries.set(candidate, {
-									attempts: 0,
-									retryAt: now + DELIVERY_CLAIM_RETRY_MS,
-									delivered: false,
-								});
+						if (this.#isRecurringExpired(candidate, now)) {
+							if (candidate.durable && !durableReady) {
+								this.#deferDurableAttempt(candidate, now, durableFailed);
 								continue;
 							}
 							jobs.delete(candidate.id);
@@ -769,14 +983,10 @@ export class CronManager {
 					let due = [...jobs.values()]
 						.sort((a, b) => this.#nextAttemptAt(a) - this.#nextAttemptAt(b))
 						.filter(candidate => this.#nextAttemptAt(candidate) <= now);
-					if (needsDurableClaim && !claim) {
+					if (needsDurableClaim && !durableReady) {
 						for (const candidate of due) {
 							if (!candidate.durable) continue;
-							this.#deliveryRetries.set(candidate, {
-								attempts: 0,
-								retryAt: now + DELIVERY_CLAIM_RETRY_MS,
-								delivered: false,
-							});
+							this.#deferDurableAttempt(candidate, now, durableFailed);
 						}
 						due = due.filter(candidate => !candidate.durable);
 					}
@@ -788,7 +998,13 @@ export class CronManager {
 						const previousNextFireAt = job.nextFireAt;
 						if (job.recurring) {
 							const next = nextCronFire(job.expression, new Date(Math.max(job.nextFireAt, now)));
-							if (job.expiresAt !== undefined && next.getTime() >= job.expiresAt) jobs.delete(job.id);
+							// `expiresAt` is inclusive, matching `#isRecurringExpired` and
+							// `parseStoredJobs`: a match landing exactly on it is the final
+							// occurrence and still gets delivered. Retiring on equality here
+							// would drop that boundary occurrence while advancing past the one
+							// before it. The job is retired on the following pass instead, once
+							// its next match is strictly later than `expiresAt`.
+							if (job.expiresAt !== undefined && next.getTime() > job.expiresAt) jobs.delete(job.id);
 							else job.nextFireAt = next.getTime();
 						} else {
 							jobs.delete(job.id);
@@ -825,16 +1041,7 @@ export class CronManager {
 						const delivery = deliveries[index];
 						if (!delivery) continue;
 						restore(delivery);
-						const attempts = (delivery.priorRetry?.attempts ?? 0) + 1;
-						const retryDelay = Math.min(
-							DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6),
-							DELIVERY_RETRY_MAX_MS,
-						);
-						this.#deliveryRetries.set(delivery.job, {
-							attempts,
-							retryAt: this.#now() + retryDelay,
-							delivered: false,
-						});
+						this.#backOffDelivery(delivery.job, this.#now(), false);
 						deliveryError ??= outcome.reason;
 					}
 
@@ -849,16 +1056,7 @@ export class CronManager {
 					} catch (error) {
 						for (const delivery of durableAccepted) {
 							restore(delivery);
-							const attempts = (delivery.priorRetry?.attempts ?? 0) + 1;
-							const retryDelay = Math.min(
-								DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6),
-								DELIVERY_RETRY_MAX_MS,
-							);
-							this.#deliveryRetries.set(delivery.job, {
-								attempts,
-								retryAt: this.#now() + retryDelay,
-								delivered: true,
-							});
+							this.#backOffDelivery(delivery.job, this.#now(), true);
 						}
 						throw error;
 					}
@@ -866,23 +1064,24 @@ export class CronManager {
 						if (outcomes[index]?.status === "fulfilled") this.#deliveryRetries.delete(delivery.job);
 					}
 					if (deliveryError !== undefined) throw deliveryError;
+					// The session-only half of a mixed batch is delivered; durable
+					// entries are on the retry ladder. Re-probing the failed backend
+					// in another iteration would only repeat the failure.
+					if (durableFailed) break;
 				} finally {
 					await maintenance.stop();
 					if (claim) await releaseDeliveryClaim(claim);
 				}
 			}
 		} catch (error) {
+			// Back off every occurrence still overdue at the failure, durable or
+			// not. A session-only job left due here would make `#armTimer` re-arm
+			// at zero delay and spin the loop through the same failure. Entries
+			// that already took a retry above keep it, so bounds stay intact.
 			const failedAt = this.#now();
 			for (const job of jobs.values()) {
-				if (!job.durable || this.#nextAttemptAt(job) > failedAt) continue;
-				const prior = this.#deliveryRetries.get(job);
-				const attempts = (prior?.attempts ?? 0) + 1;
-				const retryDelay = Math.min(DELIVERY_RETRY_BASE_MS * 2 ** Math.min(attempts - 1, 6), DELIVERY_RETRY_MAX_MS);
-				this.#deliveryRetries.set(job, {
-					attempts,
-					retryAt: failedAt + retryDelay,
-					delivered: prior?.delivered ?? false,
-				});
+				if (this.#nextAttemptAt(job) > failedAt) continue;
+				this.#backOffDelivery(job, failedAt);
 			}
 			logger.warn("Cron job delivery failed", { error });
 		} finally {

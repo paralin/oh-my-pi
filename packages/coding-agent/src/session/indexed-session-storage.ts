@@ -101,6 +101,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	readonly #drainPending = new Set<Promise<void>>();
 	#nextMtimeMs = 0;
 	#firstDrainError: Error | undefined;
+	#indexRevision = 0;
 
 	constructor(backend: SessionStorageBackend) {
 		this.#backend = backend;
@@ -112,14 +113,22 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	async refresh(): Promise<void> {
-		await this.drain();
-		const rows = await this.#backend.loadIndex();
-		this.#index.clear();
-		for (const row of rows) {
-			const title = row.titleUpdatedAt
-				? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
-				: null;
-			this.#setIndex(row.path, row.size, row.mtimeMs, title);
+		for (;;) {
+			await this.drain();
+			while (this.#pathPending.size > 0) {
+				await Promise.allSettled([...this.#pathPending.values()]);
+			}
+			const revision = this.#indexRevision;
+			const rows = [...(await this.#backend.loadIndex())];
+			if (this.#indexRevision !== revision) continue;
+			this.#index.clear();
+			for (const row of rows) {
+				const title = row.titleUpdatedAt
+					? { title: row.title, source: row.titleSource, updatedAt: row.titleUpdatedAt }
+					: null;
+				this.#setIndex(row.path, row.size, row.mtimeMs, title);
+			}
+			return;
 		}
 	}
 
@@ -451,6 +460,7 @@ export class IndexedSessionStorage implements SessionStorage {
 	}
 
 	#enqueuePaths(paths: readonly string[], task: () => Promise<void>, options: EnqueueOptions): Promise<void> {
+		this.#indexRevision++;
 		const unique = uniquePaths(paths);
 		const previous = unique.map(path => this.#pathTails.get(path) ?? RESOLVED);
 		const operation = Promise.all(previous).then(task);

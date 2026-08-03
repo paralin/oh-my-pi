@@ -26,6 +26,7 @@ import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
 import idleRecapPrompt from "../../prompts/system/recap-user.md" with { type: "text" };
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readQueueChipText, resolveAbortLabel } from "../../session/messages";
+import { buildEffectiveIdleThreshold } from "../../session/session-metadata";
 import { type ApprovalMode, resolveApproval } from "../../tools/approval";
 import { previewLine, shortenPath, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../../tools/resolve";
@@ -2239,8 +2240,21 @@ export class EventController {
 			if (this.ctx.viewSession.isStreaming) return;
 			if (this.ctx.viewSession.isCompacting) return;
 			if (this.ctx.editor.getText().trim()) return;
-			if (this.#currentContextTokens() < threshold) return;
-			void this.ctx.viewSession.runIdleCompaction();
+			// The idle gate itself is mutable: `compaction.idleEnabled` and
+			// `idleThresholdTokens` can change while this timer is pending, and the
+			// values captured at arm time are what the callback would otherwise fire
+			// on. Firing on a stale gate would run idle compaction the user has since
+			// turned off, or trigger on a threshold no longer in force — which the
+			// request then reports as whatever the settings say at metadata time, a
+			// threshold that never fired. Re-resolve the gate here so the policy that
+			// authorizes the run is the one that governs it.
+			const armed = buildEffectiveIdleThreshold(settings);
+			if (!armed.enabled || armed.thresholdTokens <= 0) return;
+			if (this.#currentContextTokens() < armed.thresholdTokens) return;
+			// Hand the run the exact threshold that cleared it, rather than letting
+			// the compaction path re-read settings that can change again while it is
+			// in flight.
+			void this.ctx.viewSession.runIdleCompaction({ idleThreshold: armed });
 		}, timeoutMs);
 		this.#idleCompactionTimer.unref?.();
 	}

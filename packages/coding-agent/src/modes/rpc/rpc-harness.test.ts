@@ -2,11 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type RpcHarnessPublishedEvent,
 	type RpcHarnessResult,
 	RpcHarnessSessionOwner,
 	rpcHarnessRecordFileForSessionFile,
+	rpcSteeringPayloadIdentity,
 } from "./rpc-harness";
 
 let tmp = "";
@@ -621,5 +623,61 @@ describe("RPC harness session owner", () => {
 		});
 		expect(deliveries).toBe(2);
 		expect((await owner.replay()).map(event => String(event.type))).toEqual(["steering_queued", "steering_injected"]);
+	});
+
+	it("redelivers accepted steering whose retry reorders payload members", async () => {
+		const owner = await RpcHarnessSessionOwner.open("session-1", recordFile());
+		let deliveries = 0;
+		const deliver = async () => {
+			deliveries++;
+		};
+		// A supervisor replaying accepted work rebuilds the request from its own
+		// records, so nested members can come back in another order.
+		const accepted = rpcSteeringPayloadIdentity("look", [
+			{ type: "image", data: "AAAA", mimeType: "image/png", detail: "high" },
+		]);
+		const reordered = rpcSteeringPayloadIdentity("look", [
+			{ detail: "high", mimeType: "image/png", data: "AAAA", type: "image" },
+		]);
+		expect(reordered).toBe(accepted);
+
+		await expect(owner.steer("steer-1", "look", deliver, accepted)).resolves.toEqual({
+			status: "ACCEPTED",
+			steeringSequence: 1,
+		});
+		await expect(owner.steer("steer-1", "look", deliver, reordered)).resolves.toEqual({
+			status: "ACCEPTED",
+			steeringSequence: 1,
+		});
+		expect(deliveries).toBe(2);
+	});
+
+	it("still rejects steering retries whose payload genuinely differs", async () => {
+		const owner = await RpcHarnessSessionOwner.open("session-1", recordFile());
+		let deliveries = 0;
+		const deliver = async () => {
+			deliveries++;
+		};
+		const image = (data: string): ImageContent => ({ type: "image", data, mimeType: "image/png" });
+		const accepted = rpcSteeringPayloadIdentity("look", [image("AAAA")]);
+		// Array order, image bytes, and scalar identity all stay meaningful.
+		expect(rpcSteeringPayloadIdentity("look", [image("BBBB")])).not.toBe(accepted);
+		expect(rpcSteeringPayloadIdentity("look", [image("AAAA"), image("BBBB")])).not.toBe(
+			rpcSteeringPayloadIdentity("look", [image("BBBB"), image("AAAA")]),
+		);
+		// An absent image list and an empty one are the same request, though.
+		expect(rpcSteeringPayloadIdentity("look", [])).toBe(rpcSteeringPayloadIdentity("look", undefined));
+
+		await expect(owner.steer("steer-1", "look", deliver, accepted)).resolves.toEqual({
+			status: "ACCEPTED",
+			steeringSequence: 1,
+		});
+		await expect(
+			owner.steer("steer-1", "look", deliver, rpcSteeringPayloadIdentity("look", [image("BBBB")])),
+		).rejects.toThrow("payload does not match the original request");
+		await expect(
+			owner.steer("steer-1", "look", deliver, rpcSteeringPayloadIdentity("looks", [image("AAAA")])),
+		).rejects.toThrow("payload does not match the original request");
+		expect(deliveries).toBe(1);
 	});
 });

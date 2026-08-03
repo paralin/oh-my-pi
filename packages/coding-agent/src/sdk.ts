@@ -3647,7 +3647,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
-					cronManager.dispose();
+					// Stops scheduling synchronously, then drains an already accepted
+					// delivery so its lease release and scheduled-task write finish
+					// before teardown closes the storage backend underneath them.
+					await cronManager.dispose();
 					if (agentKind === "main") {
 						// Top-level teardown owns the global agent lifecycle: park timers,
 						// adopted subagent sessions, revivers. Tear it down while shared
@@ -3950,7 +3953,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
 		// for already-removed listeners.
 		unsubscribeCredentialDisabled?.();
-		cronManager.dispose();
+		// Drain here too: a throw before the dispose wrapper was installed leaves
+		// no other owner for in-flight cron custody, and re-disposing is a no-op.
+		await cronManager.dispose();
 		try {
 			if (hasSession) {
 				await session.dispose();

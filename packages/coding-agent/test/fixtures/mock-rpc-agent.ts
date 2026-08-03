@@ -55,6 +55,25 @@ process.stdout.write(
 			: { type: "ready" },
 	)}\n`,
 );
+if (Bun.env.MOCK_RPC_DURABLE_EVENTS === "1") {
+	for (const event of [
+		{ type: "steering_queued", steeringId: "steer-1", steeringSequence: 1, message: "queued" },
+		{ type: "steering_injected", steeringId: "steer-1", steeringSequence: 1 },
+		{ type: "steering_rejected", steeringId: "steer-2", steeringSequence: 2 },
+		{
+			type: "session_terminal",
+			sessionId: "mock-session",
+			outcome: "completed",
+			stopReason: "mock",
+			finalMessage: "done",
+			usage: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 3 },
+			resultId: "result-1",
+			terminalSequence: 3,
+		},
+	]) {
+		process.stdout.write(`${JSON.stringify(event)}\n`);
+	}
+}
 
 function writeFrame(frame: Record<string, unknown>): void {
 	const logical = Buffer.from(JSON.stringify(frame), "utf8");
@@ -105,6 +124,63 @@ for await (const raw of console) {
 				protocolV2Enabled = true;
 				continue;
 			}
+			if (frame.type === "session.start" || frame.type === "session.resume") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						run_id: frame.run_id,
+						session_id:
+							frame.type === "session.start"
+								? `start:${String(frame.run_id)}`
+								: `resume:${String(frame.run_id)}:${String(frame.session_id)}:${String(frame.after_sequence)}`,
+						existing: false,
+					},
+				});
+				continue;
+			}
+			if (frame.type === "session.replay" || frame.type === "session.watch") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: { events: [], next_sequence: frame.after_sequence ?? 0, has_more: frame.limit === 1 },
+				});
+				continue;
+			}
+			if (frame.type === "session.result") {
+				if (Bun.env.MOCK_RPC_RESULT_DELAY_MS) await Bun.sleep(Number(Bun.env.MOCK_RPC_RESULT_DELAY_MS));
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						outcome: "completed",
+						stopReason: "mock",
+						finalMessage: "mock result",
+						usage: { input: 1, output: 2, reasoning: 0, cacheRead: 0, cacheWrite: 0, total: 3 },
+					},
+				});
+				continue;
+			}
+			if (frame.type === "session.steer") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						status: frame.message === "durable message" && Array.isArray(frame.images) ? "ACCEPTED" : "REJECTED",
+						steeringSequence: String(frame.steering_id).length,
+					},
+				});
+				continue;
+			}
+
 			if (frame.type === "get_messages_page") {
 				if (Bun.env.MOCK_RPC_PAGE_BUSY === "1") {
 					writeFrame({

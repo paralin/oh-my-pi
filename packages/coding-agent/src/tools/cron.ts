@@ -193,7 +193,15 @@ function createCronRenderer(op: CronRenderOperation) {
 
 			if (result.isError) {
 				icon = "error";
-				body.push(theme.fg("error", cronDisplayLine(shortenEmbeddedPaths(text || "Unknown error"))));
+				body.push(
+					theme.fg(
+						"error",
+						truncateToWidth(
+							cronDisplayLine(shortenEmbeddedPaths(text || "Unknown error")),
+							TRUNCATE_LENGTHS.CONTENT,
+						),
+					),
+				);
 			} else if (op === "create" && isCronJob(details)) {
 				description = truncateToWidth(cronDisplayLine(details.expression), TRUNCATE_LENGTHS.TITLE);
 				meta = [theme.fg("dim", `next ${new Date(details.nextFireAt).toLocaleString()}`), ...cronMode(details)];

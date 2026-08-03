@@ -309,6 +309,7 @@ export class SessionAdvisors {
 	#advisorInterruptImmuneTurnStart: number | undefined;
 	#pendingAdvisorCardEvents = new Set<Promise<void>>();
 	#advisorYieldQueueUnsubscribe: (() => void) | undefined;
+	#reviewSettlementListeners = new Set<() => void>();
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
@@ -453,12 +454,50 @@ export class SessionAdvisors {
 	/** Tracks persistence of a visible advisor card emitted outside the primary loop. */
 	trackCardEvent(processing: Promise<void>): void {
 		this.#pendingAdvisorCardEvents.add(processing);
-		void processing.finally(() => this.#pendingAdvisorCardEvents.delete(processing)).catch(() => {});
+		void processing
+			.finally(() => {
+				this.#pendingAdvisorCardEvents.delete(processing);
+				this.#notifyReviewSettlement();
+			})
+			.catch(() => {});
 	}
 
 	/** Waits for all advisor-card persistence handlers currently in flight. */
 	async waitForPendingCardEvents(): Promise<void> {
 		await Promise.allSettled([...this.#pendingAdvisorCardEvents]);
+	}
+
+	/**
+	 * Whether an advisor review or an emitted advisor card is still outstanding.
+	 *
+	 * Advisors review the primary's turn out of band, so the primary can be fully
+	 * idle while a review is still running. A review that lands late emits a card
+	 * that persists into the transcript, and a blocker resumes the primary through
+	 * `sendCustomMessage({ triggerTurn: true })` — both are episode work, so a
+	 * custody boundary that ignores this reports idle while work is still owed.
+	 *
+	 * A halted, quota-exhausted or disposed runtime is excluded: its backlog can
+	 * no longer drain, so counting it would hold a boundary open forever.
+	 */
+	get hasPendingReviews(): boolean {
+		if (this.#pendingAdvisorCardEvents.size > 0) return true;
+		return this.#advisors.some(
+			advisor =>
+				!advisor.runtime.disposed &&
+				!advisor.runtime.halted &&
+				!advisor.runtime.quotaExhausted &&
+				advisor.runtime.backlog > 0,
+		);
+	}
+	onReviewsSettled(listener: () => void): () => void {
+		this.#reviewSettlementListeners.add(listener);
+		if (!this.hasPendingReviews) queueMicrotask(listener);
+		return () => this.#reviewSettlementListeners.delete(listener);
+	}
+
+	#notifyReviewSettlement(): void {
+		if (this.hasPendingReviews) return;
+		for (const listener of [...this.#reviewSettlementListeners]) listener();
 	}
 
 	// Advisor runtime lifecycle
@@ -914,6 +953,7 @@ export class SessionAdvisors {
 					advisorRef.adviseTool.beginUpdate(inProgress);
 					advisorRef.emissionGuard.beginUpdate();
 				},
+				onBacklogChange: () => this.#notifyReviewSettlement(),
 				onTurnError: (error, failedMessages, signal) =>
 					this.#recoverAdvisorTurn(advisorRef, error, failedMessages, signal),
 				onTurnSuccess: async () => {
@@ -1369,6 +1409,15 @@ export class SessionAdvisors {
 			return false;
 		}
 
+		// The window whose threshold actually armed this run, carried forward to the
+		// summarization request's `profile.t`. The gate above fires on the advisor's
+		// own window, and a promotion re-arms it on the promoted window; the
+		// summarization candidate resolved below is a *different* model — often the
+		// largest-context fallback — whose window gates nothing here. Recomputing the
+		// threshold from that candidate reports one that never fired (a 200k advisor
+		// summarized by a 1m fallback would record ~800k where ~160k triggered).
+		let governingContextWindow = contextWindow;
+
 		// 1. Try promotion first
 		if (await this.#promoteAdvisorContextModel(advisor, advisorModel, signal)) {
 			// Promotion succeeded, check if new model has enough space
@@ -1377,6 +1426,8 @@ export class SessionAdvisors {
 			if (newWindow > 0) {
 				const stillNeedsCompaction = shouldCompact(contextTokens, newWindow, compactionSettings);
 				if (!stillNeedsCompaction) return false;
+				// Promotion re-armed the gate on the promoted model, so it now governs.
+				governingContextWindow = newWindow;
 			}
 		}
 
@@ -1465,12 +1516,15 @@ export class SessionAdvisors {
 			// after the session-sticky credential is selected) so summarization
 			// requests carry the advisor session id like every other advisor call
 			// (issue #6625).
+			// `t` reports the governing advisor threshold captured above, not this
+			// candidate's; `s` reports the action this request performs, and the
+			// image-input argument therefore describes the candidate that performs it.
 			const advisorMetadata = advisorProviderSessionId
 				? buildSessionMetadata(advisorProviderSessionId, candidate.provider, this.#host.modelRegistry.authStorage, {
 						...buildEffectiveSessionProfile(
 							this.#host.settings,
 							getTokenizerMode(),
-							candidate.contextWindow ?? 0,
+							governingContextWindow,
 							candidate.input.includes("image"),
 						),
 						strategy: "context-full",

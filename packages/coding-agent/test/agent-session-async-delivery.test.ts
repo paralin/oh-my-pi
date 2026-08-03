@@ -7,17 +7,51 @@
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockCall } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import { RpcCustodyBindingGuard } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AsyncResultEntry } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/launch-completion";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+
+function launchCompletion(owner: string): DaemonCompletionNotification {
+	return {
+		event: "daemon-completed",
+		completionId: "advisor-completion",
+		owner,
+		daemon: {
+			name: "advisor-worker",
+			id: "daemon-id",
+			state: "exited",
+			createdAt: 1,
+			startedAt: 1,
+			exitedAt: 2,
+			exitCode: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			owner,
+			persist: false,
+			detached: false,
+		},
+	};
+}
+
+function sawLaunchCompletion(calls: readonly MockCall[]): boolean {
+	return calls.some(call =>
+		call.context.messages.some(message =>
+			typeof message.content === "string"
+				? message.content.includes("advisor-worker")
+				: message.content.some(content => content.type === "text" && content.text.includes("advisor-worker")),
+		),
+	);
+}
 
 describe("AgentSession owner-routed async delivery", () => {
 	let session: AgentSession;
@@ -104,38 +138,110 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 		});
-		const completion = {
-			event: "daemon-completed",
-			completionId: "advisor-completion",
-			owner,
-			daemon: {
-				name: "advisor-worker",
-				id: "daemon-id",
-				state: "exited",
-				createdAt: 1,
-				startedAt: 1,
-				exitedAt: 2,
-				exitCode: 0,
-				restartCount: 0,
-				outputBytes: 0,
-				owner,
-				persist: false,
-				detached: false,
-			},
-		} satisfies DaemonCompletionNotification;
 
-		await session.queueLaunchCompletion(completion);
+		await session.queueLaunchCompletion(launchCompletion(owner));
 		await session.waitForIdle();
 
-		expect(
-			mock.calls.some(call =>
-				call.context.messages.some(message =>
-					typeof message.content === "string"
-						? message.content.includes("advisor-worker")
-						: message.content.some(content => content.type === "text" && content.text.includes("advisor-worker")),
-				),
-			),
-		).toBe(true);
+		expect(sawLaunchCompletion(mock.calls)).toBe(true);
+	});
+
+	it("defers a launch-completion wake turn while durable RPC custody is binding", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		const owner = `${sessionManager.getSessionId()}-advisor`;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		const bindingGuard = new RpcCustodyBindingGuard();
+		session.setBackgroundAgentWorkGuard(() => bindingGuard.assertWorkAllowed());
+		const bindStep = Promise.withResolvers<void>();
+		const bound = bindingGuard.run(() => bindStep.promise);
+		await Promise.resolve();
+
+		const callsBefore = mock.calls.length;
+		const delivered = session.queueLaunchCompletion(launchCompletion(owner));
+		await session.waitForIdle();
+
+		// The yield queue's idle flush prompts the agent, so waking here would run a
+		// provider turn in the middle of the custody transition.
+		expect(mock.calls).toHaveLength(callsBefore);
+		// Deferred, not dropped: the completion is still owed.
+		expect(session.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE)).toBe(true);
+
+		bindStep.resolve();
+		await bound;
+		// What rpc-mode's bindHarness does once the transition settles.
+		session.yieldQueue.requestIdleFlush();
+		await delivered;
+		await session.waitForIdle();
+
+		expect(sawLaunchCompletion(mock.calls)).toBe(true);
+		expect(session.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE)).toBe(false);
+	});
+
+	it("refuses a launch-completion wake turn after the RPC episode is sealed", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		const owner = `${sessionManager.getSessionId()}-advisor`;
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		// The composition rpc-mode installs: binding transition, then episode seal.
+		const bindingGuard = new RpcCustodyBindingGuard();
+		session.setBackgroundAgentWorkGuard(() => {
+			bindingGuard.assertWorkAllowed();
+			// Stands in for a sealed RpcHarnessSessionOwner.assertAcceptingWork().
+			throw new Error("run result is already sealed");
+		});
+
+		const callsBefore = mock.calls.length;
+		let settled = false;
+		const delivered = session.queueLaunchCompletion(launchCompletion(owner));
+		void delivered.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await session.waitForIdle();
+
+		// A turn started here would emit unsequenced, unpersisted events outside the
+		// immutable episode.
+		expect(mock.calls).toHaveLength(callsBefore);
+		// Sealing is terminal, so the entry is retained rather than delivered: the
+		// receipt stays open until disposal clears the queue and rejects it.
+		expect(session.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE)).toBe(true);
+		expect(settled).toBe(false);
 	});
 
 	it("purges finished owned jobs when starting a new session", async () => {

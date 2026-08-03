@@ -11,7 +11,7 @@ import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
 import type { BashResult } from "../../exec/bash-executor";
-import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
+import type { SessionStats } from "../../session/agent-session";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
 	RPC_MESSAGES_PAGE_BUSY_ERROR,
@@ -20,6 +20,7 @@ import {
 	type RpcMessagesPageOptions,
 } from "./rpc-messages";
 import type {
+	RpcAgentEventPayload,
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
@@ -32,7 +33,11 @@ import type {
 	RpcHostToolResult,
 	RpcHostToolUpdate,
 	RpcResponse,
+	RpcSessionEventFrame,
+	RpcSessionResult,
+	RpcSessionStartData,
 	RpcSessionState,
+	RpcSessionSteerAck,
 	RpcSubagentEventFrame,
 	RpcSubagentLifecycleFrame,
 	RpcSubagentMessagesResult,
@@ -71,7 +76,7 @@ export interface RpcClientOptions {
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
 
 export type RpcEventListener = (event: AgentEvent) => void;
-export type RpcSessionEventListener = (event: AgentSessionEvent) => void;
+export type RpcSessionEventListener = (event: RpcAgentEventPayload) => void;
 export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["payload"]) => void;
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
@@ -116,7 +121,7 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"tool_execution_end",
 ]);
 
-const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
+const sessionEventTypes = new Set<RpcAgentEventPayload["type"]>([
 	...agentEventTypes,
 	"auto_compaction_start",
 	"auto_compaction_end",
@@ -138,6 +143,10 @@ const sessionEventTypes = new Set<AgentSessionEvent["type"]>([
 	"thinking_level_changed",
 	"model_changed",
 	"goal_updated",
+	"steering_queued",
+	"steering_injected",
+	"steering_rejected",
+	"session_terminal",
 ]);
 
 function isRpcResponse(value: unknown): value is RpcResponse {
@@ -169,11 +178,11 @@ function isAgentEvent(value: unknown): value is AgentEvent {
 	return agentEventTypes.has(type as AgentEvent["type"]);
 }
 
-function isAgentSessionEvent(value: unknown): value is AgentSessionEvent {
+function isAgentSessionEvent(value: unknown): value is RpcAgentEventPayload {
 	if (!isRecord(value)) return false;
 	const type = value.type;
 	if (typeof type !== "string") return false;
-	return sessionEventTypes.has(type as AgentSessionEvent["type"]);
+	return sessionEventTypes.has(type as RpcAgentEventPayload["type"]);
 }
 
 function isRpcSubagentLifecycleFrame(value: unknown): value is RpcSubagentLifecycleFrame {
@@ -605,6 +614,60 @@ export class RpcClient {
 	 */
 	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
 		const response = await this.#send({ type: "new_session", parentSession });
+		return this.#getData(response);
+	}
+	async startSession(runId: string): Promise<RpcSessionStartData> {
+		const response = await this.#send({ type: "session.start", run_id: runId });
+		return this.#getData(response);
+	}
+
+	async resumeSession(
+		runId: string,
+		options: { sessionId?: string; afterSequence?: number } = {},
+	): Promise<RpcSessionStartData> {
+		const response = await this.#send({
+			type: "session.resume",
+			run_id: runId,
+			session_id: options.sessionId,
+			after_sequence: options.afterSequence,
+		});
+		return this.#getData(response);
+	}
+
+	async replaySession(
+		options: { afterSequence?: number; limit?: number } = {},
+	): Promise<{ events: RpcSessionEventFrame[]; next_sequence: number; has_more: boolean }> {
+		const response = await this.#send({
+			type: "session.replay",
+			after_sequence: options.afterSequence,
+			limit: options.limit,
+		});
+		return this.#getData(response);
+	}
+
+	async watchSession(
+		options: { afterSequence?: number; limit?: number } = {},
+	): Promise<{ events: RpcSessionEventFrame[]; next_sequence: number; has_more: boolean }> {
+		const response = await this.#send({
+			type: "session.watch",
+			after_sequence: options.afterSequence,
+			limit: options.limit,
+		});
+		return this.#getData(response);
+	}
+
+	async getSessionResult(timeoutMs = 0): Promise<RpcSessionResult> {
+		const response = await this.#send({ type: "session.result" }, timeoutMs);
+		return this.#getData(response);
+	}
+
+	async steerSession(steeringId: string, message: string, images?: ImageContent[]): Promise<RpcSessionSteerAck> {
+		const response = await this.#send({
+			type: "session.steer",
+			steering_id: steeringId,
+			message,
+			images,
+		});
 		return this.#getData(response);
 	}
 
@@ -1109,14 +1172,19 @@ export class RpcClient {
 		const fullCommand = { ...command, id } as RpcCommand;
 		const { promise, resolve, reject } = Promise.withResolvers<RpcResponse>();
 		let settled = false;
-		const timeoutId = this.#startTimeout(timeoutMs, () => {
-			if (settled) return;
-			this.#pendingRequests.delete(id);
-			settled = true;
-			reject(
-				new Error(`Timeout waiting for response to ${command.type}. Stderr: ${this.#process?.peekStderr() ?? ""}`),
-			);
-		});
+		const timeoutId =
+			timeoutMs > 0
+				? this.#startTimeout(timeoutMs, () => {
+						if (settled) return;
+						this.#pendingRequests.delete(id);
+						settled = true;
+						reject(
+							new Error(
+								`Timeout waiting for response to ${command.type}. Stderr: ${this.#process?.peekStderr() ?? ""}`,
+							),
+						);
+					})
+				: undefined;
 
 		this.#pendingRequests.set(id, {
 			resolve: response => {

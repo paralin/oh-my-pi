@@ -80,6 +80,8 @@ export interface AdvisorRuntimeHost {
 	 *  recovery (credential switch, fallback chain) declined. Cleared only by
 	 *  an explicit reset (`/new`, config rebuild, session restart). */
 	notifyQuotaExhausted?(): void;
+	/** Notify the host after backlog custody can have changed. */
+	onBacklogChange?(): void;
 	/** Stable identity for the live advisor model. Used to restore full transcript rendering after a model switch. */
 	getModelIdentity?(): string;
 }
@@ -876,12 +878,14 @@ export class AdvisorRuntime {
 				w.finish(true);
 			}
 		}
+		this.host.onBacklogChange?.();
 	}
 
 	#wakeAllWaiters(): void {
 		for (const w of [...this.#waiters]) {
 			w.finish(false);
 		}
+		this.host.onBacklogChange?.();
 	}
 
 	/**

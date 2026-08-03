@@ -31,6 +31,12 @@
 ### Fixed
 
 - Preserved queued steering and follow-up messages when a continuation is cancelled before or during pre-dequeue hooks, and propagated the caller's cancellation signal through every continuation model-call loop.
+### Changed
+
+- Replaced arktype with `@oh-my-pi/omptype` in tests and test utilities.
+### Added
+
+- Exported `TokenizerMode` and `getTokenizerMode()` so consumers can snapshot the tokenizer mode used for session metadata.
 
 ## [17.2.6] - 2026-08-03
 
