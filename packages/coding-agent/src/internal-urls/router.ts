@@ -5,6 +5,8 @@
  * `InternalUrlRouter.instance()`. Handlers are stateless; per-session and
  * shared state lives in `./state.ts`.
  */
+
+import { WorldClient } from "../world/index.js";
 import { AgentProtocolHandler } from "./agent-protocol";
 import { ArtifactProtocolHandler } from "./artifact-protocol";
 import { HistoryProtocolHandler } from "./history-protocol";
@@ -17,6 +19,7 @@ import { extractUriScheme, parseInternalUrl } from "./parse";
 import { RuleProtocolHandler } from "./rule-protocol";
 import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
+import { SpacewaveProtocolHandler } from "./spacewave-protocol";
 import { SshProtocolHandler } from "./ssh-protocol";
 import type {
 	InternalResource,
@@ -51,6 +54,12 @@ export class InternalUrlRouter {
 		this.register(new HistoryProtocolHandler());
 		this.register(new SshProtocolHandler());
 		this.register(new XdProtocolHandler());
+		// Registered only where it can resolve, and bound to one client for the
+		// life of this router. `create` dials nothing and returns undefined when
+		// no socket is configured, so an unconfigured root simply has no
+		// `spacewave://` scheme rather than one whose every read fails.
+		const worldClient = WorldClient.create();
+		if (worldClient) this.register(new SpacewaveProtocolHandler(worldClient));
 	}
 
 	/** Process-global router instance. */
