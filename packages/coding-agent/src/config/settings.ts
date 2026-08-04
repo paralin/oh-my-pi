@@ -370,6 +370,10 @@ export class Settings {
 	#savePromise?: Promise<void>;
 	#projectSaveTimer?: NodeJS.Timeout;
 	#projectSavePromise?: Promise<void>;
+	/** Debounced watcher for the active global config.yml/config.yaml. */
+	#configWatcher?: fs.FSWatcher;
+	#configReloadTimer?: NodeJS.Timeout;
+	#configReloadPromise?: Promise<boolean>;
 
 	/** Whether to persist changes */
 	#persist: boolean;
@@ -413,6 +417,7 @@ export class Settings {
 				globalInstance = instance;
 				clearBoundSettingsMethods();
 				globalInstancePromise = Promise.resolve(instance);
+				instance.#startConfigWatcher();
 				return instance;
 			},
 			error => {
@@ -575,6 +580,128 @@ export class Settings {
 		this.#saveTimer = undefined;
 		clearTimeout(this.#projectSaveTimer);
 		this.#projectSaveTimer = undefined;
+		clearTimeout(this.#configReloadTimer);
+		this.#configReloadTimer = undefined;
+		this.#configWatcher?.close();
+		this.#configWatcher = undefined;
+	}
+
+	#startConfigWatcher(): void {
+		if (!this.#persist || this.#savesCancelled || this.#configWatcher) return;
+		try {
+			const watcher = fs.watch(this.#agentDir, { persistent: false }, (_eventType, filename) => {
+				if (filename && !MAIN_CONFIG_FILENAMES.some(name => name === path.basename(filename.toString()))) return;
+				this.#queueConfigReload();
+			});
+			watcher.on("error", error => {
+				if (this.#configWatcher !== watcher) return;
+				logger.warn("Settings: config watcher failed", {
+					path: this.#configPath,
+					error: toError(error).message,
+				});
+				watcher.close();
+				this.#configWatcher = undefined;
+			});
+			this.#configWatcher = watcher;
+		} catch (error) {
+			logger.warn("Settings: could not watch config", {
+				path: this.#configPath,
+				error: toError(error).message,
+			});
+		}
+	}
+
+	#queueConfigReload(): void {
+		if (this.#savesCancelled) return;
+		clearTimeout(this.#configReloadTimer);
+		this.#configReloadTimer = setTimeout(() => {
+			this.#configReloadTimer = undefined;
+			const previousReload = this.#configReloadPromise;
+			const reloadPromise = previousReload
+				? previousReload.then(
+						() => this.reloadFromDisk(),
+						() => this.reloadFromDisk(),
+					)
+				: this.reloadFromDisk();
+			this.#configReloadPromise = reloadPromise;
+			reloadPromise
+				.catch(error => {
+					logger.warn("Settings: config reload failed", {
+						path: this.#configPath,
+						error: toError(error).message,
+					});
+				})
+				.finally(() => {
+					if (this.#configReloadPromise === reloadPromise) {
+						this.#configReloadPromise = undefined;
+					}
+				});
+		}, 150);
+	}
+
+	async #readGlobalConfigForReload(): Promise<{ configPath: string; settings: RawSettings } | null> {
+		for (const filename of MAIN_CONFIG_FILENAMES) {
+			const configPath = path.join(this.#agentDir, filename);
+			const result = await this.#loadYamlIfPresent(configPath);
+			switch (result.kind) {
+				case "missing":
+					continue;
+				case "loaded":
+					return { configPath, settings: result.settings };
+				case "invalid":
+				case "unreadable":
+					logger.warn("Settings: ignored invalid live config update", {
+						path: configPath,
+						error: toError(result.error).message,
+					});
+					return null;
+			}
+		}
+		return {
+			configPath: path.join(this.#agentDir, MAIN_CONFIG_FILENAMES[0]),
+			settings: {},
+		};
+	}
+
+	/**
+	 * Reload the active global config from disk without quarantining malformed
+	 * edits. Returns false and preserves the last valid settings when the file
+	 * cannot be read or parsed.
+	 */
+	async reloadFromDisk(): Promise<boolean> {
+		let loaded = await this.#readGlobalConfigForReload();
+		if (!loaded || this.#savesCancelled) return false;
+
+		if (this.#saveTimer || this.#savePromise || this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
+			await this.flush();
+			loaded = await this.#readGlobalConfigForReload();
+			if (!loaded || this.#savesCancelled) return false;
+		}
+
+		const previousHookValues = new Map<SettingPath, unknown>();
+		for (const key of Object.keys(SETTING_HOOKS) as SettingPath[]) {
+			previousHookValues.set(key, this.get(key));
+		}
+		const previousModelRoles = this.get("modelRoles");
+		const previousSessionAccent = this.get("statusLine.sessionAccent");
+
+		this.#configPath = loaded.configPath;
+		this.#global = loaded.settings;
+		this.#rebuildMerged();
+
+		for (const [key, previous] of previousHookValues) {
+			const next = this.get(key);
+			if (Bun.deepEquals(next, previous)) continue;
+			SETTING_HOOKS[key]?.(next, previous);
+		}
+		if (!Bun.deepEquals(this.get("modelRoles"), previousModelRoles)) {
+			modelRolesSignal.fire();
+		}
+		if (!Bun.deepEquals(this.get("statusLine.sessionAccent"), previousSessionAccent)) {
+			statusLineSessionAccentSignal.fire();
+		}
+		logger.debug("Settings: reloaded config", { path: this.#configPath });
+		return true;
 	}
 
 	/**

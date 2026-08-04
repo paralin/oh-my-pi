@@ -8,6 +8,7 @@ import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stre
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
 	onAppendOnlyModeChanged,
+	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	resetSettingsForTest,
 	type SettingPath,
@@ -123,6 +124,45 @@ describe("Settings", () => {
 			expect(await Bun.file(getConfigPath()).exists()).toBe(true);
 			expect(await Bun.file(yamlConfigPath).exists()).toBe(false);
 			expect((await readSettings()).setupVersion).toBe(1);
+		});
+	});
+
+	describe("live config reload", () => {
+		it("reloads model roles and keeps the last valid settings after a malformed update", async () => {
+			await writeSettings({
+				modelRoles: { luna: "github-copilot/gpt-5.6-luna:high" },
+			});
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const reloaded = Promise.withResolvers<void>();
+			let roleChanges = 0;
+			const unsubscribe = onModelRolesChanged(() => {
+				roleChanges++;
+				reloaded.resolve();
+			});
+
+			try {
+				await writeSettings({
+					modelRoles: {
+						luna: "openai-codex/gpt-5.6-luna:high",
+						kimi: "openrouter/moonshotai/kimi-k3:high",
+					},
+				});
+				await reloaded.promise;
+
+				expect(settings.getModelRole("luna")).toBe("openai-codex/gpt-5.6-luna:high");
+				expect(settings.getModelRole("kimi")).toBe("openrouter/moonshotai/kimi-k3:high");
+				expect(roleChanges).toBe(1);
+
+				await Bun.write(getConfigPath(), "modelRoles:\n  luna: [\n");
+				expect(await settings.reloadFromDisk()).toBe(false);
+
+				expect(settings.getModelRole("luna")).toBe("openai-codex/gpt-5.6-luna:high");
+				expect(settings.getModelRole("kimi")).toBe("openrouter/moonshotai/kimi-k3:high");
+				expect(roleChanges).toBe(1);
+				expect(fs.readdirSync(agentDir).some(name => name.startsWith("config.yml.broken-"))).toBe(false);
+			} finally {
+				unsubscribe();
+			}
 		});
 	});
 

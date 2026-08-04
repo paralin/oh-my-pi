@@ -168,6 +168,14 @@ Write behavior:
 - `settings.set(...)` writes to the **global** layer (the global YAML file selected at startup) and queues a background save.
 - Project settings and config overlays are read-only from the settings API.
 
+The global config directory is watched for `config.yml` and `config.yaml`
+changes. Successful external edits replace the global layer in the running
+process, rebuild effective settings, and notify changed setting hooks and model
+role listeners. Atomic replacements and repeated editor events are debounced.
+A malformed or unreadable live edit leaves the last valid settings active and
+is not quarantined; startup validation retains the stricter failure behavior
+below. Project settings and explicit config overlays are not watched.
+
 ### Settings load failures
 
 - Missing global/project YAML is treated as empty configuration.
