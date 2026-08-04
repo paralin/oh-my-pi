@@ -124,6 +124,21 @@ describe("structured subagent primitive", () => {
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
 	});
 
+	it("accepts a model-role key without a matching agent file as a Task-derived agent", async () => {
+		const roleSession = session({
+			modelRoles: { "role-only-test": "openai-codex/gpt-5.6-luna:high" },
+		});
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, agent: "role-only-test" }));
+
+		expect(policy.agent).toMatchObject({
+			name: "role-only-test",
+			model: ["@role-only-test"],
+			source: "bundled",
+		});
+		expect(policy.modelOverride).toEqual(["openai-codex/gpt-5.6-luna:high"]);
+	});
+
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
 		const previous = Bun.env.PI_BLOCKED_AGENT;
 		Bun.env.PI_BLOCKED_AGENT = "worker";
