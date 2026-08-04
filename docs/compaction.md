@@ -133,6 +133,17 @@ The automatic paths are intentionally different:
   - Trigger: `runIdleCompaction()` when not streaming or already compacting.
   - Uses `reason: "idle"` and does not auto-continue afterward.
 
+
+### Native-or-scratch strategy
+
+`compaction.strategy: "native-or-scratch"` picks the maintenance action from the active model:
+
+- When provider-native compaction is available (`shouldUseProviderNativeCompaction`, gated by `compaction.remoteEnabled`), the pass runs **context-full** and prefers the provider V2/V1 native path.
+- Otherwise, when a scratch checkpoint path exists, the pass runs **scratch-handoff** (closeout + rebuild from the scratch document).
+- If neither native nor scratch is available, it falls back to ordinary local context-full summarization.
+
+Scratch closeout steers and pre-provider oversized-request stops only arm when the resolved action is scratch-handoff for the current model. On Codex/OpenAI models with remote enabled, this strategy behaves like context-full native; on GitHub Copilot/OpenRouter it behaves like scratch-handoff.
+
 ### Shake strategy
 
 `compaction.strategy: "shake"` performs an inline, local reduction instead of calling a summarization model. It replaces eligible tool results and large fenced/XML blocks with recoverable `artifact://` references, using a protected recent-token window and minimum-savings threshold. Automatic shake emits the normal auto-compaction events with `action: "shake"`.
@@ -418,7 +429,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.strategy` = `"snapcompact"` (`"context-full"`, `"handoff"`, `"shake"`, and `"off"` are also supported)
+- `compaction.strategy` = `"snapcompact"` (`"context-full"`, `"handoff"`, `"scratch-handoff"`, `"native-or-scratch"`, `"shake"`, and `"off"` are also supported)
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.
 - `compaction.keepRecentTokens` = `20000`
 - `compaction.autoContinue` = `true`

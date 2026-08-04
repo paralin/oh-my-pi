@@ -324,6 +324,10 @@
 
 - Upgraded the bundled omptype schema engine: intersection and pipe operators, bigint and RegExp literals in the string DSL, Standard Schema V1 interop, JSON Schema import via fromJsonSchema(), and richer union/collection error reporting.
 
+### Added
+
+- Added `compaction.strategy: native-or-scratch`, which uses provider-native context-full compaction when the active model supports it and otherwise rebuilds from the scratch checkpoint.
+
 ## [17.2.7] - 2026-08-03
 
 ### Changed

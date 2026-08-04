@@ -34,6 +34,8 @@
 ### Changed
 
 - Replaced arktype with `@oh-my-pi/omptype` in tests and test utilities.
+- Extended the shared compaction strategy type with `native-or-scratch` so hosts can prefer provider-native compaction and fall back to scratch-handoff when the active model has no native path.
+
 ### Added
 
 - Exported `TokenizerMode` and `getTokenizerMode()` so consumers can snapshot the tokenizer mode used for session metadata.

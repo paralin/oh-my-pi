@@ -2178,14 +2178,14 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.strategy": {
 		type: "enum",
-		values: ["context-full", "handoff", "scratch-handoff", "shake", "snapcompact", "off"] as const,
+		values: ["context-full", "handoff", "scratch-handoff", "native-or-scratch", "shake", "snapcompact", "off"] as const,
 		default: "snapcompact",
 		ui: {
 			tab: "context",
 			group: "Compaction",
 			label: "Compaction Strategy",
 			description:
-				"Choose in-place context-full maintenance, new-session handoff, scratch-checkpoint rebuild, surgical shake, snapcompact image archive, or disable auto maintenance",
+				"Choose in-place context-full maintenance, new-session handoff, scratch-checkpoint rebuild, native-or-scratch hybrid, surgical shake, snapcompact image archive, or disable auto maintenance",
 			options: [
 				{
 					value: "context-full",
@@ -2197,6 +2197,12 @@ export const SETTINGS_SCHEMA = {
 					value: "scratch-handoff",
 					label: "Scratch handoff",
 					description: "Checkpoint current state to scratch and rebuild this session around it",
+				},
+				{
+					value: "native-or-scratch",
+					label: "Native or scratch",
+					description:
+						"Use provider-native compaction when the active model supports it; otherwise rebuild from the scratch checkpoint",
 				},
 				{
 					value: "shake",
@@ -5777,7 +5783,7 @@ export type Personality = SettingValue<"personality">;
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy: "context-full" | "handoff" | "scratch-handoff" | "shake" | "snapcompact" | "off";
+	strategy: "context-full" | "handoff" | "scratch-handoff" | "native-or-scratch" | "shake" | "snapcompact" | "off";
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number | undefined;

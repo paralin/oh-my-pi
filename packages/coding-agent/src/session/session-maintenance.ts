@@ -77,7 +77,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
-import { resolveCompactionStrategy } from "./compaction-strategy";
+import { resolveCompactionStrategy, shouldRunScratchHandoffMaintenance } from "./compaction-strategy";
 import { buildCompactionMeasurement } from "./measurement-events";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
@@ -190,14 +190,32 @@ const COMPACTION_RECOVERY_BAND = 0.8;
  * Resolve which maintenance action a pass runs. Scratch handoff owns continuity
  * whenever a scratch document is active: it rebuilds context from the document
  * instead of paying for an LLM-authored handoff.
+ *
+ * `native-or-scratch` prefers provider-native context-full compaction when the
+ * active model supports it, and otherwise uses scratch-handoff when a scratch
+ * path exists.
  */
 export function resolveAutoCompactionAction(input: {
 	strategy: CompactionSettings["strategy"];
 	reason: AutoCompactionReason;
 	suppressHandoff: boolean;
 	hasScratchHandoff: boolean;
+	model?: Model;
+	remoteEnabled?: boolean;
+	remoteStreamingV2Enabled?: boolean;
 }): AutoCompactionAction {
 	if (input.strategy === "snapcompact") return "snapcompact";
+	if (input.strategy === "native-or-scratch") {
+		const useNative =
+			input.model !== undefined &&
+			shouldUseProviderNativeCompaction(input.model, {
+				remoteEnabled: input.remoteEnabled,
+				remoteStreamingV2Enabled: input.remoteStreamingV2Enabled,
+			});
+		if (useNative) return "context-full";
+		if (input.hasScratchHandoff) return "scratch-handoff";
+		return "context-full";
+	}
 	if (input.strategy === "scratch-handoff" && input.hasScratchHandoff) return "scratch-handoff";
 	if (input.strategy === "handoff" && input.reason !== "overflow" && !input.suppressHandoff) return "handoff";
 	return "context-full";
@@ -1312,7 +1330,12 @@ export class SessionMaintenance {
 		const scratchPath = scratch.displayPath;
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
 		const shouldScratchHandoffCloseout =
-			compactionSettings.strategy === "scratch-handoff" &&
+			shouldRunScratchHandoffMaintenance({
+				strategy: compactionSettings.strategy,
+				model,
+				remoteEnabled: compactionSettings.remoteEnabled,
+				remoteStreamingV2Enabled: compactionSettings.remoteStreamingV2Enabled,
+			}) &&
 			scratchPath !== undefined &&
 			scratch.shouldRequestCloseout(contextTokens, contextWindow, compactionSettings, scratchPath);
 		if (!shouldThresholdCompact && !shouldScratchHandoffCloseout) return;
@@ -1352,7 +1375,15 @@ export class SessionMaintenance {
 			});
 			return;
 		}
-		if (compactionSettings.strategy === "scratch-handoff" && scratchPath) {
+		if (
+			shouldRunScratchHandoffMaintenance({
+				strategy: compactionSettings.strategy,
+				model,
+				remoteEnabled: compactionSettings.remoteEnabled,
+				remoteStreamingV2Enabled: compactionSettings.remoteStreamingV2Enabled,
+			}) &&
+			scratchPath
+		) {
 			logger.debug("Mid-run scratch-handoff queued closeout steer", {
 				contextTokens,
 				contextWindow,
@@ -1603,7 +1634,12 @@ export class SessionMaintenance {
 		const shouldThresholdCompact = shouldCompact(contextTokens, contextWindow, compactionSettings);
 		const scratchPath = scratch.displayPath;
 		const shouldScratchHandoffCloseout =
-			compactionSettings.strategy === "scratch-handoff" &&
+			shouldRunScratchHandoffMaintenance({
+				strategy: compactionSettings.strategy,
+				model: this.#model,
+				remoteEnabled: compactionSettings.remoteEnabled,
+				remoteStreamingV2Enabled: compactionSettings.remoteStreamingV2Enabled,
+			}) &&
 			scratchPath !== undefined &&
 			!options.suppressHandoff &&
 			scratch.shouldRequestCloseout(postMaintenanceContextTokens, contextWindow, compactionSettings, scratchPath);
@@ -1630,7 +1666,12 @@ export class SessionMaintenance {
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
 				if (
-					compactionSettings.strategy === "scratch-handoff" &&
+					shouldRunScratchHandoffMaintenance({
+						strategy: compactionSettings.strategy,
+						model: this.#model,
+						remoteEnabled: compactionSettings.remoteEnabled,
+						remoteStreamingV2Enabled: compactionSettings.remoteStreamingV2Enabled,
+					}) &&
 					scratchPath !== undefined &&
 					!options.suppressHandoff
 				) {
@@ -2495,13 +2536,20 @@ export class SessionMaintenance {
 			reason,
 			suppressHandoff,
 			hasScratchHandoff: scratch.displayPath !== undefined,
+			model: this.#model,
+			remoteEnabled: compactionSettings.remoteEnabled,
+			remoteStreamingV2Enabled: compactionSettings.remoteStreamingV2Enabled,
 		});
 		if (action === "scratch-handoff" && scratch.displayPath !== undefined) {
 			scratch.stageCloseout(scratch.displayPath, options.triggerContextTokens, reason);
 		}
 		const standardScratchCompaction = this.#host.settings.get("scratchHandoff.standardCompactionEnabled");
 		let scratchCompactionModes: ScratchCompactionModes = {
-			native: action === "scratch-handoff" && compactionSettings.remoteEnabled !== false,
+			native:
+				action === "scratch-handoff" &&
+				compactionSettings.remoteEnabled !== false &&
+				this.#model !== undefined &&
+				shouldUseProviderNativeCompaction(this.#model, compactionSettings),
 			standard: action === "scratch-handoff" && standardScratchCompaction,
 		};
 		let composeScratchHandoff =
