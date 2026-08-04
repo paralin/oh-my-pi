@@ -35,6 +35,7 @@ import type { AutoCompactionReason } from "../extensibility/shared-events";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
 import { computeNonMessageTokens, estimateToolSchemaTokens } from "../modes/utils/context-usage";
 import { resolveToCwd } from "../tools/path-utils";
+import { shouldRunScratchHandoffMaintenance } from "./compaction-strategy";
 import type { CustomMessage } from "./messages";
 import {
 	buildScratchHandoffRecentContext,
@@ -836,7 +837,17 @@ export class ScratchHandoffController {
 		if (contextWindow <= 0) return;
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		if (!compactionSettings.enabled || compactionSettings.strategy !== "scratch-handoff") return;
+		if (
+			!compactionSettings.enabled ||
+			!shouldRunScratchHandoffMaintenance({
+				strategy: compactionSettings.strategy,
+				model: this.#host.model(),
+				remoteEnabled: compactionSettings.remoteEnabled,
+				remoteStreamingV2Enabled: compactionSettings.remoteStreamingV2Enabled,
+			})
+		) {
+			return;
+		}
 		const reserveTokens = effectiveReserveTokens(contextWindow, compactionSettings);
 		const promptBudget = Math.max(0, contextWindow - reserveTokens);
 		if (promptBudget <= 0) return;

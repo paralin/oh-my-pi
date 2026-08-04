@@ -73,6 +73,70 @@ describe("scratch handoff strategy", () => {
 			}),
 		).toBe("context-full");
 	});
+
+	it("native-or-scratch prefers provider-native context-full when available", () => {
+		const nativeModel = {
+			id: "gpt-5.6-sol",
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+		} as const;
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "native-or-scratch",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: true,
+				model: nativeModel as never,
+				remoteEnabled: true,
+			}),
+		).toBe("context-full");
+	});
+
+	it("native-or-scratch falls back to scratch when native is unavailable", () => {
+		const copilotModel = {
+			id: "grok-4.5",
+			provider: "github-copilot",
+			api: "openai-completions",
+		} as const;
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "native-or-scratch",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: true,
+				model: copilotModel as never,
+				remoteEnabled: true,
+			}),
+		).toBe("scratch-handoff");
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "native-or-scratch",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: false,
+				model: copilotModel as never,
+				remoteEnabled: true,
+			}),
+		).toBe("context-full");
+	});
+
+	it("native-or-scratch respects remoteEnabled false", () => {
+		const nativeModel = {
+			id: "gpt-5.6-sol",
+			provider: "openai-codex",
+			api: "openai-codex-responses",
+		} as const;
+		expect(
+			resolveAutoCompactionAction({
+				strategy: "native-or-scratch",
+				reason: "threshold",
+				suppressHandoff: false,
+				hasScratchHandoff: true,
+				model: nativeModel as never,
+				remoteEnabled: false,
+			}),
+		).toBe("scratch-handoff");
+	});
 });
 
 describe("resolveScratchContinuityState", () => {
