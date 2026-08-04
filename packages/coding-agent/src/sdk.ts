@@ -1599,6 +1599,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					: await loadCapability<Rule>(ruleCapability.id, { cwd });
 			const { rulebookRules, alwaysApplyRules } = bucketRules(rulesResult.items, ttsrManager, {
 				builtinRules: ttsrSettings.builtinRules,
+				apertureRules: ttsrSettings.apertureRules,
 				disabledRules: ttsrSettings.disabledRules,
 			});
 			if (existingSession.injectedTtsrRules.length > 0) {

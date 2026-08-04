@@ -15,7 +15,13 @@ import * as path from "node:path";
 import { AstMatchStrictness, astMatch, FileType, type GlobMatch, glob } from "@oh-my-pi/pi-natives";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, compileRuleCondition, type Rule, ruleCapability } from "../capability/rule";
+import {
+	APERTURE_DEFAULTS_PROVIDER_ID,
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	compileRuleCondition,
+	type Rule,
+	ruleCapability,
+} from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import { Settings } from "../config/settings";
 import type { TtsrSettings } from "../config/settings-schema";

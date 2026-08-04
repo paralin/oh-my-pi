@@ -9,7 +9,9 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	SuccessfulChange,
 	ToolApprovalDecision,
+	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -301,11 +303,14 @@ const writeSchema = type({
 });
 
 export type WriteToolInput = typeof writeSchema.infer;
-
 /** Details returned by the write tool for TUI rendering */
 export interface WriteToolDetails {
 	diagnostics?: FileDiagnosticsResult;
 	meta?: OutputMeta;
+	/** Canonical operation completed by a local filesystem write. */
+	operation?: "create" | "update";
+	/** Line count of the final filesystem content. */
+	resultingLineCount?: number;
 	/** Set when the file was auto-chmod'd because content begins with a `#!` shebang. */
 	madeExecutable?: boolean;
 	/** Absolute filesystem path the write resolved to. Used by the renderer to wrap
@@ -571,6 +576,21 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	matcherDigest(args: unknown): string | undefined {
 		const content = (args as Partial<WriteParams>).content;
 		return typeof content === "string" ? content : undefined;
+	}
+
+	successfulChanges(_args: Record<string, unknown>, result: AgentToolResult<WriteToolDetails>): SuccessfulChange[] {
+		if (result.isError) return [];
+		const details = result.details;
+		if (!details?.resolvedPath || !details.operation) return [];
+		const lineCount = details.resultingLineCount;
+		if (!lineCount) return [];
+		return [
+			{
+				path: details.resolvedPath,
+				operation: details.operation,
+				ranges: [{ startLine: 1, endLine: lineCount }],
+			},
+		];
 	}
 
 	readonly #writethrough: WritethroughCallback;
@@ -1260,6 +1280,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
 			const batchRequest = getLspBatchRequest(context?.toolCall);
+			const existed = await fs.exists(absolutePath);
 
 			// Check if file exists and is auto-generated before overwriting
 			if (await fs.exists(absolutePath)) {
@@ -1290,7 +1311,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				}
 				return {
 					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					details: {
+						resolvedPath: absolutePath,
+						operation: existed ? "update" : "create",
+						resultingLineCount: Math.max(1, countLines(bridgeWrite.text)),
+						madeExecutable: madeExecutable || undefined,
+					},
 				};
 			}
 
@@ -1320,7 +1346,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (!diagnostics) {
 				return {
 					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
+					details: {
+						resolvedPath: absolutePath,
+						operation: existed ? "update" : "create",
+						resultingLineCount: Math.max(1, countLines(cleanContent)),
+						madeExecutable: madeExecutable || undefined,
+					},
 				};
 			}
 
@@ -1328,6 +1359,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				content: [{ type: "text", text: resultText }],
 				details: {
 					resolvedPath: absolutePath,
+					operation: existed ? "update" : "create",
+					resultingLineCount: Math.max(1, countLines(cleanContent)),
 					diagnostics,
 					madeExecutable: madeExecutable || undefined,
 					meta: outputMeta()

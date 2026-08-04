@@ -75,7 +75,13 @@ describe("pruneOversizedEditSnapshots", () => {
 			oldText: oversized,
 			newText: oversized,
 		});
-		expect(result).toEqual({ diff: "@@", path: "/p", firstChangedLine: 5, snapshotsPruned: true });
+		expect(result).toEqual({
+			diff: "@@",
+			path: "/p",
+			firstChangedLine: 5,
+			resultingLineCount: 1,
+			snapshotsPruned: true,
+		});
 		expect("oldText" in result).toBe(false);
 		expect("newText" in result).toBe(false);
 	});
@@ -90,7 +96,12 @@ describe("pruneOversizedEditSnapshots", () => {
 				{ path: "/small", diff: "d2", oldText: small, newText: small },
 			],
 		});
-		expect(result.perFileResults?.[0]).toEqual({ path: "/big", diff: "d1", snapshotsPruned: true });
+		expect(result.perFileResults?.[0]).toEqual({
+			path: "/big",
+			diff: "d1",
+			resultingLineCount: 1,
+			snapshotsPruned: true,
+		});
 		expect(result.perFileResults?.[1]).toEqual({
 			path: "/small",
 			diff: "d2",
@@ -126,6 +137,7 @@ describe("pruneOversizedEditSnapshots", () => {
 		expect(totalKept).toBeLessThanOrEqual(MAX_EDIT_SNAPSHOT_TEXT_CHARS);
 		// Pruned entries keep their diff/path so the renderer still works.
 		expect(pruned[0]).toMatchObject({ path: "/f2", diff: "d2", snapshotsPruned: true });
+		expect(pruned[0]?.resultingLineCount).toBe(1);
 	});
 });
 

@@ -11,6 +11,7 @@ import {
 import type { AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { isRecord, prompt, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
+import { analyzeSuccessfulChanges } from "../capability/successful-change-analyzer";
 import type { Settings } from "../config/settings";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
@@ -121,11 +122,32 @@ export class TtsrCoordinator {
 		this.#markInjected(rules.filter((ruleName): ruleName is string => typeof ruleName === "string"));
 	}
 
-	/** Folds per-tool reminders into the matched tool's result. */
-	afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
-		const rules = this.#perToolInjections.get(ctx.toolCall.id);
-		if (!rules || rules.length === 0) return undefined;
+	/** Folds streaming and semantic reminders into the matched tool's result. */
+	async afterToolCall(ctx: AfterToolCallContext, signal?: AbortSignal): Promise<AfterToolCallResult | undefined> {
+		const streamingRules = this.#perToolInjections.get(ctx.toolCall.id) ?? [];
 		this.#perToolInjections.delete(ctx.toolCall.id);
+		let semanticRules: Rule[] = [];
+		if (this.#manager && ctx.successfulChanges && ctx.successfulChanges.length > 0) {
+			try {
+				const semanticMatches = await analyzeSuccessfulChanges(
+					this.#manager,
+					ctx.successfulChanges,
+					ctx.toolCall.name,
+					signal,
+				);
+				semanticRules = this.#manager.claimInjectableRules(semanticMatches.map(match => match.rule));
+			} catch {
+				semanticRules = [];
+			}
+		}
+		const rules: Rule[] = [];
+		const seen = new Set<string>();
+		for (const rule of [...streamingRules, ...semanticRules]) {
+			if (seen.has(rule.name)) continue;
+			seen.add(rule.name);
+			rules.push(rule);
+		}
+		if (rules.length === 0) return undefined;
 		const reminder = rules
 			.map(rule =>
 				prompt.render(ttsrToolReminderTemplate, {
@@ -139,8 +161,6 @@ export class TtsrCoordinator {
 		if (ruleNames.length > 0) this.#host.sessionManager.appendTtsrInjection(ruleNames);
 		return { content: [{ type: "text", text: reminder }, ...ctx.result.content] };
 	}
-
-	/** Resolves and clears the current resume gate. */
 	resolveResume(): void {
 		if (!this.#resumeResolve) return;
 		this.#resumeResolve();

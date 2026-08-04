@@ -1499,7 +1499,7 @@ export class AgentSession {
 			this.#streamingEditGuard.maybeAbort(event);
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
 		});
-		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
+		// Tool-result hook owns post-tool actions that must affect the current loop.
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
 		// Pre-scheduling tool_call wiring: extension handlers run at arg-prep
 		// time so a block/revision lands before concurrency resolution,
@@ -3560,7 +3560,7 @@ export class AgentSession {
 		}
 	}
 
-	#afterToolCall(ctx: AfterToolCallContext): AfterToolCallResult | undefined {
+	async #afterToolCall(ctx: AfterToolCallContext, signal?: AbortSignal): Promise<AfterToolCallResult | undefined> {
 		if (
 			this.#isTerminalYieldToolResult({
 				toolName: ctx.toolCall.name,
@@ -3572,7 +3572,7 @@ export class AgentSession {
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 		}
-		return this.#ttsr.afterToolCall(ctx);
+		return this.#ttsr.afterToolCall(ctx, signal);
 	}
 	/**
 	 * Emits the extension `tool_call` event for a loop-dispatched call at

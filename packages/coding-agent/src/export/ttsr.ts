@@ -42,6 +42,8 @@ interface TtsrEntry {
 	conditions: RegExp[];
 	/** ast-grep pattern strings; matched only against edit/write tool snapshots. */
 	astConditions: string[];
+	/** Semantic post-edit clauses never participate in stream matching. */
+	semanticOnly: boolean;
 	scope: TtsrScope;
 	globalPathGlobs?: Bun.Glob[];
 }
@@ -59,6 +61,7 @@ const DEFAULT_SETTINGS: Required<TtsrSettings> = {
 	repeatMode: "once",
 	repeatGap: 10,
 	builtinRules: true,
+	apertureRules: false,
 	disabledRules: [],
 };
 
@@ -308,10 +311,11 @@ export class TtsrManager {
 		if (this.#rules.has(rule.name)) {
 			return false;
 		}
-
 		const conditions = this.#compileConditions(rule);
 		const astConditions = (rule.astCondition ?? []).map(pattern => pattern.trim()).filter(p => p.length > 0);
-		if (conditions.length === 0 && astConditions.length === 0) {
+		const semanticOnly =
+			(rule.semanticCondition?.length ?? 0) > 0 && conditions.length === 0 && astConditions.length === 0;
+		if (conditions.length === 0 && astConditions.length === 0 && !semanticOnly) {
 			return false;
 		}
 
@@ -328,6 +332,7 @@ export class TtsrManager {
 			rule,
 			conditions,
 			astConditions,
+			semanticOnly,
 			scope,
 			globalPathGlobs,
 		});
@@ -410,9 +415,7 @@ export class TtsrManager {
 
 		const candidates: TtsrEntry[] = [];
 		for (const [name, entry] of this.#rules) {
-			if (entry.astConditions.length === 0) {
-				continue;
-			}
+			if (entry.semanticOnly || entry.astConditions.length === 0) continue;
 			if (
 				!this.#canTrigger(name) ||
 				!this.#matchesScope(entry, context) ||
@@ -487,6 +490,7 @@ export class TtsrManager {
 		}
 		const matches: Rule[] = [];
 		for (const [name, entry] of this.#rules) {
+			if (entry.semanticOnly) continue;
 			if (!this.#canTrigger(name)) {
 				continue;
 			}
@@ -566,6 +570,30 @@ export class TtsrManager {
 			return false;
 		}
 		return this.#rules.size > 0;
+	}
+
+	/** Atomically claim repeat eligibility for rules at injection delivery. */
+	claimInjectableRules(rules: readonly Rule[]): Rule[] {
+		const claimed: Rule[] = [];
+		for (const rule of rules) {
+			if (!this.#canTrigger(rule.name)) continue;
+			this.markInjectedByNames([rule.name]);
+			claimed.push(rule);
+		}
+		return claimed;
+	}
+	/** Semantic rules eligible for a completed edit/write destination. */
+	getEligibleSemanticRules(filePath: string, toolName: string): Rule[] {
+		const context: TtsrMatchContext = { source: "tool", toolName, filePaths: [filePath] };
+		return Array.from(this.#rules.values())
+			.filter(
+				entry =>
+					(entry.rule.semanticCondition?.length ?? 0) > 0 &&
+					this.#canTrigger(entry.rule.name) &&
+					this.#matchesScope(entry, context) &&
+					this.#matchesGlobalPaths(entry, context),
+			)
+			.map(entry => entry.rule);
 	}
 
 	/** All rules currently registered for TTSR monitoring, in registration order. */

@@ -628,10 +628,26 @@ export interface AfterToolCallContext {
 	args: Record<string, unknown>;
 	/** The executed tool result before any `afterToolCall` overrides are applied. */
 	result: AgentToolResult<any>;
+	/** Changes successfully completed by this tool execution, when the tool exposes a projector. */
+	successfulChanges?: SuccessfulChange[];
 	/** Whether the executed tool result is currently treated as an error. */
 	isError: boolean;
 	/** Current agent context at the time the tool call is finalized. */
 	context: AgentContext;
+}
+
+/** Inclusive 1-indexed source lines affected by one successful file change. */
+export interface SuccessfulChangeRange {
+	startLine: number;
+	endLine: number;
+}
+
+/** A canonical file operation completed by a tool execution. */
+export interface SuccessfulChange {
+	path: string;
+	operation: "create" | "update" | "move" | "delete";
+	ranges: SuccessfulChangeRange[];
+	sourcePath?: string;
 }
 
 /**
@@ -818,7 +834,14 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * array) to fall back to the caller's top-level argument scan.
 	 */
 	matcherPaths?: (args: unknown) => readonly string[] | undefined;
-
+	/**
+	 * Project a completed execution into canonical file changes for semantic
+	 * post-tool evaluation. Throwing is isolated by the agent loop.
+	 */
+	successfulChanges?: (
+		args: Record<string, unknown>,
+		result: AgentToolResult<TDetails, TParameters>,
+	) => SuccessfulChange[];
 	/**
 	 * Per-file projection of a (potentially partial) streamed call, pairing each
 	 * touched file path with the digest of only the lines added to that file.

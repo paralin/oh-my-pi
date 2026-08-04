@@ -4271,6 +4271,108 @@ describe("agentLoopContinue with AgentMessage", () => {
 		}
 	});
 
+	it("passes normalized completed changes to afterToolCall", async () => {
+		const toolSchema = type({ value: "string" });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: "applied" }], details: { value: params.value } };
+			},
+			successfulChanges(args, result) {
+				expect(args).toEqual({ value: "hello" });
+				expect(result.details).toEqual({ value: "hello" });
+				return [
+					{
+						path: "/tmp/file.ts",
+						operation: "update",
+						ranges: [
+							{ startLine: 2, endLine: 4 },
+							{ startLine: 0, endLine: 1 },
+						],
+					},
+					{
+						path: "relative/file.ts",
+						operation: "update",
+						ranges: [{ startLine: 1, endLine: 1 }],
+					},
+				];
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "edit", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		let seen: unknown;
+		const stream = agentLoop(
+			[createUserMessage("edit something")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				afterToolCall: async ctx => {
+					seen = ctx.successfulChanges;
+				},
+			},
+			undefined,
+			mock.stream,
+		);
+		for await (const _event of stream) {
+			// Drain the loop.
+		}
+		expect(seen).toEqual([{ path: "/tmp/file.ts", operation: "update", ranges: [{ startLine: 2, endLine: 4 }] }]);
+	});
+
+	it("isolates a failed successful-change projector from the completed result", async () => {
+		const toolSchema = type({});
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "edit",
+			label: "Edit",
+			description: "Edit tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "applied" }], details: { kept: true } };
+			},
+			successfulChanges() {
+				throw new Error("projection failed");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "edit", arguments: {} }] },
+				{ content: ["done"] },
+			],
+		});
+		let seen: unknown = null;
+		const events: AgentEvent[] = [];
+		const stream = agentLoop(
+			[createUserMessage("edit something")],
+			context,
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				afterToolCall: async ctx => {
+					seen = ctx.successfulChanges;
+				},
+			},
+			undefined,
+			mock.stream,
+		);
+		for await (const event of stream) events.push(event);
+		expect(seen).toBeUndefined();
+		const toolEnd = events.find(event => event.type === "tool_execution_end");
+		expect(toolEnd?.type === "tool_execution_end" && toolEnd.result).toMatchObject({
+			content: [{ type: "text", text: "applied" }],
+			details: { kept: true },
+		});
+	});
+
 	it("fails closed when afterToolCall returns malformed computer provider metadata", async () => {
 		const toolSchema = type({});
 		const tool: AgentTool<typeof toolSchema> = {

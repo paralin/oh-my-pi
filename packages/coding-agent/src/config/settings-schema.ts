@@ -2178,7 +2178,15 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.strategy": {
 		type: "enum",
-		values: ["context-full", "handoff", "scratch-handoff", "native-or-scratch", "shake", "snapcompact", "off"] as const,
+		values: [
+			"context-full",
+			"handoff",
+			"scratch-handoff",
+			"native-or-scratch",
+			"shake",
+			"snapcompact",
+			"off",
+		] as const,
 		default: "snapcompact",
 		ui: {
 			tab: "context",
@@ -3242,6 +3250,17 @@ export const SETTINGS_SCHEMA = {
 			group: "Rules (TTSR)",
 			label: "Built-in Rules",
 			description: "Load the default rules shipped with the agent (override individually with ttsr.disabledRules)",
+		},
+	},
+
+	"ttsr.apertureRules": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Rules (TTSR)",
+			label: "Aperture Rules",
+			description: "Load the embedded Aperture rules (disabled by default)",
 		},
 	},
 
@@ -5886,6 +5905,8 @@ export interface TtsrSettings {
 	repeatGap: number;
 	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
 	builtinRules?: boolean;
+	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
+	apertureRules?: boolean;
 	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
 	disabledRules?: string[];
 }

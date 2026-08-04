@@ -241,6 +241,8 @@ describe("omp ttsr", () => {
 				const first = arr[0] as Record<string, unknown>;
 				expect(first).toHaveProperty("name");
 				expect(first).toHaveProperty("path");
+				expect(first).toHaveProperty("provider");
+				expect(first).toHaveProperty("enabled", true);
 				expect(first).toHaveProperty("condition");
 				expect(first).toHaveProperty("astCondition");
 				expect(first).toHaveProperty("scope");

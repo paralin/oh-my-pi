@@ -2,6 +2,7 @@
  * Agent loop that works with AgentMessage throughout.
  * Transforms to Message[] only at the LLM call boundary.
  */
+import * as path from "node:path";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
@@ -83,6 +84,7 @@ import type {
 	SteeringInterruptSource,
 	SteeringQueueState,
 	StreamFn,
+	SuccessfulChange,
 } from "./types";
 import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, isSoftToolRequirement } from "./types";
 import { yieldIfDue } from "./utils/yield";
@@ -517,6 +519,46 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 		},
 		malformed: invalidBlocks > 0 || providerMetadataResult.malformed,
 	};
+}
+function normalizeSuccessfulChanges(value: unknown): SuccessfulChange[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const changes: SuccessfulChange[] = [];
+	for (const candidate of value) {
+		if (!candidate || typeof candidate !== "object") continue;
+		const raw = candidate as Record<string, unknown>;
+		if (
+			typeof raw.path !== "string" ||
+			!path.isAbsolute(raw.path) ||
+			!["create", "update", "move", "delete"].includes(raw.operation as string) ||
+			!Array.isArray(raw.ranges)
+		) {
+			continue;
+		}
+		const ranges = raw.ranges
+			.filter(range => range && typeof range === "object")
+			.map(range => {
+				const item = range as Record<string, unknown>;
+				return { startLine: item.startLine, endLine: item.endLine };
+			})
+			.filter(
+				(range): range is { startLine: number; endLine: number } =>
+					typeof range.startLine === "number" &&
+					Number.isInteger(range.startLine) &&
+					range.startLine >= 1 &&
+					typeof range.endLine === "number" &&
+					Number.isInteger(range.endLine) &&
+					range.endLine >= range.startLine,
+			);
+		changes.push({
+			path: path.normalize(raw.path),
+			operation: raw.operation as SuccessfulChange["operation"],
+			ranges,
+			...(typeof raw.sourcePath === "string" && path.isAbsolute(raw.sourcePath)
+				? { sourcePath: path.normalize(raw.sourcePath) }
+				: {}),
+		});
+	}
+	return changes.length > 0 ? changes : undefined;
 }
 
 /**
@@ -2490,6 +2532,7 @@ async function executeToolCalls(
 		}
 
 		let result: AgentToolResult<any> = { content: [], details: {} };
+		let successfulChanges: SuccessfulChange[] | undefined;
 		let isError = false;
 		let caughtError: unknown;
 		let completedToolExecution = false;
@@ -2547,6 +2590,13 @@ async function executeToolCalls(
 				const coerced = coerceToolResult(rawResult);
 				result = coerced.result;
 				if (coerced.malformed || result.isError) isError = true;
+				if (completedToolExecution && tool.successfulChanges) {
+					try {
+						successfulChanges = normalizeSuccessfulChanges(tool.successfulChanges(record.args, result));
+					} catch {
+						successfulChanges = undefined;
+					}
+				}
 			} catch (e) {
 				caughtError = e;
 				result = {
@@ -2564,6 +2614,7 @@ async function executeToolCalls(
 							toolCall,
 							args: record.args,
 							result,
+							successfulChanges,
 							isError,
 							context: currentContext,
 						},
