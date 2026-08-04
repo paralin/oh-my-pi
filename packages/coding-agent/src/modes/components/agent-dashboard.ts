@@ -431,7 +431,7 @@ export class AgentDashboard extends Container {
 		try {
 			const selectedName = this.#selectedAgent()?.name;
 			const activeTabId = this.#tabs[this.#activeTabIndex]?.id ?? "all";
-			const { agents } = await discoverAgents(this.cwd);
+			const { agents } = await discoverAgents(this.cwd, undefined, this.#settingsManager?.getModelRoles() ?? {});
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
 			const prewalkOverrides = this.#settingsManager?.get("task.agentPrewalk") ?? {};

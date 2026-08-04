@@ -37,6 +37,33 @@ export interface DiscoveryResult {
 }
 
 /**
+ * Add Task-derived agents for configured model roles that have no explicit
+ * agent definition. The resolved Task definition supplies the prompt and
+ * capabilities, while the role selects its own model.
+ */
+export function addImplicitModelRoleAgents(
+	agents: AgentDefinition[],
+	modelRoles: Readonly<Record<string, string | undefined>>,
+): AgentDefinition[] {
+	const taskAgent = agents.find(agent => agent.name === "task");
+	if (!taskAgent) return agents;
+
+	const seen = new Set(agents.map(agent => agent.name));
+	const implicitAgents: AgentDefinition[] = [];
+	for (const role of Object.keys(modelRoles).sort()) {
+		if (!role.trim() || seen.has(role)) continue;
+		const { filePath: _taskFilePath, ...taskDefinition } = taskAgent;
+		implicitAgents.push({
+			...taskDefinition,
+			name: role,
+			model: [`@${role}`],
+		});
+		seen.add(role);
+	}
+	return implicitAgents.length > 0 ? [...agents, ...implicitAgents] : agents;
+}
+
+/**
  * Load agents from a directory.
  */
 async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<AgentDefinition[]> {
@@ -67,7 +94,11 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
  * scope before user), then bundled.
  * @param cwd - Current working directory for project agent discovery
  */
-export async function discoverAgents(cwd: string, home: string = os.homedir()): Promise<DiscoveryResult> {
+export async function discoverAgents(
+	cwd: string,
+	home: string = os.homedir(),
+	modelRoles: Readonly<Record<string, string | undefined>> = {},
+): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
 	const userDirs = getConfigDirs("agents", { project: false })
@@ -134,7 +165,7 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 
 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
 
-	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir };
+	return { agents: addImplicitModelRoleAgents([...loadedAgents, ...bundledAgents], modelRoles), projectAgentsDir };
 }
 
 /**

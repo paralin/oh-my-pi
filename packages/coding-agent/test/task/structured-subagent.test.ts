@@ -39,6 +39,7 @@ function session(
 		maxDepth?: number;
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
+		modelRoles?: Record<string, string>;
 	} = {},
 ): ToolSession {
 	return {
@@ -49,6 +50,7 @@ function session(
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
 			"task.isolation.mode": options.isolationMode ?? "none",
 			"task.enableLsp": true,
+			modelRoles: options.modelRoles ?? {},
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
 		}),
 		getSessionFile: () => null,
@@ -120,6 +122,21 @@ describe("structured subagent primitive", () => {
 		inheritedSession.outputSchemaMode = "strict";
 		const inherited = await resolveEffectiveSubagentPolicy(request({ session: inheritedSession }));
 		expect(inherited.schema).toMatchObject({ source: "session", mode: "strict", outputSchemaOverridesAgent: false });
+	});
+
+	it("accepts a model-role key without a matching agent file as a Task-derived agent", async () => {
+		const roleSession = session({
+			modelRoles: { "role-only-test": "openai-codex/gpt-5.6-luna:high" },
+		});
+
+		const policy = await resolveEffectiveSubagentPolicy(request({ session: roleSession, agent: "role-only-test" }));
+
+		expect(policy.agent).toMatchObject({
+			name: "role-only-test",
+			model: ["@role-only-test"],
+			source: "bundled",
+		});
+		expect(policy.modelOverride).toEqual(["openai-codex/gpt-5.6-luna:high"]);
 	});
 
 	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
