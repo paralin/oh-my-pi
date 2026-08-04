@@ -30,6 +30,7 @@ import { CLAUDE_CODE_EFFORTS, type ClaudeCodeSelection } from "./claude-code-sel
 import {
 	CLAUDE_CODE_MCP_TOOL_NAMES,
 	CLAUDE_CODE_WORLD_READ_TOOL_NAME,
+	CLAUDE_CODE_WORLD_TOOL_NAME,
 	createClaudeCodeMcpTools,
 } from "./claude-code-tools";
 import {
@@ -82,6 +83,7 @@ const OMP_COORDINATION_TOOL_NAMES: Readonly<Partial<Record<string, true>>> = {
 	// asking for a tool it will actually be given rather than an unsupported
 	// one. Whether it is advertised is still decided by configuration.
 	[CLAUDE_CODE_WORLD_READ_TOOL_NAME]: true,
+	[CLAUDE_CODE_WORLD_TOOL_NAME]: true,
 };
 
 /** Resolve a nonempty OMP allowlist to Claude built-ins without widening it. */

@@ -11,7 +11,7 @@ import {
 	intentKey,
 	normalizeIntentKeySource,
 	semanticWorkingDirectory,
-} from "../intent-key.js";
+} from "@oh-my-pi/pi-coding-agent/world/intent-key";
 import vectors from "./intent-key-vectors.json" with { type: "json" };
 
 /**
