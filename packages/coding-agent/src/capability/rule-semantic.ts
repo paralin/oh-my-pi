@@ -221,14 +221,22 @@ async function evaluateClause(
 	clauseNumber: number,
 	source: string,
 	lang: string,
+	changedRanges?: readonly { startLine: number; endLine: number }[],
 ): Promise<SemanticCandidateReport[]> {
 	const candidates =
 		"ast" in clause.candidate
 			? await findAstCandidates(rule, clauseNumber, clause.candidate.ast, source, lang)
 			: findRegexCandidates(rule, clauseNumber, clause.candidate.regex, source);
-	if (candidates.length === 0) return [];
+	const changed = changedRanges
+		? candidates.filter(candidate =>
+				changedRanges.some(
+					range => candidate.range.startLine <= range.endLine && range.startLine <= candidate.range.endLine,
+				),
+			)
+		: candidates;
+	if (changed.length === 0) return [];
 	const fileResult = await evaluateFilePredicates(rule, clauseNumber, clause.file, source, lang);
-	return candidates.map(candidate => {
+	return changed.map(candidate => {
 		const result = fileResult.matched ? evaluateCapturePredicates(clause, candidate) : fileResult;
 		return {
 			clause: clauseNumber,
@@ -244,10 +252,11 @@ export async function evaluateSemanticRule(
 	rule: Rule,
 	source: string,
 	lang: string,
+	changedRanges?: readonly { startLine: number; endLine: number }[],
 ): Promise<SemanticEvaluationReport> {
 	const candidates: SemanticCandidateReport[] = [];
 	for (const [index, clause] of (rule.semanticCondition ?? []).entries()) {
-		candidates.push(...(await evaluateClause(rule, clause, index + 1, source, lang)));
+		candidates.push(...(await evaluateClause(rule, clause, index + 1, source, lang, changedRanges)));
 	}
 	return { ruleName: rule.name, candidates };
 }

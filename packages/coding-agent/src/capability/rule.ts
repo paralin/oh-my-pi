@@ -17,6 +17,13 @@ const CONDITION_GLOB_SCOPE_TOOLS = ["edit", "write"] as const;
  * `ttsr.builtinRules`.
  */
 export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
+/**
+ * Provider id for the embedded Aperture company rules.
+ *
+ * The provider is registered even while its embedded registry is empty so
+ * settings and provider inspection have a stable target.
+ */
+export const APERTURE_DEFAULTS_PROVIDER_ID = "aperture-defaults";
 
 export type SemanticCandidateMatcher = { ast: string } | { regex: string };
 

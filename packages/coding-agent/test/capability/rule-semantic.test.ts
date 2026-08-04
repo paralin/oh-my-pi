@@ -215,5 +215,6 @@ describe("semantic rule conditions", () => {
 		expect(resource.content).toContain("## Semantic conditions");
 		expect(JSON.parse(resource.content.slice(fenceStart, fenceEnd))).toEqual(rule.semanticCondition);
 		expect(resource.content).toContain("Use the direct expression.");
+		expect(resource.notes).toEqual(["provider: test", "providerName: test", "enabled: true"]);
 	});
 });

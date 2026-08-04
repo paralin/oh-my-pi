@@ -23,6 +23,7 @@ import "../capability/tool";
 import "./agents-md";
 import "./builtin";
 import "./builtin-defaults";
+import "./aperture-defaults";
 import "./claude";
 import "./claude-plugins";
 import "./cline";

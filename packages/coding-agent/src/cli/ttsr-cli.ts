@@ -15,13 +15,19 @@ import * as path from "node:path";
 import { AstMatchStrictness, astMatch, FileType, type GlobMatch, glob } from "@oh-my-pi/pi-natives";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import chalk from "chalk";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, compileRuleCondition, type Rule, ruleCapability } from "../capability/rule";
+import {
+	APERTURE_DEFAULTS_PROVIDER_ID,
+	BUILTIN_DEFAULTS_PROVIDER_ID,
+	compileRuleCondition,
+	type Rule,
+	ruleCapability,
+} from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import { Settings } from "../config/settings";
 import type { TtsrSettings } from "../config/settings-schema";
 import { initializeWithSettings, loadCapability } from "../discovery";
 import { buildRuleFromMarkdown, createSourceMeta } from "../discovery/helpers";
-import type { TtsrManager } from "../export/ttsr";
+import { TtsrManager } from "../export/ttsr";
 
 export type TtsrAction = "test" | "list" | "scan";
 
@@ -247,16 +253,15 @@ async function evaluate(
 	return { triggered, notTriggered };
 }
 
-async function createTtsrManager(settings?: TtsrSettings): Promise<TtsrManager> {
-	const { TtsrManager } = await import("../export/ttsr");
+function createTtsrManager(settings?: TtsrSettings): TtsrManager {
 	return new TtsrManager(settings);
 }
-
 function filterTtsrRulesForScan(
 	rules: readonly Rule[],
-	options: { builtinRules?: boolean; disabledRules?: readonly string[] } = {},
+	options: { builtinRules?: boolean; apertureRules?: boolean; disabledRules?: readonly string[] } = {},
 ): Rule[] {
 	const includeBuiltin = options.builtinRules !== false;
+	const includeAperture = options.apertureRules === true;
 	const disabled = new Set<string>();
 	for (const raw of options.disabledRules ?? []) {
 		const name = raw.trim();
@@ -265,6 +270,7 @@ function filterTtsrRulesForScan(
 	return rules.filter(rule => {
 		if (disabled.has(rule.name)) return false;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) return false;
+		if (!includeAperture && rule._source?.provider === APERTURE_DEFAULTS_PROVIDER_ID) return false;
 		return (rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
 	});
 }
@@ -273,10 +279,11 @@ async function loadProjectTtsrRules(cwd: string): Promise<{ rules: Rule[]; manag
 	const settingsInstance = await Settings.init({ cwd });
 	initializeWithSettings(settingsInstance);
 	const ttsrSettings = settingsInstance.getGroup("ttsr");
-	const manager = await createTtsrManager(ttsrSettings);
+	const manager = createTtsrManager(ttsrSettings);
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	bucketRules(result.items, manager, {
 		builtinRules: ttsrSettings.builtinRules,
+		apertureRules: ttsrSettings.apertureRules,
 		disabledRules: ttsrSettings.disabledRules,
 	});
 	return { rules: manager.getRules(), manager };
@@ -292,6 +299,7 @@ async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	return filterTtsrRulesForScan(result.items, {
 		builtinRules: ttsrSettings.builtinRules,
+		apertureRules: ttsrSettings.apertureRules,
 		disabledRules: ttsrSettings.disabledRules,
 	});
 }
@@ -311,13 +319,14 @@ async function readIsolatedRule(rulePath: string): Promise<Rule> {
 
 async function loadIsolatedRule(rulePath: string): Promise<{ rules: Rule[]; manager: TtsrManager }> {
 	const rule = await readIsolatedRule(rulePath);
-	const manager = await createTtsrManager({
+	const manager = createTtsrManager({
 		enabled: true,
 		contextMode: "discard",
 		interruptMode: "always",
 		repeatMode: "once",
 		repeatGap: 10,
 		builtinRules: true,
+		apertureRules: false,
 		disabledRules: [],
 	});
 	if (!manager.addRule(rule)) {
@@ -448,7 +457,7 @@ function renderRuleDetail(detail: RuleMatchDetail, hit: boolean): void {
 }
 
 async function runList(json: boolean, cwd: string): Promise<void> {
-	const { rules } = await loadProjectTtsrRules(cwd);
+	const { rules, manager } = await loadProjectTtsrRules(cwd);
 
 	if (json) {
 		process.stdout.write(
@@ -457,6 +466,7 @@ async function runList(json: boolean, cwd: string): Promise<void> {
 					name: r.name,
 					path: r.path,
 					provider: r._source?.provider,
+					enabled: manager.getSettings().enabled,
 					condition: r.condition ?? [],
 					astCondition: r.astCondition ?? [],
 					scope: r.scope ?? [],

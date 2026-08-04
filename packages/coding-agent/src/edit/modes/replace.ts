@@ -1181,6 +1181,7 @@ export async function executeReplace(
 		details: pruneOversizedEditSnapshots({
 			diff: diffResult.diff,
 			path: absolutePath,
+			op: "update",
 			firstChangedLine: diffResult.firstChangedLine,
 			diagnostics,
 			meta,
