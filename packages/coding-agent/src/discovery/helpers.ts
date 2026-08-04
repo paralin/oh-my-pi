@@ -13,7 +13,12 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
-import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
+import {
+	parseRuleConditionAndScope,
+	parseSemanticCondition,
+	type Rule,
+	type RuleFrontmatter,
+} from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import type { MCPRequestIdFormat } from "../mcp/types";
@@ -190,6 +195,8 @@ export function buildRuleFromMarkdown(
 	},
 ): Rule {
 	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+	const resolvedName = options?.ruleName ?? name.replace(options?.stripNamePattern ?? /\.(md|mdc)$/, "");
+	const semanticCondition = parseSemanticCondition(resolvedName, frontmatter.semanticCondition);
 	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
 
 	let globs: string[] | undefined;
@@ -199,7 +206,6 @@ export function buildRuleFromMarkdown(
 		globs = [frontmatter.globs];
 	}
 
-	const resolvedName = options?.ruleName ?? name.replace(options?.stripNamePattern ?? /\.(md|mdc)$/, "");
 	const rawMode = frontmatter.interruptMode;
 	const interruptMode: Rule["interruptMode"] =
 		rawMode === "never" || rawMode === "prose-only" || rawMode === "tool-only" || rawMode === "always"
@@ -214,6 +220,7 @@ export function buildRuleFromMarkdown(
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
 		condition,
 		astCondition,
+		semanticCondition,
 		scope,
 		interruptMode,
 		_source: source,
