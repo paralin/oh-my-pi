@@ -29,13 +29,15 @@ export class RuleProtocolHandler implements ProtocolHandler {
 			? `${rule.content.trimEnd()}\n\n## Semantic conditions\n\n\`\`\`json\n${JSON.stringify(rule.semanticCondition, null, 2)}\n\`\`\`\n`
 			: rule.content;
 
+		const providerId = rule._source?.provider ?? "unknown";
+		const providerName = rule._source?.providerName?.trim() || providerId;
 		return {
 			url: url.href,
 			content,
 			contentType: "text/markdown",
 			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: rule.path,
-			notes: [],
+			notes: [`provider: ${providerId}`, `providerName: ${providerName}`, "enabled: true"],
 		};
 	}
 

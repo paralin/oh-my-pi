@@ -5,10 +5,10 @@
  * (300 KB+ each on the cases reported in #3786) without paying for any LLM
  * context (provider serializers send only `content`, never `details`).
  *
- * Only consumer of the raw snapshots is the ACP event mapper, which builds a
- * `diff` ToolCallContent for ACP clients (Zed). When the snapshots are pruned
- * the mapper returns `undefined` for that file and the text content still
- * flows — diff visualization degrades gracefully for over-threshold edits.
+ * The ACP event mapper uses raw snapshots for diff visualization. Successful
+ * change projection uses them to recompute final ranges for repeated edits to
+ * one file. Pruned results retain the final line count so whole-file moves
+ * remain analyzable without retaining source.
  */
 
 import type { EditToolDetails, EditToolPerFileResult } from "./renderer";
@@ -26,14 +26,31 @@ import type { EditToolDetails, EditToolPerFileResult } from "./renderer";
  */
 export const MAX_EDIT_SNAPSHOT_TEXT_CHARS = 32_768;
 
-type WithSnapshot = { oldText?: string; newText?: string; snapshotsPruned?: boolean };
+type WithSnapshot = {
+	oldText?: string;
+	newText?: string;
+	resultingLineCount?: number;
+	snapshotsPruned?: boolean;
+};
+
+function countLines(text: string): number {
+	let lines = 1;
+	for (let index = 0; index < text.length; index++) {
+		if (text.charCodeAt(index) === 10) lines++;
+	}
+	return lines;
+}
 
 function pruneSnapshot<T extends WithSnapshot>(details: T): T {
 	if ((details.oldText?.length ?? 0) + (details.newText?.length ?? 0) <= MAX_EDIT_SNAPSHOT_TEXT_CHARS) {
 		return details;
 	}
 	const { oldText: _old, newText: _new, ...rest } = details;
-	return { ...rest, snapshotsPruned: true } as T;
+	return {
+		...rest,
+		...(details.newText !== undefined ? { resultingLineCount: countLines(details.newText) } : {}),
+		snapshotsPruned: true,
+	} as T;
 }
 
 /**
@@ -54,7 +71,11 @@ function capPerFileSnapshots<T extends WithSnapshot>(entries: T[]): T[] {
 			return perEntry;
 		}
 		const { oldText: _old, newText: _new, ...rest } = perEntry;
-		return { ...rest, snapshotsPruned: true } as T;
+		return {
+			...rest,
+			...(perEntry.newText !== undefined ? { resultingLineCount: countLines(perEntry.newText) } : {}),
+			snapshotsPruned: true,
+		} as T;
 	});
 }
 

@@ -70,6 +70,8 @@ export interface EditToolPerFileResult {
 	oldText?: string;
 	/** Source-of-truth content after the edit; `undefined` for delete operations. */
 	newText?: string;
+	/** Final file line count retained when snapshots are pruned. */
+	resultingLineCount?: number;
 	/** True when {@link pruneOversizedEditSnapshots} dropped `oldText`/`newText` from this entry. Aggregators check this to suppress misleading combined snapshots when at least one entry of a multi-entry single-path edit was pruned. */
 	snapshotsPruned?: boolean;
 	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */
@@ -97,6 +99,8 @@ export interface EditToolDetails {
 	oldText?: string;
 	/** Source-of-truth content after the edit; `undefined` for delete operations. */
 	newText?: string;
+	/** Final file line count retained when snapshots are pruned. */
+	resultingLineCount?: number;
 	/** True when {@link pruneOversizedEditSnapshots} dropped `oldText`/`newText` from this entry. Aggregators check this to suppress misleading combined snapshots when at least one entry of a multi-entry single-path edit was pruned. */
 	snapshotsPruned?: boolean;
 	/** Pre-move source path; set only when the edit moved/renamed the file. The header renders `sourcePath → path`. */

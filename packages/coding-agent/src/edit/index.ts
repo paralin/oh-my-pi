@@ -1,7 +1,15 @@
+import * as path from "node:path";
 import { MismatchError as HashlineMismatchError } from "@oh-my-pi/hashline";
 import hashlineGrammar from "@oh-my-pi/hashline/grammar.lark" with { type: "text" };
 import hashlineDescription from "@oh-my-pi/hashline/prompt.md" with { type: "text" };
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type {
+	AgentTool,
+	AgentToolContext,
+	AgentToolResult,
+	AgentToolUpdateCallback,
+	SuccessfulChange,
+	SuccessfulChangeRange,
+} from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { isEnoent, isEnotdir, prompt } from "@oh-my-pi/pi-utils";
 import { createLspWritethrough, flushLspWritethroughBatch, type WritethroughCallback, writethroughNoop } from "../lsp";
@@ -15,6 +23,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { findUniqueWorkspaceSuffix, isInternalUrlPath } from "../tools/path-utils";
 import { resolvePlanPath } from "../tools/plan-mode-guard";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
+import { generateUnifiedDiffString } from "./diff";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
@@ -268,6 +277,7 @@ async function executeSinglePathEntries(
 	}
 
 	const contentTexts: string[] = [];
+	const perFileResults: EditToolPerFileResult[] = [];
 	const diffTexts: string[] = [];
 	let firstChangedLine: number | undefined;
 	let hasError = false;
@@ -304,11 +314,25 @@ async function executeSinglePathEntries(
 				lastNewText = details.newText;
 				hasLastNewText = true;
 			}
+			if (details) {
+				perFileResults.push({
+					path: details.path ?? path,
+					diff: details.diff ?? "",
+					firstChangedLine: details.firstChangedLine,
+					op: details.op,
+					move: details.move,
+					sourcePath: details.sourcePath,
+					oldText: details.oldText,
+					newText: details.newText,
+					snapshotsPruned: details.snapshotsPruned,
+				});
+			}
 			if (details?.snapshotsPruned) snapshotsPruned = true;
 			const text = result.content?.find(c => c.type === "text")?.text ?? "";
 			if (text) contentTexts.push(text);
 		} catch (err) {
 			const errorText = err instanceof Error ? err.message : String(err);
+			perFileResults.push({ path, diff: "", isError: true, errorText });
 			contentTexts.push(`Error editing ${path} (entry ${i + 1} of ${runs.length}): ${errorText}`);
 			if (i > 0) {
 				contentTexts.push(i === 1 ? `Entry 1 was already applied.` : `Entries 1-${i} were already applied.`);
@@ -349,6 +373,7 @@ async function executeSinglePathEntries(
 			diff: diffTexts.join("\n"),
 			firstChangedLine,
 			path: metadataPath ?? path,
+			perFileResults,
 			...(snapshotsPruned
 				? { snapshotsPruned: true as const }
 				: {
@@ -377,6 +402,81 @@ function extractApprovalPath(args: unknown): string {
 
 	const targetPath = record.path;
 	return typeof targetPath === "string" && targetPath.length > 0 ? targetPath : "(unknown)";
+}
+function changedRangesFromDiff(
+	diff: string,
+	newText: string | undefined,
+	resultingLineCount: number | undefined,
+	firstChangedLine: number | undefined,
+): SuccessfulChangeRange[] {
+	if (!diff && resultingLineCount !== undefined) {
+		return [{ startLine: 1, endLine: resultingLineCount }];
+	}
+	if (!diff && newText !== undefined) {
+		return [{ startLine: 1, endLine: Math.max(1, newText.split(/\r?\n/).length) }];
+	}
+	const ranges: SuccessfulChangeRange[] = [];
+	let newLine = 1;
+	for (const line of diff.split(/\r?\n/)) {
+		if (line.startsWith("@@")) {
+			const match = /\+(\d+)(?:,(\d+))?/.exec(line);
+			if (match) newLine = Number(match[1]);
+			continue;
+		}
+		if (line.startsWith("+++")) continue;
+		if (line.startsWith("---")) continue;
+		if (line.startsWith("+")) {
+			const start = newLine;
+			ranges.push({ startLine: start, endLine: start });
+			newLine++;
+			continue;
+		}
+		if (line.startsWith("-")) continue;
+		if (line.startsWith(" ")) newLine++;
+	}
+	if (ranges.length === 0 && firstChangedLine !== undefined) {
+		ranges.push({ startLine: firstChangedLine, endLine: firstChangedLine });
+	}
+	const merged: SuccessfulChangeRange[] = [];
+	for (const range of ranges) {
+		const previous = merged[merged.length - 1];
+		if (previous && range.startLine <= previous.endLine + 1)
+			previous.endLine = Math.max(previous.endLine, range.endLine);
+		else merged.push({ ...range });
+	}
+	return merged;
+}
+
+function successfulChangeForDetails(details: EditToolDetails | EditToolPerFileResult): SuccessfulChange | undefined {
+	if (("isError" in details && details.isError) || !details.path) return undefined;
+	const operation = details.move ? "move" : (details.op ?? (details.newText !== undefined ? "update" : undefined));
+	if (operation !== "create" && operation !== "update" && operation !== "move" && operation !== "delete")
+		return undefined;
+	return {
+		path: details.path,
+		operation,
+		ranges: changedRangesFromDiff(
+			details.diff,
+			operation === "delete" ? details.oldText : details.newText,
+			details.resultingLineCount,
+			details.firstChangedLine,
+		),
+		...(details.sourcePath ? { sourcePath: details.sourcePath } : {}),
+	};
+}
+
+function canonicalizeSuccessfulChange(session: ToolSession, change: SuccessfulChange): SuccessfulChange {
+	return {
+		...change,
+		path: path.isAbsolute(change.path) ? path.normalize(change.path) : resolvePlanPath(session, change.path),
+		...(change.sourcePath
+			? {
+					sourcePath: path.isAbsolute(change.sourcePath)
+						? path.normalize(change.sourcePath)
+						: resolvePlanPath(session, change.sourcePath),
+				}
+			: {}),
+	};
 }
 
 export class EditTool implements AgentTool<TInput> {
@@ -495,6 +595,36 @@ export class EditTool implements AgentTool<TInput> {
 	 */
 	matcherEntries(args: unknown): readonly { path: string; digest: string }[] | undefined {
 		return EDIT_MODE_STRATEGIES[this.mode].matcherEntries(args);
+	}
+	successfulChanges(_args: Record<string, unknown>, result: AgentToolResult<EditToolDetails>): SuccessfulChange[] {
+		const details = result.details;
+		const entries = details?.perFileResults;
+		if (entries && entries.length > 0) {
+			const changes = entries
+				.map(entry => successfulChangeForDetails(entry))
+				.filter((change): change is SuccessfulChange => change !== undefined);
+			const first = changes[0];
+			if (
+				first &&
+				details.oldText !== undefined &&
+				details.newText !== undefined &&
+				changes.every(
+					change => change.path === first.path && change.operation === "update" && change.sourcePath === undefined,
+				)
+			) {
+				const finalDiff = generateUnifiedDiffString(details.oldText, details.newText, 0);
+				return [
+					canonicalizeSuccessfulChange(this.session, {
+						...first,
+						ranges: changedRangesFromDiff(finalDiff.diff, details.newText, undefined, finalDiff.firstChangedLine),
+					}),
+				];
+			}
+			return changes.map(change => canonicalizeSuccessfulChange(this.session, change));
+		}
+		if (result.isError) return [];
+		const change = details ? successfulChangeForDetails(details) : undefined;
+		return change ? [canonicalizeSuccessfulChange(this.session, change)] : [];
 	}
 
 	async execute(
