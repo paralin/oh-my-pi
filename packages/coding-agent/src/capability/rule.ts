@@ -4,6 +4,7 @@
  * Project-specific rules from Cursor (.mdc), Windsurf (.md), and Cline formats.
  * Translated to a canonical shape regardless of source format.
  */
+import { isRecord } from "@oh-my-pi/pi-utils";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
 
@@ -17,6 +18,29 @@ const CONDITION_GLOB_SCOPE_TOOLS = ["edit", "write"] as const;
  */
 export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
 
+export type SemanticCandidateMatcher = { ast: string } | { regex: string };
+
+export interface SemanticCapturePredicate {
+	regex?: string[];
+	notRegex?: string[];
+}
+
+export interface SemanticMatcherSet {
+	ast?: string[];
+	regex?: string[];
+}
+
+export interface SemanticFilePredicates {
+	required?: SemanticMatcherSet;
+	forbidden?: SemanticMatcherSet;
+}
+
+export interface SemanticConditionClause {
+	candidate: SemanticCandidateMatcher;
+	captures?: Record<string, SemanticCapturePredicate>;
+	file?: SemanticFilePredicates;
+}
+
 /**
  * Parsed frontmatter from rule files.
  */
@@ -28,6 +52,8 @@ export interface RuleFrontmatter {
 	condition?: string | string[];
 	/** TTSR match condition(s) expressed as ast-grep patterns (edit/write streams only). */
 	astCondition?: string | string[];
+	/** Declarative post-edit candidate and local semantic predicates. */
+	semanticCondition?: unknown;
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
 	/** Per-rule TTSR interrupt mode override. */
@@ -55,6 +81,8 @@ export interface Rule {
 	condition?: string[];
 	/** ast-grep pattern condition(s) that can trigger TTSR interruption (edit/write streams only). */
 	astCondition?: string[];
+	/** Normalized declarative post-edit semantic clauses. */
+	semanticCondition?: SemanticConditionClause[];
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
 	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
@@ -261,6 +289,177 @@ export function compileRuleCondition(pattern: string): RegExp {
 		return new RegExp(pattern.slice(match[0].length), flags);
 	}
 	return new RegExp(pattern);
+}
+
+function semanticConditionError(ruleName: string, clause: number, field: string, message: string): Error {
+	return new Error(`Rule "${ruleName}" semanticCondition clause ${clause} field "${field}": ${message}`);
+}
+
+function rejectUnknownSemanticFields(
+	ruleName: string,
+	clause: number,
+	field: string,
+	value: Record<string, unknown>,
+	allowed: readonly string[],
+): void {
+	const unknown = Object.keys(value).find(key => !allowed.includes(key));
+	if (unknown) {
+		throw semanticConditionError(ruleName, clause, `${field}.${unknown}`, "unknown field");
+	}
+}
+
+function normalizeSemanticPatterns(
+	ruleName: string,
+	clause: number,
+	field: string,
+	value: unknown,
+): string[] | undefined {
+	if (value === undefined) return undefined;
+	const values = typeof value === "string" ? [value] : value;
+	if (!Array.isArray(values) || values.length === 0) {
+		throw semanticConditionError(ruleName, clause, field, "expected a non-empty string or string array");
+	}
+	const patterns = values.map((entry, index) => {
+		if (typeof entry !== "string" || entry.trim().length === 0) {
+			throw semanticConditionError(ruleName, clause, `${field}[${index}]`, "expected a non-empty string");
+		}
+		return entry.trim();
+	});
+	return Array.from(new Set(patterns));
+}
+
+function validateSemanticRegex(ruleName: string, clause: number, field: string, patterns: readonly string[]): void {
+	for (const pattern of patterns) {
+		try {
+			compileRuleCondition(pattern);
+		} catch (error) {
+			throw semanticConditionError(
+				ruleName,
+				clause,
+				field,
+				`invalid regular expression: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+}
+
+function parseSemanticMatcherSet(ruleName: string, clause: number, field: string, value: unknown): SemanticMatcherSet {
+	if (!isRecord(value)) {
+		throw semanticConditionError(ruleName, clause, field, "expected an object");
+	}
+	rejectUnknownSemanticFields(ruleName, clause, field, value, ["ast", "regex"]);
+	const ast = normalizeSemanticPatterns(ruleName, clause, `${field}.ast`, value.ast);
+	const regex = normalizeSemanticPatterns(ruleName, clause, `${field}.regex`, value.regex);
+	if (!ast && !regex) {
+		throw semanticConditionError(ruleName, clause, field, 'expected at least one "ast" or "regex" predicate');
+	}
+	if (regex) validateSemanticRegex(ruleName, clause, `${field}.regex`, regex);
+	return { ...(ast ? { ast } : {}), ...(regex ? { regex } : {}) };
+}
+
+function parseSemanticClause(ruleName: string, clause: number, value: unknown): SemanticConditionClause {
+	if (!isRecord(value)) {
+		throw semanticConditionError(ruleName, clause, "clause", "expected an object");
+	}
+	rejectUnknownSemanticFields(ruleName, clause, "clause", value, ["candidate", "captures", "file"]);
+
+	if (!isRecord(value.candidate)) {
+		throw semanticConditionError(ruleName, clause, "candidate", "expected an object");
+	}
+	rejectUnknownSemanticFields(ruleName, clause, "candidate", value.candidate, ["ast", "regex"]);
+	const ast = normalizeSemanticPatterns(ruleName, clause, "candidate.ast", value.candidate.ast);
+	const regex = normalizeSemanticPatterns(ruleName, clause, "candidate.regex", value.candidate.regex);
+	if ((ast?.length ?? 0) + (regex?.length ?? 0) !== 1) {
+		throw semanticConditionError(
+			ruleName,
+			clause,
+			"candidate",
+			'expected exactly one non-empty "ast" or "regex" pattern',
+		);
+	}
+	if (regex) validateSemanticRegex(ruleName, clause, "candidate.regex", regex);
+	const candidate: SemanticCandidateMatcher = ast ? { ast: ast[0] } : { regex: regex![0] };
+
+	let captures: Record<string, SemanticCapturePredicate> | undefined;
+	if (value.captures !== undefined) {
+		if (!isRecord(value.captures) || Object.keys(value.captures).length === 0) {
+			throw semanticConditionError(ruleName, clause, "captures", "expected a non-empty object");
+		}
+		captures = {};
+		for (const [capture, rawPredicate] of Object.entries(value.captures)) {
+			if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(capture)) {
+				throw semanticConditionError(ruleName, clause, `captures.${capture}`, "invalid capture name");
+			}
+			if (!isRecord(rawPredicate)) {
+				throw semanticConditionError(ruleName, clause, `captures.${capture}`, "expected an object");
+			}
+			rejectUnknownSemanticFields(ruleName, clause, `captures.${capture}`, rawPredicate, ["regex", "notRegex"]);
+			const captureRegex = normalizeSemanticPatterns(
+				ruleName,
+				clause,
+				`captures.${capture}.regex`,
+				rawPredicate.regex,
+			);
+			const captureNotRegex = normalizeSemanticPatterns(
+				ruleName,
+				clause,
+				`captures.${capture}.notRegex`,
+				rawPredicate.notRegex,
+			);
+			if (!captureRegex && !captureNotRegex) {
+				throw semanticConditionError(
+					ruleName,
+					clause,
+					`captures.${capture}`,
+					'expected at least one "regex" or "notRegex" predicate',
+				);
+			}
+			if (captureRegex) validateSemanticRegex(ruleName, clause, `captures.${capture}.regex`, captureRegex);
+			if (captureNotRegex) {
+				validateSemanticRegex(ruleName, clause, `captures.${capture}.notRegex`, captureNotRegex);
+			}
+			captures[capture] = {
+				...(captureRegex ? { regex: captureRegex } : {}),
+				...(captureNotRegex ? { notRegex: captureNotRegex } : {}),
+			};
+		}
+	}
+
+	let file: SemanticFilePredicates | undefined;
+	if (value.file !== undefined) {
+		if (!isRecord(value.file)) {
+			throw semanticConditionError(ruleName, clause, "file", "expected an object");
+		}
+		rejectUnknownSemanticFields(ruleName, clause, "file", value.file, ["required", "forbidden"]);
+		const required =
+			value.file.required === undefined
+				? undefined
+				: parseSemanticMatcherSet(ruleName, clause, "file.required", value.file.required);
+		const forbidden =
+			value.file.forbidden === undefined
+				? undefined
+				: parseSemanticMatcherSet(ruleName, clause, "file.forbidden", value.file.forbidden);
+		if (!required && !forbidden) {
+			throw semanticConditionError(
+				ruleName,
+				clause,
+				"file",
+				'expected at least one "required" or "forbidden" predicate',
+			);
+		}
+		file = { ...(required ? { required } : {}), ...(forbidden ? { forbidden } : {}) };
+	}
+
+	return { candidate, ...(captures ? { captures } : {}), ...(file ? { file } : {}) };
+}
+
+export function parseSemanticCondition(ruleName: string, value: unknown): SemanticConditionClause[] | undefined {
+	if (value === undefined) return undefined;
+	const clauses = Array.isArray(value) ? value : [value];
+	if (clauses.length === 0) {
+		throw semanticConditionError(ruleName, 1, "semanticCondition", "expected a non-empty clause or clause array");
+	}
+	return clauses.map((clause, index) => parseSemanticClause(ruleName, index + 1, clause));
 }
 
 let activeRules: readonly Rule[] = [];

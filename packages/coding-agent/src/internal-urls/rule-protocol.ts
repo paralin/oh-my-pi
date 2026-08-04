@@ -25,12 +25,15 @@ export class RuleProtocolHandler implements ProtocolHandler {
 			const availableStr = available.length > 0 ? available.join(", ") : "none";
 			throw new Error(`Unknown rule: ${ruleName}\nAvailable: ${availableStr}`);
 		}
+		const content = rule.semanticCondition
+			? `${rule.content.trimEnd()}\n\n## Semantic conditions\n\n\`\`\`json\n${JSON.stringify(rule.semanticCondition, null, 2)}\n\`\`\`\n`
+			: rule.content;
 
 		return {
 			url: url.href,
-			content: rule.content,
+			content,
 			contentType: "text/markdown",
-			size: Buffer.byteLength(rule.content, "utf-8"),
+			size: Buffer.byteLength(content, "utf-8"),
 			sourcePath: rule.path,
 			notes: [],
 		};
