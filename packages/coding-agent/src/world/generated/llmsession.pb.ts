@@ -62,6 +62,228 @@ export const ControlStatus_Enum = /* @__PURE__ */ createEnumType("glados.sdk.llm
 ]);
 
 /**
+ * WorldRuntimeOperation names one authority-checked World operation.
+ *
+ * @generated from enum glados.sdk.llmsession.WorldRuntimeOperation
+ */
+export enum WorldRuntimeOperation {
+	/**
+	 * WORLD_RUNTIME_OPERATION_UNKNOWN means no operation was selected.
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_DISPATCH_SUBMIT requires "world.dispatch.submit".
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_DISPATCH_SUBMIT = 1;
+	 */
+	DISPATCH_SUBMIT = 1,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_DISPATCH_WATCH requires "world.dispatch.watch".
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_DISPATCH_WATCH = 2;
+	 */
+	DISPATCH_WATCH = 2,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_QUESTION_ANSWER requires "world.question.answer".
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_QUESTION_ANSWER = 3;
+	 */
+	QUESTION_ANSWER = 3,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_SESSION_INPUT requires "world.session.input".
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_SESSION_INPUT = 4;
+	 */
+	SESSION_INPUT = 4,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_SESSION_INTERRUPT requires "world.session.interrupt".
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_SESSION_INTERRUPT = 5;
+	 */
+	SESSION_INTERRUPT = 5,
+}
+
+export const WorldRuntimeOperation_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.WorldRuntimeOperation",
+	[
+		[0, "WORLD_RUNTIME_OPERATION_UNKNOWN"],
+		[1, "WORLD_RUNTIME_OPERATION_DISPATCH_SUBMIT"],
+		[2, "WORLD_RUNTIME_OPERATION_DISPATCH_WATCH"],
+		[3, "WORLD_RUNTIME_OPERATION_QUESTION_ANSWER"],
+		[4, "WORLD_RUNTIME_OPERATION_SESSION_INPUT"],
+		[5, "WORLD_RUNTIME_OPERATION_SESSION_INTERRUPT"],
+	],
+);
+
+/**
+ * WorldAuthorityDenialCode is the stable reason one caller was denied.
+ *
+ * @generated from enum glados.sdk.llmsession.WorldAuthorityDenialCode
+ */
+export enum WorldAuthorityDenialCode {
+	/**
+	 * WORLD_AUTHORITY_DENIAL_CODE_UNKNOWN means the code is unset.
+	 *
+	 * @generated from enum value: WORLD_AUTHORITY_DENIAL_CODE_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * WORLD_AUTHORITY_DENIAL_CODE_CALLER_NOT_FOUND means the bound LlmSession does not exist.
+	 *
+	 * @generated from enum value: WORLD_AUTHORITY_DENIAL_CODE_CALLER_NOT_FOUND = 1;
+	 */
+	CALLER_NOT_FOUND = 1,
+
+	/**
+	 * WORLD_AUTHORITY_DENIAL_CODE_CALLER_MANIFEST_UNAVAILABLE means the caller has
+	 * no active DispatchAttempt with a complete immutable manifest. A settled
+	 * caller lands here, because terminal acceptance removes it from the Console
+	 * active index.
+	 *
+	 * @generated from enum value: WORLD_AUTHORITY_DENIAL_CODE_CALLER_MANIFEST_UNAVAILABLE = 2;
+	 */
+	CALLER_MANIFEST_UNAVAILABLE = 2,
+
+	/**
+	 * WORLD_AUTHORITY_DENIAL_CODE_OPERATION_NOT_ALLOWED means the frozen
+	 * CapabilitySnapshot does not grant the operation's permission ID.
+	 *
+	 * @generated from enum value: WORLD_AUTHORITY_DENIAL_CODE_OPERATION_NOT_ALLOWED = 3;
+	 */
+	OPERATION_NOT_ALLOWED = 3,
+}
+
+export const WorldAuthorityDenialCode_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.WorldAuthorityDenialCode",
+	[
+		[0, "WORLD_AUTHORITY_DENIAL_CODE_UNKNOWN"],
+		[1, "WORLD_AUTHORITY_DENIAL_CODE_CALLER_NOT_FOUND"],
+		[2, "WORLD_AUTHORITY_DENIAL_CODE_CALLER_MANIFEST_UNAVAILABLE"],
+		[3, "WORLD_AUTHORITY_DENIAL_CODE_OPERATION_NOT_ALLOWED"],
+	],
+);
+
+/**
+ * WorldOperationFailureCode is the stable reason one validated request failed.
+ *
+ * @generated from enum glados.sdk.llmsession.WorldOperationFailureCode
+ */
+export enum WorldOperationFailureCode {
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_UNKNOWN means the code is unset.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_INVALID_REQUEST means the request id or an
+	 * operation field was malformed. This is decided before the operation starts.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_INVALID_REQUEST = 1;
+	 */
+	INVALID_REQUEST = 1,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_MISSING_TARGET means the named Question,
+	 * LlmSession, or dispatch intent does not exist.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_MISSING_TARGET = 2;
+	 */
+	MISSING_TARGET = 2,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_RETRY_CONFLICT means the request id was reused
+	 * with different content.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_RETRY_CONFLICT = 3;
+	 */
+	RETRY_CONFLICT = 3,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_UNAVAILABLE means no owner can serve the
+	 * request in its current state.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_UNAVAILABLE = 4;
+	 */
+	UNAVAILABLE = 4,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_REJECTED means the existing GLaDOS operation
+	 * refused the request.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_REJECTED = 5;
+	 */
+	REJECTED = 5,
+}
+
+export const WorldOperationFailureCode_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.WorldOperationFailureCode",
+	[
+		[0, "WORLD_OPERATION_FAILURE_CODE_UNKNOWN"],
+		[1, "WORLD_OPERATION_FAILURE_CODE_INVALID_REQUEST"],
+		[2, "WORLD_OPERATION_FAILURE_CODE_MISSING_TARGET"],
+		[3, "WORLD_OPERATION_FAILURE_CODE_RETRY_CONFLICT"],
+		[4, "WORLD_OPERATION_FAILURE_CODE_UNAVAILABLE"],
+		[5, "WORLD_OPERATION_FAILURE_CODE_REJECTED"],
+	],
+);
+
+/**
+ * WorldWatchCompletion selects the exact condition that closes one watch.
+ *
+ * @generated from enum glados.sdk.llmsession.WorldWatchCompletion
+ */
+export enum WorldWatchCompletion {
+	/**
+	 * WORLD_WATCH_COMPLETION_UNKNOWN means no condition was selected.
+	 *
+	 * @generated from enum value: WORLD_WATCH_COMPLETION_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * WORLD_WATCH_COMPLETION_CURRENT sends one snapshot and closes. A missing
+	 * intent is current state, so found=false carries completion_met=true.
+	 *
+	 * @generated from enum value: WORLD_WATCH_COMPLETION_CURRENT = 1;
+	 */
+	CURRENT = 1,
+
+	/**
+	 * WORLD_WATCH_COMPLETION_CUSTODY stops when found=true, active_attempt_key is
+	 * non-empty, custody is present, and awaiting_custody=false.
+	 *
+	 * @generated from enum value: WORLD_WATCH_COMPLETION_CUSTODY = 2;
+	 */
+	CUSTODY = 2,
+
+	/**
+	 * WORLD_WATCH_COMPLETION_TERMINAL stops when found=true and any terminal
+	 * field is set: custody.terminal_accepted=true; attempt_state is ACCEPTED,
+	 * FAILED, or ABANDONED; or intent_state is ACCEPTED, FAILED, or BLOCKED.
+	 *
+	 * @generated from enum value: WORLD_WATCH_COMPLETION_TERMINAL = 3;
+	 */
+	TERMINAL = 3,
+}
+
+export const WorldWatchCompletion_Enum = /* @__PURE__ */ createEnumType("glados.sdk.llmsession.WorldWatchCompletion", [
+	[0, "WORLD_WATCH_COMPLETION_UNKNOWN"],
+	[1, "WORLD_WATCH_COMPLETION_CURRENT"],
+	[2, "WORLD_WATCH_COMPLETION_CUSTODY"],
+	[3, "WORLD_WATCH_COMPLETION_TERMINAL"],
+]);
+
+/**
  * ListSessionsRequest is the request type for ListSessions.
  *
  * @generated from message glados.sdk.llmsession.ListSessionsRequest
@@ -1900,6 +2122,929 @@ export const ControlAck: MessageType<ControlAck> = /* @__PURE__ */ createMessage
 			name: "accepted_sequence",
 			kind: "scalar",
 			T: ScalarType.UINT64,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * AccessWorldRuntimeRequest binds one World runtime handle to one caller.
+ *
+ * @generated from message glados.sdk.llmsession.AccessWorldRuntimeRequest
+ */
+export interface AccessWorldRuntimeRequest {
+	/**
+	 * CallerSessionObjectKey is the exact LlmSession World object key making the
+	 * later requests. The method validates only the key's syntax and never looks
+	 * the session up: each operation performs that lookup for itself, so a caller
+	 * that settles between binding and calling is denied at the call rather than
+	 * holding a handle that outlived its authority.
+	 *
+	 * @generated from field: string caller_session_object_key = 1;
+	 */
+	callerSessionObjectKey?: string;
+}
+
+export const AccessWorldRuntimeRequest: MessageType<AccessWorldRuntimeRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.AccessWorldRuntimeRequest",
+	fields: [
+		{
+			no: 1,
+			name: "caller_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * AccessWorldRuntimeResponse carries only the child handle.
+ *
+ * @generated from message glados.sdk.llmsession.AccessWorldRuntimeResponse
+ */
+export interface AccessWorldRuntimeResponse {
+	/**
+	 * ResourceId is the child WorldRuntimeResourceService resource id.
+	 *
+	 * @generated from field: uint32 resource_id = 1;
+	 */
+	resourceId?: number;
+}
+
+export const AccessWorldRuntimeResponse: MessageType<AccessWorldRuntimeResponse> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.AccessWorldRuntimeResponse",
+	fields: [{ no: 1, name: "resource_id", kind: "scalar", T: ScalarType.UINT32 }] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldDispatchSubmitRequest submits one child dispatch.
+ *
+ * There is no parent session field: the bound caller is the parent. A request
+ * that could name its own parent would let a caller attribute work to a session
+ * whose permissions it does not hold.
+ *
+ * @generated from message glados.sdk.llmsession.WorldDispatchSubmitRequest
+ */
+export interface WorldDispatchSubmitRequest {
+	/**
+	 * Objective is the Goal objective and provider prompt.
+	 *
+	 * @generated from field: string objective = 1;
+	 */
+	objective?: string;
+	/**
+	 * DoneCriteria describes the accepted completion condition.
+	 *
+	 * @generated from field: string done_criteria = 2;
+	 */
+	doneCriteria?: string;
+	/**
+	 * AdapterArgv is the exact Oh My Pi argument vector.
+	 *
+	 * @generated from field: repeated string adapter_argv = 3;
+	 */
+	adapterArgv?: string[];
+	/**
+	 * WorktreePath is the authorized checkout root.
+	 *
+	 * @generated from field: string worktree_path = 4;
+	 */
+	worktreePath?: string;
+	/**
+	 * WorkingDirectory is the adapter process working directory.
+	 *
+	 * @generated from field: string working_directory = 5;
+	 */
+	workingDirectory?: string;
+	/**
+	 * MaxRuntimeSeconds bounds adapter process lifetime.
+	 *
+	 * @generated from field: uint64 max_runtime_seconds = 6;
+	 */
+	maxRuntimeSeconds?: bigint;
+	/**
+	 * Model records the exact model selected by the provider adapter.
+	 *
+	 * @generated from field: string model = 7;
+	 */
+	model?: string;
+	/**
+	 * IntentIdentity is the required client-computed dispatch identity. It is
+	 * also the retry key: a repeat submission carrying the same identity resolves
+	 * to the accepted attempt instead of creating a second one.
+	 *
+	 * @generated from field: glados.sdk.llmsession.DispatchIntentIdentity intent_identity = 8;
+	 */
+	intentIdentity?: DispatchIntentIdentity;
+	/**
+	 * ChildWorldOperations are the world.* permission IDs the child receives.
+	 * GLaDOS always keeps "read", "test", and "write"; it accepts only the five
+	 * world.* IDs and rejects any ID the caller itself lacks. An empty list
+	 * grants the child no world.* permission at all.
+	 *
+	 * @generated from field: repeated string child_world_operations = 9;
+	 */
+	childWorldOperations?: string[];
+}
+
+export const WorldDispatchSubmitRequest: MessageType<WorldDispatchSubmitRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldDispatchSubmitRequest",
+	fields: [
+		{ no: 1, name: "objective", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "done_criteria", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 3,
+			name: "adapter_argv",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+		{ no: 4, name: "worktree_path", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 5,
+			name: "working_directory",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 6,
+			name: "max_runtime_seconds",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
+		{ no: 7, name: "model", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 8,
+			name: "intent_identity",
+			kind: "message",
+			T: () => DispatchIntentIdentity,
+		},
+		{
+			no: 9,
+			name: "child_world_operations",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldQuestionAnswerRequest answers one exact Question.
+ *
+ * @generated from message glados.sdk.llmsession.WorldQuestionAnswerRequest
+ */
+export interface WorldQuestionAnswerRequest {
+	/**
+	 * QuestionObjectKey is the exact Question World object key.
+	 *
+	 * @generated from field: string question_object_key = 1;
+	 */
+	questionObjectKey?: string;
+	/**
+	 * Summary is the accepted answer summary.
+	 *
+	 * @generated from field: string summary = 2;
+	 */
+	summary?: string;
+}
+
+export const WorldQuestionAnswerRequest: MessageType<WorldQuestionAnswerRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldQuestionAnswerRequest",
+	fields: [
+		{
+			no: 1,
+			name: "question_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 2, name: "summary", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldSessionInputRequest delivers steering input to one exact LlmSession.
+ *
+ * @generated from message glados.sdk.llmsession.WorldSessionInputRequest
+ */
+export interface WorldSessionInputRequest {
+	/**
+	 * TargetSessionObjectKey is the exact LlmSession receiving the input.
+	 *
+	 * @generated from field: string target_session_object_key = 1;
+	 */
+	targetSessionObjectKey?: string;
+	/**
+	 * Text is the steering input.
+	 *
+	 * @generated from field: string text = 2;
+	 */
+	text?: string;
+}
+
+export const WorldSessionInputRequest: MessageType<WorldSessionInputRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldSessionInputRequest",
+	fields: [
+		{
+			no: 1,
+			name: "target_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 2, name: "text", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldSessionInterruptRequest interrupts one exact LlmSession.
+ *
+ * @generated from message glados.sdk.llmsession.WorldSessionInterruptRequest
+ */
+export interface WorldSessionInterruptRequest {
+	/**
+	 * TargetSessionObjectKey is the exact LlmSession to interrupt.
+	 *
+	 * @generated from field: string target_session_object_key = 1;
+	 */
+	targetSessionObjectKey?: string;
+	/**
+	 * Reason is the operator-visible cancellation reason.
+	 *
+	 * @generated from field: string reason = 2;
+	 */
+	reason?: string;
+}
+
+export const WorldSessionInterruptRequest: MessageType<WorldSessionInterruptRequest> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.WorldSessionInterruptRequest",
+		fields: [
+			{
+				no: 1,
+				name: "target_session_object_key",
+				kind: "scalar",
+				T: ScalarType.STRING,
+			},
+			{ no: 2, name: "reason", kind: "scalar", T: ScalarType.STRING },
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * WorldRuntimeMutationRequest carries exactly one World operation.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeMutationRequest
+ */
+export interface WorldRuntimeMutationRequest {
+	/**
+	 * RequestId is the caller's retry identity. It must contain at least one
+	 * byte, contain only printable ASCII, and fit in 256 bytes. It never becomes
+	 * part of a World object key: stored keys use a digest over the operation,
+	 * target, and this ID.
+	 *
+	 * @generated from field: string request_id = 1;
+	 */
+	requestId?: string;
+
+	/**
+	 * Operation is the single operation this request performs.
+	 *
+	 * @generated from oneof glados.sdk.llmsession.WorldRuntimeMutationRequest.operation
+	 */
+	operation?:
+		| {
+				value?: undefined;
+				case: undefined;
+		  }
+		| {
+				/**
+				 * DispatchSubmit submits one child dispatch under the bound caller.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldDispatchSubmitRequest dispatch_submit = 2;
+				 */
+				value: WorldDispatchSubmitRequest;
+				case: "dispatchSubmit";
+		  }
+		| {
+				/**
+				 * QuestionAnswer records one Decision for an exact Question.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldQuestionAnswerRequest question_answer = 3;
+				 */
+				value: WorldQuestionAnswerRequest;
+				case: "questionAnswer";
+		  }
+		| {
+				/**
+				 * SessionInput delivers steering input to an exact target LlmSession.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldSessionInputRequest session_input = 4;
+				 */
+				value: WorldSessionInputRequest;
+				case: "sessionInput";
+		  }
+		| {
+				/**
+				 * SessionInterrupt requests fenced cancellation of an exact target LlmSession.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldSessionInterruptRequest session_interrupt = 5;
+				 */
+				value: WorldSessionInterruptRequest;
+				case: "sessionInterrupt";
+		  };
+}
+
+export const WorldRuntimeMutationRequest: MessageType<WorldRuntimeMutationRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldRuntimeMutationRequest",
+	fields: [
+		{ no: 1, name: "request_id", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "dispatch_submit",
+			kind: "message",
+			T: () => WorldDispatchSubmitRequest,
+			oneof: "operation",
+		},
+		{
+			no: 3,
+			name: "question_answer",
+			kind: "message",
+			T: () => WorldQuestionAnswerRequest,
+			oneof: "operation",
+		},
+		{
+			no: 4,
+			name: "session_input",
+			kind: "message",
+			T: () => WorldSessionInputRequest,
+			oneof: "operation",
+		},
+		{
+			no: 5,
+			name: "session_interrupt",
+			kind: "message",
+			T: () => WorldSessionInterruptRequest,
+			oneof: "operation",
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldQuestionAnswerResult reports the durable answer owners.
+ *
+ * @generated from message glados.sdk.llmsession.WorldQuestionAnswerResult
+ */
+export interface WorldQuestionAnswerResult {
+	/**
+	 * QuestionObjectKey is the answered Question.
+	 *
+	 * @generated from field: string question_object_key = 1;
+	 */
+	questionObjectKey?: string;
+	/**
+	 * DecisionObjectKey is the accepted Decision.
+	 *
+	 * @generated from field: string decision_object_key = 2;
+	 */
+	decisionObjectKey?: string;
+	/**
+	 * EvidenceObjectKey is the decision Evidence.
+	 *
+	 * @generated from field: string evidence_object_key = 3;
+	 */
+	evidenceObjectKey?: string;
+	/**
+	 * GoalObjectKey is the resumed Goal.
+	 *
+	 * @generated from field: string goal_object_key = 4;
+	 */
+	goalObjectKey?: string;
+	/**
+	 * QuestionState is the Question lifecycle state.
+	 *
+	 * @generated from field: string question_state = 5;
+	 */
+	questionState?: string;
+	/**
+	 * GoalState is the Goal lifecycle state.
+	 *
+	 * @generated from field: string goal_state = 6;
+	 */
+	goalState?: string;
+	/**
+	 * ResumeTriggerObjectKey is the armed resume Trigger when one exists.
+	 *
+	 * @generated from field: string resume_trigger_object_key = 7;
+	 */
+	resumeTriggerObjectKey?: string;
+	/**
+	 * Replayed reports that the stored Decision for this request digest was
+	 * returned without writing anything.
+	 *
+	 * @generated from field: bool replayed = 8;
+	 */
+	replayed?: boolean;
+}
+
+export const WorldQuestionAnswerResult: MessageType<WorldQuestionAnswerResult> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldQuestionAnswerResult",
+	fields: [
+		{
+			no: 1,
+			name: "question_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 2,
+			name: "decision_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "evidence_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 4, name: "goal_object_key", kind: "scalar", T: ScalarType.STRING },
+		{ no: 5, name: "question_state", kind: "scalar", T: ScalarType.STRING },
+		{ no: 6, name: "goal_state", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 7,
+			name: "resume_trigger_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 8, name: "replayed", kind: "scalar", T: ScalarType.BOOL },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldSessionControlResult reports one accepted session control.
+ *
+ * @generated from message glados.sdk.llmsession.WorldSessionControlResult
+ */
+export interface WorldSessionControlResult {
+	/**
+	 * TargetSessionObjectKey is the LlmSession the control reached.
+	 *
+	 * @generated from field: string target_session_object_key = 1;
+	 */
+	targetSessionObjectKey?: string;
+	/**
+	 * DispatchKey is the targeted dispatch lane.
+	 *
+	 * @generated from field: string dispatch_key = 2;
+	 */
+	dispatchKey?: string;
+	/**
+	 * AcceptedSequence is the accepted steering or cancellation sequence.
+	 *
+	 * @generated from field: uint64 accepted_sequence = 3;
+	 */
+	acceptedSequence?: bigint;
+	/**
+	 * Detail is a human-readable acceptance detail.
+	 *
+	 * @generated from field: string detail = 4;
+	 */
+	detail?: string;
+	/**
+	 * Replayed reports that the stored effect for this request digest was
+	 * returned without creating a second one.
+	 *
+	 * @generated from field: bool replayed = 5;
+	 */
+	replayed?: boolean;
+}
+
+export const WorldSessionControlResult: MessageType<WorldSessionControlResult> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldSessionControlResult",
+	fields: [
+		{
+			no: 1,
+			name: "target_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 2, name: "dispatch_key", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 3,
+			name: "accepted_sequence",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
+		{ no: 4, name: "detail", kind: "scalar", T: ScalarType.STRING },
+		{ no: 5, name: "replayed", kind: "scalar", T: ScalarType.BOOL },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldRuntimeAuthorityDenial reports a check that failed before any target
+ * read or World effect.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeAuthorityDenial
+ */
+export interface WorldRuntimeAuthorityDenial {
+	/**
+	 * Operation is the denied operation.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 1;
+	 */
+	operation?: WorldRuntimeOperation;
+	/**
+	 * CallerSessionObjectKey is the bound caller.
+	 *
+	 * @generated from field: string caller_session_object_key = 2;
+	 */
+	callerSessionObjectKey?: string;
+	/**
+	 * CapabilityDigest is the caller manifest capability digest when the manifest
+	 * was readable.
+	 *
+	 * @generated from field: string capability_digest = 3;
+	 */
+	capabilityDigest?: string;
+	/**
+	 * Code is the stable denial reason.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldAuthorityDenialCode code = 4;
+	 */
+	code?: WorldAuthorityDenialCode;
+	/**
+	 * RequiredPermission is the permission ID the operation required.
+	 *
+	 * @generated from field: string required_permission = 5;
+	 */
+	requiredPermission?: string;
+	/**
+	 * Detail is a readable explanation.
+	 *
+	 * @generated from field: string detail = 6;
+	 */
+	detail?: string;
+}
+
+export const WorldRuntimeAuthorityDenial: MessageType<WorldRuntimeAuthorityDenial> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldRuntimeAuthorityDenial",
+	fields: [
+		{ no: 1, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
+		{
+			no: 2,
+			name: "caller_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "capability_digest",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 4, name: "code", kind: "enum", T: WorldAuthorityDenialCode_Enum },
+		{
+			no: 5,
+			name: "required_permission",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 6, name: "detail", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldRuntimeOperationFailure reports a permitted request that failed.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeOperationFailure
+ */
+export interface WorldRuntimeOperationFailure {
+	/**
+	 * Operation is the failed operation.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 1;
+	 */
+	operation?: WorldRuntimeOperation;
+	/**
+	 * Code is the stable failure reason.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldOperationFailureCode code = 2;
+	 */
+	code?: WorldOperationFailureCode;
+	/**
+	 * TargetObjectKey is the target the failure is about when one was named.
+	 *
+	 * @generated from field: string target_object_key = 3;
+	 */
+	targetObjectKey?: string;
+	/**
+	 * Detail is a readable explanation.
+	 *
+	 * @generated from field: string detail = 4;
+	 */
+	detail?: string;
+}
+
+export const WorldRuntimeOperationFailure: MessageType<WorldRuntimeOperationFailure> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.WorldRuntimeOperationFailure",
+		fields: [
+			{ no: 1, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
+			{ no: 2, name: "code", kind: "enum", T: WorldOperationFailureCode_Enum },
+			{
+				no: 3,
+				name: "target_object_key",
+				kind: "scalar",
+				T: ScalarType.STRING,
+			},
+			{ no: 4, name: "detail", kind: "scalar", T: ScalarType.STRING },
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * WorldRuntimeMutationResponse carries exactly one result arm.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeMutationResponse
+ */
+export interface WorldRuntimeMutationResponse {
+	/**
+	 * RequestId echoes the caller request id.
+	 *
+	 * @generated from field: string request_id = 1;
+	 */
+	requestId?: string;
+	/**
+	 * Operation names the operation this response answers.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 2;
+	 */
+	operation?: WorldRuntimeOperation;
+
+	/**
+	 * Result is the single arm this response carries.
+	 *
+	 * @generated from oneof glados.sdk.llmsession.WorldRuntimeMutationResponse.result
+	 */
+	result?:
+		| {
+				value?: undefined;
+				case: undefined;
+		  }
+		| {
+				/**
+				 * DispatchSubmit is the accepted child dispatch.
+				 *
+				 * @generated from field: glados.sdk.llmsession.SubmitSessionResponse dispatch_submit = 3;
+				 */
+				value: SubmitSessionResponse;
+				case: "dispatchSubmit";
+		  }
+		| {
+				/**
+				 * QuestionAnswer is the accepted Decision and resumed owners.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldQuestionAnswerResult question_answer = 4;
+				 */
+				value: WorldQuestionAnswerResult;
+				case: "questionAnswer";
+		  }
+		| {
+				/**
+				 * SessionInput is the accepted steering delivery.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldSessionControlResult session_input = 5;
+				 */
+				value: WorldSessionControlResult;
+				case: "sessionInput";
+		  }
+		| {
+				/**
+				 * SessionInterrupt is the stored cancellation request.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldSessionControlResult session_interrupt = 6;
+				 */
+				value: WorldSessionControlResult;
+				case: "sessionInterrupt";
+		  }
+		| {
+				/**
+				 * AuthorityDenial reports that the caller may not perform the operation.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldRuntimeAuthorityDenial authority_denial = 7;
+				 */
+				value: WorldRuntimeAuthorityDenial;
+				case: "authorityDenial";
+		  }
+		| {
+				/**
+				 * OperationFailure reports a validated request the operation refused.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperationFailure operation_failure = 8;
+				 */
+				value: WorldRuntimeOperationFailure;
+				case: "operationFailure";
+		  };
+}
+
+export const WorldRuntimeMutationResponse: MessageType<WorldRuntimeMutationResponse> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.WorldRuntimeMutationResponse",
+		fields: [
+			{ no: 1, name: "request_id", kind: "scalar", T: ScalarType.STRING },
+			{ no: 2, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
+			{
+				no: 3,
+				name: "dispatch_submit",
+				kind: "message",
+				T: () => SubmitSessionResponse,
+				oneof: "result",
+			},
+			{
+				no: 4,
+				name: "question_answer",
+				kind: "message",
+				T: () => WorldQuestionAnswerResult,
+				oneof: "result",
+			},
+			{
+				no: 5,
+				name: "session_input",
+				kind: "message",
+				T: () => WorldSessionControlResult,
+				oneof: "result",
+			},
+			{
+				no: 6,
+				name: "session_interrupt",
+				kind: "message",
+				T: () => WorldSessionControlResult,
+				oneof: "result",
+			},
+			{
+				no: 7,
+				name: "authority_denial",
+				kind: "message",
+				T: () => WorldRuntimeAuthorityDenial,
+				oneof: "result",
+			},
+			{
+				no: 8,
+				name: "operation_failure",
+				kind: "message",
+				T: () => WorldRuntimeOperationFailure,
+				oneof: "result",
+			},
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * WorldRuntimeWatchRequest selects one dispatch intent and stopping condition.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeWatchRequest
+ */
+export interface WorldRuntimeWatchRequest {
+	/**
+	 * IntentKey is the exact dispatch intent World object key to watch.
+	 *
+	 * @generated from field: string intent_key = 1;
+	 */
+	intentKey?: string;
+	/**
+	 * Completion selects the exact stopping condition.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldWatchCompletion completion = 2;
+	 */
+	completion?: WorldWatchCompletion;
+}
+
+export const WorldRuntimeWatchRequest: MessageType<WorldRuntimeWatchRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldRuntimeWatchRequest",
+	fields: [
+		{ no: 1, name: "intent_key", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "completion", kind: "enum", T: WorldWatchCompletion_Enum },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldDispatchWatchSnapshot is one complete dispatch intent projection.
+ *
+ * @generated from message glados.sdk.llmsession.WorldDispatchWatchSnapshot
+ */
+export interface WorldDispatchWatchSnapshot {
+	/**
+	 * Intent is the complete fixed-key dispatch intent projection.
+	 *
+	 * @generated from field: glados.sdk.llmsession.LookupDispatchIntentResponse intent = 1;
+	 */
+	intent?: LookupDispatchIntentResponse;
+	/**
+	 * CompletionMet reports that the requested stopping condition holds for this
+	 * snapshot. A valid missing intent sends one found=false snapshot and closes;
+	 * custody and terminal watches report completion_met=false in that case.
+	 *
+	 * @generated from field: bool completion_met = 2;
+	 */
+	completionMet?: boolean;
+}
+
+export const WorldDispatchWatchSnapshot: MessageType<WorldDispatchWatchSnapshot> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldDispatchWatchSnapshot",
+	fields: [
+		{
+			no: 1,
+			name: "intent",
+			kind: "message",
+			T: () => LookupDispatchIntentResponse,
+		},
+		{ no: 2, name: "completion_met", kind: "scalar", T: ScalarType.BOOL },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldRuntimeWatchResponse carries exactly one arm.
+ *
+ * There is no event cursor. Each snapshot is complete current World state, so a
+ * caller that reconnects after a disconnect or a daemon restart simply reopens
+ * the watch and continues from what is true now.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeWatchResponse
+ */
+export interface WorldRuntimeWatchResponse {
+	/**
+	 * Result is the single arm this response carries.
+	 *
+	 * @generated from oneof glados.sdk.llmsession.WorldRuntimeWatchResponse.result
+	 */
+	result?:
+		| {
+				value?: undefined;
+				case: undefined;
+		  }
+		| {
+				/**
+				 * Snapshot is one complete dispatch intent projection.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldDispatchWatchSnapshot snapshot = 1;
+				 */
+				value: WorldDispatchWatchSnapshot;
+				case: "snapshot";
+		  }
+		| {
+				/**
+				 * AuthorityDenial reports that the caller may not watch dispatches.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldRuntimeAuthorityDenial authority_denial = 2;
+				 */
+				value: WorldRuntimeAuthorityDenial;
+				case: "authorityDenial";
+		  }
+		| {
+				/**
+				 * OperationFailure reports a malformed or unserviceable watch.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperationFailure operation_failure = 3;
+				 */
+				value: WorldRuntimeOperationFailure;
+				case: "operationFailure";
+		  };
+}
+
+export const WorldRuntimeWatchResponse: MessageType<WorldRuntimeWatchResponse> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldRuntimeWatchResponse",
+	fields: [
+		{
+			no: 1,
+			name: "snapshot",
+			kind: "message",
+			T: () => WorldDispatchWatchSnapshot,
+			oneof: "result",
+		},
+		{
+			no: 2,
+			name: "authority_denial",
+			kind: "message",
+			T: () => WorldRuntimeAuthorityDenial,
+			oneof: "result",
+		},
+		{
+			no: 3,
+			name: "operation_failure",
+			kind: "message",
+			T: () => WorldRuntimeOperationFailure,
+			oneof: "result",
 		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,

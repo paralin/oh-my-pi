@@ -8,6 +8,8 @@ import { buildDecodeMessageTransform } from "starpc";
 import {
 	AccessSessionRequest,
 	AccessSessionResponse,
+	AccessWorldRuntimeRequest,
+	AccessWorldRuntimeResponse,
 	ControlAck,
 	GetSessionRequest,
 	InterruptRequest,
@@ -28,6 +30,10 @@ import {
 	WatchAgentTreeResponse,
 	WatchSessionRequest,
 	WatchSessionResponse,
+	WorldRuntimeMutationRequest,
+	WorldRuntimeMutationResponse,
+	WorldRuntimeWatchRequest,
+	WorldRuntimeWatchResponse,
 } from "./llmsession.pb.js";
 
 /**
@@ -126,6 +132,18 @@ export const GladosResourceServiceDefinition = {
 			O: AccessSessionResponse,
 			kind: MethodKind.Unary,
 		},
+		/**
+		 * AccessWorldRuntime returns a child authority-checked World runtime resource
+		 * bound to one calling LlmSession.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessWorldRuntime
+		 */
+		AccessWorldRuntime: {
+			name: "AccessWorldRuntime",
+			I: AccessWorldRuntimeRequest,
+			O: AccessWorldRuntimeResponse,
+			kind: MethodKind.Unary,
+		},
 	},
 } as const;
 
@@ -196,6 +214,17 @@ export interface GladosResourceService {
 	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessSession
 	 */
 	AccessSession(request: AccessSessionRequest, abortSignal?: AbortSignal): Promise<AccessSessionResponse>;
+
+	/**
+	 * AccessWorldRuntime returns a child authority-checked World runtime resource
+	 * bound to one calling LlmSession.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessWorldRuntime
+	 */
+	AccessWorldRuntime(
+		request: AccessWorldRuntimeRequest,
+		abortSignal?: AbortSignal,
+	): Promise<AccessWorldRuntimeResponse>;
 }
 
 export const GladosResourceServiceServiceName = GladosResourceServiceDefinition.typeName;
@@ -214,6 +243,7 @@ export class GladosResourceServiceClient implements GladosResourceService {
 		this.ReadWorldURI = this.ReadWorldURI.bind(this);
 		this.WatchAgentTree = this.WatchAgentTree.bind(this);
 		this.AccessSession = this.AccessSession.bind(this);
+		this.AccessWorldRuntime = this.AccessWorldRuntime.bind(this);
 	}
 	/**
 	 * ListSessions lists visible LlmSession World objects.
@@ -347,6 +377,153 @@ export class GladosResourceServiceClient implements GladosResourceService {
 			abortSignal || undefined,
 		);
 		return AccessSessionResponse.fromBinary(result);
+	}
+
+	/**
+	 * AccessWorldRuntime returns a child authority-checked World runtime resource
+	 * bound to one calling LlmSession.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessWorldRuntime
+	 */
+	async AccessWorldRuntime(
+		request: AccessWorldRuntimeRequest,
+		abortSignal?: AbortSignal,
+	): Promise<AccessWorldRuntimeResponse> {
+		const requestMsg = AccessWorldRuntimeRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			GladosResourceServiceDefinition.methods.AccessWorldRuntime.name,
+			AccessWorldRuntimeRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return AccessWorldRuntimeResponse.fromBinary(result);
+	}
+}
+/**
+ * WorldRuntimeResourceService performs authority-checked World operations on
+ * behalf of exactly one bound caller LlmSession.
+ *
+ * Every method resolves the bound caller's active DispatchAttempt, reads its
+ * immutable manifest, and compares the operation's permission ID against the
+ * frozen CapabilitySnapshot before it reads the operation's target or starts any
+ * World write, steering delivery, cancellation, or process action. A failed
+ * check is a structured response arm, never a transport error, because a
+ * permission code has to survive both the TypeScript client and the Claude MCP
+ * bridge.
+ *
+ * @generated from service glados.sdk.llmsession.WorldRuntimeResourceService
+ */
+export const WorldRuntimeResourceServiceDefinition = {
+	typeName: "glados.sdk.llmsession.WorldRuntimeResourceService",
+	methods: {
+		/**
+		 * Mutate performs one authority-checked World operation.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.Mutate
+		 */
+		Mutate: {
+			name: "Mutate",
+			I: WorldRuntimeMutationRequest,
+			O: WorldRuntimeMutationResponse,
+			kind: MethodKind.Unary,
+		},
+		/**
+		 * WatchDispatch streams complete dispatch intent snapshots until the
+		 * requested completion condition holds.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.WatchDispatch
+		 */
+		WatchDispatch: {
+			name: "WatchDispatch",
+			I: WorldRuntimeWatchRequest,
+			O: WorldRuntimeWatchResponse,
+			kind: MethodKind.ServerStreaming,
+		},
+	},
+} as const;
+
+/**
+ * WorldRuntimeResourceService performs authority-checked World operations on
+ * behalf of exactly one bound caller LlmSession.
+ *
+ * Every method resolves the bound caller's active DispatchAttempt, reads its
+ * immutable manifest, and compares the operation's permission ID against the
+ * frozen CapabilitySnapshot before it reads the operation's target or starts any
+ * World write, steering delivery, cancellation, or process action. A failed
+ * check is a structured response arm, never a transport error, because a
+ * permission code has to survive both the TypeScript client and the Claude MCP
+ * bridge.
+ *
+ * @generated from service glados.sdk.llmsession.WorldRuntimeResourceService
+ */
+export interface WorldRuntimeResourceService {
+	/**
+	 * Mutate performs one authority-checked World operation.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.Mutate
+	 */
+	Mutate(request: WorldRuntimeMutationRequest, abortSignal?: AbortSignal): Promise<WorldRuntimeMutationResponse>;
+
+	/**
+	 * WatchDispatch streams complete dispatch intent snapshots until the
+	 * requested completion condition holds.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.WatchDispatch
+	 */
+	WatchDispatch(
+		request: WorldRuntimeWatchRequest,
+		abortSignal?: AbortSignal,
+	): MessageStream<WorldRuntimeWatchResponse>;
+}
+
+export const WorldRuntimeResourceServiceServiceName = WorldRuntimeResourceServiceDefinition.typeName;
+
+export class WorldRuntimeResourceServiceClient implements WorldRuntimeResourceService {
+	private readonly rpc: ProtoRpc;
+	private readonly service: string;
+	constructor(rpc: ProtoRpc, opts?: { service?: string }) {
+		this.service = opts?.service || WorldRuntimeResourceServiceServiceName;
+		this.rpc = rpc;
+		this.Mutate = this.Mutate.bind(this);
+		this.WatchDispatch = this.WatchDispatch.bind(this);
+	}
+	/**
+	 * Mutate performs one authority-checked World operation.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.Mutate
+	 */
+	async Mutate(
+		request: WorldRuntimeMutationRequest,
+		abortSignal?: AbortSignal,
+	): Promise<WorldRuntimeMutationResponse> {
+		const requestMsg = WorldRuntimeMutationRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			WorldRuntimeResourceServiceDefinition.methods.Mutate.name,
+			WorldRuntimeMutationRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return WorldRuntimeMutationResponse.fromBinary(result);
+	}
+
+	/**
+	 * WatchDispatch streams complete dispatch intent snapshots until the
+	 * requested completion condition holds.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.WatchDispatch
+	 */
+	WatchDispatch(
+		request: WorldRuntimeWatchRequest,
+		abortSignal?: AbortSignal,
+	): MessageStream<WorldRuntimeWatchResponse> {
+		const requestMsg = WorldRuntimeWatchRequest.create(request);
+		const result = this.rpc.serverStreamingRequest(
+			this.service,
+			WorldRuntimeResourceServiceDefinition.methods.WatchDispatch.name,
+			WorldRuntimeWatchRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return buildDecodeMessageTransform(WorldRuntimeWatchResponse)(result);
 	}
 }
 /**

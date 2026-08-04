@@ -8,6 +8,7 @@ import claudeCodeYieldPrompt from "../prompts/tools/claude-code-yield.md" with {
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { HubTool } from "../tools/hub";
+import { WORLD_TOOL_NAME, WorldTool } from "../tools/world";
 import { YieldTool } from "../tools/yield";
 import { MAX_WORLD_READ_PAGE, WorldClient } from "../world/index.js";
 import { TaskTool } from ".";
@@ -30,6 +31,15 @@ export const CLAUDE_CODE_MCP_TOOL_NAMES = ["task", "hub", "yield"] as const;
  * look like a broken one.
  */
 export const CLAUDE_CODE_WORLD_READ_TOOL_NAME = "world_read";
+
+/**
+ * Authority-checked World operations, advertised only when this root also names
+ * a caller session.
+ *
+ * Conditional for the same reason `world_read` is, one step further in: a socket
+ * alone leaves the peer with reads and no way to be charged for a change.
+ */
+export const CLAUDE_CODE_WORLD_TOOL_NAME = WORLD_TOOL_NAME;
 
 const CLAUDE_CODE_HUB_OPS = ["list", "send", "inbox", "wait", "jobs", "cancel"] as const;
 const CLAUDE_CODE_HUB_OP_BY_NAME: Readonly<Record<string, true | undefined>> = {
@@ -253,16 +263,20 @@ function buildHubMcpTool(hubTool: HubTool, signal: AbortSignal): ClaudeCodeMcpTo
  * outlive the unary response. Passing the peer lifetime signal directly would
  * let a later peer shutdown cancel an already-completed call.
  */
-async function readWorldForPeer(uri: string, client: WorldClient, limit: number | undefined, peerSignal: AbortSignal) {
+async function withPeerSignal<T>(peerSignal: AbortSignal, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
 	const operation = new AbortController();
 	const abort = () => operation.abort(peerSignal.reason);
 	if (peerSignal.aborted) abort();
 	else peerSignal.addEventListener("abort", abort, { once: true });
 	try {
-		return await readWorldAddress(uri, client, { limit, signal: operation.signal });
+		return await run(operation.signal);
 	} finally {
 		peerSignal.removeEventListener("abort", abort);
 	}
+}
+
+async function readWorldForPeer(uri: string, client: WorldClient, limit: number | undefined, peerSignal: AbortSignal) {
+	return await withPeerSignal(peerSignal, signal => readWorldAddress(uri, client, { limit, signal }));
 }
 
 /**
@@ -316,6 +330,41 @@ function buildWorldReadMcpTool(client: WorldClient, signal: AbortSignal): Claude
 	};
 }
 
+/**
+ * Build the authority-checked World tool for one Claude task peer.
+ *
+ * It is the native {@link WorldTool}: the same schema, the same argument
+ * validation, the same client methods, and the same renderer. Advertising a
+ * hand-written copy of the schema here is exactly the drift the shared tool
+ * exists to prevent, so the wire schema is derived from the tool itself.
+ *
+ * A structured refusal comes back as rendered text with `isError`, which is the
+ * bridge's only result shape. The typed error is what produced that text, so
+ * both runtimes report the same fields.
+ */
+function buildWorldMcpTool(client: WorldClient, signal: AbortSignal): ClaudeCodeMcpTool {
+	const worldTool = new WorldTool(client);
+	let calls = 0;
+	return {
+		name: worldTool.name,
+		description: worldTool.description,
+		inputSchema: objectToolSchema(worldTool),
+		handler: async args => {
+			try {
+				const params = worldTool.parameters(args);
+				if (params instanceof type.errors) {
+					throw new Error(`Invalid OMP world arguments: ${params.summary}`);
+				}
+				const toolCallId = `claude-world-${++calls}`;
+				const result = await withPeerSignal(signal, operation => worldTool.execute(toolCallId, params, operation));
+				return { content: toolResultContent(result.content), isError: result.isError === true };
+			} catch (error) {
+				return toolFailure(error);
+			}
+		},
+	};
+}
+
 /** Build the OMP coordination tools admitted to one Claude task peer. */
 export async function createClaudeCodeMcpTools(options: ClaudeCodeToolBridgeOptions): Promise<ClaudeCodeMcpTool[]> {
 	const session = createClaudeCodeToolSession(options.executor, options.registry);
@@ -343,6 +392,13 @@ export async function createClaudeCodeMcpTools(options: ClaudeCodeToolBridgeOpti
 		// rejection and fail the process over a best-effort cleanup.
 		options.signal.addEventListener("abort", () => void worldClient.close().catch(() => {}), { once: true });
 		tools.push(buildWorldReadMcpTool(worldClient, options.signal));
+		// The write-capable tool needs the second half of the configuration. A
+		// socket-only root keeps exactly its W2 surface rather than gaining a tool
+		// whose every call would be refused for want of a caller identity.
+		const agentTools = options.executor.agent.tools;
+		if (worldClient.canMutate && (!agentTools?.length || agentTools.includes(WORLD_TOOL_NAME))) {
+			tools.push(buildWorldMcpTool(worldClient, options.signal));
+		}
 	}
 	return tools;
 }

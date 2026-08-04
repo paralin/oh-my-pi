@@ -136,6 +136,23 @@ export class WorldTransport {
 	}
 
 	/**
+	 * Bind one child resource id a root-resource call handed back.
+	 *
+	 * A child id is only meaningful inside the handshake that produced it, so
+	 * this reuses this transport's ResourceClient session and socket rather than
+	 * dialing again: every resource rides the one connection as its own muxed
+	 * stream. It performs no handshake of its own — the caller already completed
+	 * one to obtain the id.
+	 */
+	accessResource(resourceId: number): WorldResourceRef {
+		this.#ensureUsable();
+		if (!Number.isInteger(resourceId) || resourceId <= 0) {
+			throw new Error(`World resource id must be a positive integer: ${resourceId}`);
+		}
+		return this.#createRef(resourceId);
+	}
+
+	/**
 	 * Run the ResourceClient handshake at most once per transport.
 	 *
 	 * The handshake is the session, not a per-caller step: it mints one client
@@ -375,7 +392,7 @@ function openRpcStreamClient(resourceId: number, service: ResourceServiceClient)
 /**
  * Run one call, letting the pinned starpc cancel it on the caller's signal.
  *
- * starpc 0.49.18 registers its own abort listener that writes a CallCancel and
+ * starpc 0.50.0 registers its own abort listener that writes a CallCancel and
  * ends the call's stream, so the signal handed to the generated client already
  * scopes cancellation to that one call. Racing the call against
  * `transport.close()` on top of that would destroy the connection and the

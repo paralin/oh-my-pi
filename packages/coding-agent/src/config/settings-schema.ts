@@ -5646,6 +5646,11 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	"world.session": {
+		type: "string",
+		default: undefined,
+	},
+
 	"gc.blobs": { type: "boolean", default: true },
 
 	"gc.archive": { type: "boolean", default: true },
@@ -5959,6 +5964,22 @@ export interface WorldSettings {
 	 * over this value.
 	 */
 	socket: string | undefined;
+
+	/**
+	 * World object key of the LlmSession this root's World operations are
+	 * charged to.
+	 *
+	 * GLaDOS reads this session's frozen capability manifest and answers every
+	 * authority-checked operation from it. The key selects whose permissions
+	 * apply; it does not prove which process opened the socket, which remains
+	 * the local Unix socket's job.
+	 *
+	 * Unset with a socket set is a complete configuration: that root keeps
+	 * read-only `spacewave://` access and is not given the `world` tool.
+	 * `OMP_WORLD_SESSION` takes precedence over this value, matching
+	 * `world.socket`.
+	 */
+	session: string | undefined;
 }
 
 /** Map group prefix -> typed settings interface */

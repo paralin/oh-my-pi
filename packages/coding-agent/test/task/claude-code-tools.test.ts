@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { toolWireSchema } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -16,7 +17,14 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, YieldItem } from "@oh-my-pi/pi-coding-agent/task/types";
-import { WORLD_SOCKET_ENV, WorldClient } from "@oh-my-pi/pi-coding-agent/world/index";
+import { WorldTool } from "@oh-my-pi/pi-coding-agent/tools/world/index";
+import {
+	WORLD_SESSION_ENV,
+	WORLD_SOCKET_ENV,
+	WorldAuthorityError,
+	WorldClient,
+} from "@oh-my-pi/pi-coding-agent/world/index";
+import { WorldAuthorityDenialCode, WorldRuntimeOperation } from "../../src/world/generated/llmsession.pb.js";
 
 const CLAUDE_AGENT: AgentDefinition = {
 	name: "claude-parent",
@@ -414,6 +422,134 @@ describe("Claude Code OMP tools", () => {
 		it("keeps world_read admissible for a restricted child", () => {
 			expect(() => claudeCodeNativeTools(["read", "world_read"])).not.toThrow();
 			expect(() => claudeCodeNativeTools(["read", "not_a_tool"])).toThrow(/Unsupported restricted/);
+		});
+	});
+
+	// The write-capable World tool is the native WorldTool, advertised over MCP.
+	// It is conditional one step further in than world_read: a socket alone
+	// leaves the peer with reads and no identity to be charged for a change.
+	describe("world tool bridge", () => {
+		async function withWorldEnv<T>(
+			socket: string | undefined,
+			caller: string | undefined,
+			run: () => Promise<T>,
+		): Promise<T> {
+			const previousSocket = process.env[WORLD_SOCKET_ENV];
+			const previousCaller = process.env[WORLD_SESSION_ENV];
+			const set = (name: string, value: string | undefined) => {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			};
+			set(WORLD_SOCKET_ENV, socket);
+			set(WORLD_SESSION_ENV, caller);
+			try {
+				return await run();
+			} finally {
+				set(WORLD_SOCKET_ENV, previousSocket);
+				set(WORLD_SESSION_ENV, previousCaller);
+			}
+		}
+
+		it("is absent from a socket-only root, which keeps its reads", async () => {
+			const bridge = await withWorldEnv("/run/glados/console.sock", undefined, () =>
+				tools(options(Settings.isolated())),
+			);
+			const names = bridge.map(tool => tool.name);
+			expect(names).toContain("world_read");
+			expect(names).not.toContain("world");
+		});
+
+		it("keeps the bridge and reads when the optional caller is malformed", async () => {
+			const bridge = await withWorldEnv("/run/glados/console.sock", "glados//caller", () =>
+				tools(options(Settings.isolated())),
+			);
+			const names = bridge.map(tool => tool.name);
+			expect(names).toEqual(expect.arrayContaining(["task", "hub", "yield", "world_read"]));
+			expect(names).not.toContain("world");
+		});
+
+		it("is advertised when the root also names a caller session", async () => {
+			const bridge = await withWorldEnv("/run/glados/console.sock", "glados/llm-session/caller", () =>
+				tools(options(Settings.isolated())),
+			);
+			expect(bridge.map(tool => tool.name)).toContain("world");
+		});
+
+		it("respects a restricted child's tool list", async () => {
+			const restricted = options(Settings.isolated());
+			restricted.agent = { ...CLAUDE_AGENT, tools: ["read"] };
+			const bridge = await withWorldEnv("/run/glados/console.sock", "glados/llm-session/caller", () =>
+				tools(restricted),
+			);
+			expect(bridge.map(tool => tool.name)).not.toContain("world");
+		});
+
+		// One schema, derived from the tool itself. A hand-written copy here is
+		// exactly the drift the shared tool exists to prevent.
+		it("advertises the native tool's own schema and description", async () => {
+			const bridge = await withWorldEnv("/run/glados/console.sock", "glados/llm-session/caller", () =>
+				tools(options(Settings.isolated())),
+			);
+			const world = bridge.find(tool => tool.name === "world");
+			if (!world) throw new Error("world MCP tool missing");
+			const native = new WorldTool({ canMutate: true } as unknown as WorldClient);
+			expect(world.inputSchema).toEqual(toolWireSchema(native) as typeof world.inputSchema);
+			expect(world.description).toBe(native.description);
+		});
+
+		it("rejects arguments the native schema rejects", async () => {
+			const bridge = await withWorldEnv("/run/glados/console.sock", "glados/llm-session/caller", () =>
+				tools(options(Settings.isolated())),
+			);
+			const world = bridge.find(tool => tool.name === "world");
+			if (!world) throw new Error("world MCP tool missing");
+			const failed = await world.handler({ op: "not_an_operation" });
+			expect(failed.isError).toBe(true);
+			expect(text(failed)).toContain("Invalid OMP world arguments");
+		});
+
+		it("returns the same rendered denial the native tool returns, with isError", async () => {
+			const denial = new WorldAuthorityError("session_input", {
+				operation: WorldRuntimeOperation.SESSION_INPUT,
+				callerSessionObjectKey: "glados/llm-session/caller",
+				capabilityDigest: "sha256:cap",
+				code: WorldAuthorityDenialCode.OPERATION_NOT_ALLOWED,
+				requiredPermission: "world.session.input",
+				detail: "the caller manifest does not allow it",
+			});
+			const sendSessionInput = vi.fn(async () => {
+				throw denial;
+			});
+			const client = {
+				canMutate: true,
+				sessionKey: "glados/llm-session/caller",
+				sendSessionInput,
+				close: async () => {},
+			} as unknown as WorldClient;
+			vi.spyOn(WorldClient, "create").mockReturnValue(client);
+
+			const bridge = await withWorldEnv("/run/glados/console.sock", "glados/llm-session/caller", () =>
+				tools(options(Settings.isolated())),
+			);
+			const world = bridge.find(tool => tool.name === "world");
+			if (!world) throw new Error("world MCP tool missing");
+			const call = {
+				op: "session_input" as const,
+				request_id: "r1",
+				session: "glados/llm-session/b",
+				text: "go",
+			};
+			const bridged = await world.handler(call);
+
+			const nativeResult = await new WorldTool(client).execute("call-1", call);
+			expect(bridged.isError).toBe(true);
+			// Byte-identical, because it is one renderer reached two ways.
+			expect(text(bridged)).toBe(text(nativeResult));
+			expect(text(bridged)).toContain("OPERATION_NOT_ALLOWED");
+		});
+
+		it("keeps world admissible for a restricted child", () => {
+			expect(() => claudeCodeNativeTools(["read", "world"])).not.toThrow();
 		});
 	});
 });

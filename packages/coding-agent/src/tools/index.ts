@@ -38,6 +38,7 @@ import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspec
 import type { VibeModeState } from "../vibe/state";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
+import { isWorldRuntimeConfigured, type WorldClient } from "../world/index.js";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
@@ -67,6 +68,7 @@ import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
+import { WORLD_TOOL_NAME, WorldTool } from "./world";
 import { WriteTool } from "./write";
 import { isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
@@ -111,6 +113,7 @@ export * from "./think";
 export * from "./todo";
 export * from "./tts";
 export * from "./vibe";
+export * from "./world";
 export * from "./write";
 export * from "./xdev";
 export * from "./yield";
@@ -417,6 +420,19 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+	/**
+	 * The World client this session's `world` tool must use.
+	 *
+	 * The seam exists for an owner that already holds a client and closes it, so
+	 * that owner's operations ride the client its own lifetime releases rather
+	 * than a second one nobody closes. Omitted, the tool uses the process-shared
+	 * client, which is what an ordinary native session does.
+	 *
+	 * The Claude task bridge does not go through here: it holds one client per
+	 * peer and hands it to the same `WorldTool` directly when it builds that
+	 * peer's MCP tools.
+	 */
+	worldClient?: () => WorldClient | undefined;
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -468,6 +484,22 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 	cron_create: s => new CronCreateTool(s),
 	cron_list: s => new CronListTool(s),
 	cron_delete: s => new CronDeleteTool(s),
+};
+
+/**
+ * Built-ins that exist only where their backend is configured.
+ *
+ * `BUILTIN_TOOLS` is the fixed native surface every session enumerates, and
+ * every entry in it can be constructed anywhere. `world` cannot: it needs a
+ * GLaDOS daemon socket and a caller session key, and in most processes neither
+ * is set. Listing it there would advertise a tool that resolves to nothing.
+ *
+ * It is still in `allTools`, so a restricted child that names `world` receives
+ * it exactly when the root is configured for it — the existing restriction
+ * rules keep deciding who gets it.
+ */
+export const CONDITIONAL_TOOLS: Record<string, ToolFactory> = {
+	[WORLD_TOOL_NAME]: s => WorldTool.createIf(s),
 };
 
 export type ToolName = BuiltinToolName;
@@ -601,9 +633,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			}
 		}
 	}
-	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS, ...CONDITIONAL_TOOLS };
 	const isToolAllowed = (name: string) => {
 		if (name === "goal") return goalEnabled;
+		// Both halves or nothing: a socket without a caller session keeps read-only
+		// World access, and a tool whose every call would be denied for want of an
+		// identity is worse than no tool.
+		if (name === WORLD_TOOL_NAME) return isWorldRuntimeConfigured();
 		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
@@ -666,6 +702,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 						.filter(([name]) => isToolAllowed(name))
 						.map(([name, factory]) => [name, factory] as const),
 					...(externalThinkingActive ? ([["think", HIDDEN_TOOLS.think]] as const) : []),
+					...Object.entries(CONDITIONAL_TOOLS)
+						.filter(([name]) => isToolAllowed(name))
+						.map(([name, factory]) => [name, factory] as const),
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
 				];

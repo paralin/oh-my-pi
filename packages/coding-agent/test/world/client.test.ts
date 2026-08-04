@@ -1,19 +1,50 @@
 import { describe, expect, test } from "bun:test";
 import {
+	assertWorldRequestId,
 	DEFAULT_LOOKUP_TIMEOUT_MS,
 	formatWorldURI,
 	MAX_SESSION_PAGE,
 	MAX_WORLD_READ_PAGE,
 	WORLD_LISTING_SELECTOR,
+	WORLD_OPERATION_PERMISSIONS,
+	WorldAuthorityError,
 	WorldClient,
 	type WorldEndpoint,
+	WorldOperationError,
 	type WorldService,
-} from "../client.js";
-import { WORLD_SOCKET_ENV } from "../config.js";
-import type { LookupDispatchIntentResponse, ReadWorldURIResponse, SessionSummary } from "../generated/llmsession.pb.js";
-import type { DialFn } from "../transport.js";
+} from "@oh-my-pi/pi-coding-agent/world/client";
+import { WORLD_SESSION_ENV, WORLD_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/world/config";
+import type { DialFn } from "@oh-my-pi/pi-coding-agent/world/transport";
+import type {
+	LookupDispatchIntentResponse,
+	ReadWorldURIResponse,
+	SessionSummary,
+	WorldRuntimeMutationRequest,
+	WorldRuntimeMutationResponse,
+	WorldRuntimeWatchRequest,
+	WorldRuntimeWatchResponse,
+} from "../../src/world/generated/llmsession.pb.js";
+import {
+	WorldAuthorityDenialCode,
+	WorldOperationFailureCode,
+	WorldRuntimeOperation,
+	WorldWatchCompletion,
+} from "../../src/world/generated/llmsession.pb.js";
 
 const SOCKET = "/run/glados/console.sock";
+const CALLER = "glados/llm-session/caller";
+
+/** A complete portable identity tuple, so tests vary one field at a time. */
+const IDENTITY = {
+	ownerArtifact: "repos/glados",
+	objective: "Fix the flaky auth test",
+	repository: "github.com/aperturerobotics/glados",
+	checkoutIdentity: "glados",
+	worktreeIdentity: "fix-auth",
+	workingDirectory: ".",
+	deliverablePaths: ["notes/2026/20260803.org"],
+	writeSurfaces: ["src/auth"],
+};
 
 /** A dial seam that records every call and never opens anything. */
 function recordingDial(): { dial: DialFn; calls: string[] } {
@@ -40,7 +71,27 @@ interface FakeEndpointOptions {
 	failNow?: () => Error | undefined;
 	/** Called after the lookup has entered the endpoint seam. */
 	lookupStarted?: () => void;
+	/** Child resource id `AccessWorldRuntime` hands back. Zero means "none". */
+	runtimeResourceId?: number;
+	/** Answer for one `Mutate` call, consulted per call. */
+	mutate?: (req: WorldRuntimeMutationRequest) => WorldRuntimeMutationResponse;
+	/** Snapshots one `WatchDispatch` stream yields before closing. */
+	watch?: (req: WorldRuntimeWatchRequest) => WorldRuntimeWatchResponse[];
 }
+
+/**
+ * The runtime seams the endpoint-lifetime fakes never reach.
+ *
+ * They throw rather than returning a stub so a test that starts depending on a
+ * caller binding fails loudly instead of silently exercising an empty one.
+ */
+const unusedBinding: WorldService["AccessWorldRuntime"] = async () => {
+	throw new Error("this endpoint binds no caller");
+};
+
+const unusedRuntime: WorldEndpoint["accessRuntime"] = () => {
+	throw new Error("this endpoint has no runtime binding");
+};
 
 /** The rejection an aborted operation produces. */
 function abortLike(): Error {
@@ -72,6 +123,13 @@ interface FakeEndpointLog {
 	lookups: string[];
 	lookupWaits: boolean[];
 	closes: number;
+	/** Caller keys `AccessWorldRuntime` was asked to bind, one per bind. */
+	binds: string[];
+	/** Child resource ids the client bound a runtime service to. */
+	boundResources: number[];
+	mutations: WorldRuntimeMutationRequest[];
+	watches: WorldRuntimeWatchRequest[];
+	runtimeReleases: number;
 }
 
 /**
@@ -80,7 +138,19 @@ interface FakeEndpointLog {
  * own bounding, absence handling, and endpoint lifecycle without a daemon.
  */
 function fakeEndpoints(options: FakeEndpointOptions = {}) {
-	const log: FakeEndpointLog = { reads: [], opens: 0, limits: [], lookups: [], lookupWaits: [], closes: 0 };
+	const log: FakeEndpointLog = {
+		reads: [],
+		opens: 0,
+		limits: [],
+		lookups: [],
+		lookupWaits: [],
+		closes: 0,
+		binds: [],
+		boundResources: [],
+		mutations: [],
+		watches: [],
+		runtimeReleases: 0,
+	};
 	const retire: Array<() => void> = [];
 	const openEndpoint = async (): Promise<WorldEndpoint> => {
 		log.opens++;
@@ -112,6 +182,12 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 				if (options.hang || options.hangNow?.()) return await new Promise(() => {});
 				return options.intents?.[req.intentKey] ?? { found: false };
 			},
+			AccessWorldRuntime: async req => {
+				log.binds.push(req.callerSessionObjectKey);
+				const failure = options.failWith ?? options.failNow?.();
+				if (failure) throw failure;
+				return { resourceId: options.runtimeResourceId ?? 7 };
+			},
 		};
 		const endpoint: WorldEndpoint = {
 			service,
@@ -132,6 +208,34 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 					signal.removeEventListener("abort", onAbort);
 					aborted.promise.catch(() => {});
 				}
+			},
+			accessRuntime: resourceId => {
+				log.boundResources.push(resourceId);
+				return {
+					service: {
+						Mutate: async req => {
+							log.mutations.push(req);
+							const failure = options.failWith ?? options.failNow?.();
+							if (failure) throw failure;
+							if (options.hang || options.hangNow?.()) return await new Promise(() => {});
+							if (!options.mutate) throw new Error("fake endpoint has no mutation answer");
+							return options.mutate(req);
+						},
+						WatchDispatch: req => {
+							log.watches.push(req);
+							const responses = options.watch?.(req) ?? [];
+							return (async function* () {
+								const failure = options.failWith ?? options.failNow?.();
+								if (failure) throw failure;
+								for (const response of responses) yield response;
+								if (options.hang || options.hangNow?.()) await new Promise(() => {});
+							})();
+						},
+					},
+					release: async () => {
+						log.runtimeReleases++;
+					},
+				};
 			},
 			close: async () => {
 				usable = false;
@@ -160,6 +264,20 @@ describe("unconfigured world client", () => {
 	test("still never dials when only a blank value is configured", () => {
 		const { dial, calls } = recordingDial();
 		expect(WorldClient.create({ env: { [WORLD_SOCKET_ENV]: "  " }, setting: "", dial })).toBeUndefined();
+		expect(calls).toEqual([]);
+	});
+
+	test("keeps reads and disables mutations when the optional caller is malformed", () => {
+		const { dial, calls } = recordingDial();
+		const client = WorldClient.create({
+			env: {
+				[WORLD_SOCKET_ENV]: SOCKET,
+				[WORLD_SESSION_ENV]: "glados//caller",
+			},
+			dial,
+		});
+		expect(client?.socketPath).toBe(SOCKET);
+		expect(client?.canMutate).toBe(false);
 		expect(calls).toEqual([]);
 	});
 
@@ -342,9 +460,11 @@ describe("cancellation, close, and reconnect", () => {
 					ListSessions: async () => ({ sessions: [] }),
 					LookupDispatchIntent: async () => ({ found: false }),
 					ReadWorldURI: async req => ({ objectKey: req.uri, found: false }),
+					AccessWorldRuntime: unusedBinding,
 				},
 				usable: true,
 				call: async pending => await pending,
+				accessRuntime: unusedRuntime,
 				close: async () => {
 					released++;
 					if (signal.aborted) {
@@ -376,9 +496,11 @@ describe("cancellation, close, and reconnect", () => {
 					ListSessions: async () => ({ sessions: [] }),
 					LookupDispatchIntent: async () => ({ found: false }),
 					ReadWorldURI: async req => ({ objectKey: req.uri, found: false }),
+					AccessWorldRuntime: unusedBinding,
 				},
 				usable: true,
 				call: async pending => await pending,
+				accessRuntime: unusedRuntime,
 				close: async () => {
 					throw new Error("release failed");
 				},
@@ -450,8 +572,10 @@ describe("cancellation, close, and reconnect", () => {
 				ListSessions: async () => await Promise.reject(null),
 				LookupDispatchIntent: async () => ({ found: false }),
 				ReadWorldURI: async () => ({ objectKey: "", found: false }),
+				AccessWorldRuntime: unusedBinding,
 			},
 			call: async pending => await pending,
+			accessRuntime: unusedRuntime,
 			close: async () => {
 				closes++;
 			},
@@ -562,6 +686,7 @@ describe("cancellation, close, and reconnect", () => {
 				LookupDispatchIntent: async () => ({ found: false }),
 				// Unused here; this test is about endpoint lifetime, not reads.
 				ReadWorldURI: async req => ({ objectKey: req.uri, found: false }),
+				AccessWorldRuntime: unusedBinding,
 			};
 			return {
 				service,
@@ -569,6 +694,7 @@ describe("cancellation, close, and reconnect", () => {
 					return usable;
 				},
 				call: async pending => await pending,
+				accessRuntime: unusedRuntime,
 				close: async () => {
 					usable = false;
 					closed.push(id);
@@ -793,5 +919,483 @@ describe("canonical world read", () => {
 		const { openEndpoint } = fakeEndpoints({ read: { objectKey: KEY, found: true } });
 		const client = WorldClient.create({ env: {}, setting: SOCKET, openEndpoint })!;
 		await expect(client.readWorldURI(URI)).rejects.toThrow(/no arm/);
+	});
+});
+
+/** One denial, in the shape GLaDOS returns it. */
+function denial(
+	code: WorldAuthorityDenialCode,
+	operation: WorldRuntimeOperation,
+	requiredPermission: string,
+): WorldRuntimeMutationResponse {
+	return {
+		operation,
+		result: {
+			case: "authorityDenial",
+			value: {
+				operation,
+				callerSessionObjectKey: CALLER,
+				capabilityDigest: "sha256:cap",
+				code,
+				requiredPermission,
+				detail: "the caller manifest does not allow it",
+			},
+		},
+	};
+}
+
+function failure(
+	code: WorldOperationFailureCode,
+	operation: WorldRuntimeOperation,
+	targetObjectKey = "",
+): WorldRuntimeMutationResponse {
+	return {
+		operation,
+		result: {
+			case: "operationFailure",
+			value: { operation, code, targetObjectKey, detail: "stored content differs" },
+		},
+	};
+}
+
+/** A client bound to a caller session, with the runtime seam substituted. */
+function runtimeClient(options: Parameters<typeof fakeEndpoints>[0] = {}) {
+	const fake = fakeEndpoints(options);
+	const client = WorldClient.create({
+		env: {},
+		setting: SOCKET,
+		sessionSetting: CALLER,
+		openEndpoint: fake.openEndpoint,
+	})!;
+	return { client, ...fake };
+}
+
+describe("world runtime configuration", () => {
+	test("a socket without a caller session cannot mutate and dials nothing", async () => {
+		const { dial, calls } = recordingDial();
+		const client = WorldClient.create({ env: {}, setting: SOCKET, dial })!;
+		expect(client.canMutate).toBe(false);
+		expect(client.sessionKey).toBeUndefined();
+		// The refusal is local: a caller-less client must not spend a connection
+		// discovering it has no identity to be charged.
+		await expect(
+			client.answerQuestion({ requestId: "r1", questionObjectKey: "glados/questions/q", summary: "yes" }),
+		).rejects.toThrow(new RegExp(WORLD_SESSION_ENV));
+		expect(calls).toEqual([]);
+	});
+
+	test("binds the caller key the configuration named", async () => {
+		const { client, log } = runtimeClient({
+			mutate: () => ({
+				result: {
+					case: "sessionInput",
+					value: { targetSessionObjectKey: "glados/llm-session/b", acceptedSequence: 4n },
+				},
+			}),
+		});
+		expect(client.canMutate).toBe(true);
+		await client.sendSessionInput({ requestId: "r1", targetSessionObjectKey: "glados/llm-session/b", text: "go" });
+		expect(log.binds).toEqual([CALLER]);
+		expect(log.boundResources).toEqual([7]);
+	});
+
+	test("binds once per connection and rebinds after the daemon restarts", async () => {
+		const { client, log, retireAll } = runtimeClient({
+			mutate: () => ({
+				result: {
+					case: "sessionInput",
+					value: { targetSessionObjectKey: "glados/llm-session/b", acceptedSequence: 1n },
+				},
+			}),
+		});
+		const input = { requestId: "r1", targetSessionObjectKey: "glados/llm-session/b", text: "go" };
+		await client.sendSessionInput(input);
+		await client.sendSessionInput({ ...input, requestId: "r2" });
+		// One child resource serves both operations on one connection.
+		expect(log.binds).toEqual([CALLER]);
+
+		retireAll();
+		await client.sendSessionInput({ ...input, requestId: "r3" });
+		// The child id belonged to the connection that issued it, so a fresh
+		// connection binds again rather than replaying an id the daemon forgot.
+		expect(log.binds).toEqual([CALLER, CALLER]);
+		expect(log.opens).toBe(2);
+	});
+
+	test("concurrent operations share one binding", async () => {
+		const { client, log } = runtimeClient({
+			mutate: () => ({
+				result: {
+					case: "sessionInput",
+					value: { targetSessionObjectKey: "glados/llm-session/b", acceptedSequence: 1n },
+				},
+			}),
+		});
+		const input = { targetSessionObjectKey: "glados/llm-session/b", text: "go" };
+		await Promise.all([
+			client.sendSessionInput({ ...input, requestId: "a" }),
+			client.sendSessionInput({ ...input, requestId: "b" }),
+		]);
+		expect(log.binds).toEqual([CALLER]);
+	});
+});
+
+describe("world request identity", () => {
+	test("accepts printable ASCII within the daemon's bound", () => {
+		expect(assertWorldRequestId("answer-1")).toBe("answer-1");
+		// 0x20 is printable to the daemon, which iterates bytes 0x20..0x7e.
+		expect(assertWorldRequestId("answer 1")).toBe("answer 1");
+		expect(assertWorldRequestId("x".repeat(256))).toHaveLength(256);
+	});
+
+	test("rejects what the daemon would reject, before any dial", async () => {
+		expect(() => assertWorldRequestId("")).toThrow(/required/);
+		expect(() => assertWorldRequestId("x".repeat(257))).toThrow(/256 bytes/);
+		expect(() => assertWorldRequestId("bad\nid")).toThrow(/printable ASCII/);
+		expect(() => assertWorldRequestId("café")).toThrow(/printable ASCII/);
+
+		const { dial, calls } = recordingDial();
+		const client = WorldClient.create({ env: {}, setting: SOCKET, sessionSetting: CALLER, dial })!;
+		await expect(
+			client.answerQuestion({ requestId: "  ", questionObjectKey: "glados/questions/q", summary: "yes" }),
+		).rejects.toThrow(/required/);
+		expect(calls).toEqual([]);
+	});
+});
+
+describe("world dispatch submission", () => {
+	test("sends the identity tuple and defaults the request id to the intent key", async () => {
+		const { client, log } = runtimeClient({
+			mutate: () => ({
+				result: { case: "dispatchSubmit", value: { session: { sessionObjectKey: "glados/llm-session/child" } } },
+			}),
+		});
+		const expected = client.deriveIntentKey(IDENTITY);
+		const result = await client.submitDispatch({
+			identity: IDENTITY,
+			worktreePath: "/wt/fix-auth",
+			workingDirectory: "/wt/fix-auth",
+			childWorldOperations: [WORLD_OPERATION_PERMISSIONS.question_answer],
+		});
+
+		expect(result.intentKey).toBe(expected.intentKey);
+		// The envelope's retry key is the submission's own identity rather than a
+		// second name for the same work.
+		expect(result.requestId).toBe(expected.intentKey);
+		expect(result.session?.sessionObjectKey).toBe("glados/llm-session/child");
+
+		const sent = log.mutations[0];
+		expect(sent?.requestId).toBe(expected.intentKey);
+		expect(sent?.operation?.case).toBe("dispatchSubmit");
+		const submit = sent?.operation?.case === "dispatchSubmit" ? sent.operation.value : undefined;
+		expect(submit?.intentIdentity?.intentKey).toBe(expected.intentKey);
+		// Normalized, because the daemon re-derives from exactly what it receives.
+		expect(submit?.intentIdentity?.source?.objective).toBe(expected.source.objective);
+		expect(submit?.childWorldOperations).toEqual(["world.question.answer"]);
+		// No parent field exists: the bound caller is the parent.
+		expect(Object.keys(submit ?? {})).not.toContain("parentSessionObjectKey");
+	});
+
+	test("an explicit request id overrides the intent key without changing it", async () => {
+		const { client, log } = runtimeClient({
+			mutate: () => ({ result: { case: "dispatchSubmit", value: {} } }),
+		});
+		const expected = client.deriveIntentKey(IDENTITY);
+		const result = await client.submitDispatch({ identity: IDENTITY, requestId: "submit-1" });
+		expect(result.requestId).toBe("submit-1");
+		expect(result.intentKey).toBe(expected.intentKey);
+		const submit =
+			log.mutations[0]?.operation?.case === "dispatchSubmit" ? log.mutations[0].operation.value : undefined;
+		expect(submit?.intentIdentity?.intentKey).toBe(expected.intentKey);
+	});
+});
+
+describe("world structured refusals", () => {
+	test("a permission denial keeps the daemon's code and fields", async () => {
+		const { client } = runtimeClient({
+			mutate: () =>
+				denial(
+					WorldAuthorityDenialCode.OPERATION_NOT_ALLOWED,
+					WorldRuntimeOperation.QUESTION_ANSWER,
+					"world.question.answer",
+				),
+		});
+		const error = await client
+			.answerQuestion({ requestId: "r1", questionObjectKey: "glados/questions/q", summary: "yes" })
+			.catch((e: unknown) => e);
+
+		expect(error).toBeInstanceOf(WorldAuthorityError);
+		const denied = error as WorldAuthorityError;
+		expect(denied.operation).toBe("question_answer");
+		expect(denied.code).toBe(WorldAuthorityDenialCode.OPERATION_NOT_ALLOWED);
+		expect(denied.codeName).toBe("OPERATION_NOT_ALLOWED");
+		expect(denied.callerSessionObjectKey).toBe(CALLER);
+		expect(denied.capabilityDigest).toBe("sha256:cap");
+		expect(denied.requiredPermission).toBe("world.question.answer");
+		expect(denied.detail).toBe("the caller manifest does not allow it");
+	});
+
+	test("a settled caller is reported as an unavailable manifest, not a missing session", async () => {
+		const { client } = runtimeClient({
+			mutate: () =>
+				denial(
+					WorldAuthorityDenialCode.CALLER_MANIFEST_UNAVAILABLE,
+					WorldRuntimeOperation.SESSION_INPUT,
+					"world.session.input",
+				),
+		});
+		const error = (await client
+			.sendSessionInput({ requestId: "r1", targetSessionObjectKey: "glados/llm-session/b", text: "go" })
+			.catch((e: unknown) => e)) as WorldAuthorityError;
+		expect(error.codeName).toBe("CALLER_MANIFEST_UNAVAILABLE");
+	});
+
+	test("an operation failure keeps its code, target, and request id", async () => {
+		const { client } = runtimeClient({
+			mutate: () =>
+				failure(
+					WorldOperationFailureCode.RETRY_CONFLICT,
+					WorldRuntimeOperation.SESSION_INTERRUPT,
+					"glados/llm-session/b",
+				),
+		});
+		const error = await client
+			.interruptSession({ requestId: "stop-1", targetSessionObjectKey: "glados/llm-session/b" })
+			.catch((e: unknown) => e);
+
+		expect(error).toBeInstanceOf(WorldOperationError);
+		const failed = error as WorldOperationError;
+		expect(failed.operation).toBe("session_interrupt");
+		expect(failed.code).toBe(WorldOperationFailureCode.RETRY_CONFLICT);
+		expect(failed.codeName).toBe("RETRY_CONFLICT");
+		expect(failed.targetObjectKey).toBe("glados/llm-session/b");
+		expect(failed.requestId).toBe("stop-1");
+	});
+
+	test("a response carrying the wrong arm is a client error, not a silent success", async () => {
+		const { client } = runtimeClient({
+			mutate: () => ({ result: { case: "questionAnswer", value: { questionObjectKey: "q" } } }),
+		});
+		await expect(
+			client.sendSessionInput({ requestId: "r1", targetSessionObjectKey: "glados/llm-session/b", text: "go" }),
+		).rejects.toThrow(/returned questionAnswer result/);
+	});
+});
+
+describe("world replayed effects", () => {
+	test("a replayed answer is reported as replayed", async () => {
+		const { client } = runtimeClient({
+			mutate: () => ({
+				result: {
+					case: "questionAnswer",
+					value: {
+						questionObjectKey: "glados/questions/q",
+						decisionObjectKey: "glados/questions/q/decision/abc",
+						questionState: "answered",
+						replayed: true,
+					},
+				},
+			}),
+		});
+		const result = await client.answerQuestion({
+			requestId: "answer-1",
+			questionObjectKey: "glados/questions/q",
+			summary: "yes",
+		});
+		expect(result.replayed).toBe(true);
+		expect(result.decisionObjectKey).toBe("glados/questions/q/decision/abc");
+	});
+
+	test("a replayed steering delivery returns the stored sequence", async () => {
+		const { client } = runtimeClient({
+			mutate: () => ({
+				result: {
+					case: "sessionInput",
+					value: { targetSessionObjectKey: "glados/llm-session/b", acceptedSequence: 9n, replayed: true },
+				},
+			}),
+		});
+		const result = await client.sendSessionInput({
+			requestId: "steer-1",
+			targetSessionObjectKey: "glados/llm-session/b",
+			text: "go",
+		});
+		expect(result.acceptedSequence).toBe(9n);
+		expect(result.replayed).toBe(true);
+		expect(result.operation).toBe("session_input");
+	});
+});
+
+/** One watch snapshot arm. */
+function snapshot(intent: LookupDispatchIntentResponse, completionMet: boolean): WorldRuntimeWatchResponse {
+	return { result: { case: "snapshot", value: { intent, completionMet } } };
+}
+
+describe("world dispatch watch", () => {
+	test("sends the requested stopping condition", async () => {
+		const seen: WorldRuntimeWatchRequest[] = [];
+		const { client, log } = runtimeClient({
+			watch: req => {
+				seen.push(req);
+				return [snapshot({ found: false }, true)];
+			},
+		});
+		for (const stop of ["current", "custody", "terminal"] as const) {
+			for await (const _ of client.watchDispatch({ intentKey: "di:abc", stop })) break;
+		}
+		expect(log.watches.map(req => req.completion)).toEqual([
+			WorldWatchCompletion.CURRENT,
+			WorldWatchCompletion.CUSTODY,
+			WorldWatchCompletion.TERMINAL,
+		]);
+		expect(seen[0]?.intentKey).toBe("di:abc");
+	});
+
+	test("a missing intent is current state under `current`", async () => {
+		const { client } = runtimeClient({ watch: () => [snapshot({ found: false }, true)] });
+		const seen = [];
+		for await (const next of client.watchDispatch({ intentKey: "di:abc", stop: "current" })) seen.push(next);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.intent.found).toBe(false);
+		expect(seen[0]?.completionMet).toBe(true);
+	});
+
+	test("a missing intent closes an unmet custody watch rather than hanging", async () => {
+		const { client } = runtimeClient({ watch: () => [snapshot({ found: false }, false)] });
+		const seen = [];
+		for await (const next of client.watchDispatch({ intentKey: "di:abc", stop: "custody" })) seen.push(next);
+		// The stream ended without the condition holding, which the consumer has
+		// to be able to observe: waiting for `completionMet` forever would hang.
+		expect(seen).toHaveLength(1);
+		expect(seen[0]?.completionMet).toBe(false);
+	});
+
+	test("carries complete snapshots until the condition holds", async () => {
+		const pending: LookupDispatchIntentResponse = {
+			found: true,
+			intentState: "ADMITTED",
+			activeAttemptKey: "glados/dispatch/attempt/1",
+			attemptState: "RUNNING",
+			awaitingCustody: true,
+		};
+		const settled: LookupDispatchIntentResponse = {
+			...pending,
+			attemptState: "ACCEPTED",
+			awaitingCustody: false,
+			custody: { claimState: "claimed", terminalAccepted: true },
+			session: { sessionObjectKey: "glados/llm-session/child", state: "completed" },
+		};
+		const { client } = runtimeClient({ watch: () => [snapshot(pending, false), snapshot(settled, true)] });
+
+		const seen = [];
+		for await (const next of client.watchDispatch({ intentKey: "di:abc", stop: "terminal" })) {
+			seen.push(next);
+			if (next.completionMet) break;
+		}
+		expect(seen).toHaveLength(2);
+		const last = seen[1];
+		expect(last?.completionMet).toBe(true);
+		expect(last?.intent.found).toBe(true);
+		if (last?.intent.found) {
+			expect(last.intent.attemptState).toBe("ACCEPTED");
+			expect(last.intent.custody?.terminalAccepted).toBe(true);
+			expect(last.intent.session?.sessionObjectKey).toBe("glados/llm-session/child");
+		}
+	});
+
+	test("a denial on the stream raises the same typed error a mutation does", async () => {
+		const { client } = runtimeClient({
+			watch: () => [
+				{
+					result: {
+						case: "authorityDenial",
+						value: {
+							operation: WorldRuntimeOperation.DISPATCH_WATCH,
+							callerSessionObjectKey: CALLER,
+							code: WorldAuthorityDenialCode.OPERATION_NOT_ALLOWED,
+							requiredPermission: "world.dispatch.watch",
+							detail: "no",
+						},
+					},
+				},
+			],
+		});
+		const error = await (async () => {
+			try {
+				for await (const _ of client.watchDispatch({ intentKey: "di:abc", stop: "terminal" }));
+				return null;
+			} catch (e: unknown) {
+				return e;
+			}
+		})();
+		expect(error).toBeInstanceOf(WorldAuthorityError);
+		expect((error as WorldAuthorityError).operation).toBe("dispatch_watch");
+		expect((error as WorldAuthorityError).requiredPermission).toBe("world.dispatch.watch");
+	});
+
+	test("a watch failure does not invent a request id", async () => {
+		const { client } = runtimeClient({
+			watch: () => [
+				{
+					result: {
+						case: "operationFailure",
+						value: {
+							operation: WorldRuntimeOperation.DISPATCH_WATCH,
+							code: WorldOperationFailureCode.MISSING_TARGET,
+							targetObjectKey: "di:abc",
+							detail: "missing",
+						},
+					},
+				},
+			],
+		});
+		const error = await (async () => {
+			try {
+				for await (const _ of client.watchDispatch({ intentKey: "di:abc", stop: "current" }));
+				return null;
+			} catch (caught: unknown) {
+				return caught;
+			}
+		})();
+		expect(error).toBeInstanceOf(WorldOperationError);
+		expect((error as WorldOperationError).requestId).toBe("");
+		expect((error as WorldOperationError).targetObjectKey).toBe("di:abc");
+	});
+
+	test("cancelling one watch leaves the client usable", async () => {
+		const { client, log } = runtimeClient({
+			watch: () => [snapshot({ found: true, intentState: "ADMITTED" }, false)],
+			mutate: () => ({
+				result: {
+					case: "sessionInput",
+					value: { targetSessionObjectKey: "glados/llm-session/b", acceptedSequence: 2n },
+				},
+			}),
+		});
+		const controller = new AbortController();
+		for await (const _ of client.watchDispatch({ intentKey: "di:abc", stop: "terminal" }, controller.signal)) {
+			controller.abort();
+			break;
+		}
+		// Same connection, same binding: cancelling a stream is scoped to it.
+		const result = await client.sendSessionInput({
+			requestId: "after-watch",
+			targetSessionObjectKey: "glados/llm-session/b",
+			text: "go",
+		});
+		expect(result.acceptedSequence).toBe(2n);
+		expect(log.opens).toBe(1);
+		expect(log.binds).toEqual([CALLER]);
+	});
+
+	test("an empty intent key never reaches a connection", async () => {
+		const { dial, calls } = recordingDial();
+		const client = WorldClient.create({ env: {}, setting: SOCKET, sessionSetting: CALLER, dial })!;
+		await expect(
+			(async () => {
+				for await (const _ of client.watchDispatch({ intentKey: "  ", stop: "current" }));
+			})(),
+		).rejects.toThrow(/intent key is required/);
+		expect(calls).toEqual([]);
 	});
 });

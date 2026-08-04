@@ -1,15 +1,43 @@
 import { isAbortError as isStarpcAbortError } from "starpc";
-import { resolveWorldSocketPath, type WorldSocketSources } from "./config.js";
+import {
+	resolveWorldSessionKey,
+	resolveWorldSocketPath,
+	WORLD_OBJECT_KEY_SEGMENT,
+	WORLD_SESSION_ENV,
+	type WorldSources,
+} from "./config.js";
 import type {
+	AccessWorldRuntimeResponse,
 	AgentTreeSnapshot,
+	CustodySummary,
 	LookupDispatchIntentResponse,
 	ReadWorldURIResponse,
 	SessionSummary,
+	WorldRuntimeAuthorityDenial,
+	WorldRuntimeMutationRequest,
+	WorldRuntimeMutationResponse,
+	WorldRuntimeOperationFailure,
+	WorldRuntimeWatchRequest,
+	WorldRuntimeWatchResponse,
 } from "./generated/llmsession.pb.js";
-import { GladosResourceServiceClient } from "./generated/llmsession_srpc.pb.js";
+import {
+	WorldAuthorityDenialCode,
+	WorldOperationFailureCode,
+	WorldRuntimeOperation,
+	WorldWatchCompletion,
+} from "./generated/llmsession.pb.js";
+import { GladosResourceServiceClient, WorldRuntimeResourceServiceClient } from "./generated/llmsession_srpc.pb.js";
 import type { ProjectionSnapshot } from "./generated/projection.pb.js";
 import { type IntentKeySource, intentKey } from "./intent-key.js";
+import { WORLD_CHILD_PERMISSIONS, type WorldOperation } from "./operations.js";
 import { abortError, callWithAbort, type DialFn, WorldTransport } from "./transport.js";
+
+export {
+	WORLD_CHILD_PERMISSIONS,
+	WORLD_OPERATION_PERMISSIONS,
+	WORLD_OPERATIONS,
+	type WorldOperation,
+} from "./operations.js";
 
 /** Largest session page one `listSessions` call will ask the daemon for. */
 export const MAX_SESSION_PAGE = 500;
@@ -33,6 +61,29 @@ export interface WorldService {
 		signal?: AbortSignal,
 	): Promise<LookupDispatchIntentResponse>;
 	ReadWorldURI(req: { uri: string; limit: number }, signal?: AbortSignal): Promise<ReadWorldURIResponse>;
+	AccessWorldRuntime(
+		req: { callerSessionObjectKey: string },
+		signal?: AbortSignal,
+	): Promise<AccessWorldRuntimeResponse>;
+}
+
+/**
+ * The generated authority-checked surface, served by a child resource.
+ *
+ * Every method on it is charged to the one caller session named when the child
+ * was opened, so it is deliberately reachable only through {@link
+ * WorldEndpoint.accessRuntime} and never constructed from the root resource.
+ */
+export interface WorldRuntimeService {
+	Mutate(req: WorldRuntimeMutationRequest, signal?: AbortSignal): Promise<WorldRuntimeMutationResponse>;
+	WatchDispatch(req: WorldRuntimeWatchRequest, signal?: AbortSignal): AsyncIterable<WorldRuntimeWatchResponse>;
+}
+
+/** One child runtime resource, held for as long as its endpoint lives. */
+export interface WorldRuntimeBinding {
+	readonly service: WorldRuntimeService;
+	/** Tell the daemon it may drop the child handle. Idempotent. */
+	release(): Promise<void>;
 }
 
 /** Largest page one bounded World read will ask the daemon for. */
@@ -59,10 +110,18 @@ export interface WorldEndpoint {
 	readonly usable: boolean;
 	/** Run one call, cancelled by `signal` without disturbing the session. */
 	call<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T>;
+	/**
+	 * Bind the authority-checked runtime service to a child resource id.
+	 *
+	 * The id comes from `AccessWorldRuntime` on this same endpoint. Binding is
+	 * local: it opens no stream until a call is made, and the child is released
+	 * when the endpoint closes.
+	 */
+	accessRuntime(resourceId: number): WorldRuntimeBinding;
 	close(): Promise<void>;
 }
 
-export interface WorldClientOptions extends WorldSocketSources {
+export interface WorldClientOptions extends WorldSources {
 	/** Socket dial seam. Substituted in tests; never reached when unconfigured. */
 	dial?: DialFn;
 	/**
@@ -86,6 +145,231 @@ export type DispatchIntentLookup =
 			awaitingCustody: boolean;
 	  };
 
+const OPERATION_BY_WIRE: Readonly<Record<WorldRuntimeOperation, WorldOperation | undefined>> = {
+	[WorldRuntimeOperation.UNKNOWN]: undefined,
+	[WorldRuntimeOperation.DISPATCH_SUBMIT]: "dispatch_submit",
+	[WorldRuntimeOperation.DISPATCH_WATCH]: "dispatch_watch",
+	[WorldRuntimeOperation.QUESTION_ANSWER]: "question_answer",
+	[WorldRuntimeOperation.SESSION_INPUT]: "session_input",
+	[WorldRuntimeOperation.SESSION_INTERRUPT]: "session_interrupt",
+};
+
+/** The tool-facing name for an operation the daemon reported, if it named one. */
+function operationFromWire(wire: WorldRuntimeOperation | undefined, fallback: WorldOperation): WorldOperation {
+	return (wire === undefined ? undefined : OPERATION_BY_WIRE[wire]) ?? fallback;
+}
+
+/**
+ * A permission check GLaDOS refused before it read the target.
+ *
+ * This is not a transport failure and not an operation that went wrong: the
+ * daemon decided the bound caller may not perform this operation and stopped,
+ * leaving the target World objects, custody sequences, inbox, and executor
+ * untouched. The protobuf fields are kept whole rather than flattened into a
+ * message so native OMP and the Claude bridge render the same values.
+ */
+export class WorldAuthorityError extends Error {
+	readonly operation: WorldOperation;
+	readonly code: WorldAuthorityDenialCode;
+	/** Stable enum name, e.g. `OPERATION_NOT_ALLOWED`. */
+	readonly codeName: string;
+	readonly callerSessionObjectKey: string;
+	/** Manifest capability digest, empty when the manifest was unreadable. */
+	readonly capabilityDigest: string;
+	/** The permission ID this operation required, as GLaDOS named it. */
+	readonly requiredPermission: string;
+	readonly detail: string;
+
+	constructor(operation: WorldOperation, denial: WorldRuntimeAuthorityDenial) {
+		const codeName = WorldAuthorityDenialCode[denial.code ?? WorldAuthorityDenialCode.UNKNOWN] ?? "UNKNOWN";
+		const resolved = operationFromWire(denial.operation, operation);
+		super(`world ${resolved} denied: ${codeName}${denial.detail ? ` — ${denial.detail}` : ""}`);
+		this.name = "WorldAuthorityError";
+		this.operation = resolved;
+		this.code = denial.code ?? WorldAuthorityDenialCode.UNKNOWN;
+		this.codeName = codeName;
+		this.callerSessionObjectKey = denial.callerSessionObjectKey ?? "";
+		this.capabilityDigest = denial.capabilityDigest ?? "";
+		this.requiredPermission = denial.requiredPermission ?? "";
+		this.detail = denial.detail ?? "";
+	}
+}
+
+/**
+ * A permitted operation that GLaDOS refused or could not complete.
+ *
+ * Validation, a missing target, a retry whose stored result disagrees with the
+ * new request, an unavailable executor, and a rejection by the existing
+ * component all arrive here with their own code. Transport and RPC failures stay
+ * ordinary errors: they say nothing about what the daemon decided.
+ */
+export class WorldOperationError extends Error {
+	readonly operation: WorldOperation;
+	readonly code: WorldOperationFailureCode;
+	/** Stable enum name, e.g. `RETRY_CONFLICT`. */
+	readonly codeName: string;
+	readonly targetObjectKey: string;
+	readonly detail: string;
+	readonly requestId: string;
+
+	constructor(operation: WorldOperation, failure: WorldRuntimeOperationFailure, requestId: string) {
+		const codeName = WorldOperationFailureCode[failure.code ?? WorldOperationFailureCode.UNKNOWN] ?? "UNKNOWN";
+		const resolved = operationFromWire(failure.operation, operation);
+		super(`world ${resolved} failed: ${codeName}${failure.detail ? ` — ${failure.detail}` : ""}`);
+		this.name = "WorldOperationError";
+		this.operation = resolved;
+		this.code = failure.code ?? WorldOperationFailureCode.UNKNOWN;
+		this.codeName = codeName;
+		this.targetObjectKey = failure.targetObjectKey ?? "";
+		this.detail = failure.detail ?? "";
+		this.requestId = requestId;
+	}
+}
+
+/** One dispatch submission: the identity tuple plus the run it describes. */
+export interface WorldDispatchSubmit {
+	/**
+	 * The semantic identity tuple. Its derived key is the retry key, so a repeat
+	 * submission of the same identity resolves to the accepted attempt instead of
+	 * starting a second one.
+	 */
+	identity: IntentKeySource;
+	/** Accepted completion condition. */
+	doneCriteria?: string;
+	/** Exact argument vector for the provider adapter. */
+	adapterArgv?: string[];
+	/** Authorized checkout root, as an absolute path on the daemon's host. */
+	worktreePath?: string;
+	/** Adapter process working directory, absolute. */
+	workingDirectory?: string;
+	maxRuntimeSeconds?: number;
+	model?: string;
+	/**
+	 * `world.*` permission IDs the child receives. GLaDOS keeps `read`, `test`,
+	 * and `write` regardless, accepts only the five IDs in
+	 * {@link WORLD_CHILD_PERMISSIONS}, and rejects any the caller itself lacks.
+	 * An empty or absent list grants the child no `world.*` permission.
+	 */
+	childWorldOperations?: string[];
+	/**
+	 * Mutation envelope retry key. Defaults to the derived intent key, which is
+	 * already the identity of this submission.
+	 */
+	requestId?: string;
+}
+
+export interface WorldDispatchSubmitResult {
+	requestId: string;
+	/** The key computed before the call, so a lost response stays recoverable. */
+	intentKey: string;
+	session: SessionSummary | undefined;
+	custody: CustodySummary | undefined;
+}
+
+export interface WorldQuestionAnswer {
+	requestId: string;
+	questionObjectKey: string;
+	summary: string;
+}
+
+export interface WorldQuestionAnswerResult {
+	requestId: string;
+	questionObjectKey: string;
+	decisionObjectKey: string;
+	evidenceObjectKey: string;
+	goalObjectKey: string;
+	questionState: string;
+	goalState: string;
+	resumeTriggerObjectKey: string;
+	/** The stored answer for this request was returned; nothing was written. */
+	replayed: boolean;
+}
+
+export interface WorldSessionInput {
+	requestId: string;
+	targetSessionObjectKey: string;
+	text: string;
+}
+
+export interface WorldSessionInterrupt {
+	requestId: string;
+	targetSessionObjectKey: string;
+	reason?: string;
+}
+
+export interface WorldSessionControlResult {
+	requestId: string;
+	operation: WorldOperation;
+	targetSessionObjectKey: string;
+	dispatchKey: string;
+	acceptedSequence: bigint;
+	detail: string;
+	/** The stored effect for this request was returned; no second one was made. */
+	replayed: boolean;
+}
+
+/**
+ * When a dispatch watch stops.
+ *
+ * - `current` sends one snapshot and closes. A missing intent is current state,
+ *   so it answers `found: false` with `completionMet: true`.
+ * - `custody` stops once the intent is found, has an active attempt key, carries
+ *   custody, and is no longer awaiting custody.
+ * - `terminal` stops once the intent is found and any terminal field is set:
+ *   terminal custody acceptance, an `ACCEPTED`/`FAILED`/`ABANDONED` attempt, or
+ *   an `ACCEPTED`/`FAILED`/`BLOCKED` intent.
+ *
+ * For `custody` and `terminal` a missing intent sends one `found: false`
+ * snapshot with `completionMet: false` and then closes, so a consumer must
+ * handle a stream that ends without the condition ever holding.
+ */
+export type WorldWatchStop = "current" | "custody" | "terminal";
+
+export interface WorldDispatchWatch {
+	intentKey: string;
+	stop: WorldWatchStop;
+}
+
+/** One complete watch snapshot, in the same shape a direct lookup returns. */
+export interface WorldDispatchSnapshot {
+	intent: DispatchIntentLookup;
+	completionMet: boolean;
+}
+
+const WATCH_COMPLETION: Readonly<Record<WorldWatchStop, WorldWatchCompletion>> = {
+	current: WorldWatchCompletion.CURRENT,
+	custody: WorldWatchCompletion.CUSTODY,
+	terminal: WorldWatchCompletion.TERMINAL,
+};
+
+/**
+ * Largest request id GLaDOS accepts, in bytes.
+ *
+ * The daemon re-checks this and is the authority. Checking here keeps an
+ * obviously invalid id from costing a connection, and keeps the tool from
+ * sending an empty string that every operation would refuse.
+ */
+export const MAX_WORLD_REQUEST_ID_BYTES = 256;
+
+/** Reject a request id GLaDOS would refuse, before anything is dialed. */
+export function assertWorldRequestId(requestId: string): string {
+	if (!requestId) throw new Error("world request id is required");
+	const bytes = Buffer.byteLength(requestId, "utf-8");
+	if (bytes > MAX_WORLD_REQUEST_ID_BYTES) {
+		throw new Error(`world request id must be at most ${MAX_WORLD_REQUEST_ID_BYTES} bytes, got ${bytes}`);
+	}
+	// The daemon's own range, byte for byte: 0x20 through 0x7e. Any code point
+	// above that encodes to bytes it would reject, so checking code points here
+	// accepts exactly the same set.
+	for (const ch of requestId) {
+		const code = ch.codePointAt(0) ?? 0;
+		if (code < 0x20 || code > 0x7e) {
+			throw new Error(`world request id must be printable ASCII: ${requestId}`);
+		}
+	}
+	return requestId;
+}
+
 /**
  * The configured GLaDOS World client.
  *
@@ -101,6 +385,15 @@ export type DispatchIntentLookup =
  */
 export class WorldClient {
 	readonly socketPath: string;
+	/**
+	 * The caller this client's authority-checked operations are charged to.
+	 *
+	 * `undefined` is a complete configuration, not a broken one: that root reads
+	 * the World and performs no operation. Nothing here proves the process owns
+	 * the session — the local socket is the trust boundary, and this key selects
+	 * whose frozen manifest GLaDOS answers from.
+	 */
+	readonly sessionKey: string | undefined;
 	readonly #openEndpoint: (socketPath: string, signal: AbortSignal) => Promise<WorldEndpoint>;
 	/**
 	 * Cancels work this client started on its own behalf. Connecting is shared
@@ -110,10 +403,14 @@ export class WorldClient {
 	readonly #lifetime = new AbortController();
 	#endpoint: WorldEndpoint | null = null;
 	#connecting: Promise<WorldEndpoint> | null = null;
+	/** The runtime child bound to {@link #endpoint}, rebound after a reconnect. */
+	#runtime: { endpoint: WorldEndpoint; binding: WorldRuntimeBinding } | null = null;
+	#binding: { endpoint: WorldEndpoint; pending: Promise<WorldRuntimeBinding> } | null = null;
 	#closed = false;
 
-	private constructor(socketPath: string, options: WorldClientOptions) {
+	private constructor(socketPath: string, sessionKey: string | undefined, options: WorldClientOptions) {
 		this.socketPath = socketPath;
+		this.sessionKey = sessionKey;
 		const dial = options.dial;
 		this.#openEndpoint = options.openEndpoint ?? ((path, signal) => openResourceEndpoint(path, dial, signal));
 	}
@@ -123,16 +420,34 @@ export class WorldClient {
 	 *
 	 * Nothing is dialed here. The unconfigured path must not construct a
 	 * transport or touch the dial seam at all.
+	 *
+	 * A caller session key is resolved at the same moment for the same reason the
+	 * socket is: the root picks its World once, so a mid-run change to the
+	 * environment cannot move some operations to a different caller. A malformed
+	 * optional caller disables mutations while preserving the socket's read
+	 * surface; callers that require strict validation use
+	 * {@link resolveWorldSessionKey} directly.
 	 */
 	static create(options: WorldClientOptions = {}): WorldClient | undefined {
 		const socketPath = resolveWorldSocketPath(options);
 		if (!socketPath) return undefined;
-		return new WorldClient(socketPath, options);
+		let sessionKey: string | undefined;
+		try {
+			sessionKey = resolveWorldSessionKey(options);
+		} catch {
+			sessionKey = undefined;
+		}
+		return new WorldClient(socketPath, sessionKey, options);
 	}
 
 	/** Whether a connection is currently established. */
 	get connected(): boolean {
 		return this.#endpoint?.usable ?? false;
+	}
+
+	/** Whether this client can perform authority-checked World operations. */
+	get canMutate(): boolean {
+		return this.sessionKey !== undefined;
 	}
 
 	/**
@@ -194,16 +509,7 @@ export class WorldClient {
 		} finally {
 			bounded.dispose();
 		}
-		if (!response.found) return { found: false };
-		return {
-			found: true,
-			intentState: response.intentState ?? "",
-			activeAttemptKey: response.activeAttemptKey ?? "",
-			attemptState: response.attemptState ?? "",
-			session: response.session,
-			custody: response.custody,
-			awaitingCustody: response.awaitingCustody ?? false,
-		};
+		return mapDispatchIntent(response);
 	}
 
 	/**
@@ -260,6 +566,160 @@ export class WorldClient {
 	}
 
 	/**
+	 * Submit one dispatch under the bound caller.
+	 *
+	 * The parent is the bound caller, not a field: a request cannot name a parent
+	 * it is not. The intent key is computed here, before the call, so a lost
+	 * response stays recoverable through {@link lookupDispatchIntent} — and a
+	 * retry carrying the same identity resolves to the accepted attempt rather
+	 * than starting a second one.
+	 */
+	async submitDispatch(request: WorldDispatchSubmit, signal?: AbortSignal): Promise<WorldDispatchSubmitResult> {
+		const identity = this.deriveIntentKey(request.identity);
+		// The envelope needs a retry key and the submission already has one, so
+		// defaulting to it keeps a caller from inventing a second identity for the
+		// same work.
+		const requestId = assertWorldRequestId(request.requestId?.trim() || identity.intentKey);
+		const response = await this.#mutate(
+			"dispatch_submit",
+			{
+				requestId,
+				operation: {
+					case: "dispatchSubmit",
+					value: {
+						objective: identity.source.objective,
+						doneCriteria: request.doneCriteria ?? "",
+						adapterArgv: request.adapterArgv ?? [],
+						worktreePath: request.worktreePath ?? "",
+						workingDirectory: request.workingDirectory ?? "",
+						maxRuntimeSeconds: BigInt(Math.max(0, Math.trunc(request.maxRuntimeSeconds ?? 0))),
+						model: request.model ?? "",
+						// `IntentKeySource` mirrors the generated message field for field,
+						// which is the property the shared golden vectors exist to keep.
+						intentIdentity: { source: identity.source, intentKey: identity.intentKey },
+						childWorldOperations: request.childWorldOperations ?? [],
+					},
+				},
+			},
+			signal,
+		);
+		const result = expectResultArm(response, "dispatch_submit", "dispatchSubmit", requestId);
+		return {
+			requestId,
+			intentKey: identity.intentKey,
+			session: result.session,
+			custody: result.custody,
+		};
+	}
+
+	/**
+	 * Answer one exact Question under the bound caller.
+	 *
+	 * `requestId` is the retry identity. Repeating it with the same content
+	 * returns the stored Decision without writing again; repeating it with
+	 * different content is a `RETRY_CONFLICT` rather than a silent second answer.
+	 */
+	async answerQuestion(request: WorldQuestionAnswer, signal?: AbortSignal): Promise<WorldQuestionAnswerResult> {
+		const requestId = assertWorldRequestId(request.requestId.trim());
+		const questionObjectKey = requireTarget(request.questionObjectKey, "question object key");
+		const summary = request.summary.trim();
+		if (!summary) throw new Error("question answer summary is required");
+		const response = await this.#mutate(
+			"question_answer",
+			{ requestId, operation: { case: "questionAnswer", value: { questionObjectKey, summary } } },
+			signal,
+		);
+		const result = expectResultArm(response, "question_answer", "questionAnswer", requestId);
+		return {
+			requestId,
+			questionObjectKey: result.questionObjectKey ?? questionObjectKey,
+			decisionObjectKey: result.decisionObjectKey ?? "",
+			evidenceObjectKey: result.evidenceObjectKey ?? "",
+			goalObjectKey: result.goalObjectKey ?? "",
+			questionState: result.questionState ?? "",
+			goalState: result.goalState ?? "",
+			resumeTriggerObjectKey: result.resumeTriggerObjectKey ?? "",
+			replayed: result.replayed ?? false,
+		};
+	}
+
+	/** Deliver steering input to one target session under the bound caller. */
+	async sendSessionInput(request: WorldSessionInput, signal?: AbortSignal): Promise<WorldSessionControlResult> {
+		const requestId = assertWorldRequestId(request.requestId.trim());
+		const targetSessionObjectKey = requireTarget(request.targetSessionObjectKey, "target session object key");
+		if (!request.text) throw new Error("session input text is required");
+		const response = await this.#mutate(
+			"session_input",
+			{ requestId, operation: { case: "sessionInput", value: { targetSessionObjectKey, text: request.text } } },
+			signal,
+		);
+		const result = expectResultArm(response, "session_input", "sessionInput", requestId);
+		return mapSessionControl("session_input", requestId, targetSessionObjectKey, result);
+	}
+
+	/**
+	 * Store an interrupt for one target session under the bound caller.
+	 *
+	 * Acceptance means GLaDOS stored the cancellation request. Terminal
+	 * acceptance and process release happen afterwards on the daemon's schedule,
+	 * so a caller that needs to observe the end watches the dispatch.
+	 */
+	async interruptSession(request: WorldSessionInterrupt, signal?: AbortSignal): Promise<WorldSessionControlResult> {
+		const requestId = assertWorldRequestId(request.requestId.trim());
+		const targetSessionObjectKey = requireTarget(request.targetSessionObjectKey, "target session object key");
+		const response = await this.#mutate(
+			"session_interrupt",
+			{
+				requestId,
+				operation: {
+					case: "sessionInterrupt",
+					value: { targetSessionObjectKey, reason: request.reason ?? "" },
+				},
+			},
+			signal,
+		);
+		const result = expectResultArm(response, "session_interrupt", "sessionInterrupt", requestId);
+		return mapSessionControl("session_interrupt", requestId, targetSessionObjectKey, result);
+	}
+
+	/**
+	 * Stream complete dispatch snapshots until the requested condition holds.
+	 *
+	 * Every snapshot is whole current state rather than a delta, which is what
+	 * lets a caller reopen a watch after a disconnect and continue without an
+	 * event cursor. The stream can also end without the condition ever holding —
+	 * a missing intent under `custody` or `terminal` is exactly that case — so a
+	 * consumer decides what an unmet condition means rather than waiting forever.
+	 */
+	async *watchDispatch(
+		request: WorldDispatchWatch,
+		signal?: AbortSignal,
+	): AsyncGenerator<WorldDispatchSnapshot, void, void> {
+		const intentKeyValue = request.intentKey.trim();
+		if (!intentKeyValue) throw new Error("dispatch intent key is required");
+		const runtime = await this.#runtimeFor("dispatch_watch", signal);
+		const stream = runtime.service.WatchDispatch(
+			{ intentKey: intentKeyValue, completion: WATCH_COMPLETION[request.stop] },
+			signal,
+		);
+		for await (const response of this.#iterate(runtime.endpoint, stream, signal)) {
+			const result = response.result;
+			if (result?.case === "authorityDenial") throw new WorldAuthorityError("dispatch_watch", result.value);
+			if (result?.case === "operationFailure") {
+				throw new WorldOperationError("dispatch_watch", result.value, "");
+			}
+			if (result?.case !== "snapshot") {
+				throw new Error(`world dispatch watch returned no arm for ${intentKeyValue}`);
+			}
+			const snapshot = result.value;
+			yield {
+				intent: mapDispatchIntent(snapshot.intent ?? { found: false }),
+				completionMet: snapshot.completionMet ?? false,
+			};
+		}
+	}
+
+	/**
 	 * Release the connection and refuse further work. Idempotent.
 	 *
 	 * Order matters. An established endpoint is released first, while its
@@ -299,6 +759,125 @@ export class WorldClient {
 			}
 		}
 		if (closeFailed) throw closeError;
+	}
+
+	/**
+	 * Run one authority-checked mutation and raise its structured refusals.
+	 *
+	 * A denial and a failure are results, not transport errors: they arrive on
+	 * the response and are turned into the two error classes here so every caller
+	 * — native tool, Claude bridge, direct user — sees the same typed refusal
+	 * with the daemon's own code and fields intact.
+	 */
+	async #mutate(
+		operation: WorldOperation,
+		request: WorldRuntimeMutationRequest,
+		signal?: AbortSignal,
+	): Promise<WorldRuntimeMutationResponse> {
+		const runtime = await this.#runtimeFor(operation, signal);
+		const response = await this.#call(runtime.endpoint, () => runtime.service.Mutate(request, signal), signal);
+		const result = response.result;
+		if (result?.case === "authorityDenial") throw new WorldAuthorityError(operation, result.value);
+		if (result?.case === "operationFailure") {
+			throw new WorldOperationError(operation, result.value, request.requestId ?? "");
+		}
+		return response;
+	}
+
+	/** The runtime service for the current endpoint, binding the caller once. */
+	async #runtimeFor(
+		operation: WorldOperation,
+		signal?: AbortSignal,
+	): Promise<{ endpoint: WorldEndpoint; service: WorldRuntimeService }> {
+		const sessionKey = this.sessionKey;
+		if (!sessionKey) {
+			throw new Error(
+				`world ${operation} needs a caller session: set ${WORLD_SESSION_ENV} or the world.session setting`,
+			);
+		}
+		const endpoint = await this.#connect(signal);
+		const current = this.#runtime;
+		if (current?.endpoint === endpoint) return { endpoint, service: current.binding.service };
+		// Shared like the connect above: two concurrent operations must not open
+		// two child resources for one caller on one connection. The endpoint is
+		// part of the memo because a bind in flight when the connection is
+		// replaced belongs to the old one, and reusing it would hand this caller a
+		// child id the new connection never issued.
+		let binding = this.#binding?.endpoint === endpoint ? this.#binding.pending : null;
+		if (!binding) {
+			const pending = this.#openRuntime(endpoint, sessionKey).finally(() => {
+				if (this.#binding?.pending === pending) this.#binding = null;
+			});
+			// A caller that aborts leaves this promise unobserved; keep a rejection
+			// from surfacing as an unhandled one.
+			pending.catch(() => {});
+			this.#binding = { endpoint, pending };
+			binding = pending;
+		}
+		if (!signal) return { endpoint, service: (await binding).service };
+		const aborted = Promise.withResolvers<never>();
+		const onAbort = () => aborted.reject(abortError());
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			return { endpoint, service: (await Promise.race([binding, aborted.promise])).service };
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+			aborted.promise.catch(() => {});
+		}
+	}
+
+	/**
+	 * Bind the caller session to a child runtime resource on one endpoint.
+	 *
+	 * The binding is scoped to the endpoint that produced the id: a child id is
+	 * meaningless to a connection that never issued it, so a reconnect after a
+	 * daemon restart rebinds rather than replaying the old id. The call carries
+	 * the client's own lifetime signal because the binding is shared — one
+	 * caller's cancellation must not cancel it for the others.
+	 */
+	async #openRuntime(endpoint: WorldEndpoint, sessionKey: string): Promise<WorldRuntimeBinding> {
+		const lifetime = this.#lifetime.signal;
+		const response = await this.#call(
+			endpoint,
+			() => endpoint.service.AccessWorldRuntime({ callerSessionObjectKey: sessionKey }, lifetime),
+			lifetime,
+		);
+		const resourceId = response.resourceId ?? 0;
+		if (!resourceId) throw new Error(`world runtime binding for ${sessionKey} returned no child resource`);
+		const binding = endpoint.accessRuntime(resourceId);
+		if (this.#closed) {
+			await binding.release().catch(() => {});
+			throw new Error("World client is closed");
+		}
+		// Recorded even when the endpoint has already been replaced: the next
+		// operation sees the mismatch and rebinds, and releasing a child on a
+		// retired transport is a no-op.
+		this.#runtime = { endpoint, binding };
+		return binding;
+	}
+
+	/**
+	 * Iterate one server stream, retiring the endpoint on a real failure.
+	 *
+	 * Cancelling a watch is scoped to that watch, exactly as a cancelled unary
+	 * call is: starpc ends the one stream and the session keeps serving, so the
+	 * client stays usable afterwards.
+	 */
+	async *#iterate<T>(
+		endpoint: WorldEndpoint,
+		stream: AsyncIterable<T>,
+		signal?: AbortSignal,
+	): AsyncGenerator<T, void, void> {
+		try {
+			for await (const item of stream) {
+				if (signal?.aborted) throw abortError();
+				yield item;
+			}
+		} catch (error) {
+			if (isAbortError(error) && endpoint.usable) throw error;
+			await this.#discard(endpoint);
+			throw error;
+		}
 	}
 
 	async #connect(signal?: AbortSignal): Promise<WorldEndpoint> {
@@ -374,6 +953,11 @@ export class WorldClient {
 	async #discard(endpoint: WorldEndpoint | null = this.#endpoint): Promise<void> {
 		if (!endpoint || this.#endpoint !== endpoint) return;
 		this.#endpoint = null;
+		// The runtime child belongs to this endpoint and is released by its close.
+		// Forgetting it here is what makes the next operation rebind the caller
+		// against the replacement connection instead of a resource id the daemon
+		// no longer holds.
+		if (this.#runtime?.endpoint === endpoint) this.#runtime = null;
 		await endpoint.close();
 	}
 }
@@ -391,14 +975,26 @@ export async function openResourceEndpoint(
 	try {
 		const ref = await transport.accessRootResource(signal);
 		const service: WorldService = new GladosResourceServiceClient(ref.rpc);
+		// Child resources ride this same connection and outlive no part of it, so
+		// the endpoint owns them: closing releases each child before the root,
+		// which is the order the daemon's handle table expects.
+		const children: { release(): Promise<void> }[] = [];
 		return {
 			service,
 			get usable() {
 				return transport.usable;
 			},
 			call: (pending, callSignal) => callWithAbort(pending, callSignal),
+			accessRuntime: resourceId => {
+				const child = transport.accessResource(resourceId);
+				children.push(child);
+				return { service: new WorldRuntimeResourceServiceClient(child.rpc), release: () => child.release() };
+			},
 			close: async () => {
 				try {
+					// Best effort, and never at the cost of the root release: a child
+					// handle the daemon already forgot must not keep the connection up.
+					await Promise.allSettled(children.map(child => child.release()));
 					await ref.release();
 				} finally {
 					await transport.close();
@@ -409,6 +1005,75 @@ export async function openResourceEndpoint(
 		await transport.close();
 		throw error;
 	}
+}
+
+/** Map one lookup or watch response onto the typed intent shape. */
+function mapDispatchIntent(response: LookupDispatchIntentResponse): DispatchIntentLookup {
+	if (!response.found) return { found: false };
+	return {
+		found: true,
+		intentState: response.intentState ?? "",
+		activeAttemptKey: response.activeAttemptKey ?? "",
+		attemptState: response.attemptState ?? "",
+		session: response.session,
+		custody: response.custody,
+		awaitingCustody: response.awaitingCustody ?? false,
+	};
+}
+
+/** The success arms one mutation response can carry. */
+type MutationResultArm = Extract<NonNullable<WorldRuntimeMutationResponse["result"]>, { case: string }>;
+type MutationResultsByCase = {
+	[Arm in MutationResultArm as Arm["case"]]: Arm["value"];
+};
+
+/**
+ * Read the arm this operation asked for.
+ *
+ * Denials and failures are raised before this runs, so anything else is a
+ * response that does not answer the request that was made.
+ */
+function expectResultArm<C extends keyof MutationResultsByCase>(
+	response: WorldRuntimeMutationResponse,
+	operation: WorldOperation,
+	arm: C,
+	requestId: string,
+): MutationResultsByCase[C] {
+	const result = response.result;
+	if (result?.case === arm) {
+		return result.value as MutationResultsByCase[C];
+	}
+	throw new Error(`world ${operation} returned ${result?.case ?? "no"} result for request ${requestId}`);
+}
+
+function mapSessionControl(
+	operation: WorldOperation,
+	requestId: string,
+	targetSessionObjectKey: string,
+	result: {
+		targetSessionObjectKey?: string;
+		dispatchKey?: string;
+		acceptedSequence?: bigint;
+		detail?: string;
+		replayed?: boolean;
+	},
+): WorldSessionControlResult {
+	return {
+		requestId,
+		operation,
+		targetSessionObjectKey: result.targetSessionObjectKey ?? targetSessionObjectKey,
+		dispatchKey: result.dispatchKey ?? "",
+		acceptedSequence: result.acceptedSequence ?? 0n,
+		detail: result.detail ?? "",
+		replayed: result.replayed ?? false,
+	};
+}
+
+/** Reject an empty target before it costs a connection. */
+function requireTarget(value: string, label: string): string {
+	const trimmed = value.trim();
+	if (!trimmed) throw new Error(`world ${label} is required`);
+	return trimmed;
 }
 
 /** One caller signal combined with a client-owned deadline. */
@@ -523,9 +1188,6 @@ const WORLD_SUBPATH_DELIMITER = "/-/";
  */
 const CANONICAL_SESSION_INDEX = /^[1-9][0-9]*$/;
 
-/** One object-key segment, mirroring the daemon's `ObjectKeySegmentPattern`. */
-const OBJECT_KEY_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._:-]*$/;
-
 /**
  * Validate what the structural delimiters delimit.
  *
@@ -582,8 +1244,10 @@ function assertObjectKey(objectKey: string, uri: string): void {
 		if (segment === "-" || segment === "." || segment === "..") {
 			throw new Error(`world uri object key segment "${segment}" is reserved: ${uri}`);
 		}
-		if (!OBJECT_KEY_SEGMENT.test(segment)) {
-			throw new Error(`world uri object key segment "${segment}" must match ${OBJECT_KEY_SEGMENT.source}: ${uri}`);
+		if (!WORLD_OBJECT_KEY_SEGMENT.test(segment)) {
+			throw new Error(
+				`world uri object key segment "${segment}" must match ${WORLD_OBJECT_KEY_SEGMENT.source}: ${uri}`,
+			);
 		}
 	}
 }

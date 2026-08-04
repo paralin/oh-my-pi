@@ -1,11 +1,20 @@
 import { describe, expect, test } from "bun:test";
 import net from "node:net";
 import { Duplex } from "node:stream";
-import { WorldClient } from "../client.js";
-import { ResourceClientRequest, ResourceClientResponse, ResourceRefAdoptRequest } from "../generated/resource.pb.js";
-import { ResourceServiceDefinition } from "../generated/resource_srpc.pb.js";
-import type { DialFn } from "../transport.js";
-import { callWithAbort, type ResourceReleaser, releaseResourceHandle, WorldTransport } from "../transport.js";
+import { WorldClient } from "@oh-my-pi/pi-coding-agent/world/client";
+import type { DialFn } from "@oh-my-pi/pi-coding-agent/world/transport";
+import {
+	callWithAbort,
+	type ResourceReleaser,
+	releaseResourceHandle,
+	WorldTransport,
+} from "@oh-my-pi/pi-coding-agent/world/transport";
+import {
+	ResourceClientRequest,
+	ResourceClientResponse,
+	ResourceRefAdoptRequest,
+} from "../../src/world/generated/resource.pb.js";
+import { ResourceServiceDefinition } from "../../src/world/generated/resource_srpc.pb.js";
 
 const SOCKET = "/run/glados/console.sock";
 
