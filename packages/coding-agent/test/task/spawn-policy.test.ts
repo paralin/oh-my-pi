@@ -60,6 +60,29 @@ describe("task spawn policy surfaces", () => {
 		expect(description).toContain("### fact-finder");
 		expect(description).not.toContain("### oracle");
 	});
+
+	it("refreshes implicit model-role agents in the description without recreating the tool", async () => {
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "task",
+					description: "General-purpose worker.",
+					systemPrompt: "Complete the task.",
+					source: "bundled",
+					model: ["@task"],
+				},
+			],
+			projectAgentsDir: null,
+		});
+		const session = makeSession("*");
+		const tool = await TaskTool.create(session);
+
+		session.settings.override("modelRoles", { luna: "github-copilot/gpt-5.6-luna:high" });
+		expect(tool.description).toContain("### luna");
+
+		session.settings.override("modelRoles", {});
+		expect(tool.description).not.toContain("### luna");
+	});
 });
 
 describe("isScoutSpawnable", () => {

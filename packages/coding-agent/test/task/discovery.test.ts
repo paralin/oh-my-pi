@@ -140,6 +140,51 @@ describe("discoverAgents", () => {
 		expect(collide?.filePath).toBe(path.join(cliExt, "agents", "collide.md"));
 	});
 
+	test("creates Task-derived agents for model roles without an agent file", async () => {
+		const { agents } = await discoverAgents(projectDir, tempHome, {
+			luna: "github-copilot/gpt-5.6-luna:high",
+			task: "openai-codex/gpt-5.6-luna:high",
+		});
+		const task = agents.find(agent => agent.name === "task");
+		const luna = agents.find(agent => agent.name === "luna");
+
+		expect(task).toBeDefined();
+		expect(luna).toMatchObject({
+			name: "luna",
+			model: ["@luna"],
+			systemPrompt: task?.systemPrompt,
+			tools: task?.tools,
+			spawns: task?.spawns,
+			thinkingLevel: task?.thinkingLevel,
+			source: task?.source,
+		});
+		expect(luna?.filePath).toBeUndefined();
+		expect(agents.filter(agent => agent.name === "task")).toHaveLength(1);
+	});
+
+	test("keeps an explicit agent definition ahead of an implicit model-role agent", async () => {
+		await fs.mkdir(path.join(projectDir, ".omp", "agents"), { recursive: true });
+		const explicitPath = path.join(projectDir, ".omp", "agents", "luna.md");
+		await fs.writeFile(
+			explicitPath,
+			["---", "name: luna", "description: explicit", "model: '@slow'", "---", "Explicit body."].join("\n"),
+		);
+
+		const { agents } = await discoverAgents(projectDir, tempHome, {
+			luna: "github-copilot/gpt-5.6-luna:high",
+		});
+		const luna = agents.filter(agent => agent.name === "luna");
+
+		expect(luna).toHaveLength(1);
+		expect(luna[0]).toMatchObject({
+			description: "explicit",
+			model: ["@slow"],
+			systemPrompt: "Explicit body.",
+			filePath: explicitPath,
+			source: "project",
+		});
+	});
+
 	test("explicit-only CLI roots expose only explicitly named package agents", async () => {
 		const staleExt = path.join(tempHome, "stale-ext");
 		const explicitExt = path.join(tempHome, "explicit-ext");

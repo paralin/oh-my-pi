@@ -75,6 +75,12 @@ modelRoles:
 
 `@review` resolves through `modelRoles.review`. Each `modelRoles.<role>` value stores a concrete model selector and may append a thinking suffix such as `:high` (`src/config/model-resolver.ts`). Changing that mapping affects subsequent task resolutions without editing agent definitions.
 
+A configured role also becomes an implicit Task-derived agent when no discovered
+agent has that name. For example, `agent: "review"` works with the mapping above
+without `review.md`; it inherits the resolved `task` definition and changes only
+its name and model to `@review`. A project, user, extension, plugin, or bundled
+agent named `review` takes precedence over the implicit definition.
+
 For a dispatch, set the agent name and task:
 
 ```json
@@ -142,6 +148,7 @@ Because bundled parsing uses `level: "fatal"`, malformed bundled frontmatter thr
    - installed npm/link plugins
 4. Claude marketplace plugin roots (`listClaudePluginRoots(home, cwd)`) with `agents/` subdirs — only when `isProviderEnabled("claude-plugins")`; project-scope plugins sort before user-scope
 5. Bundled agents (`loadBundledAgents()`)
+6. Task-derived definitions for otherwise-unclaimed `modelRoles` keys
 
 The OMP extension-package surface is disabled when the `omp-plugins` capability provider is disabled. Marketplace roots are excluded from `listOmpExtensionRoots` and enter only through the separately gated Claude-plugin path.
 
@@ -159,6 +166,8 @@ Implications:
 - Earlier extension roots override later extension roots, Claude marketplace plugins, and bundled agents.
 - Non-bundled agents override bundled agents with the same name.
 - Name matching is case-sensitive (`Task` and `task` are distinct).
+- A configured model role fills only a name left unclaimed by every explicit or
+  bundled agent.
 - Within one directory, markdown files are read in lexicographic filename order before dedup.
 
 ## Invalid/missing agent file behavior
@@ -189,7 +198,7 @@ Lookup is exact-name linear search:
 
 1. resolves the omitted or explicit agent name from the parent spawn policy
 2. enforces depth, blocked-self-recursion, and parent spawn-policy guards
-3. rediscovers agents with `discoverAgents(session.cwd)` and performs exact lookup
+3. rediscovers agents with the session's current `modelRoles` and performs exact lookup
 4. checks `task.disabledAgents`
 5. resolves plan-mode restrictions, output schema, model policy, and isolation policy
 
@@ -197,7 +206,12 @@ A missing name fails preflight with `Unknown agent "...". Available: ...`; no su
 
 ### Description vs execution-time discovery
 
-`TaskTool.create()` memoizes discovery per resolved working directory when building the model-facing tool description. Execution rediscovers agents, so the runtime set can differ from the earlier description if agent or extension files changed mid-session. Blocking behavior is determined after policy resolution rather than from a stale description-time agent object.
+`TaskTool.create()` memoizes filesystem discovery per resolved working
+directory. Its description augments that snapshot with the session's current
+`modelRoles` on every read. Execution also rediscovers filesystem agents and
+augments them from current settings, so a live role change is immediately
+selectable while agent-file and extension changes retain their existing
+execution-time freshness.
 
 ## Model and structured-output precedence
 
