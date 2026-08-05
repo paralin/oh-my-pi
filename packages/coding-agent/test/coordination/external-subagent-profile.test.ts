@@ -93,7 +93,10 @@ describe("external subagent profile", () => {
 			additionalDirectories: ["/shared"],
 			hasUI: false,
 			taskDepth: 1,
-			settings: Settings.isolated({ "task.maxRuntimeMs": 60_000 }),
+			settings: Settings.isolated({
+				"task.maxRuntimeMs": 60_000,
+				modelRoles: { reviewer: "openai-codex/gpt-5.6-sol:high" },
+			}),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		};
@@ -121,7 +124,7 @@ describe("external subagent profile", () => {
 			agentName: agent.name,
 			agent,
 			effectiveAgent: agent,
-			modelOverride: "openai-codex/gpt-5.6-sol:high",
+			modelOverride: "@reviewer",
 			schema: {
 				schema: { type: "object" },
 				source: "caller",

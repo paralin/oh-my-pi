@@ -7,6 +7,8 @@ const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
 /** Abort reason used only when the owning session shuts down the entire manager. */
 export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
+/** Marks async work detached by its owning session lifecycle rather than explicitly cancelled. */
+export const ASYNC_JOB_OWNER_LIFECYCLE_ABORT = new Error("Async job owner lifecycle ended");
 
 /**
  * Adaptive ("smart") `hub` poll-wait ladder (ms). A tight poll loop climbs

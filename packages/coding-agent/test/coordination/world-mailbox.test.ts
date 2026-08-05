@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { WORLD_MAILBOX_CAP, WorldMailboxRouter } from "@oh-my-pi/pi-coding-agent/coordination/world-mailbox";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import type { AgentPeer } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { WorldClient } from "@oh-my-pi/pi-coding-agent/world/client";
+import { type WorldClient, WorldEndpointError } from "@oh-my-pi/pi-coding-agent/world/client";
 import type { AgentMessageSummary } from "../../src/world/generated/llmsession.pb.js";
 import { PeerMessageAckOutcome } from "../../src/world/generated/llmsession.pb.js";
 
@@ -166,6 +166,35 @@ describe("WorldMailboxRouter", () => {
 		expect(deliveries.map(message => message.id)).toEqual(["message-1"]);
 		expect(client.acknowledgements).toHaveLength(1);
 		await second.close();
+	});
+
+	test("restarts a failed watch after another operation replaces its endpoint", async () => {
+		const client = new MailboxClient([summary(1)]) as MailboxClient & {
+			connected: boolean;
+			watchCalls: number;
+		};
+		client.connected = true;
+		client.watchCalls = 0;
+		const watch = client.watchPeerMailbox.bind(client);
+		client.watchPeerMailbox = signal => {
+			client.watchCalls++;
+			if (client.watchCalls > 1) return watch(signal);
+			return (async function* () {
+				client.connected = true;
+				yield* [] as AgentMessageSummary[];
+				throw new WorldEndpointError(new Error("retired endpoint closed"));
+			})();
+		};
+		const deliveries: IrcMessage[] = [];
+		const mailbox = router(client, receiver(deliveries));
+		mailbox.start();
+		await Promise.resolve();
+
+		await client.processed.promise;
+		expect(client.watchCalls).toBe(2);
+		expect(deliveries.map(message => message.id)).toEqual(["message-1"]);
+		expect(client.acknowledgements).toHaveLength(1);
+		await mailbox.close();
 	});
 
 	test("rejects a durable record without a positive inbox sequence before acknowledgement", async () => {

@@ -20,6 +20,8 @@ import type {
 	WatchAgentTreeResponse,
 	WatchPeerMailboxResponse,
 	WatchSessionResponse,
+	InteractiveRootBinding as WireInteractiveRootBinding,
+	InteractiveRootSpec as WireInteractiveRootSpec,
 	WorldAckPeerMessageResult,
 	WorldRuntimeAuthorityDenial,
 	WorldRuntimeMutationRequest,
@@ -31,6 +33,9 @@ import type {
 	WorldTaskAgentSpec,
 } from "./generated/llmsession.pb.js";
 import {
+	AccessInteractiveRootRequest,
+	AccessInteractiveRootResponse,
+	InteractiveRootTransitionReason,
 	PeerMessageAckOutcome,
 	PeerMessageOutcome,
 	WorldAuthorityDenialCode,
@@ -40,6 +45,8 @@ import {
 } from "./generated/llmsession.pb.js";
 import {
 	GladosResourceServiceClient,
+	GladosResourceServiceDefinition,
+	InteractiveRootResourceServiceClient,
 	LlmSessionResourceServiceClient,
 	WorldRuntimeResourceServiceClient,
 } from "./generated/llmsession_srpc.pb.js";
@@ -99,6 +106,9 @@ export interface WorldRuntimeService {
 	WatchPeerMailbox?(req: Record<string, never>, signal?: AbortSignal): AsyncIterable<WatchPeerMailboxResponse>;
 }
 
+/** The control surface served beside the attached root's runtime service. */
+export type InteractiveRootService = Pick<InteractiveRootResourceServiceClient, "Rotate" | "Reconfigure">;
+
 /** One child runtime resource, held for as long as its endpoint lives. */
 export interface WorldRuntimeBinding {
 	readonly service: WorldRuntimeService;
@@ -127,34 +137,94 @@ export type WorldRead =
 	| { found: true; objectKey: string; kind: "agentTree"; agentTree: AgentTreeSnapshot }
 	| { found: true; objectKey: string; kind: "listing"; keys: string[]; truncated: boolean };
 
-/**
- * One live session with a World daemon.
- *
- * Endpoints are single-use: `usable` goes false once the session fails or
- * closes and never returns true, which is what makes the client build a fresh
- * one after a daemon restart instead of replaying a dead client handle. A
- * cancelled call does not retire the endpoint — starpc scopes that
- * cancellation to the one call.
- */
+/** One held AccessInteractiveRoot invocation retained until commit or abort. */
+export interface InteractiveRootHeldCall {
+	response: AccessInteractiveRootResponse;
+	commit(): Promise<void>;
+	abort(): Promise<void>;
+}
+
 export interface WorldEndpoint {
 	readonly service: WorldService;
 	readonly usable: boolean;
-	/** Run one call, cancelled by `signal` without disturbing the session. */
 	call<T>(pending: Promise<T>, signal?: AbortSignal): Promise<T>;
-	/**
-	 * Bind the authority-checked runtime service to a child resource id.
-	 *
-	 * The id comes from `AccessWorldRuntime` on this same endpoint. Binding is
-	 * local: it opens no stream until a call is made, and the child is released
-	 * when the endpoint closes.
-	 */
+	callInteractiveRootWithReceipt?(
+		spec: WireInteractiveRootSpec,
+		signal?: AbortSignal,
+	): Promise<InteractiveRootHeldCall>;
 	accessRuntime(resourceId: number): WorldRuntimeBinding;
-	/** Bind one LlmSession monitor resource returned by AccessSession. */
 	accessSession?(resourceId: number): WorldSessionBinding;
+	accessInteractiveRoot?(resourceId: number): {
+		service: InteractiveRootService;
+		runtime: WorldRuntimeService;
+		release(): Promise<void>;
+	};
+	adoptResource?(resourceId: number, signal?: AbortSignal): Promise<void>;
 	close(): Promise<void>;
 }
 
+export interface InteractiveRootSpec {
+	ompSessionId: string;
+	processInstanceId: string;
+	workingDirectory: string;
+	workspaceRoots: string[];
+	provider: string;
+	model: string;
+	transitionReason: string;
+	predecessorOmpSessionId?: string;
+	protocolVersion: string;
+	buildIdentity: string;
+}
+
+export interface InteractiveRootBinding {
+	ompSessionId: string;
+	llmSessionObjectKey: string;
+	dispatchIntentKey: string;
+	dispatchAttemptKey: string;
+	claimGeneration: bigint;
+	manifestDigest: string;
+	bindingGeneration: bigint;
+	configurationDigest: string;
+	provider: string;
+	model: string;
+}
+
+function toWireInteractiveRootSpec(spec: InteractiveRootSpec): WireInteractiveRootSpec {
+	const name = spec.transitionReason.toUpperCase() as keyof typeof InteractiveRootTransitionReason;
+	const transitionReason = InteractiveRootTransitionReason[name];
+	if (transitionReason === undefined || transitionReason === InteractiveRootTransitionReason.UNKNOWN) {
+		throw new Error(`unsupported interactive root transition reason: ${spec.transitionReason}`);
+	}
+	return { ...spec, transitionReason };
+}
+
+function mapInteractiveRootBinding(binding: WireInteractiveRootBinding): InteractiveRootBinding {
+	const required = (value: string | undefined, name: string): string => {
+		if (!value) throw new Error(`interactive root binding omitted ${name}`);
+		return value;
+	};
+	const claimGeneration = binding.claimGeneration ?? 0n;
+	const bindingGeneration = binding.bindingGeneration ?? 0n;
+	if (claimGeneration === 0n || bindingGeneration === 0n) {
+		throw new Error("interactive root binding omitted a custody generation");
+	}
+	return {
+		ompSessionId: required(binding.ompSessionId, "OMP session ID"),
+		llmSessionObjectKey: required(binding.llmSessionObjectKey, "LlmSession key"),
+		dispatchIntentKey: required(binding.dispatchIntentKey, "dispatch intent key"),
+		dispatchAttemptKey: required(binding.dispatchAttemptKey, "dispatch attempt key"),
+		claimGeneration,
+		manifestDigest: required(binding.manifestDigest, "Manifest digest"),
+		bindingGeneration,
+		configurationDigest: required(binding.configurationDigest, "configuration digest"),
+		provider: required(binding.provider, "provider"),
+		model: required(binding.model, "model"),
+	};
+}
+
 export interface WorldClientOptions extends WorldSources {
+	/** Select Resource-attached interactive custody; never reads a static key. */
+	interactiveRoot?: boolean;
 	/** Socket dial seam. Substituted in tests; never reached when unconfigured. */
 	dial?: DialFn;
 	/**
@@ -266,6 +336,14 @@ export class WorldOperationError extends Error {
 		this.targetObjectKey = failure.targetObjectKey ?? "";
 		this.detail = failure.detail ?? "";
 		this.requestId = requestId;
+	}
+}
+
+/** A server stream failed on the endpoint that carried it. */
+export class WorldEndpointError extends Error {
+	constructor(cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause), { cause });
+		this.name = "WorldEndpointError";
 	}
 }
 
@@ -466,7 +544,6 @@ export function assertWorldRequestId(requestId: string): string {
  * a fresh one instead of replaying a handle the daemon forgot.
  */
 export class WorldClient {
-	readonly socketPath: string;
 	/**
 	 * The caller this client's authority-checked operations are charged to.
 	 *
@@ -475,24 +552,31 @@ export class WorldClient {
 	 * the session — the local socket is the trust boundary, and this key selects
 	 * whose frozen manifest GLaDOS answers from.
 	 */
-	readonly sessionKey: string | undefined;
+	readonly socketPath: string;
+	/** Static caller authority used when this is not an interactive root. */
+	readonly #staticSessionKey: string | undefined;
+	readonly #interactiveRoot: boolean;
 	readonly #openEndpoint: (socketPath: string, signal: AbortSignal) => Promise<WorldEndpoint>;
-	/**
-	 * Cancels work this client started on its own behalf. Connecting is shared
-	 * between concurrent callers, so no single caller's signal may cancel it;
-	 * `close` is what stops it, and this is the signal that carries that.
-	 */
 	readonly #lifetime = new AbortController();
 	#endpoint: WorldEndpoint | null = null;
 	#connecting: Promise<WorldEndpoint> | null = null;
-	/** The runtime child bound to {@link #endpoint}, rebound after a reconnect. */
 	#runtime: { endpoint: WorldEndpoint; binding: WorldRuntimeBinding } | null = null;
 	#binding: { endpoint: WorldEndpoint; pending: Promise<WorldRuntimeBinding> } | null = null;
+	#interactive: {
+		endpoint: WorldEndpoint;
+		binding: InteractiveRootBinding;
+		control: InteractiveRootService;
+		runtime: WorldRuntimeService;
+		resource: { release(): Promise<void> };
+	} | null = null;
+	#interactiveSpec: InteractiveRootSpec | null = null;
+	#interactiveAttach: Promise<InteractiveRootBinding> | null = null;
 	#closed = false;
 
 	private constructor(socketPath: string, sessionKey: string | undefined, options: WorldClientOptions) {
 		this.socketPath = socketPath;
-		this.sessionKey = sessionKey;
+		this.#staticSessionKey = sessionKey;
+		this.#interactiveRoot = options.interactiveRoot === true;
 		const dial = options.dial;
 		this.#openEndpoint = options.openEndpoint ?? ((path, signal) => openResourceEndpoint(path, dial, signal));
 	}
@@ -513,6 +597,7 @@ export class WorldClient {
 	static create(options: WorldClientOptions = {}): WorldClient | undefined {
 		const socketPath = resolveWorldSocketPath(options);
 		if (!socketPath) return undefined;
+		if (options.interactiveRoot === true) return new WorldClient(socketPath, undefined, options);
 		let sessionKey: string | undefined;
 		try {
 			sessionKey = resolveWorldSessionKey(options);
@@ -527,9 +612,139 @@ export class WorldClient {
 		return this.#endpoint?.usable ?? false;
 	}
 
-	/** Whether this client can perform authority-checked World operations. */
+	/** Current caller authority, including an accepted interactive binding. */
+	get sessionKey(): string | undefined {
+		return this.#interactive?.binding.llmSessionObjectKey ?? this.#staticSessionKey;
+	}
+
+	/** Whether this client has either static or adopted interactive authority. */
 	get canMutate(): boolean {
-		return this.sessionKey !== undefined;
+		return this.sessionKey !== undefined || this.#interactiveRoot;
+	}
+	/** Whether this instance is configured for Resource-attached custody. */
+	get interactiveRoot(): boolean {
+		return this.#interactiveRoot;
+	}
+
+	/** The accepted interactive binding, if this client is attached. */
+	get interactiveBinding(): InteractiveRootBinding | undefined {
+		return this.#interactive?.binding;
+	}
+	/** Admit and adopt one attended root child before any mutable operation. */
+	async attachInteractiveRoot(spec: InteractiveRootSpec, signal?: AbortSignal): Promise<InteractiveRootBinding> {
+		if (!this.#interactiveRoot) throw new Error("World client was not created for interactive attachment");
+		if (signal?.aborted) throw abortError();
+		if (this.#interactive) return this.#interactive.binding;
+		let pending = this.#interactiveAttach;
+		if (!pending) {
+			pending = this.#attachInteractiveRoot(spec).finally(() => {
+				if (this.#interactiveAttach === pending) this.#interactiveAttach = null;
+			});
+			this.#interactiveAttach = pending;
+		}
+		if (!signal) return await pending;
+		const aborted = Promise.withResolvers<never>();
+		const onAbort = () => aborted.reject(abortError());
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			return await Promise.race([pending, aborted.promise]);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+			aborted.promise.catch(() => {});
+		}
+	}
+
+	async #attachInteractiveRoot(spec: InteractiveRootSpec): Promise<InteractiveRootBinding> {
+		const signal = this.#lifetime.signal;
+		const endpoint = await this.#connect(signal);
+		if (!endpoint.callInteractiveRootWithReceipt || !endpoint.accessInteractiveRoot || !endpoint.adoptResource) {
+			throw new Error("World endpoint does not support held interactive root admission");
+		}
+		const held = await endpoint.callInteractiveRootWithReceipt(toWireInteractiveRootSpec(spec), signal);
+		const resourceId = held.response.resourceId ?? 0;
+		if (!resourceId || !held.response.binding) {
+			await held.abort().catch(() => {});
+			throw new Error("interactive root access returned no resource binding");
+		}
+		const binding = mapInteractiveRootBinding(held.response.binding);
+		try {
+			await endpoint.adoptResource(resourceId, signal);
+			const resource = endpoint.accessInteractiveRoot(resourceId);
+			this.#interactive = {
+				endpoint,
+				binding,
+				control: resource.service,
+				runtime: resource.runtime,
+				resource,
+			};
+			this.#interactiveSpec = spec;
+			await held.commit();
+			return binding;
+		} catch (error) {
+			await held.abort().catch(() => {});
+			await endpoint.close().catch(() => {});
+			if (this.#endpoint === endpoint) this.#endpoint = null;
+			if (this.#interactive?.endpoint === endpoint) this.#interactive = null;
+			throw error;
+		}
+	}
+
+	/** Rotate the attached root after the local OMP identity has committed. */
+	async rotateInteractiveRoot(spec: InteractiveRootSpec, signal?: AbortSignal): Promise<InteractiveRootBinding> {
+		const current = this.#interactive;
+		if (!current) throw new Error("interactive root is not attached");
+		const response = await current.control.Rotate({ spec: toWireInteractiveRootSpec(spec) }, signal);
+		const binding = mapInteractiveRootBinding(response);
+		this.#interactive = { ...current, binding };
+		this.#interactiveSpec = spec;
+		return binding;
+	}
+
+	/** Reconfigure provider/model while retaining the OMP session identity. */
+	async reconfigureInteractiveRoot(spec: InteractiveRootSpec, signal?: AbortSignal): Promise<InteractiveRootBinding> {
+		const current = this.#interactive;
+		if (!current) throw new Error("interactive root is not attached");
+		const response = await current.control.Reconfigure({ spec: toWireInteractiveRootSpec(spec) }, signal);
+		const binding = mapInteractiveRootBinding(response);
+		this.#interactive = { ...current, binding };
+		this.#interactiveSpec = spec;
+		return binding;
+	}
+
+	async rotateInteractiveRootTransition(
+		transition: { sessionId: string; previousSessionId?: string; reason: string; provider: string; model: string },
+		signal?: AbortSignal,
+	): Promise<InteractiveRootBinding> {
+		const current = this.#interactiveSpec;
+		if (!current) throw new Error("interactive root has no retained specification");
+		return this.rotateInteractiveRoot(
+			{
+				...current,
+				ompSessionId: transition.sessionId,
+				predecessorOmpSessionId: transition.previousSessionId,
+				transitionReason: transition.reason,
+				provider: transition.provider,
+				model: transition.model,
+			},
+			signal,
+		);
+	}
+
+	async reconfigureInteractiveRootTransition(
+		transition: { provider: string; model: string },
+		signal?: AbortSignal,
+	): Promise<InteractiveRootBinding> {
+		const current = this.#interactiveSpec;
+		if (!current) throw new Error("interactive root has no retained specification");
+		return this.reconfigureInteractiveRoot(
+			{
+				...current,
+				provider: transition.provider,
+				model: transition.model,
+				transitionReason: "RECONFIGURE",
+			},
+			signal,
+		);
 	}
 
 	/**
@@ -857,7 +1072,7 @@ export class WorldClient {
 		const watch = runtime.service.WatchPeerMailbox;
 		if (!watch) throw new Error("World runtime endpoint does not support peer mailbox watches");
 		const stream = watch({}, signal);
-		for await (const response of this.#iterate(runtime.endpoint, stream, signal)) {
+		for await (const response of this.#iterate(runtime.endpoint, stream, signal, true)) {
 			const result = response.result;
 			if (result?.case === "authorityDenial") {
 				throw new WorldAuthorityError("world.agent.message.receive", result.value);
@@ -1001,6 +1216,15 @@ export class WorldClient {
 		operation: WorldOperation,
 		signal?: AbortSignal,
 	): Promise<{ endpoint: WorldEndpoint; service: WorldRuntimeService }> {
+		if (this.#interactiveRoot) {
+			if (!this.#interactive) {
+				if (!this.#interactiveSpec) throw new Error(`world ${operation} needs an accepted interactive binding`);
+				await this.attachInteractiveRoot(this.#interactiveSpec, signal);
+			}
+			const attached = this.#interactive;
+			if (!attached) throw new Error(`world ${operation} needs an accepted interactive binding`);
+			return { endpoint: attached.endpoint, service: attached.runtime };
+		}
 		const sessionKey = this.sessionKey;
 		if (!sessionKey) {
 			throw new Error(
@@ -1079,6 +1303,7 @@ export class WorldClient {
 		endpoint: WorldEndpoint,
 		stream: AsyncIterable<T>,
 		signal?: AbortSignal,
+		wrapEndpointError = false,
 	): AsyncGenerator<T, void, void> {
 		try {
 			for await (const item of stream) {
@@ -1088,7 +1313,7 @@ export class WorldClient {
 		} catch (error) {
 			if (isAbortError(error) && endpoint.usable) throw error;
 			await this.#discard(endpoint);
-			throw error;
+			throw wrapEndpointError ? new WorldEndpointError(error) : error;
 		}
 	}
 
@@ -1165,11 +1390,8 @@ export class WorldClient {
 	async #discard(endpoint: WorldEndpoint | null = this.#endpoint): Promise<void> {
 		if (!endpoint || this.#endpoint !== endpoint) return;
 		this.#endpoint = null;
-		// The runtime child belongs to this endpoint and is released by its close.
-		// Forgetting it here is what makes the next operation rebind the caller
-		// against the replacement connection instead of a resource id the daemon
-		// no longer holds.
 		if (this.#runtime?.endpoint === endpoint) this.#runtime = null;
+		if (this.#interactive?.endpoint === endpoint) this.#interactive = null;
 		await endpoint.close();
 	}
 }
@@ -1197,6 +1419,28 @@ export async function openResourceEndpoint(
 				return transport.usable;
 			},
 			call: (pending, callSignal) => callWithAbort(pending, callSignal),
+			callInteractiveRootWithReceipt: async (spec, callSignal) => {
+				const rpc = ref.rpc as typeof ref.rpc & {
+					requestWithReceipt(
+						service: string,
+						method: string,
+						data: Uint8Array,
+						abortSignal?: AbortSignal,
+					): Promise<{ response: Uint8Array; receipt: { commit(): Promise<void>; abort(): Promise<void> } }>;
+				};
+				const request = AccessInteractiveRootRequest.create({ spec });
+				const held = await rpc.requestWithReceipt(
+					GladosResourceServiceDefinition.typeName,
+					GladosResourceServiceDefinition.methods.AccessInteractiveRoot.name,
+					AccessInteractiveRootRequest.toBinary(request),
+					callSignal,
+				);
+				return {
+					response: AccessInteractiveRootResponse.fromBinary(held.response),
+					commit: () => held.receipt.commit(),
+					abort: () => held.receipt.abort(),
+				};
+			},
 			accessRuntime: resourceId => {
 				const child = transport.accessResource(resourceId);
 				children.push(child);
@@ -1207,6 +1451,16 @@ export async function openResourceEndpoint(
 				children.push(child);
 				return { service: new LlmSessionResourceServiceClient(child.rpc), release: () => child.release() };
 			},
+			accessInteractiveRoot: resourceId => {
+				const child = transport.accessResource(resourceId);
+				children.push(child);
+				return {
+					service: new InteractiveRootResourceServiceClient(child.rpc),
+					runtime: new WorldRuntimeResourceServiceClient(child.rpc),
+					release: () => child.release(),
+				};
+			},
+			adoptResource: (resourceId, adoptSignal) => transport.adoptResource(resourceId, adoptSignal),
 			close: async () => {
 				try {
 					// Best effort, and never at the cost of the root release: a child

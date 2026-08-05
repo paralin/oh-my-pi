@@ -5665,7 +5665,7 @@ export const SETTINGS_SCHEMA = {
 		default: "unset" as const,
 	},
 
-	// World (hidden; the integration is inert until a socket path is configured)
+	// World (hidden; all daemon attachment is inert until explicitly enabled)
 	"world.socket": {
 		type: "string",
 		default: undefined,
@@ -5674,6 +5674,11 @@ export const SETTINGS_SCHEMA = {
 	"world.session": {
 		type: "string",
 		default: undefined,
+	},
+
+	"world.interactive": {
+		type: "boolean",
+		default: false,
 	},
 
 	"gc.blobs": { type: "boolean", default: true },
@@ -6007,8 +6012,9 @@ export interface WorldSettings {
 	 * `world.socket`.
 	 */
 	session: string | undefined;
+	/** Opt-in attended World root attachment for the ordinary interactive TUI. */
+	interactive: boolean;
 }
-
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;

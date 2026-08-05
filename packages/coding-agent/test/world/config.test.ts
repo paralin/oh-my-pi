@@ -2,8 +2,11 @@ import { describe, expect, test } from "bun:test";
 import {
 	isWorldConfigured,
 	isWorldRuntimeConfigured,
+	resolveWorldInteractive,
 	resolveWorldSessionKey,
 	resolveWorldSocketPath,
+	validateWorldInteractiveConfiguration,
+	WORLD_INTERACTIVE_ENV,
 	WORLD_SESSION_ENV,
 	WORLD_SOCKET_ENV,
 } from "@oh-my-pi/pi-coding-agent/world/config";
@@ -139,5 +142,32 @@ describe("world runtime configuration", () => {
 
 	test("a socket-only root is still a configured World", () => {
 		expect(isWorldConfigured({ env: {}, setting: "/run/glados/console.sock" })).toBe(true);
+	});
+});
+
+describe("interactive World configuration", () => {
+	test("is default-off and environment wins over settings", () => {
+		expect(resolveWorldInteractive({ env: {}, interactiveSetting: undefined })).toBe(false);
+		expect(resolveWorldInteractive({ env: { [WORLD_INTERACTIVE_ENV]: "true" }, interactiveSetting: false })).toBe(
+			true,
+		);
+		expect(resolveWorldInteractive({ env: { [WORLD_INTERACTIVE_ENV]: "0" }, interactiveSetting: true })).toBe(false);
+	});
+
+	test("rejects missing socket and static caller before key validation", () => {
+		expect(() =>
+			validateWorldInteractiveConfiguration({
+				env: { [WORLD_INTERACTIVE_ENV]: "true", [WORLD_SESSION_ENV]: "not a key" },
+				setting: undefined,
+				sessionSetting: undefined,
+			}),
+		).toThrow(/requires a World socket/);
+		expect(() =>
+			validateWorldInteractiveConfiguration({
+				env: { [WORLD_INTERACTIVE_ENV]: "true", [WORLD_SOCKET_ENV]: "/run/glados.sock" },
+				setting: undefined,
+				sessionSetting: "glados/llm-session/root",
+			}),
+		).toThrow(/cannot be combined/);
 	});
 });

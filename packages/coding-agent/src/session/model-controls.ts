@@ -23,6 +23,7 @@ import {
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
 import type { Settings } from "../config/settings";
+import type { CoordinationLifecycle, CoordinationTransitionToken } from "../coordination/backend";
 import { containsUltrathink } from "../modes/ultrathink";
 import {
 	AUTO_THINKING,
@@ -60,6 +61,7 @@ export interface ModelControlsHost {
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+	coordinationLifecycle?: CoordinationLifecycle;
 }
 
 /** Owns model selection, thinking effort, role cycling, and service tiers. */
@@ -106,6 +108,35 @@ export class ModelControls {
 
 	get #model(): Model | undefined {
 		return this.#host.model();
+	}
+	async #restoreModel(previousModel: Model | undefined): Promise<void> {
+		if (!previousModel || !this.#model || modelsAreEqual(this.#model, previousModel)) return;
+		await this.#host.setModelWithProviderSessionReset(previousModel);
+	}
+	async #restoreModelTransition(
+		previousModel: Model | undefined,
+		thinkingLevel: ThinkingLevel | undefined,
+		autoThinking: boolean,
+		autoResolvedLevel: Effort | undefined,
+	): Promise<void> {
+		await this.#restoreModel(previousModel);
+		this.restoreThinkingSnapshot(thinkingLevel, autoThinking, autoResolvedLevel);
+	}
+	async #beforeModelTransition(): Promise<CoordinationTransitionToken | undefined> {
+		return this.#host.coordinationLifecycle?.beforeRootTransition();
+	}
+
+	async #afterModelTransition(token: CoordinationTransitionToken | undefined, model: Model): Promise<void> {
+		if (!token || !this.#host.coordinationLifecycle) return;
+		await this.#host.coordinationLifecycle.afterModelTransition(token, {
+			provider: model.provider,
+			model: model.id,
+		});
+	}
+
+	async #abortModelTransition(token: CoordinationTransitionToken | undefined, error: unknown): Promise<void> {
+		if (!token || !this.#host.coordinationLifecycle) return;
+		await this.#host.coordinationLifecycle.abortRootTransition(token, error);
 	}
 
 	/** Effective metadata-clamped thinking level applied to the agent. */
@@ -212,36 +243,50 @@ export class ModelControls {
 		},
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
+		const previousModel = this.#model;
+		const previousThinkingLevel = this.#thinkingLevel;
+		const previousAutoThinking = this.#autoThinking;
+		const previousAutoResolvedLevel = this.#autoResolvedLevel;
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 
-		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
-		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
-		if (options?.persist) {
-			this.#host.settings.setModelRole(
-				role,
-				formatRoleModelValue(
-					this.#host.settings,
-					this.#host.modelRegistry,
+		const coordinationToken = await this.#beforeModelTransition();
+		try {
+			await this.#host.setModelWithProviderSessionReset(targetModel);
+			await this.#afterModelTransition(coordinationToken, targetModel);
+			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
+			this.#host.clearActiveRetryFallback();
+			await this.#host.syncAfterModelChange(previousEditMode);
+			this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+			if (options?.persist) {
+				this.#host.settings.setModelRole(
 					role,
-					targetModel,
-					options.selector,
-					options.thinkingLevel,
-				),
-			);
+					formatRoleModelValue(
+						this.#host.settings,
+						this.#host.modelRegistry,
+						role,
+						targetModel,
+						options.selector,
+						options.thinkingLevel,
+					),
+				);
+			}
+			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+			return { switched: true };
+		} catch (error) {
+			await this.#abortModelTransition(coordinationToken, error).catch(() => {});
+			await this.#restoreModelTransition(
+				previousModel,
+				previousThinkingLevel,
+				previousAutoThinking,
+				previousAutoResolvedLevel,
+			).catch(() => {});
+			throw error;
 		}
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
-
-		// Re-apply thinking for the newly selected model. Prefer the model's
-		// configured defaultLevel; otherwise preserve the current level (or auto).
-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
-		await this.#host.syncAfterModelChange(previousEditMode);
-		return { switched: true };
 	}
 
 	/**
@@ -257,29 +302,40 @@ export class ModelControls {
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
+		const previousModel = this.#model;
+		const previousThinkingLevel = this.#thinkingLevel;
+		const previousAutoThinking = this.#autoThinking;
+		const previousAutoResolvedLevel = this.#autoResolvedLevel;
 		if (!this.#host.modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const targetModel = await this.#host.modelRegistry.refreshSelectedModelMetadata(model);
 
-		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
-		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(
-			`${targetModel.provider}/${targetModel.id}`,
-			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
-		);
-		this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
-
-		// Apply explicit thinking level if given; otherwise prefer the model's
-		// configured defaultLevel; otherwise re-clamp the current level (or auto).
-		if (thinkingLevel !== undefined) {
-			this.setThinkingLevel(thinkingLevel);
-		} else {
-			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		const coordinationToken = await this.#beforeModelTransition();
+		try {
+			await this.#host.setModelWithProviderSessionReset(targetModel);
+			await this.#afterModelTransition(coordinationToken, targetModel);
+			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
+			this.#host.clearActiveRetryFallback();
+			await this.#host.syncAfterModelChange(previousEditMode);
+			this.#host.sessionManager.appendModelChange(
+				`${targetModel.provider}/${targetModel.id}`,
+				options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			);
+			this.#host.settings.getStorage()?.recordModelUsage(`${targetModel.provider}/${targetModel.id}`);
+			if (thinkingLevel !== undefined) this.setThinkingLevel(thinkingLevel);
+			else this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		} catch (error) {
+			await this.#abortModelTransition(coordinationToken, error).catch(() => {});
+			await this.#restoreModelTransition(
+				previousModel,
+				previousThinkingLevel,
+				previousAutoThinking,
+				previousAutoResolvedLevel,
+			).catch(() => {});
+			throw error;
 		}
-		await this.#host.syncAfterModelChange(previousEditMode);
 	}
 
 	/**
@@ -401,9 +457,7 @@ export class ModelControls {
 				apiKeysByProvider.set(provider, apiKey);
 			}
 
-			if (apiKey) {
-				result.push(scoped);
-			}
+			if (apiKey) result.push(scoped);
 		}
 
 		return result;
@@ -411,6 +465,10 @@ export class ModelControls {
 
 	async #cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
+		const previousModel = this.#model;
+		const previousThinkingLevel = this.#thinkingLevel;
+		const previousAutoThinking = this.#autoThinking;
+		const previousAutoResolvedLevel = this.#autoResolvedLevel;
 		const scopedModels = await this.#getScopedModelsWithApiKey();
 		if (scopedModels.length <= 1) return undefined;
 
@@ -422,22 +480,35 @@ export class ModelControls {
 		const nextIndex = direction === "forward" ? (currentIndex + 1) % len : (currentIndex - 1 + len) % len;
 		const next = scopedModels[nextIndex];
 
-		// Apply model
-		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
-		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
-		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
-
-		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
-		await this.#host.syncAfterModelChange(previousEditMode);
-
-		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
+		const coordinationToken = await this.#beforeModelTransition();
+		try {
+			await this.#host.setModelWithProviderSessionReset(next.model);
+			await this.#afterModelTransition(coordinationToken, next.model);
+			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
+			this.#host.clearActiveRetryFallback();
+			await this.#host.syncAfterModelChange(previousEditMode);
+			this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+			this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
+			this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+			return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };
+		} catch (error) {
+			await this.#abortModelTransition(coordinationToken, error).catch(() => {});
+			await this.#restoreModelTransition(
+				previousModel,
+				previousThinkingLevel,
+				previousAutoThinking,
+				previousAutoResolvedLevel,
+			).catch(() => {});
+			throw error;
+		}
 	}
 
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
+		const previousModel = this.#model;
 		const previousEditMode = this.#host.resolveActiveEditMode();
+		const previousThinkingLevel = this.#thinkingLevel;
+		const previousAutoThinking = this.#autoThinking;
+		const previousAutoResolvedLevel = this.#autoResolvedLevel;
 		const availableModels = this.#host.modelRegistry.getAvailable();
 		if (availableModels.length <= 1) return undefined;
 
@@ -454,16 +525,27 @@ export class ModelControls {
 			throw new Error(`No API key for ${nextModel.provider}/${nextModel.id}`);
 		}
 
-		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
-		this.#host.clearActiveRetryFallback();
-		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
-		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
-		// Re-apply the current thinking level (or auto) for the newly selected model
-		this.#reapplyThinkingLevel();
-		await this.#host.syncAfterModelChange(previousEditMode);
-
-		return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
+		const coordinationToken = await this.#beforeModelTransition();
+		try {
+			await this.#host.setModelWithProviderSessionReset(nextModel);
+			await this.#afterModelTransition(coordinationToken, nextModel);
+			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
+			this.#host.clearActiveRetryFallback();
+			await this.#host.syncAfterModelChange(previousEditMode);
+			this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+			this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
+			this.#reapplyThinkingLevel();
+			return { model: nextModel, thinkingLevel: this.thinkingLevel, isScoped: false };
+		} catch (error) {
+			await this.#abortModelTransition(coordinationToken, error).catch(() => {});
+			await this.#restoreModelTransition(
+				previousModel,
+				previousThinkingLevel,
+				previousAutoThinking,
+				previousAutoResolvedLevel,
+			).catch(() => {});
+			throw error;
+		}
 	}
 
 	/**

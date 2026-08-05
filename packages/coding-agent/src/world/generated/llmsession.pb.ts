@@ -12,6 +12,79 @@ import { ProjectionSnapshot } from "./projection.pb.js";
 export const protobufPackage = "glados.sdk.llmsession";
 
 /**
+ * InteractiveRootTransitionReason identifies why a root binding changed.
+ *
+ * @generated from enum glados.sdk.llmsession.InteractiveRootTransitionReason
+ */
+export enum InteractiveRootTransitionReason {
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_STARTUP = 1;
+	 */
+	STARTUP = 1,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_NEW = 2;
+	 */
+	NEW = 2,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_DROP = 3;
+	 */
+	DROP = 3,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_FORK = 4;
+	 */
+	FORK = 4,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_BRANCH = 5;
+	 */
+	BRANCH = 5,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_RESUME = 6;
+	 */
+	RESUME = 6,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_SWITCH = 7;
+	 */
+	SWITCH = 7,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_RECONFIGURE = 8;
+	 */
+	RECONFIGURE = 8,
+
+	/**
+	 * @generated from enum value: INTERACTIVE_ROOT_TRANSITION_REASON_RECONNECT = 9;
+	 */
+	RECONNECT = 9,
+}
+
+export const InteractiveRootTransitionReason_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.InteractiveRootTransitionReason",
+	[
+		[0, "INTERACTIVE_ROOT_TRANSITION_REASON_UNKNOWN"],
+		[1, "INTERACTIVE_ROOT_TRANSITION_REASON_STARTUP"],
+		[2, "INTERACTIVE_ROOT_TRANSITION_REASON_NEW"],
+		[3, "INTERACTIVE_ROOT_TRANSITION_REASON_DROP"],
+		[4, "INTERACTIVE_ROOT_TRANSITION_REASON_FORK"],
+		[5, "INTERACTIVE_ROOT_TRANSITION_REASON_BRANCH"],
+		[6, "INTERACTIVE_ROOT_TRANSITION_REASON_RESUME"],
+		[7, "INTERACTIVE_ROOT_TRANSITION_REASON_SWITCH"],
+		[8, "INTERACTIVE_ROOT_TRANSITION_REASON_RECONFIGURE"],
+		[9, "INTERACTIVE_ROOT_TRANSITION_REASON_RECONNECT"],
+	],
+);
+
+/**
  * TaskArtifactStreamKind identifies one retained Task worker stream.
  *
  * @generated from enum glados.sdk.llmsession.TaskArtifactStreamKind
@@ -551,6 +624,279 @@ export const WorldWatchCompletion_Enum = /* @__PURE__ */ createEnumType("glados.
 	[2, "WORLD_WATCH_COMPLETION_CUSTODY"],
 	[3, "WORLD_WATCH_COMPLETION_TERMINAL"],
 ]);
+
+/**
+ * InteractiveRootSpec carries only observed OMP facts. GLaDOS derives every
+ * object key, grant, permission, digest, and generation.
+ *
+ * @generated from message glados.sdk.llmsession.InteractiveRootSpec
+ */
+export interface InteractiveRootSpec {
+	/**
+	 * @generated from field: string omp_session_id = 1;
+	 */
+	ompSessionId?: string;
+	/**
+	 * @generated from field: string process_instance_id = 2;
+	 */
+	processInstanceId?: string;
+	/**
+	 * @generated from field: string working_directory = 3;
+	 */
+	workingDirectory?: string;
+	/**
+	 * @generated from field: repeated string workspace_roots = 4;
+	 */
+	workspaceRoots?: string[];
+	/**
+	 * @generated from field: string provider = 5;
+	 */
+	provider?: string;
+	/**
+	 * @generated from field: string model = 6;
+	 */
+	model?: string;
+	/**
+	 * @generated from field: glados.sdk.llmsession.InteractiveRootTransitionReason transition_reason = 7;
+	 */
+	transitionReason?: InteractiveRootTransitionReason;
+	/**
+	 * @generated from field: string predecessor_omp_session_id = 8;
+	 */
+	predecessorOmpSessionId?: string;
+	/**
+	 * @generated from field: string protocol_version = 9;
+	 */
+	protocolVersion?: string;
+	/**
+	 * @generated from field: string build_identity = 10;
+	 */
+	buildIdentity?: string;
+}
+
+export const InteractiveRootSpec: MessageType<InteractiveRootSpec> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.InteractiveRootSpec",
+	fields: [
+		{ no: 1, name: "omp_session_id", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "process_instance_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "working_directory",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 4,
+			name: "workspace_roots",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+		{ no: 5, name: "provider", kind: "scalar", T: ScalarType.STRING },
+		{ no: 6, name: "model", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 7,
+			name: "transition_reason",
+			kind: "enum",
+			T: InteractiveRootTransitionReason_Enum,
+		},
+		{
+			no: 8,
+			name: "predecessor_omp_session_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 9, name: "protocol_version", kind: "scalar", T: ScalarType.STRING },
+		{ no: 10, name: "build_identity", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * InteractiveRootBinding is the accepted generation-scoped caller summary.
+ *
+ * @generated from message glados.sdk.llmsession.InteractiveRootBinding
+ */
+export interface InteractiveRootBinding {
+	/**
+	 * @generated from field: string omp_session_id = 1;
+	 */
+	ompSessionId?: string;
+	/**
+	 * @generated from field: string llm_session_object_key = 2;
+	 */
+	llmSessionObjectKey?: string;
+	/**
+	 * @generated from field: string dispatch_intent_key = 3;
+	 */
+	dispatchIntentKey?: string;
+	/**
+	 * @generated from field: string dispatch_attempt_key = 4;
+	 */
+	dispatchAttemptKey?: string;
+	/**
+	 * @generated from field: uint64 claim_generation = 5;
+	 */
+	claimGeneration?: bigint;
+	/**
+	 * @generated from field: string manifest_digest = 6;
+	 */
+	manifestDigest?: string;
+	/**
+	 * @generated from field: uint64 binding_generation = 7;
+	 */
+	bindingGeneration?: bigint;
+	/**
+	 * @generated from field: string configuration_digest = 8;
+	 */
+	configurationDigest?: string;
+	/**
+	 * @generated from field: string provider = 9;
+	 */
+	provider?: string;
+	/**
+	 * @generated from field: string model = 10;
+	 */
+	model?: string;
+}
+
+export const InteractiveRootBinding: MessageType<InteractiveRootBinding> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.InteractiveRootBinding",
+	fields: [
+		{ no: 1, name: "omp_session_id", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "dispatch_intent_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 4,
+			name: "dispatch_attempt_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 5, name: "claim_generation", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 6, name: "manifest_digest", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 7,
+			name: "binding_generation",
+			kind: "scalar",
+			T: ScalarType.UINT64,
+		},
+		{
+			no: 8,
+			name: "configuration_digest",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 9, name: "provider", kind: "scalar", T: ScalarType.STRING },
+		{ no: 10, name: "model", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * @generated from message glados.sdk.llmsession.AccessInteractiveRootRequest
+ */
+export interface AccessInteractiveRootRequest {
+	/**
+	 * @generated from field: glados.sdk.llmsession.InteractiveRootSpec spec = 1;
+	 */
+	spec?: InteractiveRootSpec;
+}
+
+export const AccessInteractiveRootRequest: MessageType<AccessInteractiveRootRequest> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.AccessInteractiveRootRequest",
+		fields: [
+			{ no: 1, name: "spec", kind: "message", T: () => InteractiveRootSpec },
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * @generated from message glados.sdk.llmsession.AccessInteractiveRootResponse
+ */
+export interface AccessInteractiveRootResponse {
+	/**
+	 * ResourceId is the adopted InteractiveRootResourceService child.
+	 * @resource-adoption-id
+	 *
+	 * @generated from field: uint32 resource_id = 1;
+	 */
+	resourceId?: number;
+	/**
+	 * Binding is the accepted generation-scoped caller summary.
+	 *
+	 * @generated from field: glados.sdk.llmsession.InteractiveRootBinding binding = 2;
+	 */
+	binding?: InteractiveRootBinding;
+}
+
+export const AccessInteractiveRootResponse: MessageType<AccessInteractiveRootResponse> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.AccessInteractiveRootResponse",
+		fields: [
+			{ no: 1, name: "resource_id", kind: "scalar", T: ScalarType.UINT32 },
+			{
+				no: 2,
+				name: "binding",
+				kind: "message",
+				T: () => InteractiveRootBinding,
+			},
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * @generated from message glados.sdk.llmsession.InteractiveRootRotateRequest
+ */
+export interface InteractiveRootRotateRequest {
+	/**
+	 * @generated from field: glados.sdk.llmsession.InteractiveRootSpec spec = 1;
+	 */
+	spec?: InteractiveRootSpec;
+}
+
+export const InteractiveRootRotateRequest: MessageType<InteractiveRootRotateRequest> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.InteractiveRootRotateRequest",
+		fields: [
+			{ no: 1, name: "spec", kind: "message", T: () => InteractiveRootSpec },
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * @generated from message glados.sdk.llmsession.InteractiveRootReconfigureRequest
+ */
+export interface InteractiveRootReconfigureRequest {
+	/**
+	 * @generated from field: glados.sdk.llmsession.InteractiveRootSpec spec = 1;
+	 */
+	spec?: InteractiveRootSpec;
+}
+
+export const InteractiveRootReconfigureRequest: MessageType<InteractiveRootReconfigureRequest> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.InteractiveRootReconfigureRequest",
+		fields: [
+			{ no: 1, name: "spec", kind: "message", T: () => InteractiveRootSpec },
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
 
 /**
  * ListSessionsRequest is the request type for ListSessions.

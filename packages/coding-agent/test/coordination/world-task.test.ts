@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as os from "node:os";
 import path from "node:path";
+import { ASYNC_JOB_OWNER_LIFECYCLE_ABORT } from "@oh-my-pi/pi-coding-agent/async";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CoordinationSpawnRequest } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { decodeExternalSubagentProfile } from "@oh-my-pi/pi-coding-agent/coordination/external-subagent-profile";
@@ -91,7 +92,7 @@ class FakeWorldClient implements WorldCoordinationClient {
 				: { found: false, agent: undefined, session: undefined, inactive: false };
 		return { requestId: "submit", intentKey: intentKey(request.identity).intentKey, session, custody: undefined };
 	};
-	watch: (sessionObjectKey: string) => AsyncIterable<SessionSnapshot> = () =>
+	watch: (sessionObjectKey: string, signal?: AbortSignal) => AsyncIterable<SessionSnapshot> = () =>
 		(async function* () {
 			yield { taskResult: { output: "done", exitCode: 0 } };
 		})();
@@ -118,9 +119,9 @@ class FakeWorldClient implements WorldCoordinationClient {
 		return await this.submit(request);
 	}
 
-	async *watchSession(sessionObjectKey: string): AsyncGenerator<SessionSnapshot, void, void> {
+	async *watchSession(sessionObjectKey: string, signal?: AbortSignal): AsyncGenerator<SessionSnapshot, void, void> {
 		this.calls.push(`watch:${sessionObjectKey}`);
-		for await (const snapshot of this.watch(sessionObjectKey)) yield snapshot;
+		for await (const snapshot of this.watch(sessionObjectKey, signal)) yield snapshot;
 	}
 
 	async listSessions(): Promise<SessionSummary[]> {
@@ -315,6 +316,32 @@ describe("World durable Task spawn", () => {
 		expect(handle.peerId).toBe("worker");
 		expect(client.submissions).toHaveLength(1);
 		expect(client.calls.filter(call => call.startsWith("lookup:"))).toHaveLength(2);
+	});
+
+	test("preserves the submission failure when recovery finds no attached session", async () => {
+		const client = new FakeWorldClient();
+		let lookups = 0;
+		client.lookup = async () => {
+			lookups += 1;
+			return lookups === 1
+				? absent()
+				: {
+						found: true,
+						intentState: "ACTIVE",
+						activeAttemptKey: "attempt/1",
+						attemptState: "FAILED",
+						session: undefined,
+						custody: undefined,
+						awaitingCustody: false,
+					};
+		};
+		client.submit = async () => {
+			throw new Error("adapter launch failed");
+		};
+		const backend = new WorldCoordinationBackend(client);
+
+		await expect(backend.spawn(spawnRequest())).rejects.toThrow("adapter launch failed");
+		expect(lookups).toBe(2);
 	});
 
 	test("stops lost-response recovery when the caller aborts", async () => {
@@ -544,5 +571,27 @@ describe("World Task session watch", () => {
 		expect((await settled).result.aborted).toBe(true);
 		expect(client.interrupts).toHaveLength(1);
 		expect(client.interrupts[0]?.requestId).toMatch(/^world-task-interrupt:[0-9a-f]{32}$/);
+	});
+
+	test("detaches an owner-lifecycle watch without interrupting its durable child", async () => {
+		const client = new FakeWorldClient();
+		client.watch = (_sessionObjectKey, signal) =>
+			(async function* () {
+				await new Promise<never>((_resolve, reject) => {
+					const detach = () => reject(signal?.reason);
+					signal?.addEventListener("abort", detach, { once: true });
+					if (signal?.aborted) detach();
+				});
+				yield {};
+			})();
+		const backend = new WorldCoordinationBackend(client);
+		const handle = await backend.spawn(spawnRequest());
+		const abort = new AbortController();
+		const settled = handle.wait(abort.signal);
+
+		abort.abort(ASYNC_JOB_OWNER_LIFECYCLE_ABORT);
+
+		await expect(settled).rejects.toBe(ASYNC_JOB_OWNER_LIFECYCLE_ABORT);
+		expect(client.interrupts).toHaveLength(0);
 	});
 });

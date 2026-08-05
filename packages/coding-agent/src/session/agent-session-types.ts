@@ -25,6 +25,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import type { SettingValue } from "../config/settings-schema";
+import type { CoordinationLifecycle } from "../coordination/backend";
 import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { TtsrManager } from "../export/ttsr";
@@ -126,6 +127,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Awaited custody boundary for session and model identity changes. */
+	coordinationLifecycle?: CoordinationLifecycle;
 	/** Sends an auto-reply back through the durable backend that delivered its World message. */
 	sendWorldIrcReply?: (message: Omit<IrcMessage, "id" | "source" | "ts">) => Promise<IrcDeliveryReceipt>;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */

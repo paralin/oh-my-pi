@@ -63,10 +63,11 @@ import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
-import type { CoordinationBackend } from "./coordination/backend";
+import type { CoordinationBackend, CoordinationLifecycle } from "./coordination/backend";
 import { CronManager } from "./cron";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import type { WorldClient } from "./world/client.js";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -557,6 +558,10 @@ export interface CreateAgentSessionOptions {
 
 	/** Root-scoped Task and Hub coordination inherited by child sessions. */
 	coordinationBackend?: CoordinationBackend;
+	/** Awaited custody boundary for top-level session and model transitions. */
+	coordinationLifecycle?: CoordinationLifecycle;
+	/** Sole World client supplied to tools for an attached interactive root. */
+	worldClient?: () => WorldClient | undefined;
 	/** Settings instance. Default: Settings.init({ cwd, agentDir }) */
 	settings?: Settings;
 	/**
@@ -1744,6 +1749,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			lspReadOnly,
 			enableIrc: options.enableIrc,
 			coordinationBackend: options.coordinationBackend,
+			worldClient: options.worldClient,
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -3469,6 +3475,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			sessionManager,
 			initialAdvisorCosts,
 			settings,
+			coordinationLifecycle: options.coordinationLifecycle,
 			sendWorldIrcReply: options.coordinationBackend
 				? async message =>
 						await options.coordinationBackend!.send({

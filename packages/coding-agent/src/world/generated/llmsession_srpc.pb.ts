@@ -6,12 +6,17 @@ import { MethodKind } from "@aptre/protobuf-es-lite/service-type";
 import type { MessageStream, ProtoRpc } from "starpc";
 import { buildDecodeMessageTransform } from "starpc";
 import {
+	AccessInteractiveRootRequest,
+	AccessInteractiveRootResponse,
 	AccessSessionRequest,
 	AccessSessionResponse,
 	AccessWorldRuntimeRequest,
 	AccessWorldRuntimeResponse,
 	ControlAck,
 	GetSessionRequest,
+	InteractiveRootBinding,
+	InteractiveRootReconfigureRequest,
+	InteractiveRootRotateRequest,
 	InterruptRequest,
 	ListSessionSnapshotsRequest,
 	ListSessionSnapshotsResponse,
@@ -148,6 +153,18 @@ export const GladosResourceServiceDefinition = {
 			O: AccessWorldRuntimeResponse,
 			kind: MethodKind.Unary,
 		},
+		/**
+		 * AccessInteractiveRoot admits an attended OMP process and returns an
+		 * adoption-annotated child Resource plus its derived binding.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessInteractiveRoot
+		 */
+		AccessInteractiveRoot: {
+			name: "AccessInteractiveRoot",
+			I: AccessInteractiveRootRequest,
+			O: AccessInteractiveRootResponse,
+			kind: MethodKind.Unary,
+		},
 	},
 } as const;
 
@@ -229,6 +246,17 @@ export interface GladosResourceService {
 		request: AccessWorldRuntimeRequest,
 		abortSignal?: AbortSignal,
 	): Promise<AccessWorldRuntimeResponse>;
+
+	/**
+	 * AccessInteractiveRoot admits an attended OMP process and returns an
+	 * adoption-annotated child Resource plus its derived binding.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessInteractiveRoot
+	 */
+	AccessInteractiveRoot(
+		request: AccessInteractiveRootRequest,
+		abortSignal?: AbortSignal,
+	): Promise<AccessInteractiveRootResponse>;
 }
 
 export const GladosResourceServiceServiceName = GladosResourceServiceDefinition.typeName;
@@ -248,6 +276,7 @@ export class GladosResourceServiceClient implements GladosResourceService {
 		this.WatchAgentTree = this.WatchAgentTree.bind(this);
 		this.AccessSession = this.AccessSession.bind(this);
 		this.AccessWorldRuntime = this.AccessWorldRuntime.bind(this);
+		this.AccessInteractiveRoot = this.AccessInteractiveRoot.bind(this);
 	}
 	/**
 	 * ListSessions lists visible LlmSession World objects.
@@ -401,6 +430,118 @@ export class GladosResourceServiceClient implements GladosResourceService {
 			abortSignal || undefined,
 		);
 		return AccessWorldRuntimeResponse.fromBinary(result);
+	}
+
+	/**
+	 * AccessInteractiveRoot admits an attended OMP process and returns an
+	 * adoption-annotated child Resource plus its derived binding.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.GladosResourceService.AccessInteractiveRoot
+	 */
+	async AccessInteractiveRoot(
+		request: AccessInteractiveRootRequest,
+		abortSignal?: AbortSignal,
+	): Promise<AccessInteractiveRootResponse> {
+		const requestMsg = AccessInteractiveRootRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			GladosResourceServiceDefinition.methods.AccessInteractiveRoot.name,
+			AccessInteractiveRootRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return AccessInteractiveRootResponse.fromBinary(result);
+	}
+}
+/**
+ * InteractiveRootResourceService is the generation-fenced control surface of
+ * one Resource-attached interactive root. It is served on the same child mux as
+ * WorldRuntimeResourceService.
+ *
+ * @generated from service glados.sdk.llmsession.InteractiveRootResourceService
+ */
+export const InteractiveRootResourceServiceDefinition = {
+	typeName: "glados.sdk.llmsession.InteractiveRootResourceService",
+	methods: {
+		/**
+		 * @generated from rpc glados.sdk.llmsession.InteractiveRootResourceService.Rotate
+		 */
+		Rotate: {
+			name: "Rotate",
+			I: InteractiveRootRotateRequest,
+			O: InteractiveRootBinding,
+			kind: MethodKind.Unary,
+		},
+		/**
+		 * @generated from rpc glados.sdk.llmsession.InteractiveRootResourceService.Reconfigure
+		 */
+		Reconfigure: {
+			name: "Reconfigure",
+			I: InteractiveRootReconfigureRequest,
+			O: InteractiveRootBinding,
+			kind: MethodKind.Unary,
+		},
+	},
+} as const;
+
+/**
+ * InteractiveRootResourceService is the generation-fenced control surface of
+ * one Resource-attached interactive root. It is served on the same child mux as
+ * WorldRuntimeResourceService.
+ *
+ * @generated from service glados.sdk.llmsession.InteractiveRootResourceService
+ */
+export interface InteractiveRootResourceService {
+	/**
+	 * @generated from rpc glados.sdk.llmsession.InteractiveRootResourceService.Rotate
+	 */
+	Rotate(request: InteractiveRootRotateRequest, abortSignal?: AbortSignal): Promise<InteractiveRootBinding>;
+
+	/**
+	 * @generated from rpc glados.sdk.llmsession.InteractiveRootResourceService.Reconfigure
+	 */
+	Reconfigure(request: InteractiveRootReconfigureRequest, abortSignal?: AbortSignal): Promise<InteractiveRootBinding>;
+}
+
+export const InteractiveRootResourceServiceServiceName = InteractiveRootResourceServiceDefinition.typeName;
+
+export class InteractiveRootResourceServiceClient implements InteractiveRootResourceService {
+	private readonly rpc: ProtoRpc;
+	private readonly service: string;
+	constructor(rpc: ProtoRpc, opts?: { service?: string }) {
+		this.service = opts?.service || InteractiveRootResourceServiceServiceName;
+		this.rpc = rpc;
+		this.Rotate = this.Rotate.bind(this);
+		this.Reconfigure = this.Reconfigure.bind(this);
+	}
+	/**
+	 * @generated from rpc glados.sdk.llmsession.InteractiveRootResourceService.Rotate
+	 */
+	async Rotate(request: InteractiveRootRotateRequest, abortSignal?: AbortSignal): Promise<InteractiveRootBinding> {
+		const requestMsg = InteractiveRootRotateRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			InteractiveRootResourceServiceDefinition.methods.Rotate.name,
+			InteractiveRootRotateRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return InteractiveRootBinding.fromBinary(result);
+	}
+
+	/**
+	 * @generated from rpc glados.sdk.llmsession.InteractiveRootResourceService.Reconfigure
+	 */
+	async Reconfigure(
+		request: InteractiveRootReconfigureRequest,
+		abortSignal?: AbortSignal,
+	): Promise<InteractiveRootBinding> {
+		const requestMsg = InteractiveRootReconfigureRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			InteractiveRootResourceServiceDefinition.methods.Reconfigure.name,
+			InteractiveRootReconfigureRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return InteractiveRootBinding.fromBinary(result);
 	}
 }
 /**

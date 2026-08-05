@@ -1,4 +1,5 @@
 import { canonicalJsonStringify } from "@oh-my-pi/pi-utils";
+import { resolveConfiguredModelPatterns } from "../config/model-resolver";
 import type { OverallPlanReference } from "../plan-mode/plan-handoff";
 import type { EffectiveSubagentPolicy, StructuredSubagentRequest } from "../task/structured-subagent";
 import type { AgentSource, StructuredSubagentSchemaMode, StructuredSubagentSchemaSource } from "../task/types";
@@ -187,7 +188,7 @@ export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileA
 		throw new Error("unsupported_world_runtime: external Task requires a native, non-isolated policy");
 	}
 	const rawSelector = policy.modelOverride ?? policy.parentActiveModelPattern;
-	const modelSelector = typeof rawSelector === "string" ? [rawSelector] : [...(rawSelector ?? [])];
+	const modelSelector = resolveConfiguredModelPatterns(rawSelector, request.session.settings);
 	if (modelSelector.length === 0) throw new Error("external Task policy has no resolved model selector");
 	const tools = policy.effectiveAgent.tools ?? [...(request.session.toolRegistry?.keys() ?? [])];
 	if (tools.length === 0) throw new Error("external Task policy has no resolved tool list");

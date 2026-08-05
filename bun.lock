@@ -336,6 +336,7 @@
   "patchedDependencies": {
     "puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch",
     "@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
+    "starpc@0.50.0": "patches/starpc@0.50.0.patch",
   },
   "overrides": {
     "@ark/schema": "0.56.2",
