@@ -18,6 +18,11 @@ This document covers the current Time Traveling Stream Rules (TTSR) runtime path
 - [`../src/extensibility/custom-tools/types.ts`](../packages/coding-agent/src/extensibility/custom-tools/types.ts)
 - [`../src/modes/controllers/event-controller.ts`](../packages/coding-agent/src/modes/controllers/event-controller.ts)
 
+- [`../src/capability/rule-semantic.ts`](../packages/coding-agent/src/capability/rule-semantic.ts)
+- [`../src/capability/successful-change-analyzer.ts`](../packages/coding-agent/src/capability/successful-change-analyzer.ts)
+- [`../src/edit/index.ts`](../packages/coding-agent/src/edit/index.ts)
+- [`../src/tools/write.ts`](../packages/coding-agent/src/tools/write.ts)
+
 ## 1. Discovery feed and rule registration
 
 At session creation, `createAgentSession()` loads discovered rules, constructs a `TtsrManager`, and buckets rules through `bucketRules(...)`:
@@ -31,12 +36,13 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(
   ttsrManager,
   {
     builtinRules: ttsrSettings.builtinRules,
+    apertureRules: ttsrSettings.apertureRules,
     disabledRules: ttsrSettings.disabledRules,
   },
 );
 ```
 
-`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops embedded `builtin-defaults` rules when `ttsr.builtinRules === false`, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets.
+`bucketRules(...)` drops names listed in `ttsr.disabledRules`, drops `builtin-defaults` rules when `ttsr.builtinRules === false`, drops `aperture-defaults` rules unless `ttsr.apertureRules === true`, registers accepted TTSR rules, and then routes the remaining rules to always-apply/rulebook buckets. The gates are independent. Deduplication and provider precedence happen before these gates, and `_source.provider` supplies attribution.
 
 ### Pre-registration dedupe behavior
 
@@ -47,7 +53,7 @@ const { rulebookRules, alwaysApplyRules } = bucketRules(
 Registration is skipped when:
 
 - TTSR is disabled (`ttsr.enabled === false`)
-- both `rule.condition` (regex) and `rule.astCondition` (ast-grep patterns) are absent, or every regex condition fails to compile and there are no non-empty AST conditions
+- all of `rule.condition`, `rule.astCondition`, and `rule.semanticCondition` are absent or unusable
 - a rule with the same `rule.name` was already registered in this manager
 - the parsed rule scope excludes all monitored streams
 
@@ -60,6 +66,10 @@ With no explicit `scope`, a rule monitors assistant text and all tool arguments,
 AST conditions only evaluate on tool-argument streams for tools that expose a reconstructed `matcherDigest` or per-file `matcherEntries`, and only when a candidate path supplies a usable file extension for language inference. Built-in edit/write tools provide these surfaces, but the coordinator resolves them generically from the active tool.
 
 The snapshot is source-bearing payload, not the whole prospective file: pre-existing target content is invisible unless the call repeats it. Current edit modes expose `new_string` for replace, added lines for JSON patch, hashline, and apply-patch forms, and full content for create forms; write exposes its entire `content`. Multi-file hashline/apply-patch calls are split into separate `{ path, digest }` entries, so AST language, path scope/globs, buffers, and matching are evaluated per file. Matching is in-memory through native `astMatch` with Smart strictness.
+
+### Semantic conditions (`semanticCondition`)
+
+Semantic clauses are registered in `TtsrManager` as semantic-only entries when a rule has no streaming `condition` or `astCondition`. They never match partial assistant or tool argument buffers. The post-edit analyzer evaluates them only after a successful edit or write result, against the final destination source and the changed ranges reported by that tool. A rule can carry both streaming and semantic conditions; each path keeps its own matching semantics.
 
 ### Setting gating
 
@@ -75,6 +85,7 @@ Manager defaults when a setting is omitted:
 | `repeatMode`    | `"once"`                                         |
 | `repeatGap`     | `10` completed turns                             |
 | `builtinRules`  | `true` (consumed by `bucketRules`, not matching) |
+| `apertureRules` | `false` (consumed by `bucketRules`, not matching) |
 | `disabledRules` | `[]` (consumed by `bucketRules`, not matching)   |
 
 ## 2. Streaming monitor lifecycle
@@ -169,6 +180,14 @@ Within a matching batch, each rule is attached to exactly one sibling tool call:
 - The reminder is in-band on the tool result, not a separate `custom_message`/`ttsr-injection` entry. Transcript readers looking for non-interrupting TTSR activity on tool-source rules MUST inspect tool results (and the persisted `ttsr_injection` entry list), not just synthetic injection entries.
 - A single tool result may carry reminders for several rules concatenated with a blank line between rendered templates.
 - If the assistant message ends with `stopReason === "aborted"` or `"error"` before the matched tools run, pending per-tool buckets are cleared and no `ttsr_injection` entry is persisted. The match-time in-memory injection record is **not** rolled back: in `once` mode it stays suppressed until session reload; in `after-gap` mode it becomes eligible after the configured number of completed turns. Because the undelivered match was not persisted, reload also makes it eligible again.
+
+### Successful edit/write semantic path
+
+`EditTool.successfulChanges()` and `WriteTool.successfulChanges()` provide the completed destinations and changed line ranges. Edit paths are canonicalized by `canonicalizeSuccessfulChange()` and write paths use `details.resolvedPath`. `analyzeSuccessfulChanges()` drops deletes, normalizes and merges repeated destinations, then reads each final destination from disk as UTF-8. A missing final source or missing file language produces a skipped report and does not turn the successful tool result into an error.
+
+For each eligible semantic rule, `evaluateSemanticRule()` finds AST, raw regex, or executable-source `codeRegex` candidates, intersects candidate ranges with the reported changed ranges, and then evaluates capture and whole-file predicates. Only matched candidates with a `references` predicate invoke the optional project-aware lookup from `lsp/references.ts`. The lookup excludes the declaration, counts unique call sites, records `{ capture, count, serverName }` as reference evidence, rejects candidates outside `min` or `max`, and skips candidates when evidence is unavailable, fails, or is cancelled.
+
+The coordinator catches semantic-analysis failures and continues with the successful result. It atomically claims eligible rules through `TtsrManager.claimInjectableRules()`, combines them with any streaming tool matches, removes duplicate names, and prepends one rendered `ttsr-tool-reminder.md` text block to `ctx.result.content`. The original tool content remains after the reminder. There is no stream abort or follow-up turn for this inline reminder. `appendTtsrInjection()` persists delivered names. Claiming and the manager's `repeatMode` and `repeatGap` prevent duplicate delivery, including concurrent sibling tool calls.
 
 ## 5. Repeat policy and gap logic
 

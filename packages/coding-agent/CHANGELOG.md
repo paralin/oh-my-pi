@@ -328,6 +328,7 @@
 
 - Added semantic TTSR clauses that evaluate successful edit and write ranges before the tool result reaches the model.
 - Added a default-off `aperture-defaults` rule provider with an independent settings gate and provider attribution.
+- Added semantic bundled rules and `omp ttsr list`, `test`, and `scan` inspection with normalized match reports.
 - Added `compaction.strategy: native-or-scratch`, which uses provider-native context-full compaction when the active model supports it and otherwise rebuilds from the scratch checkpoint.
 - Added implicit Task-derived agents for configured `modelRoles` keys without
   matching agent files.

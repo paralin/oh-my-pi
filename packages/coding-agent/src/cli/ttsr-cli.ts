@@ -2,19 +2,18 @@
  * TTSR CLI command handlers.
  *
  * `omp ttsr test` — feed a snippet (inline text, `--file`, or stdin) through the
- * real TTSR matching pipeline (`TtsrManager.checkSnapshot` for regex conditions,
- * `checkAstSnapshot` for ast-grep conditions) and report which rules would
- * trigger. The match context (`--source`, `--tool`, `--path`) is honored so
- * glob/AST/scope-scoped rules evaluate the same way they do in a live session.
+ * real TTSR matching pipeline and evaluate semantic-only rules against the
+ * supplied whole source. Project-reference evidence is only used for an actual
+ * `--file` source; candidate reports retain ranges, captures, clauses, and reasons.
  *
- * `omp ttsr list` — show every TTSR-registered rule the current project/user
- * config would load, with its conditions, scope, and source.
+ * `omp ttsr list` — show every TTSR-registered rule with conditions, semantic
+ * clauses, scope, provider attribution, effective gates, and interrupt mode.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { AstMatchStrictness, astMatch, FileType, type GlobMatch, glob } from "@oh-my-pi/pi-natives";
-import chalk from "@oh-my-pi/pi-utils/chalk";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
+import chalk from "@oh-my-pi/pi-utils/chalk";
 import {
 	APERTURE_DEFAULTS_PROVIDER_ID,
 	BUILTIN_DEFAULTS_PROVIDER_ID,
@@ -23,11 +22,32 @@ import {
 	ruleCapability,
 } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
+import { evaluateSemanticRule, type SemanticEvaluationReport } from "../capability/rule-semantic";
+import { applyProjectReferenceEvidence } from "../capability/successful-change-analyzer";
 import { Settings } from "../config/settings";
 import type { TtsrSettings } from "../config/settings-schema";
 import { initializeWithSettings, loadCapability } from "../discovery";
 import { buildRuleFromMarkdown, createSourceMeta } from "../discovery/helpers";
 import type { TtsrManager } from "../export/ttsr";
+import { shutdownAll as shutdownLspClients } from "../lsp/client";
+
+type TtsrRuleStatus = "matched" | "rejected" | "skipped" | "out-of-scope";
+
+interface RuleMatchDetail {
+	name: string;
+	path: string;
+	sourceProvider?: string;
+	status: TtsrRuleStatus;
+	scope: string[];
+	interruptMode?: Rule["interruptMode"];
+	/** Conditions that matched the snippet. */
+	matched: { regex: string[]; ast: string[] };
+	/** All conditions defined on the rule (for verbose display). */
+	defined: { regex: string[]; ast: string[] };
+	skippedAst?: string;
+	semantic?: SemanticEvaluationReport;
+	reason?: string;
+}
 
 export type TtsrAction = "test" | "list" | "scan";
 
@@ -41,6 +61,11 @@ interface TtsrMatchContext {
 	toolName?: string;
 	filePaths?: string[];
 	streamKey?: string;
+	/** Real file used as the project-reference lookup target, when applicable. */
+	semanticReferenceFile?: string;
+	/** Project references are safe only when the snippet is that file's contents. */
+	allowSemanticReferences?: boolean;
+	projectCwd?: string;
 }
 
 export interface TtsrTestArgs {
@@ -80,17 +105,6 @@ export interface TtsrCommandArgs {
 	json?: boolean;
 }
 
-interface RuleMatchDetail {
-	name: string;
-	path: string;
-	sourceProvider?: string;
-	/** Conditions that matched the snippet. */
-	matched: { regex: string[]; ast: string[] };
-	/** All conditions defined on the rule (for verbose display). */
-	defined: { regex: string[]; ast: string[] };
-	skippedAst?: string;
-}
-
 interface TestReport {
 	source: TtsrMatchSource;
 	tool?: string;
@@ -123,6 +137,11 @@ interface ScanSkipSummary {
 	large: number;
 	unreadable: number;
 	noRelevantRules: number;
+}
+
+interface ScanSemanticSummary {
+	rejected: number;
+	skipped: number;
 }
 
 interface ScanRegexCondition {
@@ -212,11 +231,25 @@ async function astMatches(rule: Rule, snippet: string, lang: string): Promise<st
 	return out;
 }
 
-/**
- * Run the snippet through the manager's real match paths and collect, for each
- * triggered rule, which of its conditions fired. Returns triggered + the full
- * evaluated set (so callers can render not-triggered entries too).
- */
+function ruleMatchesCliContext(rule: Rule, context: TtsrMatchContext): boolean {
+	if (rule.globs && rule.globs.length > 0 && !matchesScanGlob(new Bun.Glob(rule.globs[0]!), context.filePaths)) {
+		if (!rule.globs.slice(1).some(pattern => matchesScanGlob(new Bun.Glob(pattern), context.filePaths))) return false;
+	}
+	const scopes = rule.scope ?? [];
+	if (scopes.length === 0) return true;
+	for (const rawScope of scopes) {
+		const token = rawScope.trim().toLowerCase();
+		if (token === context.source) return true;
+		if (context.source !== "tool") continue;
+		const parsed = parseScanToolScopeToken(rawScope.trim());
+		if (!parsed) continue;
+		if (parsed.toolName && parsed.toolName !== (context.toolName ?? "").toLowerCase()) continue;
+		if (parsed.pathGlob && !matchesScanGlob(parsed.pathGlob, context.filePaths)) continue;
+		return true;
+	}
+	return false;
+}
+
 async function evaluate(
 	manager: TtsrManager,
 	rules: readonly Rule[],
@@ -229,26 +262,86 @@ async function evaluate(
 			? await manager.checkAstSnapshot(snippet, context)
 			: [];
 	const hitNames = new Set<string>([...regexHit, ...astHit].map(r => r.name));
-
 	const lang = deriveLang(context.filePaths);
 	const astEligible = context.source === "tool" && !!lang;
-
 	const triggered: RuleMatchDetail[] = [];
 	const notTriggered: RuleMatchDetail[] = [];
 	for (const rule of rules) {
 		const regex = await regexMatches(rule, snippet);
 		const ast = astEligible ? await astMatches(rule, snippet, lang!) : [];
+		const streamHit = hitNames.has(rule.name);
 		const detail: RuleMatchDetail = {
 			name: rule.name,
 			path: rule.path,
 			sourceProvider: rule._source?.provider,
+			scope: rule.scope ?? [],
+			interruptMode: rule.interruptMode,
+			status: streamHit ? "matched" : "rejected",
 			matched: { regex, ast },
 			defined: { regex: rule.condition ?? [], ast: rule.astCondition ?? [] },
 		};
 		if (!astEligible && (rule.astCondition ?? []).length > 0) {
 			detail.skippedAst = "astCondition requires --source tool and a --path with a file extension";
+			if (!streamHit && (rule.condition ?? []).length === 0) {
+				detail.status = "skipped";
+				detail.reason = detail.skippedAst;
+			}
 		}
-		(hitNames.has(rule.name) ? triggered : notTriggered).push(detail);
+		if (!ruleMatchesCliContext(rule, context)) {
+			detail.status = "out-of-scope";
+			detail.reason = "context or candidate path is outside the rule scope";
+		} else if ((rule.semanticCondition?.length ?? 0) > 0) {
+			if (!lang) {
+				detail.status = streamHit ? "matched" : "skipped";
+				detail.reason = streamHit ? undefined : "semantic evaluation requires a file extension in --path";
+				detail.semantic = {
+					ruleName: rule.name,
+					candidates: [],
+					skipped: (rule.semanticCondition ?? []).map((_, index) => ({
+						clause: index + 1,
+						reason: "file language unavailable",
+					})),
+				};
+			} else {
+				let semantic = await evaluateSemanticRule(rule, snippet, lang);
+				if (context.semanticReferenceFile && context.allowSemanticReferences) {
+					semantic = await applyProjectReferenceEvidence(rule, semantic, context.semanticReferenceFile, {
+						toolName: context.toolName ?? "edit",
+						cwd: context.projectCwd ?? path.dirname(context.semanticReferenceFile),
+					});
+				} else if (!context.allowSemanticReferences) {
+					const hasReferenceCandidates = semantic.candidates.some(
+						candidate => rule.semanticCondition?.[candidate.clause - 1]?.references,
+					);
+					if (hasReferenceCandidates) {
+						semantic = {
+							...semantic,
+							candidates: semantic.candidates.map(candidate =>
+								rule.semanticCondition?.[candidate.clause - 1]?.references && candidate.status === "matched"
+									? {
+											...candidate,
+											status: "skipped",
+											reason: "project reference evidence is only available for an actual edit/write file",
+										}
+									: candidate,
+							),
+						};
+					}
+				}
+				detail.semantic = semantic;
+				const semanticMatched = semantic.candidates.some(candidate => candidate.status === "matched");
+				const semanticRejected = semantic.candidates.some(candidate => candidate.status === "rejected");
+				const semanticSkipped =
+					semantic.candidates.some(candidate => candidate.status === "skipped") || semantic.skipped.length > 0;
+				if (semanticMatched) detail.status = "matched";
+				else if (!streamHit)
+					detail.status = semanticSkipped ? "skipped" : semanticRejected ? "rejected" : "rejected";
+				if (!streamHit && detail.status !== "matched")
+					detail.reason =
+						semantic.candidates[0]?.reason ?? semantic.skipped[0]?.reason ?? "no semantic candidate matched";
+			}
+		}
+		(streamHit || detail.status === "matched" ? triggered : notTriggered).push(detail);
 	}
 	return { triggered, notTriggered };
 }
@@ -257,12 +350,12 @@ async function createTtsrManager(settings?: TtsrSettings): Promise<TtsrManager> 
 	const { TtsrManager } = await import("../export/ttsr");
 	return new TtsrManager(settings);
 }
-
 function filterTtsrRulesForScan(
 	rules: readonly Rule[],
-	options: { builtinRules?: boolean; disabledRules?: readonly string[] } = {},
+	options: { builtinRules?: boolean; apertureRules?: boolean; disabledRules?: readonly string[] } = {},
 ): Rule[] {
 	const includeBuiltin = options.builtinRules !== false;
+	const includeAperture = options.apertureRules === true;
 	const disabled = new Set<string>();
 	for (const raw of options.disabledRules ?? []) {
 		const name = raw.trim();
@@ -271,7 +364,12 @@ function filterTtsrRulesForScan(
 	return rules.filter(rule => {
 		if (disabled.has(rule.name)) return false;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) return false;
-		return (rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
+		if (!includeAperture && rule._source?.provider === APERTURE_DEFAULTS_PROVIDER_ID) return false;
+		return (
+			(rule.condition && rule.condition.length > 0) ||
+			(rule.astCondition && rule.astCondition.length > 0) ||
+			(rule.semanticCondition && rule.semanticCondition.length > 0)
+		);
 	});
 }
 
@@ -283,6 +381,7 @@ async function loadProjectTtsrRules(cwd: string): Promise<{ rules: Rule[]; manag
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	bucketRules(result.items, manager, {
 		builtinRules: ttsrSettings.builtinRules,
+		apertureRules: ttsrSettings.apertureRules,
 		disabledRules: ttsrSettings.disabledRules,
 	});
 	return { rules: manager.getRules(), manager };
@@ -298,6 +397,7 @@ async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	return filterTtsrRulesForScan(result.items, {
 		builtinRules: ttsrSettings.builtinRules,
+		apertureRules: ttsrSettings.apertureRules,
 		disabledRules: ttsrSettings.disabledRules,
 	});
 }
@@ -324,11 +424,12 @@ async function loadIsolatedRule(rulePath: string): Promise<{ rules: Rule[]; mana
 		repeatMode: "once",
 		repeatGap: 10,
 		builtinRules: true,
+		apertureRules: false,
 		disabledRules: [],
 	});
 	if (!manager.addRule(rule)) {
 		throw new Error(
-			`Rule "${rule.name}" has no usable TTSR condition. Add a \`condition\` (regex) or \`astCondition\` (ast-grep pattern) to its frontmatter.`,
+			`Rule "${rule.name}" has no usable TTSR condition. Add a \`condition\`, \`astCondition\`, or \`semanticCondition\` to its frontmatter.`,
 		);
 	}
 	return { rules: manager.getRules(), manager };
@@ -349,10 +450,13 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
 	// Infer match context: when the user points --file at a source file and
 	// doesn't pick a source, default to tool/edit with that path so tool-scoped
 	// rules (the common case, e.g. tool:edit(*.ts)) match like they would live.
-	const filePath = args.filePath ?? (args.file && args.file !== STDIN_MARKER ? path.resolve(args.file) : undefined);
+	const actualFilePath = args.file && args.file !== STDIN_MARKER ? path.resolve(args.file) : undefined;
+	const filePath = args.filePath ?? actualFilePath;
 	const source: TtsrMatchSource =
 		args.source ?? (filePath && SOURCE_FILE_EXT.test(path.extname(filePath)) ? "tool" : "text");
 	const tool = args.tool ?? (source === "tool" ? "edit" : undefined);
+	const allowSemanticReferences =
+		actualFilePath !== undefined && source === "tool" && (tool === "edit" || tool === "write");
 
 	// A supplied source file whose extension is unknown falls through to the
 	// text (prose) context, where tool-scoped rules can never match. Surface
@@ -366,6 +470,9 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
 		source,
 		toolName: tool,
 		filePaths: filePath ? [filePath] : undefined,
+		semanticReferenceFile: allowSemanticReferences ? actualFilePath : undefined,
+		allowSemanticReferences,
+		projectCwd: cwd,
 	};
 
 	const { rules, manager } = args.rule ? await loadIsolatedRule(args.rule) : await loadProjectTtsrRules(cwd);
@@ -373,7 +480,7 @@ async function runTest(args: TtsrTestArgs, json: boolean, cwd: string): Promise<
 	if (rules.length === 0) {
 		const msg = args.rule
 			? "Rule registered but produced no TTSR entry."
-			: "No TTSR rules registered for this project. Add a `condition` or `astCondition` to a rule file, then re-run.";
+			: "No TTSR rules registered for this project. Add a `condition`, `astCondition`, or `semanticCondition` to a rule file, then re-run.";
 		if (json) {
 			process.stdout.write(`${JSON.stringify({ error: msg })}\n`);
 		} else {
@@ -426,69 +533,84 @@ function renderTestReport(report: TestReport, verbose: boolean, isolated: boolea
 		process.stdout.write(`\n${chalk.dim(`Not triggered (${report.notTriggered.length})`)}\n`);
 		for (const detail of report.notTriggered) renderRuleDetail(detail, false);
 	}
-
 	if (isolated && report.triggered.length === 0) {
 		process.exitCode = 1;
 	}
 }
+
 function renderRuleDetail(detail: RuleMatchDetail, hit: boolean): void {
-	const mark = hit ? chalk.green("✓") : chalk.red("✗");
+	const effectiveHit = detail.status === "matched";
+	const mark = effectiveHit ? chalk.green("✓") : chalk.red("✗");
 	const condParts: string[] = [];
-	// For triggered rules, show which conditions fired. For not-triggered
-	// rules (verbose), show the rule's full condition set so users can see
-	// what would match.
 	const regex = hit ? detail.matched.regex : detail.defined.regex;
 	const ast = hit ? detail.matched.ast : detail.defined.ast;
-	if (regex.length > 0) {
-		condParts.push(`condition: ${regex.map(c => chalk.yellow(`/${c}/`)).join(", ")}`);
-	}
-	if (ast.length > 0) {
-		condParts.push(`astCondition: ${ast.map(c => chalk.magenta(c)).join(", ")}`);
-	}
-	if (detail.skippedAst) {
-		condParts.push(chalk.dim(`astCondition: ${detail.skippedAst}`));
-	}
+	if (regex.length > 0) condParts.push(`condition: ${regex.map(c => chalk.yellow(`/${c}/`)).join(", ")}`);
+	if (ast.length > 0) condParts.push(`astCondition: ${ast.map(c => chalk.magenta(c)).join(", ")}`);
+	if (detail.skippedAst) condParts.push(chalk.dim(`astCondition: ${detail.skippedAst}`));
+	if (detail.scope.length > 0) condParts.push(`scope: ${detail.scope.join(", ")}`);
+	if (detail.interruptMode) condParts.push(`interruptMode: ${detail.interruptMode}`);
 	const condLabel = condParts.length > 0 ? condParts.join("  ") : chalk.dim("no active conditions");
 	const provider = detail.sourceProvider ? chalk.dim(` [${detail.sourceProvider}]`) : "";
-	process.stdout.write(`  ${mark} ${chalk.bold(detail.name)}  ${condLabel}${provider}\n`);
+	process.stdout.write(`  ${mark} ${chalk.bold(detail.name)}  status=${detail.status}  ${condLabel}${provider}\n`);
+	if (detail.reason) process.stdout.write(`    reason: ${detail.reason}\n`);
+	for (const candidate of detail.semantic?.candidates ?? []) {
+		process.stdout.write(
+			`    semantic clause=${candidate.clause} status=${candidate.status} range=${candidate.range.startLine}:${candidate.range.startColumn}-${candidate.range.endLine}:${candidate.range.endColumn} captures=${JSON.stringify(candidate.captures)}${candidate.referenceEvidence ? ` references=${JSON.stringify(candidate.referenceEvidence)}` : ""} reason=${candidate.reason}\n`,
+		);
+	}
+	for (const skipped of detail.semantic?.skipped ?? []) {
+		process.stdout.write(`    semantic clause=${skipped.clause} status=skipped reason=${skipped.reason}\n`);
+	}
 }
 
 async function runList(json: boolean, cwd: string): Promise<void> {
-	const { rules } = await loadProjectTtsrRules(cwd);
+	const { rules, manager } = await loadProjectTtsrRules(cwd);
+	const settings = manager.getSettings();
+	const projectRules = rules.map(r => {
+		const provider = r._source?.provider;
+		const disabled = settings.disabledRules.includes(r.name);
+		const builtinGate = provider !== BUILTIN_DEFAULTS_PROVIDER_ID || settings.builtinRules;
+		const apertureGate = provider !== APERTURE_DEFAULTS_PROVIDER_ID || settings.apertureRules;
+		const enabled = settings.enabled && !disabled && builtinGate && apertureGate;
+		return {
+			name: r.name,
+			path: r.path,
+			provider: provider ?? null,
+			enabled,
+			effectiveEnabled: enabled,
+			builtinRules: settings.builtinRules,
+			apertureRules: settings.apertureRules,
+			disabled,
+			condition: r.condition ?? [],
+			astCondition: r.astCondition ?? [],
+			semanticCondition: r.semanticCondition ?? [],
+			scope: r.scope ?? [],
+			globs: r.globs ?? [],
+			interruptMode: r.interruptMode ?? settings.interruptMode,
+			description: r.description ?? null,
+		};
+	});
 
 	if (json) {
-		process.stdout.write(
-			`${JSON.stringify(
-				rules.map(r => ({
-					name: r.name,
-					path: r.path,
-					provider: r._source?.provider,
-					condition: r.condition ?? [],
-					astCondition: r.astCondition ?? [],
-					scope: r.scope ?? [],
-					globs: r.globs ?? [],
-					description: r.description,
-				})),
-			)}\n`,
-		);
+		process.stdout.write(`${JSON.stringify(projectRules)}\n`);
 		return;
 	}
-
 	if (rules.length === 0) {
 		process.stdout.write(`${chalk.yellow("No TTSR rules registered for this project.")}\n`);
 		return;
 	}
-
 	process.stdout.write(`${chalk.bold(`TTSR rules (${rules.length})`)}\n`);
-	for (const rule of rules) {
+	for (const rule of projectRules) {
 		const condParts: string[] = [];
-		if ((rule.condition ?? []).length > 0) condParts.push(`condition: ${rule.condition!.join(", ")}`);
-		if ((rule.astCondition ?? []).length > 0) condParts.push(`astCondition: ${rule.astCondition!.join(", ")}`);
-		if ((rule.scope ?? []).length > 0) condParts.push(`scope: ${rule.scope!.join(", ")}`);
-		if ((rule.globs ?? []).length > 0) condParts.push(`globs: ${rule.globs!.join(", ")}`);
-		const provider = rule._source?.provider ? chalk.dim(` [${rule._source.provider}]`) : "";
+		if (rule.condition.length > 0) condParts.push(`condition: ${rule.condition.join(", ")}`);
+		if (rule.astCondition.length > 0) condParts.push(`astCondition: ${rule.astCondition.join(", ")}`);
+		if (rule.semanticCondition.length > 0)
+			condParts.push(`semanticCondition: ${JSON.stringify(rule.semanticCondition)}`);
+		if (rule.scope.length > 0) condParts.push(`scope: ${rule.scope.join(", ")}`);
+		if (rule.globs.length > 0) condParts.push(`globs: ${rule.globs.join(", ")}`);
+		const provider = rule.provider ? chalk.dim(` provider=${rule.provider}`) : "";
 		process.stdout.write(
-			`  ${chalk.bold(rule.name)}${provider} ${chalk.dim(condParts.join("  ") || "no conditions")}\n`,
+			`  ${chalk.bold(rule.name)}${provider} enabled=${rule.enabled} builtin=${rule.builtinRules} aperture=${rule.apertureRules} disabled=${rule.disabled} interruptMode=${rule.interruptMode} ${chalk.dim(condParts.join("  ") || "no conditions")}\n`,
 		);
 		if (rule.description) process.stdout.write(`${chalk.dim(`    ${rule.description}`)}\n`);
 	}
@@ -700,6 +822,9 @@ async function scanRulePlanMatchesContent(
 		name: plan.rule.name,
 		path: plan.rule.path,
 		sourceProvider: plan.rule._source?.provider,
+		scope: plan.rule.scope ?? [],
+		interruptMode: plan.rule.interruptMode,
+		status: "matched",
 		matched: { regex: matchedRegex, ast: matchedAst },
 		defined: { regex: plan.rule.condition ?? [], ast: plan.rule.astCondition ?? [] },
 	};
@@ -796,6 +921,20 @@ function countSkipped(skipped: ScanSkipSummary): number {
 	return skipped.binary + skipped.large + skipped.unreadable + skipped.noRelevantRules;
 }
 
+function scanRuleDetail(rule: Rule, status: TtsrRuleStatus, reason?: string): RuleMatchDetail {
+	return {
+		name: rule.name,
+		path: rule.path,
+		sourceProvider: rule._source?.provider,
+		scope: rule.scope ?? [],
+		interruptMode: rule.interruptMode,
+		status,
+		matched: { regex: [], ast: [] },
+		defined: { regex: rule.condition ?? [], ast: rule.astCondition ?? [] },
+		...(reason ? { reason } : {}),
+	};
+}
+
 async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<void> {
 	const scanDir = args.directory ? path.resolve(cwd, args.directory) : cwd;
 	if (!fs.existsSync(scanDir)) {
@@ -822,7 +961,10 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 	}
 
 	const scanRulePlans = compileScanRulePlans(rules).filter(
-		plan => plan.regexConditions.length > 0 || plan.astConditions.length > 0,
+		plan =>
+			plan.regexConditions.length > 0 ||
+			plan.astConditions.length > 0 ||
+			(plan.rule.semanticCondition?.length ?? 0) > 0,
 	);
 	if (scanRulePlans.length === 0) {
 		const msg = args.rule
@@ -841,12 +983,15 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 	const includeDetails = json || (args.verbose ?? false);
 	const files = await discoverScanFiles(scanDir, cwd, gitignore);
 	const emptySkipped: ScanSkipSummary = { binary: 0, large: 0, unreadable: 0, noRelevantRules: 0 };
+	const emptySemantic: ScanSemanticSummary = { rejected: 0, skipped: 0 };
 	if (files.length === 0) {
 		const msg = `No files found to scan in ${scanDir}`;
 		if (json) {
 			process.stdout.write(
 				`${JSON.stringify({
+					mode: "whole-file",
 					files: [],
+					evaluations: [],
 					summary: {
 						totalFiles: 0,
 						scannedFiles: 0,
@@ -855,6 +1000,7 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 						evaluatedRules: scanRulePlans.length,
 						skippedFiles: 0,
 						skipped: emptySkipped,
+						semantic: emptySemantic,
 						gitignore,
 						maxBytes,
 					},
@@ -867,7 +1013,9 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 	}
 
 	const fileResults: Array<{ file: string; matches: RuleMatchDetail[] }> = [];
+	const evaluationResults: Array<{ file: string; evaluations: RuleMatchDetail[] }> = [];
 	const skipped: ScanSkipSummary = { binary: 0, large: 0, unreadable: 0, noRelevantRules: 0 };
+	const semanticSummary: ScanSemanticSummary = { rejected: 0, skipped: 0 };
 	let scannedFiles = 0;
 	let matchedFiles = 0;
 	let totalMatches = 0;
@@ -879,14 +1027,21 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 		const basename = path.basename(absPath);
 		const filePaths = [absPath.replaceAll("\\", "/"), relToProj, basename];
 		const relevantPlans = scanRulePlans.filter(plan => scanRulePlanMatchesToolScope(plan, filePaths));
+		const fileEvaluations = includeDetails
+			? scanRulePlans
+					.filter(plan => !relevantPlans.includes(plan))
+					.map(plan => scanRuleDetail(plan.rule, "out-of-scope", "candidate path is outside the rule scope"))
+			: [];
 		if (relevantPlans.length === 0) {
 			skipped.noRelevantRules++;
+			if (fileEvaluations.length > 0) evaluationResults.push({ file: relToProj, evaluations: fileEvaluations });
 			continue;
 		}
 
 		const readResult = await readScanFileText(absPath, maxBytes, candidate.size);
 		if ("skip" in readResult) {
 			skipped[readResult.skip]++;
+			if (fileEvaluations.length > 0) evaluationResults.push({ file: relToProj, evaluations: fileEvaluations });
 			continue;
 		}
 		const fileContent = readResult.content;
@@ -896,28 +1051,76 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 		const fileTriggeredDetails: RuleMatchDetail[] = [];
 		let fileMatchCount = 0;
 		const pendingAstPlans: ScanRulePlan[] = [];
+		const matchedPlans = new Set<ScanRulePlan>();
 		for (const plan of relevantPlans) {
-			const detail = includeDetails
+			let detail = includeDetails
 				? await scanRulePlanMatchesContent(plan, fileContent, lang, true)
 				: await scanRulePlanMatchesContent(plan, fileContent, undefined, false);
-			if (detail) {
-				fileMatchCount++;
-				if (includeDetails) {
-					fileTriggeredDetails.push(detail);
-				}
-				continue;
-			}
-			if (!includeDetails && scanRulePlanMayMatchAst(plan, fileContent)) {
+			const streamMatched = detail !== undefined;
+			let semanticRuleMatched = false;
+			if (!includeDetails && !streamMatched && scanRulePlanMayMatchAst(plan, fileContent))
 				pendingAstPlans.push(plan);
+
+			if ((plan.rule.semanticCondition?.length ?? 0) > 0) {
+				let semantic: SemanticEvaluationReport;
+				if (!lang) {
+					semantic = {
+						ruleName: plan.rule.name,
+						candidates: [],
+						skipped: (plan.rule.semanticCondition ?? []).map((_, index) => ({
+							clause: index + 1,
+							reason: "file language unavailable",
+						})),
+					};
+				} else {
+					semantic = await evaluateSemanticRule(plan.rule, fileContent, lang);
+					semantic = await applyProjectReferenceEvidence(plan.rule, semantic, absPath, { toolName: "edit", cwd });
+				}
+				semanticRuleMatched = semantic.candidates.some(candidate => candidate.status === "matched");
+				const semanticSkipped =
+					semantic.candidates.some(candidate => candidate.status === "skipped") || semantic.skipped.length > 0;
+				if (!semanticRuleMatched) {
+					if (semanticSkipped) semanticSummary.skipped++;
+					else semanticSummary.rejected++;
+				}
+
+				if (includeDetails) {
+					const semanticStatus: TtsrRuleStatus = semanticRuleMatched
+						? "matched"
+						: semanticSkipped
+							? "skipped"
+							: "rejected";
+					const reason =
+						semantic.candidates.find(candidate => candidate.status === semanticStatus)?.reason ??
+						semantic.skipped[0]?.reason ??
+						"no semantic candidate matched";
+					detail ??= scanRuleDetail(plan.rule, semanticStatus, reason);
+					detail.semantic = semantic;
+					if (streamMatched || semanticRuleMatched) {
+						detail.status = "matched";
+						fileTriggeredDetails.push(detail);
+					} else {
+						detail.status = semanticStatus;
+						detail.reason = reason;
+						fileEvaluations.push(detail);
+					}
+				}
+			} else if (detail && includeDetails) {
+				fileTriggeredDetails.push(detail);
+			}
+
+			if ((streamMatched || semanticRuleMatched) && !matchedPlans.has(plan)) {
+				matchedPlans.add(plan);
+				fileMatchCount++;
 			}
 		}
 		if (!includeDetails && (await scanAnyAstConditionMatches(pendingAstPlans, fileContent, lang)) !== false) {
 			for (const plan of pendingAstPlans) {
 				const detail = await scanRulePlanMatchesContent(plan, fileContent, lang, false);
-				if (!detail) {
-					continue;
+				if (detail && !matchedPlans.has(plan)) {
+					matchedPlans.add(plan);
+					fileMatchCount++;
 				}
-				fileMatchCount++;
 			}
 		}
 
@@ -931,17 +1134,39 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 				});
 			}
 		}
+		if (fileEvaluations.length > 0) evaluationResults.push({ file: relToProj, evaluations: fileEvaluations });
 	}
 
 	if (json) {
 		process.stdout.write(
 			`${JSON.stringify({
+				mode: "whole-file",
 				files: fileResults.map(fr => ({
 					filePath: fr.file,
 					matches: fr.matches.map(m => ({
 						name: m.name,
 						path: m.path,
+						provider: m.sourceProvider,
+						status: m.status,
+						scope: m.scope,
+						interruptMode: m.interruptMode,
 						matched: m.matched,
+						semantic: m.semantic,
+						reason: m.reason,
+					})),
+				})),
+				evaluations: evaluationResults.map(fr => ({
+					filePath: fr.file,
+					evaluations: fr.evaluations.map(evaluation => ({
+						name: evaluation.name,
+						path: evaluation.path,
+						provider: evaluation.sourceProvider,
+						status: evaluation.status,
+						scope: evaluation.scope,
+						interruptMode: evaluation.interruptMode,
+						matched: evaluation.matched,
+						semantic: evaluation.semantic,
+						reason: evaluation.reason,
 					})),
 				})),
 				summary: {
@@ -952,6 +1177,7 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 					evaluatedRules: scanRulePlans.length,
 					skippedFiles: countSkipped(skipped),
 					skipped,
+					semantic: semanticSummary,
 					gitignore,
 					maxBytes,
 				},
@@ -959,11 +1185,16 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 		);
 	} else {
 		process.stdout.write(
-			`${chalk.bold("TTSR scan")} — directory=${chalk.cyan(scanDir)} files=${chalk.dim(files.length)} scanned=${chalk.dim(scannedFiles)} rules=${chalk.dim(scanRulePlans.length)} gitignore=${chalk.dim(gitignore ? "on" : "off")} max-bytes=${chalk.dim(maxBytes === 0 ? "off" : String(maxBytes))}\n`,
+			`${chalk.bold("TTSR scan")} — mode=whole-file directory=${chalk.cyan(scanDir)} files=${chalk.dim(files.length)} scanned=${chalk.dim(scannedFiles)} rules=${chalk.dim(scanRulePlans.length)} gitignore=${chalk.dim(gitignore ? "on" : "off")} max-bytes=${chalk.dim(maxBytes === 0 ? "off" : String(maxBytes))}\n`,
 		);
 		if (countSkipped(skipped) > 0) {
 			process.stdout.write(
-				`${chalk.dim(`  skipped: binary=${skipped.binary} large=${skipped.large} unreadable=${skipped.unreadable} no-relevant-rules=${skipped.noRelevantRules}`)}\n`,
+				`${chalk.dim(`  skipped files: binary=${skipped.binary} large=${skipped.large} unreadable=${skipped.unreadable} no-relevant-rules=${skipped.noRelevantRules}`)}\n`,
+			);
+		}
+		if (semanticSummary.rejected > 0 || semanticSummary.skipped > 0) {
+			process.stdout.write(
+				`${chalk.dim(`  semantic evidence: rejected=${semanticSummary.rejected} skipped=${semanticSummary.skipped}`)}\n`,
 			);
 		}
 
@@ -989,31 +1220,42 @@ async function runScan(args: TtsrScanArgs, json: boolean, cwd: string): Promise<
 				process.stdout.write("\n");
 			}
 		}
+		if (includeDetails && evaluationResults.length > 0) {
+			process.stdout.write(`\n${chalk.dim("Evaluation details")}\n`);
+			for (const fr of evaluationResults) {
+				process.stdout.write(`${chalk.bold.underline(fr.file)}\n`);
+				for (const detail of fr.evaluations) renderRuleDetail(detail, false);
+			}
+		}
 	}
 }
 
 export async function runTtsrCommand(cmd: TtsrCommandArgs): Promise<void> {
 	const cwd = getProjectDir();
-	if (cmd.action === "test") {
-		if (!cmd.test) {
-			process.stderr.write(`${chalk.red("error: `ttsr test` requires a snippet, --file, or piped stdin")}\n`);
-			process.exit(1);
+	try {
+		if (cmd.action === "test") {
+			if (!cmd.test) {
+				process.stderr.write(`${chalk.red("error: `ttsr test` requires a snippet, --file, or piped stdin")}\n`);
+				process.exit(1);
+			}
+			await runTest(cmd.test, cmd.json ?? false, cwd);
+			return;
 		}
-		await runTest(cmd.test, cmd.json ?? false, cwd);
-		return;
-	}
-	if (cmd.action === "list") {
-		await runList(cmd.json ?? false, cwd);
-		return;
-	}
-	if (cmd.action === "scan") {
-		if (!cmd.scan) {
-			process.stderr.write(`${chalk.red("error: scan arguments missing")}\n`);
-			process.exit(1);
+		if (cmd.action === "list") {
+			await runList(cmd.json ?? false, cwd);
+			return;
 		}
-		await runScan(cmd.scan, cmd.json ?? false, cwd);
-		return;
+		if (cmd.action === "scan") {
+			if (!cmd.scan) {
+				process.stderr.write(`${chalk.red("error: scan arguments missing")}\n`);
+				process.exit(1);
+			}
+			await runScan(cmd.scan, cmd.json ?? false, cwd);
+			return;
+		}
+		process.stderr.write(`${chalk.red(`error: unknown ttsr action: ${cmd.action}`)}\n`);
+		process.exit(1);
+	} finally {
+		await shutdownLspClients();
 	}
-	process.stderr.write(`${chalk.red(`error: unknown ttsr action: ${cmd.action}`)}\n`);
-	process.exit(1);
 }

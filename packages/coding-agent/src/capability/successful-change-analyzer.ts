@@ -165,6 +165,15 @@ async function evaluateProjectReferences(
 	}
 	return { ...report, candidates };
 }
+/** Apply the existing project-reference predicate service to a semantic report. */
+export async function applyProjectReferenceEvidence(
+	rule: Rule,
+	report: SemanticEvaluationReport,
+	filePath: string,
+	options: SuccessfulChangeAnalysisOptions,
+): Promise<SemanticEvaluationReport> {
+	return evaluateProjectReferences(rule, report, filePath, options, new Map());
+}
 
 /** Evaluate semantic rules against completed edit/write destinations. */
 export async function analyzeSuccessfulChanges(
