@@ -1,3 +1,4 @@
+import type * as BabelParser from "@babel/parser";
 import { type AstMatchResult, AstMatchStrictness, astMatch } from "@oh-my-pi/pi-natives";
 import {
 	compileRuleCondition,
@@ -162,17 +163,124 @@ function regexRange(source: string, start: number, end: number): SemanticSourceR
 	};
 }
 
-function findRegexCandidates(rule: Rule, clause: number, pattern: string, source: string): LocalCandidate[] {
+interface SourceSpan {
+	start: number;
+	end: number;
+}
+
+let babelParser: Promise<typeof BabelParser> | undefined;
+
+function loadBabelParser(): Promise<typeof BabelParser> {
+	babelParser ??= import("@babel/parser");
+	return babelParser;
+}
+
+async function excludedCodeRegexSpans(rule: Rule, clause: number, source: string, lang: string): Promise<SourceSpan[]> {
+	const normalizedLang = lang.toLowerCase().replace(/^\./, "");
+	if (normalizedLang === "go") {
+		const spans: SourceSpan[] = [];
+		for (let index = 0; index < source.length; ) {
+			const start = index;
+			const char = source[index];
+			const next = source[index + 1];
+			if (char === "/" && next === "/") {
+				index += 2;
+				while (index < source.length && source[index] !== "\n") index++;
+				spans.push({ start, end: index });
+				continue;
+			}
+			if (char === "/" && next === "*") {
+				index += 2;
+				while (index < source.length && !(source[index] === "*" && source[index + 1] === "/")) index++;
+				index = Math.min(source.length, index + 2);
+				spans.push({ start, end: index });
+				continue;
+			}
+			if (char !== '"' && char !== "'" && char !== "`") {
+				index++;
+				continue;
+			}
+
+			const quote = char;
+			index++;
+			while (index < source.length) {
+				const current = source[index];
+				if (current === quote) {
+					index++;
+					break;
+				}
+				if (current === "\\" && quote !== "`") {
+					index = Math.min(source.length, index + 2);
+					continue;
+				}
+				if (current === "\n" && quote !== "`") break;
+				index++;
+			}
+			spans.push({ start, end: index });
+		}
+		return spans;
+	}
+
+	if (!["js", "jsx", "mjs", "cjs", "ts", "tsx", "mts", "cts"].includes(normalizedLang)) {
+		throw semanticEvaluationError(rule, clause, "candidate.codeRegex", `unsupported language "${lang}"`);
+	}
+	try {
+		const parser = await loadBabelParser();
+		const plugins: BabelParser.ParserPlugin[] = [];
+		if (["ts", "tsx", "mts", "cts"].includes(normalizedLang)) plugins.push("typescript");
+		if (["js", "jsx", "mjs", "cjs", "ts", "tsx"].includes(normalizedLang)) plugins.push("jsx");
+		const parsed = parser.parse(source, {
+			sourceType: "unambiguous",
+			errorRecovery: true,
+			tokens: true,
+			plugins,
+		});
+		const spans: SourceSpan[] = [];
+		for (const comment of parsed.comments ?? []) {
+			if (comment.start !== undefined && comment.end !== undefined) {
+				spans.push({ start: comment.start, end: comment.end });
+			}
+		}
+		for (const token of parsed.tokens ?? []) {
+			if (["string", "regexp", "template", "jsxText"].includes(token.type.label)) {
+				spans.push({ start: token.start, end: token.end });
+			}
+		}
+		return spans.sort((left, right) => left.start - right.start);
+	} catch (error) {
+		throw semanticEvaluationError(
+			rule,
+			clause,
+			"candidate.codeRegex",
+			`could not tokenize source: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+}
+
+async function findRegexCandidates(
+	rule: Rule,
+	clause: number,
+	pattern: string,
+	source: string,
+	codeOnly = false,
+	lang = "",
+): Promise<LocalCandidate[]> {
 	const compiled = compileRuleCondition(pattern);
 	const flags = Array.from(new Set(`${compiled.flags}gd`)).join("");
 	const regex = new RegExp(compiled.source, flags);
 	const candidates: LocalCandidate[] = [];
+	const excludedSpans = codeOnly ? await excludedCodeRegexSpans(rule, clause, source, lang) : [];
+	let excludedIndex = 0;
 	for (let match = regex.exec(source); match; match = regex.exec(source)) {
+		const field = codeOnly ? "candidate.codeRegex" : "candidate.regex";
 		if (match[0].length === 0) {
-			throw semanticEvaluationError(rule, clause, "candidate.regex", "candidate matched an empty source range");
+			throw semanticEvaluationError(rule, clause, field, "candidate matched an empty source range");
 		}
 		const start = match.index;
 		const end = start + match[0].length;
+		while (excludedIndex < excludedSpans.length && excludedSpans[excludedIndex].end <= start) excludedIndex++;
+		const excluded = excludedSpans[excludedIndex];
+		if (excluded && excluded.start <= start && start < excluded.end) continue;
 		const groups = match.groups ?? {};
 		const indices = (
 			match as RegExpExecArray & {
@@ -267,7 +375,9 @@ async function evaluateClause(
 	const candidates =
 		"ast" in clause.candidate
 			? await findAstCandidates(rule, clauseNumber, clause.candidate.ast, source, lang)
-			: findRegexCandidates(rule, clauseNumber, clause.candidate.regex, source);
+			: "regex" in clause.candidate
+				? await findRegexCandidates(rule, clauseNumber, clause.candidate.regex, source)
+				: await findRegexCandidates(rule, clauseNumber, clause.candidate.codeRegex, source, true, lang);
 	const changed = changedRanges
 		? candidates.filter(candidate =>
 				changedRanges.some(

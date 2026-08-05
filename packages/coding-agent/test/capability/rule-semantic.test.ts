@@ -105,6 +105,67 @@ describe("semantic rule conditions", () => {
 		});
 	});
 
+	it("limits code regex candidates to executable Go and TypeScript source", async () => {
+		const rule = loadRule(`semanticCondition:
+  candidate:
+    codeRegex: '(?<NAME>danger)\\('`);
+		expect(rule.semanticCondition).toEqual([{ candidate: { codeRegex: "(?<NAME>danger)\\(" } }]);
+
+		for (const fixture of [
+			{
+				lang: "go",
+				source: [
+					"// danger(comment)",
+					"/* danger(block) */",
+					'const quoted = "danger(string)"',
+					"const raw = `danger(raw)`",
+					"danger(value)",
+				].join("\n"),
+				expectedLines: [5],
+			},
+			{
+				lang: "ts",
+				source: [
+					"// danger(comment)",
+					"/* danger(block) */",
+					'const quoted = "danger(string)";',
+					"const literal = `danger(template)`;",
+					"const pattern = /danger()/;",
+					"if (ready) /danger()/.test(value);",
+					"if (ready) {} /danger()/.test(value);",
+					"const markup = <div>danger()</div>;",
+					"const interpolated = `value: $" + "{danger(value)}`;",
+					"danger(value);",
+				].join("\n"),
+				expectedLines: [9, 10],
+			},
+			{
+				lang: "js",
+				source: ["// danger(comment)", "const markup = <div>danger()</div>;", "danger(value);"].join("\n"),
+				expectedLines: [3],
+			},
+		]) {
+			const report = await evaluateSemanticRule(rule, fixture.source, fixture.lang);
+			expect(report.skipped).toEqual([]);
+			expect(report.candidates.map(candidate => candidate.range.startLine)).toEqual(fixture.expectedLines);
+			expect(report.candidates).toMatchObject(
+				fixture.expectedLines.map(startLine => ({
+					status: "matched",
+					captures: { NAME: "danger" },
+					range: { startLine },
+				})),
+			);
+		}
+	});
+
+	it("keeps ordinary regex candidates available for comment rules", async () => {
+		const rule = loadRule(`semanticCondition:
+  candidate:
+    regex: '(?<MARKER>TODO):'`);
+		const report = await evaluateSemanticRule(rule, "// TODO: repair this", "ts");
+		expect(report.candidates).toMatchObject([{ status: "matched", captures: { MARKER: "TODO" } }]);
+	});
+
 	it("reports candidates rejected by capture and whole-file predicates", async () => {
 		const captureRule = loadRule(`semanticCondition:
   candidate:
@@ -194,6 +255,16 @@ describe("semantic rule conditions", () => {
 				"ambiguous-rule",
 			),
 		).toThrow('Rule "ambiguous-rule" semanticCondition clause 1 field "candidate"');
+
+		expect(() =>
+			loadRule(
+				`semanticCondition:
+  candidate:
+    regex: 'function'
+    codeRegex: 'function'`,
+				"ambiguous-code-regex-rule",
+			),
+		).toThrow('Rule "ambiguous-code-regex-rule" semanticCondition clause 1 field "candidate"');
 
 		expect(() =>
 			loadRule(
