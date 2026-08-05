@@ -1,7 +1,7 @@
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { IrcBus, type IrcMessage } from "../irc/bus";
+import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -21,6 +21,7 @@ export interface IrcBridgeHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: CustomMessage[]): void;
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
+	sendWorldIrcReply?: (message: Omit<IrcMessage, "id" | "source" | "ts">) => Promise<IrcDeliveryReceipt>;
 }
 
 /** Build the canonical model-facing record for one incoming peer message. */
@@ -200,12 +201,20 @@ export class IrcBridge {
 			};
 			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 			this.#asides.push(record);
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
+			const outgoing = { from: msg.to, to: msg.from, body, replyTo: msg.id };
+			const receipt =
+				msg.source === "world" ? await this.#sendWorldReply(outgoing) : await IrcBus.global().send(outgoing);
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}
 		} catch (error) {
 			logger.warn("IRC auto-reply turn failed", { from: msg.from, error: String(error) });
 		}
+	}
+
+	async #sendWorldReply(message: Omit<IrcMessage, "id" | "source" | "ts">): Promise<IrcDeliveryReceipt> {
+		const send = this.#host.sendWorldIrcReply;
+		if (!send) throw new Error("World IRC reply backend is unavailable");
+		return await send(message);
 	}
 }

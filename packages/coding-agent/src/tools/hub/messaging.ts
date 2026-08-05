@@ -11,8 +11,9 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { formatAge, formatDuration } from "@oh-my-pi/pi-utils";
+import { formatAge, formatDuration, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
+import type { CoordinationBackend, CoordinationPeerRoster } from "../../coordination/backend";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
@@ -21,6 +22,7 @@ import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { isAgentSession } from "../../session/agent-session";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
+import { WorldAuthorityError, WorldOperationError } from "../../world/client";
 import {
 	createCachedComponent,
 	formatBadge,
@@ -30,7 +32,7 @@ import {
 	replaceTabs,
 	type ToolUIColor,
 } from "../render-utils";
-import { type CoordinationDetails, type HubRenderArgs, hubErrorResult } from "./types";
+import { type CoordinationDetails, type HubPeerInfo, type HubRenderArgs, hubErrorResult } from "./types";
 
 export const DEFAULT_IRC_TIMEOUT_MS = 120_000;
 
@@ -68,7 +70,14 @@ export function resolveMessageTimeoutMs(settings: Settings, explicit?: number): 
 }
 
 /** Session-buffered inbox drain used before parking a bus waiter. */
-export function drainPendingInbox(registry: AgentRegistry, senderId: string, from?: string): IrcMessage | undefined {
+export function drainPendingInbox(
+	registry: AgentRegistry,
+	senderId: string,
+	from?: string,
+	coordinationBackend?: CoordinationBackend,
+): IrcMessage | undefined {
+	const world = coordinationBackend?.inbox({ from, limit: 1 })[0];
+	if (world) return world;
 	const session = registry.get(senderId)?.session;
 	return isAgentSession(session) ? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0] : undefined;
 }
@@ -88,15 +97,27 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 export async function executeList(
 	registry: AgentRegistry,
 	senderId: string,
+	worldRoster?: CoordinationPeerRoster,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	let refs = registry.list();
-	if (!refs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
+	let localRefs = registry.list();
+	if (!localRefs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
 		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
-		refs = registry.list();
+		localRefs = registry.list();
+	}
+	const rosterErrors = [...(worldRoster?.errors ?? [])];
+	const localIds = new Set(localRefs.filter(ref => ref.kind !== "advisor").map(ref => ref.id));
+	for (const ref of worldRoster?.peers ?? []) {
+		if (!localIds.has(ref.id)) continue;
+		if (rosterErrors.some(error => error.code === "identity_conflict" && error.peerId === ref.id)) continue;
+		rosterErrors.push({
+			code: "identity_conflict",
+			peerId: ref.id,
+			detail: `Peer ID ${ref.id} is present in both the local registry and the World Agent tree`,
+		});
 	}
 
 	const bus = IrcBus.global();
-	const peers = refs
+	const localPeers: HubPeerInfo[] = localRefs
 		.filter(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")
 		.map(ref => ({
 			id: ref.id,
@@ -108,6 +129,20 @@ export async function executeList(
 			lastActivity: ref.lastActivity,
 			activity: ref.activity,
 		}));
+	const worldPeers: HubPeerInfo[] = (worldRoster?.peers ?? [])
+		.filter(ref => ref.id !== senderId && ref.kind !== "advisor")
+		.map(ref => ({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: ref.kind,
+			status: ref.status,
+			parentId: ref.parentId,
+			unread: 0,
+			lastActivity: ref.lastActivity,
+			activity: ref.activity,
+			source: "world" as const,
+		}));
+	const peers = [...localPeers, ...worldPeers];
 	const lines: string[] = [];
 	if (peers.length === 0) {
 		lines.push("No other agents.");
@@ -118,18 +153,30 @@ export async function executeList(
 				peer.activity || undefined,
 				peer.unread > 0 ? `unread ${peer.unread}` : undefined,
 				peer.parentId ? `parent ${peer.parentId}` : undefined,
-				`active ${formatDuration(Date.now() - peer.lastActivity)} ago`,
+				`active ${formatDuration(Math.max(0, Date.now() - peer.lastActivity))} ago`,
 			].filter(Boolean);
-			lines.push(`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}] — ${extras.join(", ")}`);
+			const source = peer.source === "world" ? " · world" : "";
+			lines.push(
+				`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}${source}] — ${extras.join(", ")}`,
+			);
 		}
-		if (peers.some(peer => peer.status === "parked")) {
+		if (localPeers.some(peer => peer.status === "parked")) {
 			lines.push("");
 			lines.push("Parked agents are revived automatically when you message them.");
 		}
 	}
+	if (rosterErrors.length) {
+		lines.push("", `${rosterErrors.length} World roster error(s):`);
+		for (const error of rosterErrors) lines.push(`- ${error.peerId}: ${error.code} — ${error.detail}`);
+	}
 	return {
 		content: [{ type: "text", text: lines.join("\n") }],
-		details: { op: "list", from: senderId, peers },
+		details: {
+			op: "list",
+			from: senderId,
+			peers,
+			...(rosterErrors.length > 0 ? { rosterErrors } : {}),
+		},
 	};
 }
 
@@ -141,8 +188,158 @@ export interface HubSendParams {
 	timeoutMs?: number;
 }
 
+function worldErrorDetails(error: unknown): Pick<CoordinationDetails, "worldError"> {
+	if (error instanceof WorldAuthorityError) {
+		return {
+			worldError: {
+				kind: "authority",
+				operation: error.operation,
+				code: error.code,
+				codeName: error.codeName,
+				detail: error.detail,
+				requiredPermission: error.requiredPermission,
+			},
+		};
+	}
+	if (error instanceof WorldOperationError) {
+		return {
+			worldError: {
+				kind: "operation",
+				operation: error.operation,
+				code: error.code,
+				codeName: error.codeName,
+				detail: error.detail,
+			},
+		};
+	}
+	return {};
+}
+
+async function executeWorldSend(
+	deps: {
+		senderId: string;
+		settings: Settings;
+		coordinationBackend: CoordinationBackend;
+	},
+	to: string,
+	message: string,
+	params: HubSendParams,
+	signal?: AbortSignal,
+): Promise<AgentToolResult<CoordinationDetails>> {
+	const outbound: IrcMessage = {
+		id: Snowflake.next(),
+		from: deps.senderId,
+		to,
+		body: message,
+		ts: Date.now(),
+		...(params.replyTo ? { replyTo: params.replyTo } : {}),
+		expectsReply: params.await || undefined,
+		source: "world",
+	};
+	const timeoutMs = params.await ? resolveMessageTimeoutMs(deps.settings, params.timeoutMs) : undefined;
+	const waitAbort = params.await ? new AbortController() : undefined;
+	const waitCancelled = new Error("World IRC await cancelled");
+	let removeAbortListener: (() => void) | undefined;
+	const waiting =
+		params.await && waitAbort
+			? deps.coordinationBackend
+					.waitMessage({ from: to, replyTo: outbound.id }, timeoutMs ?? DEFAULT_IRC_TIMEOUT_MS, waitAbort.signal)
+					.then(
+						value => ({ message: value, error: null as Error | null }),
+						error => ({
+							message: null,
+							error: error === waitCancelled ? null : error instanceof Error ? error : new Error(String(error)),
+						}),
+					)
+			: undefined;
+	if (waitAbort && signal) {
+		if (signal.aborted) {
+			waitAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted"));
+		} else {
+			const onAbort = (): void => {
+				waitAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted"));
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+		}
+	}
+
+	try {
+		let receipt: IrcDeliveryReceipt;
+		try {
+			receipt = await deps.coordinationBackend.send(
+				{ targetPeerId: to, message: outbound, expectsReply: params.await || undefined },
+				signal,
+			);
+		} catch (error) {
+			waitAbort?.abort(waitCancelled);
+			await waiting;
+			const detail = error instanceof Error ? error.message : String(error);
+			return hubErrorResult(detail, {
+				op: "send",
+				from: deps.senderId,
+				to,
+				receipts: [{ to, outcome: "failed", error: detail }],
+				...worldErrorDetails(error),
+			});
+		}
+		const lines = [
+			"Delivered to 1 peer(s):",
+			`- ${receipt.to}: ${receipt.outcome}${receipt.queueOutcome ? ` (${receipt.queueOutcome})` : ""}`,
+		];
+		let waited: IrcMessage | null | undefined;
+		if (waiting && timeoutMs !== undefined) {
+			lines.push("");
+			const reply = await waiting;
+			if (reply.error) {
+				if (signal?.aborted) {
+					lines.push(
+						`Send delivered but the reply wait was interrupted before ${to} answered. ` +
+							"Check `inbox` or `wait` again after handling the interrupt.",
+					);
+				} else {
+					return hubErrorResult(reply.error.message, {
+						op: "send",
+						from: deps.senderId,
+						to,
+						receipts: [receipt],
+					});
+				}
+			} else {
+				waited = reply.message;
+				if (waited) {
+					lines.push(`Reply from ${waited.from}:`, waited.body);
+				} else {
+					lines.push(
+						`No reply from ${to} within ${formatDuration(timeoutMs)}. ` +
+							"They may answer later — check `inbox` or `wait` again.",
+					);
+				}
+			}
+		}
+		return {
+			content: [{ type: "text", text: lines.join("\n") }],
+			details: {
+				op: "send",
+				from: deps.senderId,
+				to,
+				receipts: [receipt],
+				...(waited !== undefined ? { waited } : {}),
+			},
+		};
+	} finally {
+		waitAbort?.abort(waitCancelled);
+		removeAbortListener?.();
+	}
+}
+
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: {
+		registry: AgentRegistry;
+		senderId: string;
+		settings: Settings;
+		coordinationBackend?: CoordinationBackend;
+	},
 	params: HubSendParams,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
@@ -165,6 +362,53 @@ export async function executeSend(
 			from: senderId,
 			to,
 		});
+	}
+	const backend = deps.coordinationBackend;
+	if (backend && !isBroadcast) {
+		let roster: CoordinationPeerRoster;
+		try {
+			roster = await backend.listPeers(signal);
+		} catch (error) {
+			return hubErrorResult(error instanceof Error ? error.message : String(error), {
+				op: "send",
+				from: senderId,
+				to,
+				...worldErrorDetails(error),
+			});
+		}
+		const rosterError = roster.errors.find(error => error.peerId === to);
+		if (rosterError?.code === "identity_conflict") {
+			return hubErrorResult(rosterError.detail, {
+				op: "send",
+				from: senderId,
+				to,
+				rosterErrors: [rosterError],
+			});
+		}
+		const worldTarget = roster.peers.some(ref => ref.id === to);
+		const localTarget = registry.get(to);
+		if (worldTarget && localTarget) {
+			const conflict = {
+				code: "identity_conflict" as const,
+				peerId: to,
+				detail: `Peer ID ${to} is present in both the local registry and the World Agent tree`,
+			};
+			return hubErrorResult(conflict.detail, {
+				op: "send",
+				from: senderId,
+				to,
+				rosterErrors: [conflict],
+			});
+		}
+		if (worldTarget || rosterError !== undefined || !localTarget) {
+			return await executeWorldSend(
+				{ senderId, settings, coordinationBackend: backend },
+				to,
+				message,
+				params,
+				signal,
+			);
+		}
 	}
 
 	const bus = IrcBus.global();
@@ -289,34 +533,55 @@ export async function executeSend(
 	}
 }
 
-/** Pure message wait: no jobs in play, block on the bus with peer liveness. */
+/** Pure message wait with the selected coordination backend and current liveness rules. */
 export async function executeMessageWait(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: {
+		registry: AgentRegistry;
+		senderId: string;
+		settings: Settings;
+		coordinationBackend?: CoordinationBackend;
+	},
 	params: { from?: string; timeoutMs?: number },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const { registry, senderId, settings } = deps;
+	const { registry, senderId, settings, coordinationBackend } = deps;
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
-			liveness: { registry, senderId },
-		});
+		let useWorld = coordinationBackend !== undefined;
+		if (coordinationBackend && from) {
+			const roster = await coordinationBackend.listPeers(signal);
+			const rosterError = roster.errors.find(error => error.peerId === from);
+			if (rosterError?.code === "identity_conflict") throw new Error(rosterError.detail);
+			const worldTarget = roster.peers.some(ref => ref.id === from);
+			const localTarget = registry.get(from);
+			if (worldTarget && localTarget) {
+				throw new Error(`Peer ID ${from} is present in both the local registry and the World Agent tree`);
+			}
+			useWorld = worldTarget || rosterError !== undefined || !localTarget;
+		}
+		const waited =
+			useWorld && coordinationBackend
+				? await coordinationBackend.waitMessage({ from }, timeoutMs, signal)
+				: await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+						liveness: { registry, senderId },
+					});
 		if (!waited) {
 			const filterNote = from ? ` from ${from}` : "";
 			return {
 				content: [{ type: "text", text: `No message${filterNote} within ${formatDuration(timeoutMs)}.` }],
 				details: { op: "wait", from: senderId, waited: null },
-				// A clean wait timeout carries no information once consumed.
 				useless: true,
 			};
 		}
 		return messageResult(senderId, waited);
 	} catch (error) {
-		if (signal?.aborted) {
-			throw error;
-		}
-		return hubErrorResult(error instanceof Error ? error.message : String(error), { op: "wait", from: senderId });
+		if (signal?.aborted) throw error;
+		return hubErrorResult(error instanceof Error ? error.message : String(error), {
+			op: "wait",
+			from: senderId,
+			...worldErrorDetails(error),
+		});
 	}
 }
 
@@ -324,11 +589,21 @@ export function executeInbox(
 	registry: AgentRegistry,
 	senderId: string,
 	peek?: boolean,
+	coordinationBackend?: CoordinationBackend,
 ): AgentToolResult<CoordinationDetails> {
 	const busMessages = IrcBus.global().inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages = isAgentSession(session) ? session.drainPendingIrcInboxMessages(senderId) : [];
-	const messages = [...busMessages, ...pendingMessages].sort((a, b) => a.ts - b.ts);
+	const worldMessages = coordinationBackend?.inbox({ peek }) ?? [];
+	const unique = new Map<string, IrcMessage>();
+	for (const message of [...busMessages, ...pendingMessages, ...worldMessages]) unique.set(message.id, message);
+	const messages = [...unique.values()].sort((a, b) => {
+		const timeOrder = a.ts - b.ts;
+		if (timeOrder !== 0) return timeOrder;
+		const aSequence = a.inboxSequence ?? 0n;
+		const bSequence = b.inboxSequence ?? 0n;
+		return aSequence < bSequence ? -1 : aSequence > bSequence ? 1 : 0;
+	});
 	if (messages.length === 0) {
 		return {
 			content: [{ type: "text", text: "Inbox empty." }],
@@ -536,7 +811,7 @@ function renderSendResult(
 	if (to === "all") meta.push("broadcast");
 	if (receipts.length === 1) {
 		const receipt = receipts[0]!;
-		meta.push(theme.fg(outcomeColor(receipt.outcome), receipt.outcome));
+		meta.push(theme.fg(outcomeColor(receipt.outcome), receipt.queueOutcome ?? receipt.outcome));
 	} else {
 		if (delivered.length > 0) meta.push(theme.fg("success", `${delivered.length} delivered`));
 		if (failedCount > 0) meta.push(theme.fg("error", `${failedCount} failed`));
@@ -562,7 +837,11 @@ function renderSendResult(
 					maxCollapsed: PREVIEW_LIMITS.COLLAPSED_ITEMS,
 					itemType: "recipient",
 					renderItem: receipt => {
-						const badge = formatBadge(receipt.outcome, outcomeColor(receipt.outcome), theme);
+						const badge = formatBadge(
+							receipt.queueOutcome ?? receipt.outcome,
+							outcomeColor(receipt.outcome),
+							theme,
+						);
 						const error =
 							receipt.outcome === "failed" && receipt.error
 								? ` ${theme.fg("error", `${theme.format.dash} ${receipt.error}`)}`

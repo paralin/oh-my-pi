@@ -274,7 +274,11 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 	if (Array.isArray(params.tasks) && params.tasks.length > 0) {
 		return params.tasks;
 	}
-	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	const item: TaskItem = {
+		name: params.name,
+		agent: params.agent,
+		task: params.task,
+	};
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("effort" in params) item.effort = params.effort;
@@ -683,7 +687,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				try {
 					return { policy: await this.#resolveSpawnPreflight(spawn) };
 				} catch (error) {
-					return { error: error instanceof StructuredSubagentError ? error.message : String(error) };
+					return {
+						error: error instanceof StructuredSubagentError ? error.message : String(error),
+					};
 				}
 			}),
 		);
@@ -704,6 +710,16 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			);
 		}
 		const policies = preflights.map(preflight => preflight.policy!);
+		if (this.session.coordinationBackend) {
+			const unsupportedIndex = policies.findIndex(policy => policy.isIsolated || policy.claudeCode !== undefined);
+			if (unsupportedIndex >= 0) {
+				const policy = policies[unsupportedIndex]!;
+				const runtime = policy.claudeCode ? "claude-code" : "isolated";
+				return createTaskModeError(
+					`unsupported_world_runtime: World Task supports only native, non-isolated workers; item ${unsupportedIndex + 1} selected ${runtime}`,
+				);
+			}
+		}
 		const itemBlocking = policies.map(policy => policy.effectiveAgent.blocking === true);
 
 		// Execution mode is per item: an item whose agent type declares
@@ -824,7 +840,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const agentType = resolvedAgents[index]!;
 			const policy = policies[index]!;
 			const agentSource = policy.agent.source;
-			const agentId = await outputManager.allocate(item.name?.trim() || generateTaskName());
+			const requestedName = item.name?.trim();
+			const agentId =
+				this.session.coordinationBackend && requestedName
+					? requestedName
+					: await outputManager.allocate(requestedName || generateTaskName());
 			const assignment = (item.task ?? "").trim();
 			spawns.push({
 				agentId,
@@ -987,7 +1007,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			params,
 			defaultAgent,
 			signal,
-			spawns: syncSpawns.map(spawn => ({ item: spawn.item, index: spawn.index, preAllocatedId: spawn.agentId })),
+			spawns: syncSpawns.map(spawn => ({
+				item: spawn.item,
+				index: spawn.index,
+				preAllocatedId: spawn.agentId,
+			})),
 			onItemProgress: onUpdate
 				? (index, progress) => {
 						const spawn = spawns.find(candidate => candidate.index === index);
@@ -1114,10 +1138,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				try {
 					markRunning();
 					progress.status = "running";
-					await reportProgress(
-						`Running background task ${agentId}...`,
-						buildDetails() as unknown as Record<string, unknown>,
-					);
+					await reportProgress(`Running background task ${agentId}...`, buildDetails());
 					const forwardSyncProgress: AgentToolUpdateCallback<TaskToolDetails> = async update => {
 						const nextProgress = update.details?.progress?.[0];
 						if (nextProgress) {
@@ -1145,7 +1166,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						}
 						const updateText =
 							update.content.find(part => part.type === "text")?.text ?? `Running background task ${agentId}...`;
-						await reportProgress(updateText, buildDetails() as unknown as Record<string, unknown>);
+						await reportProgress(updateText, buildDetails());
 					};
 					const result = await this.#executeSync(
 						toolCallId,
@@ -1185,7 +1206,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = resultFailed
 						? `Background task ${agentId} failed.`
 						: `Background task ${agentId} complete.`;
-					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
+					await reportProgress(statusText, buildDetails());
 					const deliveryText = `${finalText}${await buildFollowUpHint(singleResult?.aborted === true)}`;
 					if (resultFailed) {
 						// Mark the job itself failed; the failed agent stays interrogable.
@@ -1200,7 +1221,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					progress.durationMs = Math.max(0, Date.now() - startedAt);
 					onSettled?.(true);
 					const statusText = `Background task ${agentId} failed.`;
-					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
+					await reportProgress(statusText, buildDetails());
 					const message = error instanceof Error ? error.message : String(error);
 					const hint = await buildFollowUpHint(false);
 					throw new TaskJobError(`${message}${hint}`);
@@ -1214,7 +1235,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				onProgress: text => {
-					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
+					onUpdate?.({
+						content: [{ type: "text", text }],
+						details: buildDetails(),
+					});
 				},
 			},
 		);
@@ -1429,7 +1453,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 				signal,
 				onProgress: progress => {
-					latestProgress = { ...progress, recentTools: progress.recentTools.slice() };
+					latestProgress = {
+						...progress,
+						recentTools: progress.recentTools.slice(),
+					};
 					onUpdate?.({
 						content: [{ type: "text", text: `Running agent ${progress.id}...` }],
 						details: {

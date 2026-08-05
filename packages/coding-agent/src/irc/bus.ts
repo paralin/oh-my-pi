@@ -31,12 +31,20 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
+	/** Sender is waiting for a correlated reply. Durable World messages preserve this bit. */
+	expectsReply?: boolean;
+	/** Durable target-inbox order when the message came from the World mailbox. */
+	inboxSequence?: bigint;
+	/** Durable messages carry this marker so replies use the selected coordination backend. */
+	source?: "world";
 }
 
 export interface IrcDeliveryReceipt {
 	to: string;
 	outcome: "injected" | "queued" | "woken" | "revived" | "failed";
 	error?: string;
+	/** Durable World storage state when outcome is queued. */
+	queueOutcome?: "queued_live" | "queued_inactive";
 }
 
 /** Delivery failure that cannot succeed for a later generation of the recipient. */

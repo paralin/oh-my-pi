@@ -121,6 +121,7 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	coordinationBackend?: ToolSession["coordinationBackend"];
 }
 
 const PROGRESS_INTERVAL_MS = 500;
@@ -240,7 +241,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		const registry = this.session.agentRegistry;
 		const senderId = this.session.getAgentId?.() ?? null;
 		if (!registry || !senderId) return null;
-		return { registry, senderId, settings: this.session.settings };
+		return {
+			registry,
+			senderId,
+			settings: this.session.settings,
+			coordinationBackend: this.session.coordinationBackend,
+		};
 	}
 
 	async execute(
@@ -254,7 +260,19 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "list": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
-				return executeList(messaging.registry, messaging.senderId);
+				const worldRoster = this.session.coordinationBackend
+					? await this.session.coordinationBackend.listPeers(signal).catch(error => ({
+							peers: [],
+							errors: [
+								{
+									code: "projection_error" as const,
+									peerId: "*",
+									detail: error instanceof Error ? error.message : String(error),
+								},
+							],
+						}))
+					: undefined;
+				return executeList(messaging.registry, messaging.senderId, worldRoster);
 			}
 			case "send": {
 				const toPeer = params.to?.trim();
@@ -272,7 +290,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "inbox": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
-				return executeInbox(messaging.registry, messaging.senderId, params.peek);
+				return executeInbox(messaging.registry, messaging.senderId, params.peek, messaging.coordinationBackend);
 			}
 			case "wait":
 				if (params.name?.trim()) return this.#launch(params, "wait", signal);
@@ -346,7 +364,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 
 		// A message already buffered on the session satisfies the wait first.
 		if (messaging) {
-			const pending = drainPendingInbox(messaging.registry, messaging.senderId, from);
+			const pending = drainPendingInbox(messaging.registry, messaging.senderId, from, messaging.coordinationBackend);
 			if (pending) return messageResult(messaging.senderId, pending);
 		}
 
@@ -371,10 +389,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		if (!manager || runningJobs.length === 0) {
 			// No job legs: pure message wait — or nothing to block on at all.
 			if (!messaging) return nothingToWaitForResult(this.session);
-			if (!from) {
-				// A bare wait can only be satisfied by a running peer eventually
-				// sending something; with none, return the snapshot immediately
-				// instead of blocking a full message-timeout window.
+			if (!from && !messaging.coordinationBackend) {
+				// A bare local wait can only be satisfied by a running peer.
 				const hasRunningPeer = messaging.registry
 					.listVisibleTo(messaging.senderId)
 					.some(ref => ref.status === "running");
@@ -400,16 +416,16 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		let removeBusAbortListener: (() => void) | undefined;
 		const busLeg =
 			messaging && busAbort
-				? IrcBus.global()
-						.wait(messaging.senderId, { from }, 0, busAbort.signal)
-						.then(
-							message => ({ message, error: null as Error | null }),
-							error => ({
-								message: null,
-								error:
-									error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
-							}),
-						)
+				? (messaging.coordinationBackend
+						? messaging.coordinationBackend.waitMessage({ from }, 0, busAbort.signal)
+						: IrcBus.global().wait(messaging.senderId, { from }, 0, busAbort.signal)
+					).then(
+						message => ({ message, error: null as Error | null }),
+						error => ({
+							message: null,
+							error: error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
+						}),
+					)
 				: undefined;
 		if (busLeg) racePromises.push(busLeg);
 		if (busAbort && signal) {
