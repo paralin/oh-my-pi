@@ -9,10 +9,12 @@ import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import type { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
 	type CreateAgentSessionOptions,
 	type CustomTool,
@@ -129,6 +131,38 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 	afterAll(() => {
 		removeSyncWithRetries(registryAuthDir);
+	});
+
+	it("attaches the root session to its World mailbox after construction", async () => {
+		const tempDir = makeTempDir();
+		let attachedAgentId: string | undefined;
+		let attachedReceiver: AgentSession | undefined;
+		let closed = false;
+		const backend: CoordinationBackend = {
+			kind: "world",
+			spawn: () => Promise.reject(new Error("unused")),
+			listPeers: async () => ({ peers: [], errors: [] }),
+			attachMailbox: (agentId, receiver) => {
+				attachedAgentId = agentId;
+				attachedReceiver = receiver as AgentSession;
+			},
+			send: () => Promise.reject(new Error("unused")),
+			inbox: () => [],
+			waitMessage: () => Promise.reject(new Error("unused")),
+			interrupt: () => Promise.reject(new Error("unused")),
+			close: async () => {
+				closed = true;
+			},
+		};
+
+		const { session } = await createAgentSession({ ...baseOptions(tempDir), coordinationBackend: backend });
+		try {
+			expect(attachedAgentId).toBe(MAIN_AGENT_ID);
+			expect(attachedReceiver).toBe(session);
+		} finally {
+			await session.dispose();
+		}
+		expect(closed).toBe(true);
 	});
 
 	it("excludes defaultInactive extension tools from the initial active set unless explicitly requested", async () => {
@@ -636,8 +670,8 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		});
 
 		try {
-			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "yield"]);
-			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "yield"]);
+			expect(restricted.getAllToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
+			expect(restricted.getActiveToolNames()).toEqual(["read", "lsp", "hub", "yield"]);
 			for (const name of [
 				"generate_image",
 				"tts",
@@ -649,7 +683,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 				"default_active_tool",
 				"default_inactive_tool",
 				"sdk_custom_tool",
-				"hub",
 			]) {
 				expect(restricted.getToolByName(name)).toBeUndefined();
 			}

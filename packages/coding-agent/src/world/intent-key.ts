@@ -6,7 +6,8 @@ import * as path from "node:path";
  *
  * This mirrors `glados.sdk.llmsession.IntentKeySource` field for field. The
  * daemon re-derives the key from this tuple and rejects a submission whose key
- * does not match, so every field here participates in the digest.
+ * does not match, so every field here participates in the digest. PeerId and
+ * workerProfileDigest are an all-or-neither trailing identity pair.
  */
 export interface IntentKeySource {
 	ownerArtifact: string;
@@ -18,6 +19,8 @@ export interface IntentKeySource {
 	deliverablePaths: string[];
 	writeSurfaces: string[];
 	resumeSessionObjectKey?: string;
+	peerId?: string;
+	workerProfileDigest?: string;
 }
 
 /** Key prefix minted by the GLaDOS dispatch owner (`glados_dispatch.IntentKeyPrefix`). */
@@ -82,6 +85,9 @@ export function intentKey(source: IntentKeySource): { intentKey: string; source:
 		normalized.writeSurfaces.join("\n"),
 	];
 	if (normalized.resumeSessionObjectKey) parts.push(normalized.resumeSessionObjectKey);
+	if (normalized.peerId && normalized.workerProfileDigest) {
+		parts.push(normalized.peerId, normalized.workerProfileDigest);
+	}
 	const digest = createHash("sha256").update(parts.join("\0"), "utf8").digest();
 	return { intentKey: INTENT_KEY_PREFIX + base32NoPadding(digest).toLowerCase(), source: normalized };
 }
@@ -110,11 +116,22 @@ export function normalizeIntentKeySource(source: IntentKeySource): IntentKeySour
 		deliverablePaths: canonicalPathList(source.deliverablePaths, "deliverable path"),
 		writeSurfaces: canonicalPathList(source.writeSurfaces, "write surface"),
 		resumeSessionObjectKey: goTrimSpace(source.resumeSessionObjectKey ?? ""),
+		peerId: goTrimSpace(source.peerId ?? ""),
+		workerProfileDigest: goTrimSpace(source.workerProfileDigest ?? "").toLowerCase(),
 	};
 	if (normalized.deliverablePaths.length === 0) throw new Error("at least one deliverable path is required");
 	if (normalized.writeSurfaces.length === 0) throw new Error("at least one write surface is required");
 	if (/[\r\n\0]/.test(normalized.resumeSessionObjectKey ?? "")) {
 		throw new Error("resume session object key must not contain newline or NUL");
+	}
+	if (Boolean(normalized.peerId) !== Boolean(normalized.workerProfileDigest)) {
+		throw new Error("peer id and worker profile digest must be provided together");
+	}
+	if (normalized.peerId && /[\r\n\0\t ]/.test(normalized.peerId)) {
+		throw new Error("peer id must not contain whitespace or NUL");
+	}
+	if (normalized.workerProfileDigest && !/^[0-9a-f]{64}$/.test(normalized.workerProfileDigest)) {
+		throw new Error("worker profile digest must be 64 lowercase hex characters");
 	}
 	return normalized;
 }

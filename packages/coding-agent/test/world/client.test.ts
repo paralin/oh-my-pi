@@ -18,16 +18,23 @@ import type { DialFn } from "@oh-my-pi/pi-coding-agent/world/transport";
 import type {
 	LookupDispatchIntentResponse,
 	ReadWorldURIResponse,
+	ResolveAgentPeerResponse,
 	SessionSummary,
+	WatchAgentTreeResponse,
+	WatchPeerMailboxResponse,
+	WatchSessionResponse,
 	WorldRuntimeMutationRequest,
 	WorldRuntimeMutationResponse,
 	WorldRuntimeWatchRequest,
 	WorldRuntimeWatchResponse,
 } from "../../src/world/generated/llmsession.pb.js";
 import {
+	PeerMessageAckOutcome,
+	PeerMessageOutcome,
 	WorldAuthorityDenialCode,
 	WorldOperationFailureCode,
 	WorldRuntimeOperation,
+	WorldTaskAgentSource,
 	WorldWatchCompletion,
 } from "../../src/world/generated/llmsession.pb.js";
 
@@ -77,6 +84,16 @@ interface FakeEndpointOptions {
 	mutate?: (req: WorldRuntimeMutationRequest) => WorldRuntimeMutationResponse;
 	/** Snapshots one `WatchDispatch` stream yields before closing. */
 	watch?: (req: WorldRuntimeWatchRequest) => WorldRuntimeWatchResponse[];
+	/** Exact response for one durable peer resolution. */
+	resolvePeer?: (peerId: string) => ResolveAgentPeerResponse;
+	/** Child resource id `AccessSession` hands back. */
+	sessionResourceId?: number;
+	/** Complete snapshots one bound session watch yields before closing. */
+	sessionWatch?: WatchSessionResponse[];
+	/** Complete root Agent-tree snapshots before the stream closes. */
+	agentTreeWatch?: WatchAgentTreeResponse[];
+	/** Durable caller mailbox records before the stream closes. */
+	mailboxWatch?: WatchPeerMailboxResponse[];
 }
 
 /**
@@ -127,9 +144,15 @@ interface FakeEndpointLog {
 	binds: string[];
 	/** Child resource ids the client bound a runtime service to. */
 	boundResources: number[];
+	resolvedPeers: string[];
+	accessedSessions: string[];
+	agentTreeWatches: number;
+	mailboxWatches: number;
+	boundSessionResources: number[];
 	mutations: WorldRuntimeMutationRequest[];
 	watches: WorldRuntimeWatchRequest[];
 	runtimeReleases: number;
+	sessionReleases: number;
 }
 
 /**
@@ -147,9 +170,15 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 		closes: 0,
 		binds: [],
 		boundResources: [],
+		resolvedPeers: [],
+		accessedSessions: [],
+		agentTreeWatches: 0,
+		mailboxWatches: 0,
+		boundSessionResources: [],
 		mutations: [],
 		watches: [],
 		runtimeReleases: 0,
+		sessionReleases: 0,
 	};
 	const retire: Array<() => void> = [];
 	const openEndpoint = async (): Promise<WorldEndpoint> => {
@@ -187,6 +216,16 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 				const failure = options.failWith ?? options.failNow?.();
 				if (failure) throw failure;
 				return { resourceId: options.runtimeResourceId ?? 7 };
+			},
+			AccessSession: async req => {
+				log.accessedSessions.push(req.sessionObjectKey);
+				return { resourceId: options.sessionResourceId ?? 9 };
+			},
+			WatchAgentTree: () => {
+				log.agentTreeWatches += 1;
+				return (async function* () {
+					for (const response of options.agentTreeWatch ?? []) yield response;
+				})();
 			},
 		};
 		const endpoint: WorldEndpoint = {
@@ -231,9 +270,33 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 								if (options.hang || options.hangNow?.()) await new Promise(() => {});
 							})();
 						},
+						ResolveAgentPeer: async req => {
+							log.resolvedPeers.push(req.peerId);
+							return options.resolvePeer?.(req.peerId) ?? { found: false };
+						},
+						WatchPeerMailbox: () => {
+							log.mailboxWatches += 1;
+							return (async function* () {
+								for (const response of options.mailboxWatch ?? []) yield response;
+							})();
+						},
 					},
 					release: async () => {
 						log.runtimeReleases++;
+					},
+				};
+			},
+			accessSession: resourceId => {
+				log.boundSessionResources.push(resourceId);
+				return {
+					service: {
+						WatchSession: () =>
+							(async function* () {
+								for (const response of options.sessionWatch ?? []) yield response;
+							})(),
+					},
+					release: async () => {
+						log.sessionReleases++;
 					},
 				};
 			},
@@ -1040,6 +1103,214 @@ describe("world runtime configuration", () => {
 	});
 });
 
+describe("World peer and session resources", () => {
+	test("resolves one exact peer through the bound runtime", async () => {
+		const session = { sessionObjectKey: "glados/llm-session/worker", parentSessionObjectKey: CALLER };
+		const { client, log } = runtimeClient({
+			resolvePeer: peerId => ({
+				found: true,
+				agent: { agentObjectKey: "glados/agents/worker", peerId, name: "Worker" },
+				session,
+			}),
+		});
+
+		expect(await client.resolveAgentPeer("worker")).toEqual({
+			found: true,
+			agent: { agentObjectKey: "glados/agents/worker", peerId: "worker", name: "Worker" },
+			session,
+			inactive: false,
+		});
+		expect(log.resolvedPeers).toEqual(["worker"]);
+		expect(log.binds).toEqual([CALLER]);
+	});
+
+	test("streams complete Agent-tree snapshots from the root resource", async () => {
+		const snapshots = [
+			{ revision: 1n, agents: [{ agentObjectKey: "glados/agents/worker", peerId: "worker" }] },
+			{ revision: 2n, agents: [{ agentObjectKey: "glados/agents/worker", peerId: "worker-2" }] },
+		];
+		const { client, log } = runtimeClient({
+			agentTreeWatch: snapshots.map(snapshot => ({ snapshot })),
+		});
+		const received = [];
+		for await (const snapshot of client.watchAgentTree()) received.push(snapshot);
+
+		expect(received).toEqual(snapshots);
+		expect(log.agentTreeWatches).toBe(1);
+	});
+
+	test("streams complete session snapshots and releases the child resource", async () => {
+		const snapshots = [
+			{ session: { sessionObjectKey: "glados/llm-session/worker", state: "LLM_SESSION_STATE_ACTIVE" } },
+			{ taskResult: { output: "done", exitCode: 0 } },
+		];
+		const { client, log } = runtimeClient({
+			sessionResourceId: 13,
+			sessionWatch: snapshots.map(snapshot => ({ snapshot })),
+		});
+		const received = [];
+		for await (const snapshot of client.watchSession("glados/llm-session/worker")) received.push(snapshot);
+
+		expect(received).toEqual(snapshots);
+		expect(log.accessedSessions).toEqual(["glados/llm-session/worker"]);
+		expect(log.boundSessionResources).toEqual([13]);
+		expect(log.sessionReleases).toBe(1);
+	});
+
+	test("stores peer and reserved-parent messages with typed queue receipts", async () => {
+		const { client, log } = runtimeClient({
+			mutate: req => ({
+				requestId: req.requestId,
+				result: {
+					case: "sendPeerMessage",
+					value: {
+						messageObjectKey: `glados/messages/${req.requestId}`,
+						clientMessageId: req.operation?.case === "sendPeerMessage" ? req.operation.value.clientMessageId : "",
+						toAgentObjectKey: "glados/agents/target",
+						targetLlmSessionObjectKey: "glados/llm-session/target",
+						inboxSequence: 8n,
+						outcome: PeerMessageOutcome.QUEUED_LIVE,
+						replayed: false,
+					},
+				},
+			}),
+		});
+
+		const peer = await client.sendPeerMessage({
+			requestId: "send-peer",
+			clientMessageId: "message-1",
+			body: "hello",
+			replyToClientMessageId: "question-1",
+			expectsReply: true,
+			target: { kind: "peer", peerId: "worker" },
+		});
+		await client.sendPeerMessage({
+			requestId: "send-parent",
+			clientMessageId: "message-2",
+			body: "hello parent",
+			target: { kind: "parent" },
+		});
+
+		expect(peer).toEqual({
+			requestId: "send-peer",
+			messageObjectKey: "glados/messages/send-peer",
+			clientMessageId: "message-1",
+			toAgentObjectKey: "glados/agents/target",
+			targetLlmSessionObjectKey: "glados/llm-session/target",
+			inboxSequence: 8n,
+			outcome: PeerMessageOutcome.QUEUED_LIVE,
+			replayed: false,
+		});
+		expect(log.mutations.map(request => request.operation)).toEqual([
+			{
+				case: "sendPeerMessage",
+				value: {
+					clientMessageId: "message-1",
+					body: "hello",
+					replyToClientMessageId: "question-1",
+					expectsReply: true,
+					target: { case: "targetPeerId", value: "worker" },
+				},
+			},
+			{
+				case: "sendPeerMessage",
+				value: {
+					clientMessageId: "message-2",
+					body: "hello parent",
+					replyToClientMessageId: undefined,
+					expectsReply: false,
+					target: { case: "targetParent", value: true },
+				},
+			},
+		]);
+	});
+
+	test("rejects rewritten message identities and incomplete durable receipts", async () => {
+		const { client, log } = runtimeClient({
+			mutate: req => ({
+				requestId: req.requestId,
+				result: {
+					case: "sendPeerMessage",
+					value: {
+						messageObjectKey: "glados/messages/1",
+						clientMessageId: "different-message",
+						toAgentObjectKey: "glados/agents/target",
+						targetLlmSessionObjectKey: "glados/llm-session/target",
+						inboxSequence: 1n,
+						outcome: PeerMessageOutcome.QUEUED_LIVE,
+					},
+				},
+			}),
+		});
+
+		await expect(
+			client.sendPeerMessage({
+				requestId: "send-peer",
+				clientMessageId: " message-1 ",
+				body: "hello",
+				target: { kind: "peer", peerId: "worker" },
+			}),
+		).rejects.toThrow("peer client message id is invalid");
+		expect(log.mutations).toEqual([]);
+
+		await expect(
+			client.sendPeerMessage({
+				requestId: "send-peer",
+				clientMessageId: "message-1",
+				body: "hello",
+				target: { kind: "peer", peerId: "worker" },
+			}),
+		).rejects.toThrow("returned client message ID different-message, expected message-1");
+	});
+
+	test("streams the bound mailbox and acknowledges one typed local outcome", async () => {
+		const message = {
+			messageObjectKey: "glados/messages/1",
+			clientMessageId: "message-1",
+			body: "hello",
+			inboxSequence: 4n,
+		};
+		const { client, log } = runtimeClient({
+			mailboxWatch: [{ result: { case: "message", value: message } }],
+			mutate: () => ({
+				result: {
+					case: "ackPeerMessage",
+					value: {
+						messageObjectKey: message.messageObjectKey,
+						consumedByLlmSessionObjectKey: CALLER,
+						consumedAt: "2026-08-04T12:00:00Z",
+						replayed: true,
+					},
+				},
+			}),
+		});
+		const received = [];
+		for await (const item of client.watchPeerMailbox()) received.push(item);
+		const ack = await client.ackPeerMessage({
+			requestId: "ack-1",
+			messageObjectKey: message.messageObjectKey,
+			outcome: PeerMessageAckOutcome.WAITER,
+		});
+
+		expect(received).toEqual([message]);
+		expect(log.mailboxWatches).toBe(1);
+		expect(log.mutations[0]?.operation).toEqual({
+			case: "ackPeerMessage",
+			value: {
+				messageObjectKey: message.messageObjectKey,
+				outcome: PeerMessageAckOutcome.WAITER,
+			},
+		});
+		expect(ack).toEqual({
+			requestId: "ack-1",
+			messageObjectKey: message.messageObjectKey,
+			consumedByLlmSessionObjectKey: CALLER,
+			consumedAt: "2026-08-04T12:00:00Z",
+			replayed: true,
+		});
+	});
+});
+
 describe("world request identity", () => {
 	test("accepts printable ASCII within the daemon's bound", () => {
 		expect(assertWorldRequestId("answer-1")).toBe("answer-1");
@@ -1076,6 +1347,15 @@ describe("world dispatch submission", () => {
 			worktreePath: "/wt/fix-auth",
 			workingDirectory: "/wt/fix-auth",
 			childWorldOperations: [WORLD_OPERATION_PERMISSIONS.question_answer],
+			taskAgent: {
+				peerId: "worker",
+				displayName: "Worker",
+				agentType: "task",
+				agentSource: WorldTaskAgentSource.BUNDLED,
+				purpose: "Fix auth",
+				workerProfile: new Uint8Array([1, 2, 3]),
+				workerProfileDigest: "a".repeat(64),
+			},
 		});
 
 		expect(result.intentKey).toBe(expected.intentKey);
@@ -1092,6 +1372,15 @@ describe("world dispatch submission", () => {
 		// Normalized, because the daemon re-derives from exactly what it receives.
 		expect(submit?.intentIdentity?.source?.objective).toBe(expected.source.objective);
 		expect(submit?.childWorldOperations).toEqual(["world.question.answer"]);
+		expect(submit?.taskAgent).toEqual({
+			peerId: "worker",
+			displayName: "Worker",
+			agentType: "task",
+			agentSource: WorldTaskAgentSource.BUNDLED,
+			purpose: "Fix auth",
+			workerProfile: new Uint8Array([1, 2, 3]),
+			workerProfileDigest: "a".repeat(64),
+		});
 		// No parent field exists: the bound caller is the parent.
 		expect(Object.keys(submit ?? {})).not.toContain("parentSessionObjectKey");
 	});

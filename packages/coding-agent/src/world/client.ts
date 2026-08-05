@@ -7,26 +7,42 @@ import {
 	type WorldSources,
 } from "./config.js";
 import type {
+	AccessSessionResponse,
 	AccessWorldRuntimeResponse,
+	AgentMessageSummary,
 	AgentTreeSnapshot,
 	CustodySummary,
 	LookupDispatchIntentResponse,
 	ReadWorldURIResponse,
+	ResolveAgentPeerResponse,
+	SessionSnapshot,
 	SessionSummary,
+	WatchAgentTreeResponse,
+	WatchPeerMailboxResponse,
+	WatchSessionResponse,
+	WorldAckPeerMessageResult,
 	WorldRuntimeAuthorityDenial,
 	WorldRuntimeMutationRequest,
 	WorldRuntimeMutationResponse,
 	WorldRuntimeOperationFailure,
 	WorldRuntimeWatchRequest,
 	WorldRuntimeWatchResponse,
+	WorldSendPeerMessageResult,
+	WorldTaskAgentSpec,
 } from "./generated/llmsession.pb.js";
 import {
+	PeerMessageAckOutcome,
+	PeerMessageOutcome,
 	WorldAuthorityDenialCode,
 	WorldOperationFailureCode,
 	WorldRuntimeOperation,
 	WorldWatchCompletion,
 } from "./generated/llmsession.pb.js";
-import { GladosResourceServiceClient, WorldRuntimeResourceServiceClient } from "./generated/llmsession_srpc.pb.js";
+import {
+	GladosResourceServiceClient,
+	LlmSessionResourceServiceClient,
+	WorldRuntimeResourceServiceClient,
+} from "./generated/llmsession_srpc.pb.js";
 import type { ProjectionSnapshot } from "./generated/projection.pb.js";
 import { type IntentKeySource, intentKey } from "./intent-key.js";
 import { WORLD_CHILD_PERMISSIONS, type WorldOperation } from "./operations.js";
@@ -65,6 +81,8 @@ export interface WorldService {
 		req: { callerSessionObjectKey: string },
 		signal?: AbortSignal,
 	): Promise<AccessWorldRuntimeResponse>;
+	AccessSession?(req: { sessionObjectKey: string }, signal?: AbortSignal): Promise<AccessSessionResponse>;
+	WatchAgentTree?(req: Record<string, never>, signal?: AbortSignal): AsyncIterable<WatchAgentTreeResponse>;
 }
 
 /**
@@ -77,12 +95,25 @@ export interface WorldService {
 export interface WorldRuntimeService {
 	Mutate(req: WorldRuntimeMutationRequest, signal?: AbortSignal): Promise<WorldRuntimeMutationResponse>;
 	WatchDispatch(req: WorldRuntimeWatchRequest, signal?: AbortSignal): AsyncIterable<WorldRuntimeWatchResponse>;
+	ResolveAgentPeer?(req: { peerId: string }, signal?: AbortSignal): Promise<ResolveAgentPeerResponse>;
+	WatchPeerMailbox?(req: Record<string, never>, signal?: AbortSignal): AsyncIterable<WatchPeerMailboxResponse>;
 }
 
 /** One child runtime resource, held for as long as its endpoint lives. */
 export interface WorldRuntimeBinding {
 	readonly service: WorldRuntimeService;
 	/** Tell the daemon it may drop the child handle. Idempotent. */
+	release(): Promise<void>;
+}
+
+/** The generated monitor surface for one attached LlmSession resource. */
+export interface WorldSessionService {
+	WatchSession(req: Record<string, never>, signal?: AbortSignal): AsyncIterable<WatchSessionResponse>;
+}
+
+/** One child session resource, released when its watch ends. */
+export interface WorldSessionBinding {
+	readonly service: WorldSessionService;
 	release(): Promise<void>;
 }
 
@@ -118,6 +149,8 @@ export interface WorldEndpoint {
 	 * when the endpoint closes.
 	 */
 	accessRuntime(resourceId: number): WorldRuntimeBinding;
+	/** Bind one LlmSession monitor resource returned by AccessSession. */
+	accessSession?(resourceId: number): WorldSessionBinding;
 	close(): Promise<void>;
 }
 
@@ -145,6 +178,14 @@ export type DispatchIntentLookup =
 			awaitingCustody: boolean;
 	  };
 
+/** One exact durable peer resolution. */
+export interface WorldAgentPeerResolution {
+	found: boolean;
+	agent: ResolveAgentPeerResponse["agent"];
+	session: ResolveAgentPeerResponse["session"];
+	inactive: boolean;
+}
+
 const OPERATION_BY_WIRE: Readonly<Record<WorldRuntimeOperation, WorldOperation | undefined>> = {
 	[WorldRuntimeOperation.UNKNOWN]: undefined,
 	[WorldRuntimeOperation.DISPATCH_SUBMIT]: "dispatch_submit",
@@ -152,6 +193,8 @@ const OPERATION_BY_WIRE: Readonly<Record<WorldRuntimeOperation, WorldOperation |
 	[WorldRuntimeOperation.QUESTION_ANSWER]: "question_answer",
 	[WorldRuntimeOperation.SESSION_INPUT]: "session_input",
 	[WorldRuntimeOperation.SESSION_INTERRUPT]: "session_interrupt",
+	[WorldRuntimeOperation.AGENT_MESSAGE_SEND]: "world.agent.message.send",
+	[WorldRuntimeOperation.AGENT_MESSAGE_RECEIVE]: "world.agent.message.receive",
 };
 
 /** The tool-facing name for an operation the daemon reported, if it named one. */
@@ -251,6 +294,8 @@ export interface WorldDispatchSubmit {
 	 * An empty or absent list grants the child no `world.*` permission.
 	 */
 	childWorldOperations?: string[];
+	/** Durable Task Agent identity and frozen worker profile. */
+	taskAgent?: WorldTaskAgentSpec;
 	/**
 	 * Mutation envelope retry key. Defaults to the derived intent key, which is
 	 * already the identity of this submission.
@@ -305,6 +350,43 @@ export interface WorldSessionControlResult {
 	acceptedSequence: bigint;
 	detail: string;
 	/** The stored effect for this request was returned; no second one was made. */
+	replayed: boolean;
+}
+
+/** Address accepted by durable peer send. Raw LlmSession keys have no arm. */
+export type WorldPeerMessageTarget = { kind: "peer"; peerId: string } | { kind: "parent" };
+
+export interface WorldPeerMessageSend {
+	requestId: string;
+	clientMessageId: string;
+	body: string;
+	replyToClientMessageId?: string;
+	expectsReply?: boolean;
+	target: WorldPeerMessageTarget;
+}
+
+export interface WorldPeerMessageSendResult {
+	requestId: string;
+	messageObjectKey: string;
+	clientMessageId: string;
+	toAgentObjectKey: string;
+	targetLlmSessionObjectKey: string;
+	inboxSequence: bigint;
+	outcome: PeerMessageOutcome;
+	replayed: boolean;
+}
+
+export interface WorldPeerMessageAck {
+	requestId: string;
+	messageObjectKey: string;
+	outcome: PeerMessageAckOutcome;
+}
+
+export interface WorldPeerMessageAckResult {
+	requestId: string;
+	messageObjectKey: string;
+	consumedByLlmSessionObjectKey: string;
+	consumedAt: string;
 	replayed: boolean;
 }
 
@@ -512,6 +594,54 @@ export class WorldClient {
 		return mapDispatchIntent(response);
 	}
 
+	/** Resolve one exact durable peer ID without display-name fallback. */
+	async resolveAgentPeer(peerId: string, signal?: AbortSignal): Promise<WorldAgentPeerResolution> {
+		const id = requireTarget(peerId, "peer id");
+		const runtime = await this.#runtimeFor("world.agent.message.receive", signal);
+		const resolve = runtime.service.ResolveAgentPeer;
+		if (!resolve) throw new Error("World runtime endpoint does not support peer resolution");
+		const response = await this.#call(runtime.endpoint, () => resolve({ peerId: id }, signal), signal);
+		if (response.failure) throw new WorldOperationError("world.agent.message.receive", response.failure, "");
+		return {
+			found: response.found ?? false,
+			agent: response.agent,
+			session: response.session,
+			inactive: response.inactive ?? false,
+		};
+	}
+
+	/** Stream complete Agent-tree snapshots from the root World resource. */
+	async *watchAgentTree(signal?: AbortSignal): AsyncGenerator<AgentTreeSnapshot, void, void> {
+		const endpoint = await this.#connect(signal);
+		const watch = endpoint.service.WatchAgentTree;
+		if (!watch) throw new Error("World endpoint does not support Agent-tree watches");
+		const stream = watch({}, signal);
+		for await (const item of this.#iterate(endpoint, stream, signal)) {
+			if (item.snapshot) yield item.snapshot;
+		}
+	}
+
+	/** Stream complete snapshots for one exact LlmSession child resource. */
+	async *watchSession(sessionObjectKey: string, signal?: AbortSignal): AsyncGenerator<SessionSnapshot, void, void> {
+		const key = requireTarget(sessionObjectKey, "session object key");
+		const endpoint = await this.#connect(signal);
+		const access = endpoint.service.AccessSession;
+		const bind = endpoint.accessSession;
+		if (!access || !bind) throw new Error("World endpoint does not support session resources");
+		const response = await this.#call(endpoint, () => access({ sessionObjectKey: key }, signal), signal);
+		const resourceId = response.resourceId ?? 0;
+		if (!resourceId) throw new Error(`World session ${key} returned no child resource`);
+		const binding = bind(resourceId);
+		try {
+			const stream = binding.service.WatchSession({}, signal);
+			for await (const item of this.#iterate(endpoint, stream, signal)) {
+				if (item.snapshot) yield item.snapshot;
+			}
+		} finally {
+			await binding.release();
+		}
+	}
+
 	/**
 	 * Read one canonical World URI.
 	 *
@@ -598,6 +728,7 @@ export class WorldClient {
 						// which is the property the shared golden vectors exist to keep.
 						intentIdentity: { source: identity.source, intentKey: identity.intentKey },
 						childWorldOperations: request.childWorldOperations ?? [],
+						taskAgent: request.taskAgent,
 					},
 				},
 			},
@@ -680,6 +811,87 @@ export class WorldClient {
 		);
 		const result = expectResultArm(response, "session_interrupt", "sessionInterrupt", requestId);
 		return mapSessionControl("session_interrupt", requestId, targetSessionObjectKey, result);
+	}
+
+	/** Store one retry-safe durable message without accepting a raw session selector. */
+	async sendPeerMessage(request: WorldPeerMessageSend, signal?: AbortSignal): Promise<WorldPeerMessageSendResult> {
+		const requestId = assertWorldRequestId(request.requestId.trim());
+		const clientMessageId = requireExactTarget(request.clientMessageId, "peer client message id");
+		if (!request.body.trim()) throw new Error("world peer message body is required");
+		const replyToClientMessageId =
+			request.replyToClientMessageId === undefined
+				? undefined
+				: requireExactTarget(request.replyToClientMessageId, "reply-to client message id");
+		const target =
+			request.target.kind === "parent"
+				? ({ case: "targetParent", value: true } as const)
+				: ({ case: "targetPeerId", value: requireTarget(request.target.peerId, "peer id") } as const);
+		const response = await this.#mutate(
+			"world.agent.message.send",
+			{
+				requestId,
+				operation: {
+					case: "sendPeerMessage",
+					value: {
+						clientMessageId,
+						body: request.body,
+						replyToClientMessageId,
+						expectsReply: request.expectsReply ?? false,
+						target,
+					},
+				},
+			},
+			signal,
+		);
+		const result = expectResultArm(response, "world.agent.message.send", "sendPeerMessage", requestId);
+		const outcome = result.outcome ?? PeerMessageOutcome.UNKNOWN;
+		if (outcome === PeerMessageOutcome.UNKNOWN) {
+			throw new Error(`world peer message send returned an unknown outcome for request ${requestId}`);
+		}
+		return mapPeerMessageSendResult(requestId, clientMessageId, result, outcome);
+	}
+
+	/** Stream the bound caller's unconsumed durable messages. */
+	async *watchPeerMailbox(signal?: AbortSignal): AsyncGenerator<AgentMessageSummary, void, void> {
+		const runtime = await this.#runtimeFor("world.agent.message.receive", signal);
+		const watch = runtime.service.WatchPeerMailbox;
+		if (!watch) throw new Error("World runtime endpoint does not support peer mailbox watches");
+		const stream = watch({}, signal);
+		for await (const response of this.#iterate(runtime.endpoint, stream, signal)) {
+			const result = response.result;
+			if (result?.case === "authorityDenial") {
+				throw new WorldAuthorityError("world.agent.message.receive", result.value);
+			}
+			if (result?.case === "operationFailure") {
+				throw new WorldOperationError("world.agent.message.receive", result.value, "");
+			}
+			if (result?.case !== "message") {
+				throw new Error("world peer mailbox watch returned no message arm");
+			}
+			yield result.value;
+		}
+	}
+
+	/** Record one accepted local mailbox outcome. */
+	async ackPeerMessage(request: WorldPeerMessageAck, signal?: AbortSignal): Promise<WorldPeerMessageAckResult> {
+		const requestId = assertWorldRequestId(request.requestId.trim());
+		const messageObjectKey = requireTarget(request.messageObjectKey, "peer message object key");
+		if (request.outcome === PeerMessageAckOutcome.UNKNOWN) {
+			throw new Error("world peer message acknowledgement outcome is required");
+		}
+		const response = await this.#mutate(
+			"world.agent.message.receive",
+			{
+				requestId,
+				operation: {
+					case: "ackPeerMessage",
+					value: { messageObjectKey, outcome: request.outcome },
+				},
+			},
+			signal,
+		);
+		const result = expectResultArm(response, "world.agent.message.receive", "ackPeerMessage", requestId);
+		return mapPeerMessageAckResult(requestId, messageObjectKey, result);
 	}
 
 	/**
@@ -990,6 +1202,11 @@ export async function openResourceEndpoint(
 				children.push(child);
 				return { service: new WorldRuntimeResourceServiceClient(child.rpc), release: () => child.release() };
 			},
+			accessSession: resourceId => {
+				const child = transport.accessResource(resourceId);
+				children.push(child);
+				return { service: new LlmSessionResourceServiceClient(child.rpc), release: () => child.release() };
+			},
 			close: async () => {
 				try {
 					// Best effort, and never at the cost of the root release: a child
@@ -1069,11 +1286,74 @@ function mapSessionControl(
 	};
 }
 
+function mapPeerMessageSendResult(
+	requestId: string,
+	clientMessageId: string,
+	result: WorldSendPeerMessageResult,
+	outcome: PeerMessageOutcome,
+): WorldPeerMessageSendResult {
+	const messageObjectKey = requireExactTarget(result.messageObjectKey ?? "", "peer message object key");
+	const returnedClientMessageId = requireExactTarget(result.clientMessageId ?? "", "peer client message id");
+	if (returnedClientMessageId !== clientMessageId) {
+		throw new Error(
+			`world peer message send returned client message ID ${returnedClientMessageId}, expected ${clientMessageId}`,
+		);
+	}
+	const toAgentObjectKey = requireExactTarget(result.toAgentObjectKey ?? "", "target agent object key");
+	const targetLlmSessionObjectKey = result.targetLlmSessionObjectKey ?? "";
+	if (outcome === PeerMessageOutcome.QUEUED_LIVE) {
+		requireExactTarget(targetLlmSessionObjectKey, "target session object key");
+	} else if (targetLlmSessionObjectKey) {
+		throw new Error("world inactive peer message send returned a target session");
+	}
+	const inboxSequence = result.inboxSequence ?? 0n;
+	if (inboxSequence <= 0n) throw new Error("world peer message send returned no positive inbox sequence");
+	return {
+		requestId,
+		messageObjectKey,
+		clientMessageId: returnedClientMessageId,
+		toAgentObjectKey,
+		targetLlmSessionObjectKey,
+		inboxSequence,
+		outcome,
+		replayed: result.replayed ?? false,
+	};
+}
+
+function mapPeerMessageAckResult(
+	requestId: string,
+	messageObjectKey: string,
+	result: WorldAckPeerMessageResult,
+): WorldPeerMessageAckResult {
+	const returnedMessageObjectKey = requireExactTarget(result.messageObjectKey ?? "", "peer message object key");
+	if (returnedMessageObjectKey !== messageObjectKey) {
+		throw new Error(
+			`world peer message acknowledgement returned message key ${returnedMessageObjectKey}, expected ${messageObjectKey}`,
+		);
+	}
+	return {
+		requestId,
+		messageObjectKey: returnedMessageObjectKey,
+		consumedByLlmSessionObjectKey: requireExactTarget(
+			result.consumedByLlmSessionObjectKey ?? "",
+			"consuming session object key",
+		),
+		consumedAt: requireExactTarget(result.consumedAt ?? "", "peer message consumption time"),
+		replayed: result.replayed ?? false,
+	};
+}
+
 /** Reject an empty target before it costs a connection. */
 function requireTarget(value: string, label: string): string {
 	const trimmed = value.trim();
 	if (!trimmed) throw new Error(`world ${label} is required`);
 	return trimmed;
+}
+
+/** Reject missing or rewritten identifiers before they cross the World boundary. */
+function requireExactTarget(value: string, label: string): string {
+	if (!value || value.trim() !== value) throw new Error(`world ${label} is invalid`);
+	return value;
 }
 
 /** One caller signal combined with a client-owned deadline. */

@@ -12,6 +12,80 @@ import { ProjectionSnapshot } from "./projection.pb.js";
 export const protobufPackage = "glados.sdk.llmsession";
 
 /**
+ * TaskArtifactStreamKind identifies one retained Task worker stream.
+ *
+ * @generated from enum glados.sdk.llmsession.TaskArtifactStreamKind
+ */
+export enum TaskArtifactStreamKind {
+	/**
+	 * TASK_ARTIFACT_STREAM_KIND_UNKNOWN is invalid or unset.
+	 *
+	 * @generated from enum value: TASK_ARTIFACT_STREAM_KIND_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * TASK_ARTIFACT_STREAM_KIND_STDOUT is retained standard output.
+	 *
+	 * @generated from enum value: TASK_ARTIFACT_STREAM_KIND_STDOUT = 1;
+	 */
+	STDOUT = 1,
+
+	/**
+	 * TASK_ARTIFACT_STREAM_KIND_STDERR is retained standard error.
+	 *
+	 * @generated from enum value: TASK_ARTIFACT_STREAM_KIND_STDERR = 2;
+	 */
+	STDERR = 2,
+}
+
+export const TaskArtifactStreamKind_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.TaskArtifactStreamKind",
+	[
+		[0, "TASK_ARTIFACT_STREAM_KIND_UNKNOWN"],
+		[1, "TASK_ARTIFACT_STREAM_KIND_STDOUT"],
+		[2, "TASK_ARTIFACT_STREAM_KIND_STDERR"],
+	],
+);
+
+/**
+ * WorldAgentMessageChannel identifies the delivery contract in projections.
+ *
+ * @generated from enum glados.sdk.llmsession.WorldAgentMessageChannel
+ */
+export enum WorldAgentMessageChannel {
+	/**
+	 * WORLD_AGENT_MESSAGE_CHANNEL_UNKNOWN is unset legacy steering.
+	 *
+	 * @generated from enum value: WORLD_AGENT_MESSAGE_CHANNEL_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * WORLD_AGENT_MESSAGE_CHANNEL_STEERING is explicit lane steering.
+	 *
+	 * @generated from enum value: WORLD_AGENT_MESSAGE_CHANNEL_STEERING = 1;
+	 */
+	STEERING = 1,
+
+	/**
+	 * WORLD_AGENT_MESSAGE_CHANNEL_HUB is peer coordination.
+	 *
+	 * @generated from enum value: WORLD_AGENT_MESSAGE_CHANNEL_HUB = 2;
+	 */
+	HUB = 2,
+}
+
+export const WorldAgentMessageChannel_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.WorldAgentMessageChannel",
+	[
+		[0, "WORLD_AGENT_MESSAGE_CHANNEL_UNKNOWN"],
+		[1, "WORLD_AGENT_MESSAGE_CHANNEL_STEERING"],
+		[2, "WORLD_AGENT_MESSAGE_CHANNEL_HUB"],
+	],
+);
+
+/**
  * ControlStatus records control acceptance state.
  *
  * @generated from enum glados.sdk.llmsession.ControlStatus
@@ -108,6 +182,23 @@ export enum WorldRuntimeOperation {
 	 * @generated from enum value: WORLD_RUNTIME_OPERATION_SESSION_INTERRUPT = 5;
 	 */
 	SESSION_INTERRUPT = 5,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_AGENT_MESSAGE_SEND requires "world.agent.message.send".
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_AGENT_MESSAGE_SEND = 6;
+	 */
+	AGENT_MESSAGE_SEND = 6,
+
+	/**
+	 * WORLD_RUNTIME_OPERATION_AGENT_MESSAGE_RECEIVE requires
+	 * "world.agent.message.receive". It covers both the mailbox watch and the
+	 * acknowledgement that ends one delivery, because a caller that can claim a
+	 * message must be able to settle it.
+	 *
+	 * @generated from enum value: WORLD_RUNTIME_OPERATION_AGENT_MESSAGE_RECEIVE = 7;
+	 */
+	AGENT_MESSAGE_RECEIVE = 7,
 }
 
 export const WorldRuntimeOperation_Enum = /* @__PURE__ */ createEnumType(
@@ -119,6 +210,146 @@ export const WorldRuntimeOperation_Enum = /* @__PURE__ */ createEnumType(
 		[3, "WORLD_RUNTIME_OPERATION_QUESTION_ANSWER"],
 		[4, "WORLD_RUNTIME_OPERATION_SESSION_INPUT"],
 		[5, "WORLD_RUNTIME_OPERATION_SESSION_INTERRUPT"],
+		[6, "WORLD_RUNTIME_OPERATION_AGENT_MESSAGE_SEND"],
+		[7, "WORLD_RUNTIME_OPERATION_AGENT_MESSAGE_RECEIVE"],
+	],
+);
+
+/**
+ * WorldTaskAgentSource identifies where the worker definition was resolved.
+ *
+ * @generated from enum glados.sdk.llmsession.WorldTaskAgentSource
+ */
+export enum WorldTaskAgentSource {
+	/**
+	 * WORLD_TASK_AGENT_SOURCE_UNKNOWN is the invalid unset value.
+	 *
+	 * @generated from enum value: WORLD_TASK_AGENT_SOURCE_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * WORLD_TASK_AGENT_SOURCE_BUNDLED is supplied with Oh My Pi.
+	 *
+	 * @generated from enum value: WORLD_TASK_AGENT_SOURCE_BUNDLED = 1;
+	 */
+	BUNDLED = 1,
+
+	/**
+	 * WORLD_TASK_AGENT_SOURCE_USER is defined in the user's configuration.
+	 *
+	 * @generated from enum value: WORLD_TASK_AGENT_SOURCE_USER = 2;
+	 */
+	USER = 2,
+
+	/**
+	 * WORLD_TASK_AGENT_SOURCE_PROJECT is defined by the current project.
+	 *
+	 * @generated from enum value: WORLD_TASK_AGENT_SOURCE_PROJECT = 3;
+	 */
+	PROJECT = 3,
+}
+
+export const WorldTaskAgentSource_Enum = /* @__PURE__ */ createEnumType("glados.sdk.llmsession.WorldTaskAgentSource", [
+	[0, "WORLD_TASK_AGENT_SOURCE_UNKNOWN"],
+	[1, "WORLD_TASK_AGENT_SOURCE_BUNDLED"],
+	[2, "WORLD_TASK_AGENT_SOURCE_USER"],
+	[3, "WORLD_TASK_AGENT_SOURCE_PROJECT"],
+]);
+
+/**
+ * PeerMessageOutcome is the stable delivery receipt for one stored message.
+ *
+ * @generated from enum glados.sdk.llmsession.PeerMessageOutcome
+ */
+export enum PeerMessageOutcome {
+	/**
+	 * PEER_MESSAGE_OUTCOME_UNKNOWN means the outcome is unset.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_OUTCOME_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * PEER_MESSAGE_OUTCOME_QUEUED_LIVE stored the message against a live exact
+	 * target session.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_OUTCOME_QUEUED_LIVE = 1;
+	 */
+	QUEUED_LIVE = 1,
+
+	/**
+	 * PEER_MESSAGE_OUTCOME_QUEUED_INACTIVE stored the message with an empty
+	 * target session because the Agent has no active Task session. The Agent's
+	 * next sole active Task session claims it. Send never resumes a peer.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_OUTCOME_QUEUED_INACTIVE = 2;
+	 */
+	QUEUED_INACTIVE = 2,
+}
+
+export const PeerMessageOutcome_Enum = /* @__PURE__ */ createEnumType("glados.sdk.llmsession.PeerMessageOutcome", [
+	[0, "PEER_MESSAGE_OUTCOME_UNKNOWN"],
+	[1, "PEER_MESSAGE_OUTCOME_QUEUED_LIVE"],
+	[2, "PEER_MESSAGE_OUTCOME_QUEUED_INACTIVE"],
+]);
+
+/**
+ * PeerMessageAckOutcome is the accepted local delivery outcome a receiver
+ * acknowledges.
+ *
+ * The receiver reports which local path accepted the record because a mailbox
+ * router, a waiter, and a queue settle a message differently, and redelivery
+ * after a crash has to be able to tell them apart.
+ *
+ * @generated from enum glados.sdk.llmsession.PeerMessageAckOutcome
+ */
+export enum PeerMessageAckOutcome {
+	/**
+	 * PEER_MESSAGE_ACK_OUTCOME_UNKNOWN means no outcome was selected, which is
+	 * never an accepted acknowledgement.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_ACK_OUTCOME_UNKNOWN = 0;
+	 */
+	UNKNOWN = 0,
+
+	/**
+	 * PEER_MESSAGE_ACK_OUTCOME_WAITER means an active waiter claimed it first.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_ACK_OUTCOME_WAITER = 1;
+	 */
+	WAITER = 1,
+
+	/**
+	 * PEER_MESSAGE_ACK_OUTCOME_INJECTED means it was injected into the live run.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_ACK_OUTCOME_INJECTED = 2;
+	 */
+	INJECTED = 2,
+
+	/**
+	 * PEER_MESSAGE_ACK_OUTCOME_QUEUED means the local bridge queued it.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_ACK_OUTCOME_QUEUED = 3;
+	 */
+	QUEUED = 3,
+
+	/**
+	 * PEER_MESSAGE_ACK_OUTCOME_WOKEN means it woke an idle local run.
+	 *
+	 * @generated from enum value: PEER_MESSAGE_ACK_OUTCOME_WOKEN = 4;
+	 */
+	WOKEN = 4,
+}
+
+export const PeerMessageAckOutcome_Enum = /* @__PURE__ */ createEnumType(
+	"glados.sdk.llmsession.PeerMessageAckOutcome",
+	[
+		[0, "PEER_MESSAGE_ACK_OUTCOME_UNKNOWN"],
+		[1, "PEER_MESSAGE_ACK_OUTCOME_WAITER"],
+		[2, "PEER_MESSAGE_ACK_OUTCOME_INJECTED"],
+		[3, "PEER_MESSAGE_ACK_OUTCOME_QUEUED"],
+		[4, "PEER_MESSAGE_ACK_OUTCOME_WOKEN"],
 	],
 );
 
@@ -223,6 +454,40 @@ export enum WorldOperationFailureCode {
 	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_REJECTED = 5;
 	 */
 	REJECTED = 5,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_AMBIGUOUS_ACTIVE_PEER means the named peer has
+	 * two or more active Task sessions. Choosing one would deliver to a run the
+	 * caller did not address.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_AMBIGUOUS_ACTIVE_PEER = 6;
+	 */
+	AMBIGUOUS_ACTIVE_PEER = 6,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_TARGET_SESSION_TERMINAL means a reply or
+	 * parent target named an exact session that has already settled. It is
+	 * decided before the message is stored.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_TARGET_SESSION_TERMINAL = 7;
+	 */
+	TARGET_SESSION_TERMINAL = 7,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_PEER_IDENTITY_CONFLICT means the peer ID is
+	 * already reserved for a different intent, parent, or profile digest.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_PEER_IDENTITY_CONFLICT = 8;
+	 */
+	PEER_IDENTITY_CONFLICT = 8,
+
+	/**
+	 * WORLD_OPERATION_FAILURE_CODE_UNSUPPORTED_WORLD_RUNTIME means the requested
+	 * child runtime is not admitted by daemon custody.
+	 *
+	 * @generated from enum value: WORLD_OPERATION_FAILURE_CODE_UNSUPPORTED_WORLD_RUNTIME = 9;
+	 */
+	UNSUPPORTED_WORLD_RUNTIME = 9,
 }
 
 export const WorldOperationFailureCode_Enum = /* @__PURE__ */ createEnumType(
@@ -234,6 +499,10 @@ export const WorldOperationFailureCode_Enum = /* @__PURE__ */ createEnumType(
 		[3, "WORLD_OPERATION_FAILURE_CODE_RETRY_CONFLICT"],
 		[4, "WORLD_OPERATION_FAILURE_CODE_UNAVAILABLE"],
 		[5, "WORLD_OPERATION_FAILURE_CODE_REJECTED"],
+		[6, "WORLD_OPERATION_FAILURE_CODE_AMBIGUOUS_ACTIVE_PEER"],
+		[7, "WORLD_OPERATION_FAILURE_CODE_TARGET_SESSION_TERMINAL"],
+		[8, "WORLD_OPERATION_FAILURE_CODE_PEER_IDENTITY_CONFLICT"],
+		[9, "WORLD_OPERATION_FAILURE_CODE_UNSUPPORTED_WORLD_RUNTIME"],
 	],
 );
 
@@ -643,6 +912,60 @@ export interface AgentMessageSummary {
 	 * @generated from field: string failure = 14;
 	 */
 	failure?: string;
+	/**
+	 * Channel is the delivery contract this message travels under.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldAgentMessageChannel channel = 15;
+	 */
+	channel?: WorldAgentMessageChannel;
+	/**
+	 * InboxSequence orders this message within its target AgentInbox.
+	 *
+	 * @generated from field: uint64 inbox_sequence = 16;
+	 */
+	inboxSequence?: bigint;
+	/**
+	 * ClientMessageId is the sender's own identity for this message.
+	 *
+	 * @generated from field: string client_message_id = 17;
+	 */
+	clientMessageId?: string;
+	/**
+	 * ReplyToClientMessageId names the ClientMessageId this message answers.
+	 *
+	 * @generated from field: string reply_to_client_message_id = 18;
+	 */
+	replyToClientMessageId?: string;
+	/**
+	 * ExpectsReply records that the sender is waiting for a correlated answer.
+	 *
+	 * @generated from field: bool expects_reply = 19;
+	 */
+	expectsReply?: boolean;
+	/**
+	 * ConsumedByLlmSessionObjectKey identifies the run that claimed this message.
+	 *
+	 * @generated from field: string consumed_by_llm_session_object_key = 20;
+	 */
+	consumedByLlmSessionObjectKey?: string;
+	/**
+	 * ConsumedAt is when the target run acknowledged local acceptance.
+	 *
+	 * @generated from field: string consumed_at = 21;
+	 */
+	consumedAt?: string;
+	/**
+	 * ConsumptionOutcome records the accepted local delivery path.
+	 *
+	 * @generated from field: glados.sdk.llmsession.PeerMessageAckOutcome consumption_outcome = 22;
+	 */
+	consumptionOutcome?: PeerMessageAckOutcome;
+	/**
+	 * QueueOutcome records whether storage targeted a live or inactive peer.
+	 *
+	 * @generated from field: glados.sdk.llmsession.PeerMessageOutcome queue_outcome = 23;
+	 */
+	queueOutcome?: PeerMessageOutcome;
 }
 
 export const AgentMessageSummary: MessageType<AgentMessageSummary> = /* @__PURE__ */ createMessageType({
@@ -692,6 +1015,45 @@ export const AgentMessageSummary: MessageType<AgentMessageSummary> = /* @__PURE_
 		{ no: 12, name: "delivered_at", kind: "scalar", T: ScalarType.STRING },
 		{ no: 13, name: "acked_at", kind: "scalar", T: ScalarType.STRING },
 		{ no: 14, name: "failure", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 15,
+			name: "channel",
+			kind: "enum",
+			T: WorldAgentMessageChannel_Enum,
+		},
+		{ no: 16, name: "inbox_sequence", kind: "scalar", T: ScalarType.UINT64 },
+		{
+			no: 17,
+			name: "client_message_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 18,
+			name: "reply_to_client_message_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 19, name: "expects_reply", kind: "scalar", T: ScalarType.BOOL },
+		{
+			no: 20,
+			name: "consumed_by_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 21, name: "consumed_at", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 22,
+			name: "consumption_outcome",
+			kind: "enum",
+			T: PeerMessageAckOutcome_Enum,
+		},
+		{
+			no: 23,
+			name: "queue_outcome",
+			kind: "enum",
+			T: PeerMessageOutcome_Enum,
+		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -963,6 +1325,559 @@ export const CustodySummary: MessageType<CustodySummary> = /* @__PURE__ */ creat
 });
 
 /**
+ * TaskProgressSummary is the bounded live Task projection.
+ *
+ * It carries exactly the fields a watcher needs to rebuild running progress
+ * without reading the transcript, and nothing terminal: a live snapshot must
+ * not imply a result the worker has not yielded.
+ *
+ * @generated from message glados.sdk.llmsession.TaskProgressSummary
+ */
+export interface TaskProgressSummary {
+	/**
+	 * LastIntent is the worker's latest short intent line.
+	 *
+	 * @generated from field: string last_intent = 1;
+	 */
+	lastIntent?: string;
+	/**
+	 * Tokens is the running total token count.
+	 *
+	 * @generated from field: int64 tokens = 2;
+	 */
+	tokens?: bigint;
+	/**
+	 * Requests is the running provider request count.
+	 *
+	 * @generated from field: uint64 requests = 3;
+	 */
+	requests?: bigint;
+	/**
+	 * ContextTokens is the current context occupancy.
+	 *
+	 * @generated from field: int64 context_tokens = 4;
+	 */
+	contextTokens?: bigint;
+	/**
+	 * ContextWindow is the selected model context window.
+	 *
+	 * @generated from field: int64 context_window = 5;
+	 */
+	contextWindow?: bigint;
+	/**
+	 * ResolvedModel is the model the worker is running under.
+	 *
+	 * @generated from field: string resolved_model = 6;
+	 */
+	resolvedModel?: string;
+	/**
+	 * DurationMs is elapsed worker runtime in milliseconds.
+	 *
+	 * @generated from field: uint64 duration_ms = 7;
+	 */
+	durationMs?: bigint;
+	/**
+	 * ActiveToolName is the tool currently executing when one is.
+	 *
+	 * @generated from field: string active_tool_name = 8;
+	 */
+	activeToolName?: string;
+	/**
+	 * UpdatedAt is when this progress row was observed.
+	 *
+	 * @generated from field: string updated_at = 9;
+	 */
+	updatedAt?: string;
+	/**
+	 * Cost is the running accumulated total cost. The worker tracks this on
+	 * progress alongside tokens, so a live projection that omitted it could not
+	 * rebuild the running display.
+	 *
+	 * @generated from field: double cost = 10;
+	 */
+	cost?: number;
+}
+
+export const TaskProgressSummary: MessageType<TaskProgressSummary> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskProgressSummary",
+	fields: [
+		{ no: 1, name: "last_intent", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "tokens", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 3, name: "requests", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 4, name: "context_tokens", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 5, name: "context_window", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 6, name: "resolved_model", kind: "scalar", T: ScalarType.STRING },
+		{ no: 7, name: "duration_ms", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 8, name: "active_tool_name", kind: "scalar", T: ScalarType.STRING },
+		{ no: 9, name: "updated_at", kind: "scalar", T: ScalarType.STRING },
+		{ no: 10, name: "cost", kind: "scalar", T: ScalarType.DOUBLE },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * TaskUsageCost is the accumulated billing breakdown for one Task worker.
+ *
+ * The components are floating point because they are currency amounts the
+ * worker accumulates per turn, not token counts. Total is carried rather than
+ * summed by the reader: the worker accumulates it from the provider's own cost
+ * records, and re-deriving it here would disagree whenever a provider reports a
+ * total its components do not add up to.
+ *
+ * @generated from message glados.sdk.llmsession.TaskUsageCost
+ */
+export interface TaskUsageCost {
+	/**
+	 * Input is the accumulated non-cached input cost.
+	 *
+	 * @generated from field: double input = 1;
+	 */
+	input?: number;
+	/**
+	 * Output is the accumulated output cost.
+	 *
+	 * @generated from field: double output = 2;
+	 */
+	output?: number;
+	/**
+	 * CacheRead is the accumulated prompt-cache read cost.
+	 *
+	 * @generated from field: double cache_read = 3;
+	 */
+	cacheRead?: number;
+	/**
+	 * CacheWrite is the accumulated prompt-cache write cost.
+	 *
+	 * @generated from field: double cache_write = 4;
+	 */
+	cacheWrite?: number;
+	/**
+	 * Total is the accumulated total cost as the worker reported it.
+	 *
+	 * @generated from field: double total = 5;
+	 */
+	total?: number;
+}
+
+export const TaskUsageCost: MessageType<TaskUsageCost> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskUsageCost",
+	fields: [
+		{ no: 1, name: "input", kind: "scalar", T: ScalarType.DOUBLE },
+		{ no: 2, name: "output", kind: "scalar", T: ScalarType.DOUBLE },
+		{ no: 3, name: "cache_read", kind: "scalar", T: ScalarType.DOUBLE },
+		{ no: 4, name: "cache_write", kind: "scalar", T: ScalarType.DOUBLE },
+		{ no: 5, name: "total", kind: "scalar", T: ScalarType.DOUBLE },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * TaskUsageSummary is the complete typed provider usage for one Task worker.
+ *
+ * Field names match the worker's own accumulated Usage object exactly, so a
+ * consumer maps it back without a rename table. Renaming these onto the World
+ * LlmUsageEvent spelling would silently merge two different cache buckets.
+ *
+ * @generated from message glados.sdk.llmsession.TaskUsageSummary
+ */
+export interface TaskUsageSummary {
+	/**
+	 * Input is the non-cached conversation input token total.
+	 *
+	 * @generated from field: int64 input = 1;
+	 */
+	input?: bigint;
+	/**
+	 * Output is the conversation output token total, including thinking and
+	 * tool-call argument tokens.
+	 *
+	 * @generated from field: int64 output = 2;
+	 */
+	output?: bigint;
+	/**
+	 * CacheRead is the token total read from the prompt cache.
+	 *
+	 * @generated from field: int64 cache_read = 3;
+	 */
+	cacheRead?: bigint;
+	/**
+	 * CacheWrite is the token total written to the prompt cache.
+	 *
+	 * @generated from field: int64 cache_write = 4;
+	 */
+	cacheWrite?: bigint;
+	/**
+	 * TotalTokens is the worker-reported total, including provider-side
+	 * orchestration tokens when reported. It is not the sum of the fields above.
+	 *
+	 * @generated from field: int64 total_tokens = 5;
+	 */
+	totalTokens?: bigint;
+	/**
+	 * ReasoningTokens is the reasoning token total, always a subset of Output.
+	 *
+	 * The worker's accumulator initializes this to zero and adds to it every
+	 * turn, so on a Task result zero means zero rather than unknown.
+	 *
+	 * @generated from field: int64 reasoning_tokens = 6;
+	 */
+	reasoningTokens?: bigint;
+	/**
+	 * Cost is the accumulated billing breakdown.
+	 *
+	 * @generated from field: glados.sdk.llmsession.TaskUsageCost cost = 7;
+	 */
+	cost?: TaskUsageCost;
+}
+
+export const TaskUsageSummary: MessageType<TaskUsageSummary> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskUsageSummary",
+	fields: [
+		{ no: 1, name: "input", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 2, name: "output", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 3, name: "cache_read", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 4, name: "cache_write", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 5, name: "total_tokens", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 6, name: "reasoning_tokens", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 7, name: "cost", kind: "message", T: () => TaskUsageCost },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * TaskExtractedToolData is one tool's extracted structured observations.
+ *
+ * The worker keys these by tool name and appends one entry per extraction, so
+ * a tool contributes an ordered list rather than a single value. The envelope
+ * is typed because routing and attribution are GLaDOS facts; each value stays
+ * canonical JSON because the extracted shape is defined by the tool that
+ * produced it and no World wire type describes it.
+ *
+ * @generated from message glados.sdk.llmsession.TaskExtractedToolData
+ */
+export interface TaskExtractedToolData {
+	/**
+	 * ToolName is the tool that produced these extractions.
+	 *
+	 * @generated from field: string tool_name = 1;
+	 */
+	toolName?: string;
+	/**
+	 * Values are the extractions in the order the tool emitted them. Order is
+	 * meaningful: it is the order the tool ran.
+	 *
+	 * @generated from field: repeated string values = 2;
+	 */
+	values?: string[];
+}
+
+export const TaskExtractedToolData: MessageType<TaskExtractedToolData> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskExtractedToolData",
+	fields: [
+		{ no: 1, name: "tool_name", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "values",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			repeated: true,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * TaskRetryFailure records a worker that exited because its auto-retry loop
+ * gave up, either because a retry-after exceeded the cap or because every
+ * attempt was exhausted.
+ *
+ * It is a distinct message rather than a string so a parent can surface a
+ * rate-limited outcome instead of a generic failure without parsing prose.
+ *
+ * @generated from message glados.sdk.llmsession.TaskRetryFailure
+ */
+export interface TaskRetryFailure {
+	/**
+	 * Attempt is the attempt number the worker gave up on.
+	 *
+	 * @generated from field: uint32 attempt = 1;
+	 */
+	attempt?: number;
+	/**
+	 * ErrorMessage is the error the final attempt reported.
+	 *
+	 * @generated from field: string error_message = 2;
+	 */
+	errorMessage?: string;
+}
+
+export const TaskRetryFailure: MessageType<TaskRetryFailure> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskRetryFailure",
+	fields: [
+		{ no: 1, name: "attempt", kind: "scalar", T: ScalarType.UINT32 },
+		{ no: 2, name: "error_message", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * TaskArtifactRef names one durable artifact retained for a Task result.
+ *
+ * @generated from message glados.sdk.llmsession.TaskArtifactRef
+ */
+export interface TaskArtifactRef {
+	/**
+	 * ArtifactRef identifies the retained artifact.
+	 *
+	 * External identity. It addresses executor-retained storage, not a World
+	 * object, so it names nothing the graph could resolve.
+	 *
+	 * @generated from field: string artifact_ref = 1;
+	 */
+	artifactRef?: string;
+	/**
+	 * StreamKind identifies the retained output stream.
+	 *
+	 * @generated from field: glados.sdk.llmsession.TaskArtifactStreamKind stream_kind = 2;
+	 */
+	streamKind?: TaskArtifactStreamKind;
+	/**
+	 * RetainedBytes is the retained byte count.
+	 *
+	 * @generated from field: uint64 retained_bytes = 3;
+	 */
+	retainedBytes?: bigint;
+	/**
+	 * ProducedBytes is the full byte count produced before any bound applied.
+	 *
+	 * @generated from field: uint64 produced_bytes = 4;
+	 */
+	producedBytes?: bigint;
+	/**
+	 * Truncated reports that the source exceeded its retention bound.
+	 *
+	 * @generated from field: bool truncated = 5;
+	 */
+	truncated?: boolean;
+	/**
+	 * ContentDigest identifies retained content.
+	 *
+	 * @generated from field: string content_digest = 6;
+	 */
+	contentDigest?: string;
+}
+
+export const TaskArtifactRef: MessageType<TaskArtifactRef> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskArtifactRef",
+	fields: [
+		{ no: 1, name: "artifact_ref", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 2,
+			name: "stream_kind",
+			kind: "enum",
+			T: TaskArtifactStreamKind_Enum,
+		},
+		{ no: 3, name: "retained_bytes", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 4, name: "produced_bytes", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 5, name: "truncated", kind: "scalar", T: ScalarType.BOOL },
+		{ no: 6, name: "content_digest", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * TaskResultSummary is the complete terminal Task projection.
+ *
+ * A consumer rebuilds its own terminal result from these fields alone. Every
+ * field the worker reported is projected under its own name so nothing has to
+ * be inferred from output text.
+ *
+ * @generated from message glados.sdk.llmsession.TaskResultSummary
+ */
+export interface TaskResultSummary {
+	/**
+	 * LastIntent is the worker's final short intent line.
+	 *
+	 * @generated from field: string last_intent = 1;
+	 */
+	lastIntent?: string;
+	/**
+	 * ExitCode is the worker process exit status.
+	 *
+	 * @generated from field: int32 exit_code = 2;
+	 */
+	exitCode?: number;
+	/**
+	 * Output is the retained worker output.
+	 *
+	 * @generated from field: string output = 3;
+	 */
+	output?: string;
+	/**
+	 * Stderr is the retained worker error output.
+	 *
+	 * @generated from field: string stderr = 4;
+	 */
+	stderr?: string;
+	/**
+	 * Truncated reports that Output or Stderr hit its retention bound.
+	 *
+	 * @generated from field: bool truncated = 5;
+	 */
+	truncated?: boolean;
+	/**
+	 * StructuredOutput is the worker's complete structured-completion envelope as
+	 * canonical JSON: its schema source, schema mode, validation status, parsed
+	 * data, and validation error. It is carried whole rather than split because
+	 * data is shaped by a caller-supplied schema that no fixed wire type can
+	 * describe, and separating the metadata from the payload it describes would
+	 * let a reader see a status without the data it judged.
+	 *
+	 * @generated from field: string structured_output = 6;
+	 */
+	structuredOutput?: string;
+	/**
+	 * DurationMs is total worker runtime in milliseconds.
+	 *
+	 * @generated from field: uint64 duration_ms = 7;
+	 */
+	durationMs?: bigint;
+	/**
+	 * Tokens is the total token count.
+	 *
+	 * @generated from field: int64 tokens = 8;
+	 */
+	tokens?: bigint;
+	/**
+	 * Requests is the total provider request count.
+	 *
+	 * @generated from field: uint64 requests = 9;
+	 */
+	requests?: bigint;
+	/**
+	 * ContextTokens is the final context occupancy.
+	 *
+	 * @generated from field: int64 context_tokens = 10;
+	 */
+	contextTokens?: bigint;
+	/**
+	 * ContextWindow is the selected model context window.
+	 *
+	 * @generated from field: int64 context_window = 11;
+	 */
+	contextWindow?: bigint;
+	/**
+	 * ResolvedModel is the model the worker actually ran under.
+	 *
+	 * @generated from field: string resolved_model = 12;
+	 */
+	resolvedModel?: string;
+	/**
+	 * ResolvedModelIsFallback reports that ResolvedModel is not the requested
+	 * model.
+	 *
+	 * @generated from field: bool resolved_model_is_fallback = 13;
+	 */
+	resolvedModelIsFallback?: boolean;
+	/**
+	 * Error is the normalized terminal error summary.
+	 *
+	 * @generated from field: string error = 14;
+	 */
+	error?: string;
+	/**
+	 * Aborted reports that the worker was cancelled rather than completing.
+	 *
+	 * @generated from field: bool aborted = 15;
+	 */
+	aborted?: boolean;
+	/**
+	 * AbortReason is the operator-visible cancellation reason.
+	 *
+	 * @generated from field: string abort_reason = 16;
+	 */
+	abortReason?: string;
+	/**
+	 * Usage is the complete typed provider usage.
+	 *
+	 * @generated from field: glados.sdk.llmsession.TaskUsageSummary usage = 17;
+	 */
+	usage?: TaskUsageSummary;
+	/**
+	 * ExtractedToolData are the ordered per-tool extractions.
+	 *
+	 * @generated from field: repeated glados.sdk.llmsession.TaskExtractedToolData extracted_tool_data = 18;
+	 */
+	extractedToolData?: TaskExtractedToolData[];
+	/**
+	 * RetryFailure is present only when the worker exhausted its retry budget.
+	 *
+	 * @generated from field: glados.sdk.llmsession.TaskRetryFailure retry_failure = 19;
+	 */
+	retryFailure?: TaskRetryFailure;
+	/**
+	 * Artifacts are the durable artifacts retained for this result.
+	 *
+	 * @generated from field: repeated glados.sdk.llmsession.TaskArtifactRef artifacts = 20;
+	 */
+	artifacts?: TaskArtifactRef[];
+}
+
+export const TaskResultSummary: MessageType<TaskResultSummary> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.TaskResultSummary",
+	fields: [
+		{ no: 1, name: "last_intent", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "exit_code", kind: "scalar", T: ScalarType.INT32 },
+		{ no: 3, name: "output", kind: "scalar", T: ScalarType.STRING },
+		{ no: 4, name: "stderr", kind: "scalar", T: ScalarType.STRING },
+		{ no: 5, name: "truncated", kind: "scalar", T: ScalarType.BOOL },
+		{
+			no: 6,
+			name: "structured_output",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 7, name: "duration_ms", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 8, name: "tokens", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 9, name: "requests", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 10, name: "context_tokens", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 11, name: "context_window", kind: "scalar", T: ScalarType.INT64 },
+		{ no: 12, name: "resolved_model", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 13,
+			name: "resolved_model_is_fallback",
+			kind: "scalar",
+			T: ScalarType.BOOL,
+		},
+		{ no: 14, name: "error", kind: "scalar", T: ScalarType.STRING },
+		{ no: 15, name: "aborted", kind: "scalar", T: ScalarType.BOOL },
+		{ no: 16, name: "abort_reason", kind: "scalar", T: ScalarType.STRING },
+		{ no: 17, name: "usage", kind: "message", T: () => TaskUsageSummary },
+		{
+			no: 18,
+			name: "extracted_tool_data",
+			kind: "message",
+			T: () => TaskExtractedToolData,
+			repeated: true,
+		},
+		{
+			no: 19,
+			name: "retry_failure",
+			kind: "message",
+			T: () => TaskRetryFailure,
+		},
+		{
+			no: 20,
+			name: "artifacts",
+			kind: "message",
+			T: () => TaskArtifactRef,
+			repeated: true,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
  * SessionSnapshot is the complete monitor projection for one LlmSession.
  *
  * @generated from message glados.sdk.llmsession.SessionSnapshot
@@ -1004,6 +1919,21 @@ export interface SessionSnapshot {
 	 * @generated from field: repeated glados.sdk.llmsession.CustodySummary custody = 6;
 	 */
 	custody?: CustodySummary[];
+	/**
+	 * Progress is the bounded live Task progress projection. It is present while
+	 * the run is live so a watcher can rebuild progress without reading the
+	 * transcript.
+	 *
+	 * @generated from field: glados.sdk.llmsession.TaskProgressSummary progress = 7;
+	 */
+	progress?: TaskProgressSummary;
+	/**
+	 * TaskResult is the complete terminal Task projection, present only after the
+	 * worker's terminal record is accepted.
+	 *
+	 * @generated from field: glados.sdk.llmsession.TaskResultSummary task_result = 8;
+	 */
+	taskResult?: TaskResultSummary;
 }
 
 export const SessionSnapshot: MessageType<SessionSnapshot> = /* @__PURE__ */ createMessageType({
@@ -1032,6 +1962,18 @@ export const SessionSnapshot: MessageType<SessionSnapshot> = /* @__PURE__ */ cre
 			kind: "message",
 			T: () => CustodySummary,
 			repeated: true,
+		},
+		{
+			no: 7,
+			name: "progress",
+			kind: "message",
+			T: () => TaskProgressSummary,
+		},
+		{
+			no: 8,
+			name: "task_result",
+			kind: "message",
+			T: () => TaskResultSummary,
 		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
@@ -1127,6 +2069,21 @@ export interface IntentKeySource {
 	 * @generated from field: string resume_session_object_key = 9;
 	 */
 	resumeSessionObjectKey?: string;
+	/**
+	 * PeerId is the reserved coordination peer identity for delegated work.
+	 * Empty PeerId and WorkerProfileDigest append no tuple part, so every
+	 * identity computed before this field existed keeps its exact key.
+	 *
+	 * @generated from field: string peer_id = 10;
+	 */
+	peerId?: string;
+	/**
+	 * WorkerProfileDigest is the lowercase SHA-256 of the frozen worker profile.
+	 * It is required whenever PeerId is set, and rejected when PeerId is empty.
+	 *
+	 * @generated from field: string worker_profile_digest = 11;
+	 */
+	workerProfileDigest?: string;
 }
 
 export const IntentKeySource: MessageType<IntentKeySource> = /* @__PURE__ */ createMessageType({
@@ -1170,6 +2127,13 @@ export const IntentKeySource: MessageType<IntentKeySource> = /* @__PURE__ */ cre
 		{
 			no: 9,
 			name: "resume_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 10, name: "peer_id", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 11,
+			name: "worker_profile_digest",
 			kind: "scalar",
 			T: ScalarType.STRING,
 		},
@@ -1493,6 +2457,14 @@ export interface AgentSummary {
 	 * @generated from field: repeated string active_llm_session_object_keys = 5;
 	 */
 	activeLlmSessionObjectKeys?: string[];
+	/**
+	 * PeerId is the durable coordination peer identity, empty for an Agent that
+	 * holds none. It is projected separately from Name so a roster merges on
+	 * identity rather than on a display label.
+	 *
+	 * @generated from field: string peer_id = 6;
+	 */
+	peerId?: string;
 }
 
 export const AgentSummary: MessageType<AgentSummary> = /* @__PURE__ */ createMessageType({
@@ -1514,6 +2486,7 @@ export const AgentSummary: MessageType<AgentSummary> = /* @__PURE__ */ createMes
 			T: ScalarType.STRING,
 			repeated: true,
 		},
+		{ no: 6, name: "peer_id", kind: "scalar", T: ScalarType.STRING },
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
 });
@@ -2179,6 +3152,90 @@ export const AccessWorldRuntimeResponse: MessageType<AccessWorldRuntimeResponse>
 });
 
 /**
+ * WorldTaskAgentSpec is the durable child Agent identity for one Task.
+ *
+ * It is a request field rather than a set of loose columns because peer ID,
+ * profile, and digest are one identity claim: a submission that carried a peer
+ * ID without the profile it was reserved for could attach to work it does not
+ * describe.
+ *
+ * @generated from message glados.sdk.llmsession.WorldTaskAgentSpec
+ */
+export interface WorldTaskAgentSpec {
+	/**
+	 * PeerId is the final coordination ID reserved for this Task. It is exact:
+	 * GLaDOS never re-rolls it, so a caller that wants a generated name resolves
+	 * one before submitting.
+	 *
+	 * @generated from field: string peer_id = 1;
+	 */
+	peerId?: string;
+	/**
+	 * DisplayName is the generated or supplied label, kept separate from PeerId.
+	 *
+	 * @generated from field: string display_name = 2;
+	 */
+	displayName?: string;
+	/**
+	 * AgentType is the resolved agent-definition name.
+	 *
+	 * @generated from field: string agent_type = 3;
+	 */
+	agentType?: string;
+	/**
+	 * AgentSource records where the definition was resolved.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldTaskAgentSource agent_source = 4;
+	 */
+	agentSource?: WorldTaskAgentSource;
+	/**
+	 * Purpose is the trimmed assignment this child is accountable for.
+	 *
+	 * @generated from field: string purpose = 5;
+	 */
+	purpose?: string;
+	/**
+	 * WorkerProfile is the canonical worker profile encoding, at most 1 MiB. It
+	 * is bytes because the profile schema is owned and validated by the worker
+	 * runtime, and GLaDOS freezes and hashes exactly what it was handed.
+	 *
+	 * @generated from field: bytes worker_profile = 6;
+	 */
+	workerProfile?: Uint8Array;
+	/**
+	 * WorkerProfileDigest is the lowercase SHA-256 of WorkerProfile. It must
+	 * match the digest carried in the dispatch intent identity.
+	 *
+	 * @generated from field: string worker_profile_digest = 7;
+	 */
+	workerProfileDigest?: string;
+}
+
+export const WorldTaskAgentSpec: MessageType<WorldTaskAgentSpec> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldTaskAgentSpec",
+	fields: [
+		{ no: 1, name: "peer_id", kind: "scalar", T: ScalarType.STRING },
+		{ no: 2, name: "display_name", kind: "scalar", T: ScalarType.STRING },
+		{ no: 3, name: "agent_type", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 4,
+			name: "agent_source",
+			kind: "enum",
+			T: WorldTaskAgentSource_Enum,
+		},
+		{ no: 5, name: "purpose", kind: "scalar", T: ScalarType.STRING },
+		{ no: 6, name: "worker_profile", kind: "scalar", T: ScalarType.BYTES },
+		{
+			no: 7,
+			name: "worker_profile_digest",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
  * WorldDispatchSubmitRequest submits one child dispatch.
  *
  * There is no parent session field: the bound caller is the parent. A request
@@ -2240,13 +3297,21 @@ export interface WorldDispatchSubmitRequest {
 	intentIdentity?: DispatchIntentIdentity;
 	/**
 	 * ChildWorldOperations are the world.* permission IDs the child receives.
-	 * GLaDOS always keeps "read", "test", and "write"; it accepts only the five
+	 * GLaDOS always keeps "read", "test", and "write"; it accepts only the seven
 	 * world.* IDs and rejects any ID the caller itself lacks. An empty list
 	 * grants the child no world.* permission at all.
 	 *
 	 * @generated from field: repeated string child_world_operations = 9;
 	 */
 	childWorldOperations?: string[];
+	/**
+	 * TaskAgent requests one durable child Agent identity for this dispatch. When
+	 * it is absent the submission keeps the current behavior and creates no
+	 * coordination peer.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldTaskAgentSpec task_agent = 10;
+	 */
+	taskAgent?: WorldTaskAgentSpec;
 }
 
 export const WorldDispatchSubmitRequest: MessageType<WorldDispatchSubmitRequest> = /* @__PURE__ */ createMessageType({
@@ -2287,6 +3352,12 @@ export const WorldDispatchSubmitRequest: MessageType<WorldDispatchSubmitRequest>
 			kind: "scalar",
 			T: ScalarType.STRING,
 			repeated: true,
+		},
+		{
+			no: 10,
+			name: "task_agent",
+			kind: "message",
+			T: () => WorldTaskAgentSpec,
 		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
@@ -2396,6 +3467,149 @@ export const WorldSessionInterruptRequest: MessageType<WorldSessionInterruptRequ
 	});
 
 /**
+ * WorldSendPeerMessageRequest stores one durable message for one peer.
+ *
+ * The caller cannot name a raw target LlmSession. Routing is resolved by GLaDOS
+ * from durable peer identity and the caller's immutable manifest, so a caller
+ * cannot address a session it was never given.
+ *
+ * @generated from message glados.sdk.llmsession.WorldSendPeerMessageRequest
+ */
+export interface WorldSendPeerMessageRequest {
+	/**
+	 * ClientMessageId is the sender's own identity for this message. It makes
+	 * send retry and reply correlation idempotent.
+	 *
+	 * @generated from field: string client_message_id = 1;
+	 */
+	clientMessageId?: string;
+	/**
+	 * Body is the message payload.
+	 *
+	 * @generated from field: string body = 2;
+	 */
+	body?: string;
+	/**
+	 * ReplyToClientMessageId names the ClientMessageId this message answers. A
+	 * reply targets the original message's source LlmSession exactly.
+	 *
+	 * @generated from field: string reply_to_client_message_id = 3;
+	 */
+	replyToClientMessageId?: string;
+	/**
+	 * ExpectsReply records that the sender is waiting for a correlated answer.
+	 *
+	 * @generated from field: bool expects_reply = 4;
+	 */
+	expectsReply?: boolean;
+
+	/**
+	 * Target selects exactly one recipient.
+	 *
+	 * @generated from oneof glados.sdk.llmsession.WorldSendPeerMessageRequest.target
+	 */
+	target?:
+		| {
+				value?: undefined;
+				case: undefined;
+		  }
+		| {
+				/**
+				 * TargetPeerId resolves one durable Task Agent by its coordination ID. Its
+				 * sole active Task session becomes the target.
+				 *
+				 * @generated from field: string target_peer_id = 5;
+				 */
+				value: string;
+				case: "targetPeerId";
+		  }
+		| {
+				/**
+				 * TargetParent addresses only Manifest.ParentLlmSessionObjectKey. It is a
+				 * bit rather than a key so a child can reach its own parent without being
+				 * able to name any other session.
+				 *
+				 * @generated from field: bool target_parent = 6;
+				 */
+				value: boolean;
+				case: "targetParent";
+		  };
+}
+
+export const WorldSendPeerMessageRequest: MessageType<WorldSendPeerMessageRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldSendPeerMessageRequest",
+	fields: [
+		{
+			no: 1,
+			name: "client_message_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 2, name: "body", kind: "scalar", T: ScalarType.STRING },
+		{
+			no: 3,
+			name: "reply_to_client_message_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 4, name: "expects_reply", kind: "scalar", T: ScalarType.BOOL },
+		{
+			no: 5,
+			name: "target_peer_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+			oneof: "target",
+		},
+		{
+			no: 6,
+			name: "target_parent",
+			kind: "scalar",
+			T: ScalarType.BOOL,
+			oneof: "target",
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldAckPeerMessageRequest records one consumption receipt.
+ *
+ * GLaDOS requires both the message's target Agent and target LlmSession to
+ * match the bound caller. A failed local delivery sends no acknowledgement at
+ * all, so the message stays claimable and is redelivered.
+ *
+ * @generated from message glados.sdk.llmsession.WorldAckPeerMessageRequest
+ */
+export interface WorldAckPeerMessageRequest {
+	/**
+	 * MessageObjectKey is the exact AgentMessage the caller consumed.
+	 *
+	 * @generated from field: string message_object_key = 1;
+	 */
+	messageObjectKey?: string;
+	/**
+	 * Outcome is the accepted local delivery outcome.
+	 *
+	 * @generated from field: glados.sdk.llmsession.PeerMessageAckOutcome outcome = 2;
+	 */
+	outcome?: PeerMessageAckOutcome;
+}
+
+export const WorldAckPeerMessageRequest: MessageType<WorldAckPeerMessageRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldAckPeerMessageRequest",
+	fields: [
+		{
+			no: 1,
+			name: "message_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 2, name: "outcome", kind: "enum", T: PeerMessageAckOutcome_Enum },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
  * WorldRuntimeMutationRequest carries exactly one World operation.
  *
  * @generated from message glados.sdk.llmsession.WorldRuntimeMutationRequest
@@ -2456,6 +3670,24 @@ export interface WorldRuntimeMutationRequest {
 				 */
 				value: WorldSessionInterruptRequest;
 				case: "sessionInterrupt";
+		  }
+		| {
+				/**
+				 * SendPeerMessage stores one durable peer message for exactly one target.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldSendPeerMessageRequest send_peer_message = 6;
+				 */
+				value: WorldSendPeerMessageRequest;
+				case: "sendPeerMessage";
+		  }
+		| {
+				/**
+				 * AckPeerMessage records one idempotent local-consumption receipt.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldAckPeerMessageRequest ack_peer_message = 7;
+				 */
+				value: WorldAckPeerMessageRequest;
+				case: "ackPeerMessage";
 		  };
 }
 
@@ -2490,6 +3722,454 @@ export const WorldRuntimeMutationRequest: MessageType<WorldRuntimeMutationReques
 			kind: "message",
 			T: () => WorldSessionInterruptRequest,
 			oneof: "operation",
+		},
+		{
+			no: 6,
+			name: "send_peer_message",
+			kind: "message",
+			T: () => WorldSendPeerMessageRequest,
+			oneof: "operation",
+		},
+		{
+			no: 7,
+			name: "ack_peer_message",
+			kind: "message",
+			T: () => WorldAckPeerMessageRequest,
+			oneof: "operation",
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldSendPeerMessageResult reports one stored peer message.
+ *
+ * @generated from message glados.sdk.llmsession.WorldSendPeerMessageResult
+ */
+export interface WorldSendPeerMessageResult {
+	/**
+	 * MessageObjectKey is the stored AgentMessage World object key.
+	 *
+	 * @generated from field: string message_object_key = 1;
+	 */
+	messageObjectKey?: string;
+	/**
+	 * ClientMessageId echoes the sender's identity for this message.
+	 *
+	 * @generated from field: string client_message_id = 2;
+	 */
+	clientMessageId?: string;
+	/**
+	 * ToAgentObjectKey is the resolved receiving Agent.
+	 *
+	 * @generated from field: string to_agent_object_key = 3;
+	 */
+	toAgentObjectKey?: string;
+	/**
+	 * TargetLlmSessionObjectKey is the resolved target run, empty when the peer
+	 * was inactive.
+	 *
+	 * @generated from field: string target_llm_session_object_key = 4;
+	 */
+	targetLlmSessionObjectKey?: string;
+	/**
+	 * InboxSequence is the sequence allocated in the target inbox.
+	 *
+	 * @generated from field: uint64 inbox_sequence = 5;
+	 */
+	inboxSequence?: bigint;
+	/**
+	 * Outcome is the stable delivery receipt.
+	 *
+	 * @generated from field: glados.sdk.llmsession.PeerMessageOutcome outcome = 6;
+	 */
+	outcome?: PeerMessageOutcome;
+	/**
+	 * Replayed reports that the stored message for this client message ID was
+	 * returned without storing a second one.
+	 *
+	 * @generated from field: bool replayed = 7;
+	 */
+	replayed?: boolean;
+}
+
+export const WorldSendPeerMessageResult: MessageType<WorldSendPeerMessageResult> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldSendPeerMessageResult",
+	fields: [
+		{
+			no: 1,
+			name: "message_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 2,
+			name: "client_message_id",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "to_agent_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 4,
+			name: "target_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 5, name: "inbox_sequence", kind: "scalar", T: ScalarType.UINT64 },
+		{ no: 6, name: "outcome", kind: "enum", T: PeerMessageOutcome_Enum },
+		{ no: 7, name: "replayed", kind: "scalar", T: ScalarType.BOOL },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldAckPeerMessageResult reports one recorded consumption receipt.
+ *
+ * @generated from message glados.sdk.llmsession.WorldAckPeerMessageResult
+ */
+export interface WorldAckPeerMessageResult {
+	/**
+	 * MessageObjectKey is the acknowledged AgentMessage.
+	 *
+	 * @generated from field: string message_object_key = 1;
+	 */
+	messageObjectKey?: string;
+	/**
+	 * ConsumedByLlmSessionObjectKey is the run that claimed the message.
+	 *
+	 * @generated from field: string consumed_by_llm_session_object_key = 2;
+	 */
+	consumedByLlmSessionObjectKey?: string;
+	/**
+	 * ConsumedAt is when consumption was recorded.
+	 *
+	 * @generated from field: string consumed_at = 3;
+	 */
+	consumedAt?: string;
+	/**
+	 * Replayed reports that an identical receipt already existed, so nothing was
+	 * written. Acknowledgement is idempotent because redelivery is expected.
+	 *
+	 * @generated from field: bool replayed = 4;
+	 */
+	replayed?: boolean;
+}
+
+export const WorldAckPeerMessageResult: MessageType<WorldAckPeerMessageResult> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldAckPeerMessageResult",
+	fields: [
+		{
+			no: 1,
+			name: "message_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 2,
+			name: "consumed_by_llm_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 3, name: "consumed_at", kind: "scalar", T: ScalarType.STRING },
+		{ no: 4, name: "replayed", kind: "scalar", T: ScalarType.BOOL },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * ResolveAgentPeerRequest resolves one durable coordination peer.
+ *
+ * @generated from message glados.sdk.llmsession.ResolveAgentPeerRequest
+ */
+export interface ResolveAgentPeerRequest {
+	/**
+	 * PeerId is the exact durable coordination ID to resolve.
+	 *
+	 * @generated from field: string peer_id = 1;
+	 */
+	peerId?: string;
+}
+
+export const ResolveAgentPeerRequest: MessageType<ResolveAgentPeerRequest> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.ResolveAgentPeerRequest",
+	fields: [{ no: 1, name: "peer_id", kind: "scalar", T: ScalarType.STRING }] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WorldRuntimeOperationFailure reports a permitted request that failed.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeOperationFailure
+ */
+export interface WorldRuntimeOperationFailure {
+	/**
+	 * Operation is the failed operation.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 1;
+	 */
+	operation?: WorldRuntimeOperation;
+	/**
+	 * Code is the stable failure reason.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldOperationFailureCode code = 2;
+	 */
+	code?: WorldOperationFailureCode;
+	/**
+	 * TargetObjectKey is the target the failure is about when one was named.
+	 *
+	 * @generated from field: string target_object_key = 3;
+	 */
+	targetObjectKey?: string;
+	/**
+	 * Detail is a readable explanation.
+	 *
+	 * @generated from field: string detail = 4;
+	 */
+	detail?: string;
+}
+
+export const WorldRuntimeOperationFailure: MessageType<WorldRuntimeOperationFailure> =
+	/* @__PURE__ */ createMessageType({
+		typeName: "glados.sdk.llmsession.WorldRuntimeOperationFailure",
+		fields: [
+			{ no: 1, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
+			{ no: 2, name: "code", kind: "enum", T: WorldOperationFailureCode_Enum },
+			{
+				no: 3,
+				name: "target_object_key",
+				kind: "scalar",
+				T: ScalarType.STRING,
+			},
+			{ no: 4, name: "detail", kind: "scalar", T: ScalarType.STRING },
+		] satisfies readonly PartialFieldInfo[],
+		packedByDefault: true,
+	});
+
+/**
+ * ResolveAgentPeerResponse is one peer resolution.
+ *
+ * @generated from message glados.sdk.llmsession.ResolveAgentPeerResponse
+ */
+export interface ResolveAgentPeerResponse {
+	/**
+	 * Found reports whether the peer ID names a durable Agent. A missing peer is
+	 * a typed absence, not an error.
+	 *
+	 * @generated from field: bool found = 1;
+	 */
+	found?: boolean;
+	/**
+	 * Agent is the resolved Agent tree row.
+	 *
+	 * @generated from field: glados.sdk.llmsession.AgentSummary agent = 2;
+	 */
+	agent?: AgentSummary;
+	/**
+	 * Session is the Agent's sole active Task session when exactly one exists.
+	 *
+	 * @generated from field: glados.sdk.llmsession.SessionSummary session = 3;
+	 */
+	session?: SessionSummary;
+	/**
+	 * Inactive reports a durable Agent with zero active Task sessions. Messages
+	 * to it queue until its next session; W4 does not resume it.
+	 *
+	 * @generated from field: bool inactive = 4;
+	 */
+	inactive?: boolean;
+	/**
+	 * Failure reports an ambiguous peer, which is the case of two or more active
+	 * Task sessions. It is a typed arm because picking one would deliver a
+	 * message to a run the sender did not address.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperationFailure failure = 5;
+	 */
+	failure?: WorldRuntimeOperationFailure;
+}
+
+export const ResolveAgentPeerResponse: MessageType<ResolveAgentPeerResponse> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.ResolveAgentPeerResponse",
+	fields: [
+		{ no: 1, name: "found", kind: "scalar", T: ScalarType.BOOL },
+		{ no: 2, name: "agent", kind: "message", T: () => AgentSummary },
+		{ no: 3, name: "session", kind: "message", T: () => SessionSummary },
+		{ no: 4, name: "inactive", kind: "scalar", T: ScalarType.BOOL },
+		{
+			no: 5,
+			name: "failure",
+			kind: "message",
+			T: () => WorldRuntimeOperationFailure,
+		},
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WatchPeerMailboxRequest opens the bound caller's mailbox stream.
+ *
+ * It carries no inbox or Agent selector on purpose: the stream is bound to the
+ * caller Agent and caller LlmSession established at AccessWorldRuntime.
+ *
+ * @generated from message glados.sdk.llmsession.WatchPeerMailboxRequest
+ */
+export interface WatchPeerMailboxRequest {}
+
+export const WatchPeerMailboxRequest: MessageType<WatchPeerMailboxRequest> =
+	/* @__PURE__ */ createEmptyMessageType<WatchPeerMailboxRequest>(
+		"glados.sdk.llmsession.WatchPeerMailboxRequest",
+		true,
+	);
+
+/**
+ * WorldRuntimeAuthorityDenial reports a check that failed before any target
+ * read or World effect.
+ *
+ * @generated from message glados.sdk.llmsession.WorldRuntimeAuthorityDenial
+ */
+export interface WorldRuntimeAuthorityDenial {
+	/**
+	 * Operation is the denied operation.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 1;
+	 */
+	operation?: WorldRuntimeOperation;
+	/**
+	 * CallerSessionObjectKey is the bound caller.
+	 *
+	 * @generated from field: string caller_session_object_key = 2;
+	 */
+	callerSessionObjectKey?: string;
+	/**
+	 * CapabilityDigest is the caller manifest capability digest when the manifest
+	 * was readable.
+	 *
+	 * @generated from field: string capability_digest = 3;
+	 */
+	capabilityDigest?: string;
+	/**
+	 * Code is the stable denial reason.
+	 *
+	 * @generated from field: glados.sdk.llmsession.WorldAuthorityDenialCode code = 4;
+	 */
+	code?: WorldAuthorityDenialCode;
+	/**
+	 * RequiredPermission is the permission ID the operation required.
+	 *
+	 * @generated from field: string required_permission = 5;
+	 */
+	requiredPermission?: string;
+	/**
+	 * Detail is a readable explanation.
+	 *
+	 * @generated from field: string detail = 6;
+	 */
+	detail?: string;
+}
+
+export const WorldRuntimeAuthorityDenial: MessageType<WorldRuntimeAuthorityDenial> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WorldRuntimeAuthorityDenial",
+	fields: [
+		{ no: 1, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
+		{
+			no: 2,
+			name: "caller_session_object_key",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{
+			no: 3,
+			name: "capability_digest",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 4, name: "code", kind: "enum", T: WorldAuthorityDenialCode_Enum },
+		{
+			no: 5,
+			name: "required_permission",
+			kind: "scalar",
+			T: ScalarType.STRING,
+		},
+		{ no: 6, name: "detail", kind: "scalar", T: ScalarType.STRING },
+	] satisfies readonly PartialFieldInfo[],
+	packedByDefault: true,
+});
+
+/**
+ * WatchPeerMailboxResponse carries exactly one arm.
+ *
+ * @generated from message glados.sdk.llmsession.WatchPeerMailboxResponse
+ */
+export interface WatchPeerMailboxResponse {
+	/**
+	 * Result is the single arm this response carries.
+	 *
+	 * @generated from oneof glados.sdk.llmsession.WatchPeerMailboxResponse.result
+	 */
+	result?:
+		| {
+				value?: undefined;
+				case: undefined;
+		  }
+		| {
+				/**
+				 * Message is the lowest-sequence unconsumed message the caller may claim.
+				 * Its target session is empty or exactly the caller. For an empty target,
+				 * the claiming transaction first proves the caller is the Agent's sole
+				 * active Task session.
+				 *
+				 * @generated from field: glados.sdk.llmsession.AgentMessageSummary message = 1;
+				 */
+				value: AgentMessageSummary;
+				case: "message";
+		  }
+		| {
+				/**
+				 * AuthorityDenial reports that the caller may not receive peer messages.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldRuntimeAuthorityDenial authority_denial = 2;
+				 */
+				value: WorldRuntimeAuthorityDenial;
+				case: "authorityDenial";
+		  }
+		| {
+				/**
+				 * OperationFailure reports an unserviceable watch.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperationFailure operation_failure = 3;
+				 */
+				value: WorldRuntimeOperationFailure;
+				case: "operationFailure";
+		  };
+}
+
+export const WatchPeerMailboxResponse: MessageType<WatchPeerMailboxResponse> = /* @__PURE__ */ createMessageType({
+	typeName: "glados.sdk.llmsession.WatchPeerMailboxResponse",
+	fields: [
+		{
+			no: 1,
+			name: "message",
+			kind: "message",
+			T: () => AgentMessageSummary,
+			oneof: "result",
+		},
+		{
+			no: 2,
+			name: "authority_denial",
+			kind: "message",
+			T: () => WorldRuntimeAuthorityDenial,
+			oneof: "result",
+		},
+		{
+			no: 3,
+			name: "operation_failure",
+			kind: "message",
+			T: () => WorldRuntimeOperationFailure,
+			oneof: "result",
 		},
 	] satisfies readonly PartialFieldInfo[],
 	packedByDefault: true,
@@ -2649,129 +4329,6 @@ export const WorldSessionControlResult: MessageType<WorldSessionControlResult> =
 });
 
 /**
- * WorldRuntimeAuthorityDenial reports a check that failed before any target
- * read or World effect.
- *
- * @generated from message glados.sdk.llmsession.WorldRuntimeAuthorityDenial
- */
-export interface WorldRuntimeAuthorityDenial {
-	/**
-	 * Operation is the denied operation.
-	 *
-	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 1;
-	 */
-	operation?: WorldRuntimeOperation;
-	/**
-	 * CallerSessionObjectKey is the bound caller.
-	 *
-	 * @generated from field: string caller_session_object_key = 2;
-	 */
-	callerSessionObjectKey?: string;
-	/**
-	 * CapabilityDigest is the caller manifest capability digest when the manifest
-	 * was readable.
-	 *
-	 * @generated from field: string capability_digest = 3;
-	 */
-	capabilityDigest?: string;
-	/**
-	 * Code is the stable denial reason.
-	 *
-	 * @generated from field: glados.sdk.llmsession.WorldAuthorityDenialCode code = 4;
-	 */
-	code?: WorldAuthorityDenialCode;
-	/**
-	 * RequiredPermission is the permission ID the operation required.
-	 *
-	 * @generated from field: string required_permission = 5;
-	 */
-	requiredPermission?: string;
-	/**
-	 * Detail is a readable explanation.
-	 *
-	 * @generated from field: string detail = 6;
-	 */
-	detail?: string;
-}
-
-export const WorldRuntimeAuthorityDenial: MessageType<WorldRuntimeAuthorityDenial> = /* @__PURE__ */ createMessageType({
-	typeName: "glados.sdk.llmsession.WorldRuntimeAuthorityDenial",
-	fields: [
-		{ no: 1, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
-		{
-			no: 2,
-			name: "caller_session_object_key",
-			kind: "scalar",
-			T: ScalarType.STRING,
-		},
-		{
-			no: 3,
-			name: "capability_digest",
-			kind: "scalar",
-			T: ScalarType.STRING,
-		},
-		{ no: 4, name: "code", kind: "enum", T: WorldAuthorityDenialCode_Enum },
-		{
-			no: 5,
-			name: "required_permission",
-			kind: "scalar",
-			T: ScalarType.STRING,
-		},
-		{ no: 6, name: "detail", kind: "scalar", T: ScalarType.STRING },
-	] satisfies readonly PartialFieldInfo[],
-	packedByDefault: true,
-});
-
-/**
- * WorldRuntimeOperationFailure reports a permitted request that failed.
- *
- * @generated from message glados.sdk.llmsession.WorldRuntimeOperationFailure
- */
-export interface WorldRuntimeOperationFailure {
-	/**
-	 * Operation is the failed operation.
-	 *
-	 * @generated from field: glados.sdk.llmsession.WorldRuntimeOperation operation = 1;
-	 */
-	operation?: WorldRuntimeOperation;
-	/**
-	 * Code is the stable failure reason.
-	 *
-	 * @generated from field: glados.sdk.llmsession.WorldOperationFailureCode code = 2;
-	 */
-	code?: WorldOperationFailureCode;
-	/**
-	 * TargetObjectKey is the target the failure is about when one was named.
-	 *
-	 * @generated from field: string target_object_key = 3;
-	 */
-	targetObjectKey?: string;
-	/**
-	 * Detail is a readable explanation.
-	 *
-	 * @generated from field: string detail = 4;
-	 */
-	detail?: string;
-}
-
-export const WorldRuntimeOperationFailure: MessageType<WorldRuntimeOperationFailure> =
-	/* @__PURE__ */ createMessageType({
-		typeName: "glados.sdk.llmsession.WorldRuntimeOperationFailure",
-		fields: [
-			{ no: 1, name: "operation", kind: "enum", T: WorldRuntimeOperation_Enum },
-			{ no: 2, name: "code", kind: "enum", T: WorldOperationFailureCode_Enum },
-			{
-				no: 3,
-				name: "target_object_key",
-				kind: "scalar",
-				T: ScalarType.STRING,
-			},
-			{ no: 4, name: "detail", kind: "scalar", T: ScalarType.STRING },
-		] satisfies readonly PartialFieldInfo[],
-		packedByDefault: true,
-	});
-
-/**
  * WorldRuntimeMutationResponse carries exactly one result arm.
  *
  * @generated from message glados.sdk.llmsession.WorldRuntimeMutationResponse
@@ -2853,6 +4410,24 @@ export interface WorldRuntimeMutationResponse {
 				 */
 				value: WorldRuntimeOperationFailure;
 				case: "operationFailure";
+		  }
+		| {
+				/**
+				 * SendPeerMessage is the stored peer message and its delivery receipt.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldSendPeerMessageResult send_peer_message = 9;
+				 */
+				value: WorldSendPeerMessageResult;
+				case: "sendPeerMessage";
+		  }
+		| {
+				/**
+				 * AckPeerMessage is the recorded consumption receipt.
+				 *
+				 * @generated from field: glados.sdk.llmsession.WorldAckPeerMessageResult ack_peer_message = 10;
+				 */
+				value: WorldAckPeerMessageResult;
+				case: "ackPeerMessage";
 		  };
 }
 
@@ -2902,6 +4477,20 @@ export const WorldRuntimeMutationResponse: MessageType<WorldRuntimeMutationRespo
 				name: "operation_failure",
 				kind: "message",
 				T: () => WorldRuntimeOperationFailure,
+				oneof: "result",
+			},
+			{
+				no: 9,
+				name: "send_peer_message",
+				kind: "message",
+				T: () => WorldSendPeerMessageResult,
+				oneof: "result",
+			},
+			{
+				no: 10,
+				name: "ack_peer_message",
+				kind: "message",
+				T: () => WorldAckPeerMessageResult,
 				oneof: "result",
 			},
 		] satisfies readonly PartialFieldInfo[],

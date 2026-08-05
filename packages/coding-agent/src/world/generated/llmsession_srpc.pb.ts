@@ -21,6 +21,8 @@ import {
 	LookupDispatchIntentResponse,
 	ReadWorldURIRequest,
 	ReadWorldURIResponse,
+	ResolveAgentPeerRequest,
+	ResolveAgentPeerResponse,
 	ResumeSessionRequest,
 	SendInputRequest,
 	SessionSnapshot,
@@ -28,6 +30,8 @@ import {
 	SubmitSessionResponse,
 	WatchAgentTreeRequest,
 	WatchAgentTreeResponse,
+	WatchPeerMailboxRequest,
+	WatchPeerMailboxResponse,
 	WatchSessionRequest,
 	WatchSessionResponse,
 	WorldRuntimeMutationRequest,
@@ -439,6 +443,34 @@ export const WorldRuntimeResourceServiceDefinition = {
 			O: WorldRuntimeWatchResponse,
 			kind: MethodKind.ServerStreaming,
 		},
+		/**
+		 * ResolveAgentPeer resolves one durable peer ID to its Agent and sole active
+		 * Task session.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.ResolveAgentPeer
+		 */
+		ResolveAgentPeer: {
+			name: "ResolveAgentPeer",
+			I: ResolveAgentPeerRequest,
+			O: ResolveAgentPeerResponse,
+			kind: MethodKind.Unary,
+		},
+		/**
+		 * WatchPeerMailbox streams the bound caller's unconsumed peer messages.
+		 *
+		 * It is a separate RPC rather than a Mutate arm because it is a stream, and
+		 * it is bound to the caller Agent and caller LlmSession rather than naming an
+		 * inbox: a request that could name an inbox would let one caller drain
+		 * another Agent's messages.
+		 *
+		 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.WatchPeerMailbox
+		 */
+		WatchPeerMailbox: {
+			name: "WatchPeerMailbox",
+			I: WatchPeerMailboxRequest,
+			O: WatchPeerMailboxResponse,
+			kind: MethodKind.ServerStreaming,
+		},
 	},
 } as const;
 
@@ -474,6 +506,29 @@ export interface WorldRuntimeResourceService {
 		request: WorldRuntimeWatchRequest,
 		abortSignal?: AbortSignal,
 	): MessageStream<WorldRuntimeWatchResponse>;
+
+	/**
+	 * ResolveAgentPeer resolves one durable peer ID to its Agent and sole active
+	 * Task session.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.ResolveAgentPeer
+	 */
+	ResolveAgentPeer(request: ResolveAgentPeerRequest, abortSignal?: AbortSignal): Promise<ResolveAgentPeerResponse>;
+
+	/**
+	 * WatchPeerMailbox streams the bound caller's unconsumed peer messages.
+	 *
+	 * It is a separate RPC rather than a Mutate arm because it is a stream, and
+	 * it is bound to the caller Agent and caller LlmSession rather than naming an
+	 * inbox: a request that could name an inbox would let one caller drain
+	 * another Agent's messages.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.WatchPeerMailbox
+	 */
+	WatchPeerMailbox(
+		request: WatchPeerMailboxRequest,
+		abortSignal?: AbortSignal,
+	): MessageStream<WatchPeerMailboxResponse>;
 }
 
 export const WorldRuntimeResourceServiceServiceName = WorldRuntimeResourceServiceDefinition.typeName;
@@ -486,6 +541,8 @@ export class WorldRuntimeResourceServiceClient implements WorldRuntimeResourceSe
 		this.rpc = rpc;
 		this.Mutate = this.Mutate.bind(this);
 		this.WatchDispatch = this.WatchDispatch.bind(this);
+		this.ResolveAgentPeer = this.ResolveAgentPeer.bind(this);
+		this.WatchPeerMailbox = this.WatchPeerMailbox.bind(this);
 	}
 	/**
 	 * Mutate performs one authority-checked World operation.
@@ -524,6 +581,50 @@ export class WorldRuntimeResourceServiceClient implements WorldRuntimeResourceSe
 			abortSignal || undefined,
 		);
 		return buildDecodeMessageTransform(WorldRuntimeWatchResponse)(result);
+	}
+
+	/**
+	 * ResolveAgentPeer resolves one durable peer ID to its Agent and sole active
+	 * Task session.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.ResolveAgentPeer
+	 */
+	async ResolveAgentPeer(
+		request: ResolveAgentPeerRequest,
+		abortSignal?: AbortSignal,
+	): Promise<ResolveAgentPeerResponse> {
+		const requestMsg = ResolveAgentPeerRequest.create(request);
+		const result = await this.rpc.request(
+			this.service,
+			WorldRuntimeResourceServiceDefinition.methods.ResolveAgentPeer.name,
+			ResolveAgentPeerRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return ResolveAgentPeerResponse.fromBinary(result);
+	}
+
+	/**
+	 * WatchPeerMailbox streams the bound caller's unconsumed peer messages.
+	 *
+	 * It is a separate RPC rather than a Mutate arm because it is a stream, and
+	 * it is bound to the caller Agent and caller LlmSession rather than naming an
+	 * inbox: a request that could name an inbox would let one caller drain
+	 * another Agent's messages.
+	 *
+	 * @generated from rpc glados.sdk.llmsession.WorldRuntimeResourceService.WatchPeerMailbox
+	 */
+	WatchPeerMailbox(
+		request: WatchPeerMailboxRequest,
+		abortSignal?: AbortSignal,
+	): MessageStream<WatchPeerMailboxResponse> {
+		const requestMsg = WatchPeerMailboxRequest.create(request);
+		const result = this.rpc.serverStreamingRequest(
+			this.service,
+			WorldRuntimeResourceServiceDefinition.methods.WatchPeerMailbox.name,
+			WatchPeerMailboxRequest.toBinary(requestMsg),
+			abortSignal || undefined,
+		);
+		return buildDecodeMessageTransform(WatchPeerMailboxResponse)(result);
 	}
 }
 /**
