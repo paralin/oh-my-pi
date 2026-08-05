@@ -163,8 +163,11 @@ export class StructuredSubagentError extends Error {
 
 const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
 
-function renderSubagentPrompt(assignment: string): string {
-	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
+/** Renders the exact Task user prompt shared by local and external workers. */
+export function renderStructuredSubagentPrompt(assignment: string): string {
+	return prompt.render(subagentUserPromptTemplate, {
+		assignment: assignment.trim(),
+	});
 }
 
 function trimToUndefined(value: string | undefined): string | undefined {
@@ -181,15 +184,35 @@ function sanitizeAgentId(value: string | undefined): string | undefined {
 function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinition): StructuredSubagentSchemaResolution {
 	const mode = request.schemaMode ?? request.session.outputSchemaMode ?? "permissive";
 	if (Object.hasOwn(request, "outputSchema")) {
-		return { schema: request.outputSchema, source: "caller", mode, outputSchemaOverridesAgent: true };
+		return {
+			schema: request.outputSchema,
+			source: "caller",
+			mode,
+			outputSchemaOverridesAgent: true,
+		};
 	}
 	if (agent.output !== undefined) {
-		return { schema: agent.output, source: "agent", mode, outputSchemaOverridesAgent: false };
+		return {
+			schema: agent.output,
+			source: "agent",
+			mode,
+			outputSchemaOverridesAgent: false,
+		};
 	}
 	if (request.session.outputSchema !== undefined) {
-		return { schema: request.session.outputSchema, source: "session", mode, outputSchemaOverridesAgent: false };
+		return {
+			schema: request.session.outputSchema,
+			source: "session",
+			mode,
+			outputSchemaOverridesAgent: false,
+		};
 	}
-	return { schema: undefined, source: "none", mode, outputSchemaOverridesAgent: false };
+	return {
+		schema: undefined,
+		source: "none",
+		mode,
+		outputSchemaOverridesAgent: false,
+	};
 }
 
 function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
@@ -357,9 +380,11 @@ export async function reserveStructuredSubagentId(
 	identity: StructuredSubagentIdentity | undefined,
 ): Promise<string> {
 	if (identity?.id) return identity.id;
+	const requested = sanitizeAgentId(identity?.label);
+	if (session.coordinationBackend && requested) return requested;
 	const manager = session.agentOutputManager ?? new AgentOutputManager(session.getArtifactsDir ?? (() => null));
 	session.agentOutputManager ??= manager;
-	return manager.allocate(sanitizeAgentId(identity?.label) ?? generateTaskName());
+	return manager.allocate(requested ?? generateTaskName());
 }
 
 interface ArtifactLease {
@@ -377,14 +402,24 @@ async function leaseArtifacts(
 	if (sessionFile) {
 		const artifactsDir = sessionSidecarDir(sessionFile);
 		await fs.mkdir(artifactsDir, { recursive: true });
-		return { sessionFile, artifactsDir, temporary: false, unregister: undefined };
+		return {
+			sessionFile,
+			artifactsDir,
+			temporary: false,
+			unregister: undefined,
+		};
 	}
 	const artifactsDir = path.join(
 		os.tmpdir(),
 		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
 	);
 	await fs.mkdir(artifactsDir, { recursive: true });
-	return { sessionFile: null, artifactsDir, temporary: true, unregister: registerArtifactsDir(artifactsDir) };
+	return {
+		sessionFile: null,
+		artifactsDir,
+		temporary: true,
+		unregister: registerArtifactsDir(artifactsDir),
+	};
 }
 
 function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
@@ -414,7 +449,7 @@ function buildExecutorOptions(
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		agent: policy.effectiveAgent,
-		task: renderSubagentPrompt(request.assignment),
+		task: renderStructuredSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
 		planReference: undefined,
@@ -453,6 +488,7 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
+		coordinationBackend: session.coordinationBackend,
 		asyncJobManager: session.asyncJobManager,
 		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
 		enableMCP,
@@ -500,7 +536,7 @@ function buildFailureResult(
 			id,
 			agent: policy.agent.name,
 			agentSource: policy.agent.source,
-			task: renderSubagentPrompt(request.assignment),
+			task: renderStructuredSubagentPrompt(request.assignment),
 			assignment: request.assignment.trim(),
 			description: trimToUndefined(request.identity?.label),
 			exitCode: 1,
@@ -583,11 +619,30 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
+		const planReference = await loadPlanReference(request, policy);
+		if (request.invocationKind === "task" && request.session.coordinationBackend) {
+			const handle = await request.session.coordinationBackend.spawn(
+				{
+					peerId: id,
+					label: trimToUndefined(request.identity?.label) ?? id,
+					generated: trimToUndefined(request.identity?.label) === undefined,
+					request,
+					policy,
+					planReference,
+					artifactsDir: lease.artifactsDir,
+					temporaryArtifacts: lease.temporary,
+				},
+				request.signal,
+			);
+			const result = await handle.wait(request.signal, request.onProgress);
+			completedSuccessfully = result.result.exitCode === 0 && !result.result.error && !result.result.aborted;
+			return result;
+		}
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};
-		baseOptions.planReference = await loadPlanReference(request, policy);
+		baseOptions.planReference = planReference;
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {
@@ -604,7 +659,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const claudeCode = policy.claudeCode;
 		const runSubagent = claudeCode
 			? (options: ExecutorOptions) =>
-					runClaudeCodeSubprocess({ options, model: claudeCode.model, effort: claudeCode.effort })
+					runClaudeCodeSubprocess({
+						options,
+						model: claudeCode.model,
+						effort: claudeCode.effort,
+					})
 			: runSubprocess;
 		const result = !isolationContext
 			? await runSubagent(baseOptions)

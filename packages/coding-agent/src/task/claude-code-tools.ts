@@ -92,7 +92,12 @@ function toolResultContent(content: { type: string; text?: string }[]): { type: 
 
 function toolFailure(error: unknown): ClaudeCodeToolResult {
 	return {
-		content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+		content: [
+			{
+				type: "text",
+				text: error instanceof Error ? error.message : String(error),
+			},
+		],
 		isError: true,
 	};
 }
@@ -141,7 +146,10 @@ export function createClaudeCodeToolSession(options: ExecutorOptions, registry: 
 		getSessionSpawns: () => spawns,
 		authStorage: options.authStorage,
 		modelRegistry: options.modelRegistry,
-		agentOutputManager: new AgentOutputManager(getArtifactsDir, { parentPrefix: options.id }),
+		agentOutputManager: new AgentOutputManager(getArtifactsDir, {
+			parentPrefix: options.id,
+		}),
+		coordinationBackend: options.coordinationBackend,
 		asyncJobManager: options.asyncJobManager,
 		mcpManager: options.mcpManager,
 		localProtocolOptions: options.localProtocolOptions,
@@ -166,7 +174,9 @@ function buildYieldMcpTool(
 	const handler = subprocessToolRegistry.getHandler("yield");
 	return {
 		name: yieldTool.name,
-		description: prompt.render(claudeCodeYieldPrompt, { description: yieldTool.description }),
+		description: prompt.render(claudeCodeYieldPrompt, {
+			description: yieldTool.description,
+		}),
 		inputSchema: objectToolSchema(yieldTool),
 		handler: async args => {
 			const toolCallId = `yield-${yieldItems.length}`;
@@ -176,7 +186,10 @@ function buildYieldMcpTool(
 					toolName: yieldTool.name,
 					toolCallId,
 					args,
-					result: { content: toolResultContent(result.content), details: result.details },
+					result: {
+						content: toolResultContent(result.content),
+						details: result.details,
+					},
 				};
 				const item = handler?.extractData?.(event);
 				if (item) yieldItems.push(item);
@@ -322,7 +335,9 @@ function buildWorldReadMcpTool(client: WorldClient, signal: AbortSignal): Claude
 				const rawLimit = args.limit;
 				const limit = rawLimit === undefined ? undefined : Number(rawLimit);
 				const read = await readWorldForPeer(uri, client, limit, signal);
-				return { content: [{ type: "text" as const, text: renderWorldRead(uri, read).content }] };
+				return {
+					content: [{ type: "text" as const, text: renderWorldRead(uri, read).content }],
+				};
 			} catch (error) {
 				return toolFailure(error);
 			}
@@ -357,7 +372,10 @@ function buildWorldMcpTool(client: WorldClient, signal: AbortSignal): ClaudeCode
 				}
 				const toolCallId = `claude-world-${++calls}`;
 				const result = await withPeerSignal(signal, operation => worldTool.execute(toolCallId, params, operation));
-				return { content: toolResultContent(result.content), isError: result.isError === true };
+				return {
+					content: toolResultContent(result.content),
+					isError: result.isError === true,
+				};
 			} catch (error) {
 				return toolFailure(error);
 			}

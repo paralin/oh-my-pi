@@ -544,7 +544,7 @@ export interface SingleResult {
 }
 
 /** Tool details for TUI rendering */
-export interface TaskToolDetails {
+export interface TaskToolDetails extends Record<string, unknown> {
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	totalDurationMs: number;

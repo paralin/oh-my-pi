@@ -1,10 +1,12 @@
-/** The five authority-checked World operations, in tool-facing spelling. */
+/** The authority-checked World operations, in tool-facing spelling. */
 export const WORLD_OPERATIONS = [
 	"dispatch_submit",
 	"dispatch_watch",
 	"question_answer",
 	"session_input",
 	"session_interrupt",
+	"world.agent.message.send",
+	"world.agent.message.receive",
 ] as const;
 
 export type WorldOperation = (typeof WORLD_OPERATIONS)[number];
@@ -16,6 +18,8 @@ export const WORLD_OPERATION_PERMISSIONS: Readonly<Record<WorldOperation, string
 	question_answer: "world.question.answer",
 	session_input: "world.session.input",
 	session_interrupt: "world.session.interrupt",
+	"world.agent.message.send": "world.agent.message.send",
+	"world.agent.message.receive": "world.agent.message.receive",
 };
 
 /** Every permission ID a child dispatch may receive, in operation order. */

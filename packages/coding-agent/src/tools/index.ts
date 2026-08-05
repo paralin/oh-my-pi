@@ -6,6 +6,7 @@ import type { AsyncJobManager } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import type { CoordinationBackend } from "../coordination/backend";
 import type { CronManager } from "../cron";
 import { EditTool } from "../edit";
 import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
@@ -420,6 +421,8 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+	/** Root-scoped Task and Hub coordination selected when this session starts. */
+	coordinationBackend?: CoordinationBackend;
 	/**
 	 * The World client this session's `world` tool must use.
 	 *
@@ -542,7 +545,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 			pythonAvailable = availability.ok;
 			if (!availability.ok) {
-				logger.warn("Python kernel unavailable and JS backend disabled", { reason: availability.reason });
+				logger.warn("Python kernel unavailable and JS backend disabled", {
+					reason: availability.reason,
+				});
 			}
 		}
 		if (allowRuby) {
@@ -552,7 +557,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 			rubyAvailable = availability.ok;
 			if (!availability.ok) {
-				logger.warn("Ruby kernel unavailable and JS backend disabled", { reason: availability.reason });
+				logger.warn("Ruby kernel unavailable and JS backend disabled", {
+					reason: availability.reason,
+				});
 			}
 		}
 		if (allowJulia) {
@@ -562,7 +569,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 			juliaAvailable = availability.ok;
 			if (!availability.ok) {
-				logger.warn("Julia kernel unavailable and JS backend disabled", { reason: availability.reason });
+				logger.warn("Julia kernel unavailable and JS backend disabled", {
+					reason: availability.reason,
+				});
 			}
 		}
 	}
@@ -633,7 +642,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			}
 		}
 	}
-	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS, ...CONDITIONAL_TOOLS };
+	const allTools: Record<string, ToolFactory> = {
+		...BUILTIN_TOOLS,
+		...HIDDEN_TOOLS,
+		...CONDITIONAL_TOOLS,
+	};
 	const isToolAllowed = (name: string) => {
 		if (name === "goal") return goalEnabled;
 		// Both halves or nothing: a socket without a caller session keeps read-only
@@ -665,7 +678,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 		if (name === "hub") {
 			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
+				(!restrictToolNames || requestedTools?.includes("hub") === true) &&
+				session.enableIrc !== false &&
+				isIrcEnabled(session.settings, session.taskDepth ?? 0)
 			);
 		}
 		if (name === "retain" || name === "recall" || name === "reflect") {

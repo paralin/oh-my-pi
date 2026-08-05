@@ -6,6 +6,7 @@
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -13,7 +14,7 @@ import { type CoordinationDetails, HubTool } from "@oh-my-pi/pi-coding-agent/too
 
 const SELF_ID = "Main";
 
-function makeSession(manager: AsyncJobManager | undefined): ToolSession {
+function makeSession(manager: AsyncJobManager | undefined, coordinationBackend?: CoordinationBackend): ToolSession {
 	const stub = {
 		cwd: process.cwd(),
 		settings: {
@@ -26,6 +27,7 @@ function makeSession(manager: AsyncJobManager | undefined): ToolSession {
 		agentRegistry: AgentRegistry.global(),
 		asyncJobManager: manager,
 		getAgentId: () => SELF_ID,
+		coordinationBackend,
 	};
 	// Structurally-partial test session: HubTool only touches the fields above.
 	return stub as unknown as ToolSession;
@@ -71,6 +73,49 @@ describe("hub unified wait", () => {
 		// The job was not consumed by the message win.
 		expect(manager.getJob(job.id)?.status).toBe("running");
 
+		manager.cancel(job.id);
+	});
+
+	test("a World mailbox message settles the wait while a local Task watcher keeps running", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		const job = registerHangingJob(manager, "durable task watch");
+		const mailbox = Promise.withResolvers<{
+			id: string;
+			from: string;
+			to: string;
+			body: string;
+			ts: number;
+			source: "world";
+		}>();
+		const backend: CoordinationBackend = {
+			kind: "world",
+			spawn: () => Promise.reject(new Error("unused")),
+			listPeers: async () => ({ peers: [], errors: [] }),
+			attachMailbox: () => {},
+			send: () => Promise.reject(new Error("unused")),
+			inbox: () => [],
+			waitMessage: async () => await mailbox.promise,
+			interrupt: () => Promise.reject(new Error("unused")),
+			close: () => Promise.resolve(),
+		};
+		const tool = new HubTool(makeSession(manager, backend));
+
+		const pending = tool.execute("world_wait", { op: "wait" });
+		mailbox.resolve({
+			id: "world-message",
+			from: "foreign",
+			to: SELF_ID,
+			body: "durable result",
+			ts: Date.now(),
+			source: "world",
+		});
+		const result = await pending;
+
+		const details = result.details as CoordinationDetails;
+		expect(details.waited).toEqual(expect.objectContaining({ id: "world-message", from: "foreign" }));
+		expect(manager.getJob(job.id)?.status).toBe("running");
 		manager.cancel(job.id);
 	});
 

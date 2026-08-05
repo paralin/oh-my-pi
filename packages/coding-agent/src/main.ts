@@ -47,6 +47,7 @@ import { ModelsConfigFile } from "./config/models-config";
 import { resolveScratchCompactionOverrides } from "./config/scratch-compaction-method";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
+import { createWorldCoordinationBackend } from "./coordination/world";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -278,7 +279,10 @@ export function buildModelScopeNotification(
 			return `${scopedModel.model.id}${thinkingStr}`;
 		})
 		.join(", ");
-	return { kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` };
+	return {
+		kind: "info",
+		message: `Model scope: ${modelList} (Ctrl+P to cycle)`,
+	};
 }
 export async function submitInteractiveInput(
 	mode: Pick<
@@ -333,7 +337,10 @@ export async function submitInteractiveInput(
 				userInitiated: input.userInitiated,
 			});
 		} else {
-			await session.prompt(input.text, { images: input.images, streamingBehavior });
+			await session.prompt(input.text, {
+				images: input.images,
+				streamingBehavior,
+			});
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
@@ -1055,7 +1062,11 @@ export async function buildSessionOptions(
 			: !restoringSession && activeSettings.get("prewalk.enabled");
 	if (prewalkEnabled) {
 		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		const resolved = resolveCliModel({
+			cliModel: rolePattern,
+			modelRegistry,
+			preferences: modelMatchPreferences,
+		});
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
@@ -1073,7 +1084,10 @@ export async function buildSessionOptions(
 				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
 			);
 		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			options.prewalk = {
+				target: resolved.model,
+				thinkingLevel: resolved.thinkingLevel,
+			};
 		}
 	}
 
@@ -1082,7 +1096,11 @@ export async function buildSessionOptions(
 	}
 	if (parsed.planYolo) {
 		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
+		const resolved = resolveCliModel({
+			cliModel: rolePattern,
+			modelRegistry,
+			preferences: modelMatchPreferences,
+		});
 		if (resolved.warning) {
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
@@ -1092,7 +1110,10 @@ export async function buildSessionOptions(
 		if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
 			throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
 		}
-		options.planYolo = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
+		options.planYolo = {
+			target: resolved.model,
+			thinkingLevel: resolved.thinkingLevel,
+		};
 	}
 
 	// Thinking level
@@ -1305,7 +1326,11 @@ export async function runRootCommand(
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	const settingsInstance =
-		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
+		deps.settings ??
+		(await logger.time("settings:init", Settings.init, {
+			cwd,
+			configFiles: parsedArgs.config,
+		}));
 	const scratchCompactionOverrides =
 		parsedArgs.compactionMethod !== undefined
 			? resolveScratchCompactionOverrides(parsedArgs.compactionMethod)
@@ -1583,6 +1608,7 @@ export async function runRootCommand(
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
+	sessionOptions.coordinationBackend = createWorldCoordinationBackend();
 
 	// OTEL: register global OTLP exporters when an endpoint is configured via
 	// env, then switch on the agent loop's telemetry hooks so traces, run-level

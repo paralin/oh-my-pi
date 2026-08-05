@@ -26,6 +26,7 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
+import type { CoordinationBackend } from "../coordination/backend";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
@@ -448,6 +449,8 @@ export interface ExecutorOptions {
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
+	/** Root-scoped Task and Hub coordination inherited without reconstruction. */
+	coordinationBackend?: CoordinationBackend;
 	settings?: Settings;
 	/** Scoped job owner inherited by nested Task and Hub tools. */
 	asyncJobManager?: AsyncJobManager;
@@ -651,9 +654,15 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 					validation && !validation.success
 						? summarizeValidationFailure(validation, completeData, validator?.requiredFields ?? [])
 						: assembled.schemaOverridden
-							? { message: SUBAGENT_WARNING_SCHEMA_OVERRIDDEN, missingRequired: [] }
+							? {
+									message: SUBAGENT_WARNING_SCHEMA_OVERRIDDEN,
+									missingRequired: [],
+								}
 							: schemaError
-								? { message: `invalid output schema: ${schemaError}`, missingRequired: [] }
+								? {
+										message: `invalid output schema: ${schemaError}`,
+										missingRequired: [],
+									}
 								: undefined;
 				if (includeStructuredOutput) {
 					structuredOutput =
@@ -666,7 +675,13 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 									error: schemaError ? `invalid output schema: ${schemaError}` : undefined,
 								}
 							: failure
-								? { source, mode, status: "invalid", data: completeData, error: failure.message }
+								? {
+										source,
+										mode,
+										status: "invalid",
+										data: completeData,
+										error: failure.message,
+									}
 								: { source, mode, status: "valid", data: completeData };
 				}
 				const mustReject =
@@ -705,11 +720,19 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		if (fallback) {
 			const { validator } = buildOutputValidator(outputSchema);
 			const completeData = parseStringifiedJson(fallback.data ?? null);
-			const result = validator?.validate(completeData) ?? { success: true as const };
+			const result = validator?.validate(completeData) ?? {
+				success: true as const,
+			};
 			if (!result.success) {
 				const summary = summarizeValidationFailure(result, completeData, validator?.requiredFields ?? []);
 				if (includeStructuredOutput) {
-					structuredOutput = { source, mode, status: "invalid", data: completeData, error: summary.message };
+					structuredOutput = {
+						source,
+						mode,
+						status: "invalid",
+						data: completeData,
+						error: summary.message,
+					};
 				}
 				const outcome = buildSchemaViolationOutcome(summary, completeData);
 				rawOutput = outcome.rawOutput;
@@ -747,7 +770,14 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		}
 	}
 
-	return { rawOutput, exitCode, stderr, abortedViaYield, hasYield, structuredOutput };
+	return {
+		rawOutput,
+		exitCode,
+		stderr,
+		abortedViaYield,
+		hasYield,
+		structuredOutput,
+	};
 }
 
 export interface FinalizeSubprocessResultArgs extends FinalizeSubprocessOutputArgs {
@@ -893,7 +923,12 @@ export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 					.find(t => t.mcpServerName === serverName && t.mcpToolName === mcpToolName);
 				if (!source?.execute) {
 					return {
-						content: [{ type: "text" as const, text: `MCP error: tool ${mcpToolName} no longer available` }],
+						content: [
+							{
+								type: "text" as const,
+								text: `MCP error: tool ${mcpToolName} no longer available`,
+							},
+						],
 						details: { serverName, mcpToolName, isError: true },
 					};
 				}
@@ -1681,7 +1716,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 								// never take down event processing (which escalates to terminate).
 								const notice = buildBudgetNotice(progress.requests, softRequestBudget);
 								void Promise.resolve()
-									.then(() => steerSession.sendUserMessage(notice, { deliverAs: "steer" }))
+									.then(() =>
+										steerSession.sendUserMessage(notice, {
+											deliverAs: "steer",
+										}),
+									)
 									.catch(err => {
 										logger.warn("Subagent budget steer failed", {
 											error: err instanceof Error ? err.message : String(err),
@@ -2684,7 +2723,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 
 	return finalizeRunResult({
 		monitor,
-		done: { ...outcome, abortReason: outcome.abortReasonText, durationMs: Date.now() - startTime },
+		done: {
+			...outcome,
+			abortReason: outcome.abortReasonText,
+			durationMs: Date.now() - startTime,
+		},
 		index,
 		id,
 		agent,
@@ -3143,6 +3186,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				modelRegistry,
 				getApiKey: options.getApiKey,
 				settings: subagentSettings,
+				coordinationBackend: options.coordinationBackend,
 				model,
 				modelPattern: model || modelOverride === undefined ? undefined : modelPatterns,
 				modelPatternAuthFallback:
@@ -3358,7 +3402,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					},
 				);
 				extensionRunner.onError(err => {
-					logger.error("Extension error", { path: err.extensionPath, error: err.error });
+					logger.error("Extension error", {
+						path: err.extensionPath,
+						error: err.error,
+					});
 				});
 				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
 				while (pendingExtensionMessages.length > 0) {

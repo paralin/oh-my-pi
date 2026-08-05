@@ -6,6 +6,7 @@ import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { ClaudeCodePeer } from "@oh-my-pi/pi-coding-agent/task/claude-code-peer";
@@ -75,7 +76,10 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 	};
 }
 
-function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}): {
+function createRealSession(
+	overrides: Partial<Record<SettingPath, unknown>> = {},
+	sendWorldIrcReply?: AgentSessionConfig["sendWorldIrcReply"],
+): {
 	session: AgentSession;
 	sessionManager: SessionManager;
 } {
@@ -90,6 +94,7 @@ function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}
 		}),
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, ...overrides }),
+		sendWorldIrcReply,
 		modelRegistry: {} as never,
 	});
 	return { session, sessionManager };
@@ -1129,6 +1134,50 @@ describe("IRC", () => {
 			// The recipient records what was said on its behalf.
 			const record = await autoReplyEvent;
 			expect(record.details).toMatchObject({ to: "0-Sub", body: "auto answer" });
+		});
+
+		it("routes a durable message auto-reply through its World backend", async () => {
+			const sent: Parameters<NonNullable<AgentSessionConfig["sendWorldIrcReply"]>>[0][] = [];
+			const observed = Promise.withResolvers<void>();
+			const { session } = createRealSession({ "async.enabled": false }, async message => {
+				sent.push(message);
+				observed.resolve();
+				return {
+					to: message.to,
+					outcome: "queued",
+					queueOutcome: "queued_live",
+				};
+			});
+			sessions.push(session);
+			registry.register({ id: "Child", displayName: "task", kind: "sub", session });
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			vi.spyOn(session, "runEphemeralTurn").mockResolvedValue({
+				replyText: "durable answer",
+				assistantMessage: {} as never,
+			});
+
+			await session.deliverIrcMessage(
+				{
+					id: "world-question",
+					from: "main",
+					to: "Child",
+					body: "status?",
+					ts: Date.now(),
+					expectsReply: true,
+					source: "world",
+				},
+				{ expectsReply: true },
+			);
+			await observed.promise;
+
+			expect(sent).toEqual([
+				{
+					from: "Child",
+					to: "main",
+					body: "durable answer",
+					replyTo: "world-question",
+				},
+			]);
 		});
 
 		it("does not auto-reply when async execution is enabled or the sender does not await", async () => {

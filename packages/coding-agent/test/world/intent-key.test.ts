@@ -35,6 +35,29 @@ interface IntentKeyVectorFile {
 }
 
 const golden = vectors as IntentKeyVectorFile;
+/**
+ * delegatedIdentityVectorDigest is a well-formed worker profile digest.
+ *
+ * It is a literal rather than a computed hash so the expected key stays a fact
+ * about this file, not about whatever bytes a helper happened to hash.
+ */
+const delegatedIdentityVectorDigest = "5f2b8c1d0a7e4936bd8c2f1a5e7093c4d6b8a02f1e3c5d7908a6b4c2e1f30d5a";
+
+interface DelegatedIdentityVector {
+	name: string;
+	peerId?: string;
+	workerProfileDigest?: string;
+	invalid?: boolean;
+	legacyKey?: boolean;
+}
+
+const delegatedIdentityVectors: DelegatedIdentityVector[] = [
+	{ name: "legacy_both_empty", legacyKey: true },
+	{ name: "w4_peer_and_digest", peerId: "reviewer-2", workerProfileDigest: delegatedIdentityVectorDigest },
+	{ name: "w4_distinct_peer", peerId: "reviewer-3", workerProfileDigest: delegatedIdentityVectorDigest },
+	{ name: "invalid_peer_without_digest", peerId: "reviewer-2", invalid: true },
+	{ name: "invalid_digest_without_peer", workerProfileDigest: delegatedIdentityVectorDigest, invalid: true },
+];
 
 describe("dispatch intent key parity", () => {
 	test("reads the same vector file GLaDOS pins", () => {
@@ -57,6 +80,32 @@ describe("dispatch intent key parity", () => {
 			const existing = seen.get(vector.intentKey);
 			expect(existing, `${vector.name} collides with ${existing}`).toBeUndefined();
 			seen.set(vector.intentKey, vector.name);
+		}
+	});
+
+	test("pins legacy and delegated peer identity vectors", () => {
+		const base = golden.vectors[0];
+		const seen = new Map<string, string>();
+		for (const vector of delegatedIdentityVectors) {
+			const source: IntentKeySource = {
+				...base.source,
+				peerId: vector.peerId,
+				workerProfileDigest: vector.workerProfileDigest,
+			};
+			if (vector.invalid) {
+				expect(() => intentKey(source), vector.name).toThrow(/provided together/);
+				continue;
+			}
+			const result = intentKey(source);
+			if (vector.legacyKey) {
+				expect(result.intentKey, vector.name).toBe(base.intentKey);
+				continue;
+			}
+			expect(result.intentKey, vector.name).not.toBe(base.intentKey);
+			expect(seen.get(result.intentKey), `${vector.name} collides with ${seen.get(result.intentKey)}`).toBeUndefined();
+			seen.set(result.intentKey, vector.name);
+			expect(result.source.peerId).toBe(vector.peerId);
+			expect(result.source.workerProfileDigest).toBe(vector.workerProfileDigest);
 		}
 	});
 

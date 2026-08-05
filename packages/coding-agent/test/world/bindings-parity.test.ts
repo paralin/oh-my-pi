@@ -137,7 +137,7 @@ describe("vendored binding parity", () => {
 	});
 });
 
-describe("vendored W3 surface", () => {
+describe("vendored World surface", () => {
 	const llmsession = readCopy("llmsession.pb.ts");
 	const srpc = readCopy("llmsession_srpc.pb.ts");
 
@@ -149,13 +149,17 @@ describe("vendored W3 surface", () => {
 		expect(llmsession).toContain("export interface AccessWorldRuntimeResponse");
 	});
 
-	test("carries the authority-checked service with its two methods", () => {
-		expect(srpc).toContain('typeName: "glados.sdk.llmsession.WorldRuntimeResourceService"');
+	test("carries the authority-checked service with its resource methods", () => {
 		const shape = extractApiShape(srpc);
+		expect(shape).toContain("annotation service glados.sdk.llmsession.WorldRuntimeResourceService");
 		expect(shape).toContain("method Mutate I=WorldRuntimeMutationRequest O=WorldRuntimeMutationResponse kind=Unary");
 		// Server streaming, because a watch is a stream of complete snapshots.
 		expect(shape).toContain(
 			"method WatchDispatch I=WorldRuntimeWatchRequest O=WorldRuntimeWatchResponse kind=ServerStreaming",
+		);
+		expect(shape).toContain("method ResolveAgentPeer I=ResolveAgentPeerRequest O=ResolveAgentPeerResponse kind=Unary");
+		expect(shape).toContain(
+			"method WatchPeerMailbox I=WatchPeerMailboxRequest O=WatchPeerMailboxResponse kind=ServerStreaming",
 		);
 	});
 

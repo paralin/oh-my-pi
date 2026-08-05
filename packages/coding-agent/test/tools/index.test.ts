@@ -457,6 +457,18 @@ describe("createTools", () => {
 		expect(requested).toContain("cron_list");
 		expect(requested).toContain("cron_delete");
 	});
+	it("admits Hub for a restricted child only when its frozen list names it", async () => {
+		const session = createTestSession({
+			taskDepth: 1,
+			restrictToolNames: true,
+			enableIrc: true,
+		});
+		const withoutHub = (await createTools(session, ["read"])).map(tool => tool.name);
+		const withHub = (await createTools(session, ["read", "hub"])).map(tool => tool.name);
+
+		expect(withoutHub).not.toContain("hub");
+		expect(withHub).toContain("hub");
+	});
 });
 
 const WORLD_SOCKET = "/run/glados/console.sock";

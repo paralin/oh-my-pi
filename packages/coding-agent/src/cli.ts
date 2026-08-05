@@ -34,6 +34,7 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
+import { runExternalSubagentMode } from "./modes/external-subagent-mode";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -145,7 +146,9 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		// Park early events and replay them once the module's handler is live.
 		// Worker-thread entries using `parentPort` need the same sync-prefix
 		// buffering; the computer/tab/eval cases install that inbox below.
-		const scope = globalThis as unknown as { onmessage: ((event: MessageEvent) => void) | null };
+		const scope = globalThis as unknown as {
+			onmessage: ((event: MessageEvent) => void) | null;
+		};
 		const pending: MessageEvent[] = [];
 		const buffer = (event: MessageEvent): void => {
 			pending.push(event);
@@ -393,6 +396,11 @@ export async function runCli(argv: string[]): Promise<void> {
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
 
+	if (process.env.GLADOS_ADAPTER_CONFIG) {
+		await runExternalSubagentMode(process.env);
+		return;
+	}
+
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
 		return;
@@ -409,7 +417,13 @@ export async function runCli(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	return run({
+		bin: APP_NAME,
+		version: VERSION,
+		argv: resolved.argv,
+		commands,
+		metadataHelp: showHelp,
+	});
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS

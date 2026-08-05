@@ -1097,6 +1097,7 @@ export class AgentSession {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
+			sendWorldIrcReply: config.sendWorldIrcReply,
 		};
 		this.#irc = new IrcBridge(ircHost);
 		const prewalkHost: PrewalkCoordinatorHost = {
