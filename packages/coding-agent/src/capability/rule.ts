@@ -25,7 +25,13 @@ export const BUILTIN_DEFAULTS_PROVIDER_ID = "builtin-defaults";
  */
 export const APERTURE_DEFAULTS_PROVIDER_ID = "aperture-defaults";
 
-export type SemanticCandidateMatcher = { ast: string } | { regex: string };
+export type SemanticCandidateMatcher =
+	| { ast: string }
+	| { regex: string }
+	| {
+			/** Regex whose match must begin outside comments and literal text. */
+			codeRegex: string;
+	  };
 
 export interface SemanticCapturePredicate {
 	regex?: string[];
@@ -400,8 +406,8 @@ function parseSemanticReferences(ruleName: string, clause: number, value: unknow
 
 function semanticCandidateCaptures(candidate: SemanticCandidateMatcher): Set<string> {
 	const captures = new Set<string>();
-	const pattern = "regex" in candidate ? candidate.regex : candidate.ast;
-	const matcher = "regex" in candidate ? /\(\?<([A-Za-z_][A-Za-z0-9_]*)>/g : /\${1,3}([A-Za-z_][A-Za-z0-9_]*)/g;
+	const pattern = "ast" in candidate ? candidate.ast : "regex" in candidate ? candidate.regex : candidate.codeRegex;
+	const matcher = "ast" in candidate ? /\${1,3}([A-Za-z_][A-Za-z0-9_]*)/g : /\(\?<([A-Za-z_][A-Za-z0-9_]*)>/g;
 	for (const match of pattern.matchAll(matcher)) {
 		if (match[1]) captures.add(match[1]);
 	}
@@ -417,19 +423,25 @@ function parseSemanticClause(ruleName: string, clause: number, value: unknown): 
 	if (!isRecord(value.candidate)) {
 		throw semanticConditionError(ruleName, clause, "candidate", "expected an object");
 	}
-	rejectUnknownSemanticFields(ruleName, clause, "candidate", value.candidate, ["ast", "regex"]);
+	rejectUnknownSemanticFields(ruleName, clause, "candidate", value.candidate, ["ast", "regex", "codeRegex"]);
 	const ast = normalizeSemanticPatterns(ruleName, clause, "candidate.ast", value.candidate.ast);
 	const regex = normalizeSemanticPatterns(ruleName, clause, "candidate.regex", value.candidate.regex);
-	if ((ast?.length ?? 0) + (regex?.length ?? 0) !== 1) {
+	const codeRegex = normalizeSemanticPatterns(ruleName, clause, "candidate.codeRegex", value.candidate.codeRegex);
+	if ((ast?.length ?? 0) + (regex?.length ?? 0) + (codeRegex?.length ?? 0) !== 1) {
 		throw semanticConditionError(
 			ruleName,
 			clause,
 			"candidate",
-			'expected exactly one non-empty "ast" or "regex" pattern',
+			'expected exactly one non-empty "ast", "regex", or "codeRegex" pattern',
 		);
 	}
 	if (regex) validateSemanticRegex(ruleName, clause, "candidate.regex", regex);
-	const candidate: SemanticCandidateMatcher = ast ? { ast: ast[0] } : { regex: regex![0] };
+	if (codeRegex) validateSemanticRegex(ruleName, clause, "candidate.codeRegex", codeRegex);
+	const candidate: SemanticCandidateMatcher = ast
+		? { ast: ast[0] }
+		: regex
+			? { regex: regex[0] }
+			: { codeRegex: codeRegex![0] };
 
 	let captures: Record<string, SemanticCapturePredicate> | undefined;
 	if (value.captures !== undefined) {

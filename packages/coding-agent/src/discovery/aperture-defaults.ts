@@ -1,19 +1,17 @@
 /**
- * The empty embedded registry provides a stable provider id while no Aperture
- * rules are present.
+ * The embedded Aperture registry provides conservative company-local guidance.
+ * Rules remain disabled until the session explicitly enables the provider.
  */
 import { registerProvider } from "../capability";
 import { APERTURE_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "../capability/rule";
 import type { LoadContext, LoadResult } from "../capability/types";
+import { APERTURE_RULE_SOURCES, type ApertureRuleSource } from "./aperture-rules";
 import { buildRuleFromMarkdown, createSourceMeta } from "./helpers";
 
-export interface ApertureRuleSource {
-	name: string;
-	content: string;
-}
+export type { ApertureRuleSource } from "./aperture-rules";
 
-/** Embedded Aperture rule registry. */
-export const APERTURE_RULE_SOURCES: readonly ApertureRuleSource[] = [];
+/** Embedded Aperture rule registry in deterministic name order. */
+export { APERTURE_RULE_SOURCES };
 
 /** Validate the namespace reserved for embedded Aperture rules. */
 export function validateApertureRuleSources(sources: readonly ApertureRuleSource[]): void {

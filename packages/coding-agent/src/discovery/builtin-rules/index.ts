@@ -13,9 +13,14 @@ import goBenchLoop from "./go-bench-loop.md" with { type: "text" };
 import goExpPromoted from "./go-exp-promoted.md" with { type: "text" };
 import goIoutil from "./go-ioutil.md" with { type: "text" };
 import goJoinHostport from "./go-join-hostport.md" with { type: "text" };
+import goMessageClone from "./go-message-clone.md" with { type: "text" };
+import goMessageEqual from "./go-message-equal.md" with { type: "text" };
 import goNewExpr from "./go-new-expr.md" with { type: "text" };
+import goNoTinyFunctions from "./go-no-tiny-functions.md" with { type: "text" };
 import goRandV2 from "./go-rand-v2.md" with { type: "text" };
 import goRangeInt from "./go-range-int.md" with { type: "text" };
+import goSlicesClone from "./go-slices-clone.md" with { type: "text" };
+import goSortCompact from "./go-sort-compact.md" with { type: "text" };
 import rsBoxLeak from "./rs-box-leak.md" with { type: "text" };
 import rsFuturePrelude from "./rs-future-prelude.md" with { type: "text" };
 import rsLazylock from "./rs-lazylock.md" with { type: "text" };
@@ -49,9 +54,14 @@ export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "go-exp-promoted", content: goExpPromoted },
 	{ name: "go-ioutil", content: goIoutil },
 	{ name: "go-join-hostport", content: goJoinHostport },
+	{ name: "go-message-clone", content: goMessageClone },
+	{ name: "go-message-equal", content: goMessageEqual },
 	{ name: "go-new-expr", content: goNewExpr },
+	{ name: "go-no-tiny-functions", content: goNoTinyFunctions },
 	{ name: "go-rand-v2", content: goRandV2 },
 	{ name: "go-range-int", content: goRangeInt },
+	{ name: "go-slices-clone", content: goSlicesClone },
+	{ name: "go-sort-compact", content: goSortCompact },
 	{ name: "rs-box-leak", content: rsBoxLeak },
 	{ name: "rs-future-prelude", content: rsFuturePrelude },
 	{ name: "rs-lazylock", content: rsLazylock },
