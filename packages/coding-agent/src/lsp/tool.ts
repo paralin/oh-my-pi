@@ -7,7 +7,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "../modes/theme/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -33,13 +33,10 @@ import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
 	hasRustWorkspaceAncestor,
-	isOnlyQueriedDeclaration,
 	MAX_GLOB_DIAGNOSTIC_TARGETS,
 	normalizeLocationResult,
 	PROJECT_INDEXED_ACTIONS,
 	REFERENCE_CONTEXT_LIMIT,
-	REFERENCES_RETRY_COUNT,
-	REFERENCES_RETRY_DELAY_MS,
 	SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	WORKSPACE_SYMBOL_LIMIT,
 	waitForDiagnostics,
@@ -52,6 +49,7 @@ import {
 	sortAndValidateTextEdits,
 } from "./edits";
 import { detectLspmux } from "./lspmux";
+import { requestReferences } from "./references";
 import {
 	configCache,
 	getConfig,
@@ -1203,33 +1201,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					break;
 				}
 				case "references": {
-					let result: Location[] | null = null;
-					for (let attempt = 0; attempt <= REFERENCES_RETRY_COUNT; attempt++) {
-						result = (await sendRequest(
-							client,
-							"textDocument/references",
-							{
-								textDocument: { uri },
-								position,
-								context: { includeDeclaration: true },
-							},
-							signal,
-						)) as Location[] | null;
+					const result = await requestReferences(client, serverConfig, uri, position, signal);
 
-						const locations = result ?? [];
-						if (!isProjectAwareLspServer(serverConfig) || attempt === REFERENCES_RETRY_COUNT) {
-							break;
-						}
-						if (locations.length > 0 && !isOnlyQueriedDeclaration(locations, uri, position)) {
-							break;
-						}
-
-						await waitForProjectLoaded(client, signal);
-						throwIfAborted(signal);
-						await untilAborted(signal, () => Bun.sleep(REFERENCES_RETRY_DELAY_MS));
-					}
-
-					if (!result || result.length === 0) {
+					if (result.length === 0) {
 						output = "No references found";
 						useless = true;
 					} else {

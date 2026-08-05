@@ -288,6 +288,23 @@ export declare function __piNativesV17_3_4(): void
 export declare function astEdit(options: AstReplaceOptions): Promise<AstReplaceResult>
 
 /** One ast-grep match with source range and optional meta-variables. */
+export interface AstFindCapture {
+  /** Captured source text. */
+  text: string
+  /** Start byte offset in the file (UTF-8 byte index). */
+  byteStart: number
+  /** End byte offset in the file (exclusive UTF-8 byte index). */
+  byteEnd: number
+  /** 1-based start line. */
+  startLine: number
+  /** 1-based start column. */
+  startColumn: number
+  /** 1-based end line. */
+  endLine: number
+  /** 1-based end column. */
+  endColumn: number
+}
+
 export interface AstFindMatch {
   /** Display path of the matching file. */
   path: string
@@ -307,6 +324,11 @@ export interface AstFindMatch {
   endColumn: number
   /** Meta-variable name to captured text, when `includeMeta` was enabled. */
   metaVariables?: Record<string, string>
+  /**
+   * Meta-variable name to its exact source range, when `includeMeta` was
+   * enabled.
+   */
+  metaVariableRanges?: Record<string, AstFindCapture>
 }
 
 /** Options for `astGrep`: patterns, scan scope, and match limits. */

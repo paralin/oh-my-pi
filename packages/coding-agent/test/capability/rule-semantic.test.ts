@@ -42,6 +42,23 @@ describe("semantic rule conditions", () => {
 				endColumn: 55,
 			},
 			captures: { NAME: "isEmpty" },
+			captureRanges: {
+				NAME: { startLine: 2, startColumn: 10, endLine: 2, endColumn: 17 },
+			},
+		});
+	});
+
+	it("preserves distinct AST capture positions when source text repeats", async () => {
+		const rule = loadRule(`semanticCondition:
+  candidate:
+    ast: 'function $NAME($ARG) { return $ARG; }'
+  references:
+    capture: NAME
+    max: 1`);
+		const report = await evaluateSemanticRule(rule, "function helper(helper) { return helper; }", "ts");
+		expect(report.candidates[0]?.captureRanges).toMatchObject({
+			NAME: { byteStart: 9, byteEnd: 15, startLine: 1, startColumn: 10 },
+			ARG: { byteStart: 33, byteEnd: 39, startLine: 1, startColumn: 34 },
 		});
 	});
 
@@ -80,6 +97,12 @@ describe("semantic rule conditions", () => {
 				[2, "matched", "isReady"],
 			],
 		);
+		expect(report.candidates[1]?.captureRanges.NAME).toMatchObject({
+			startLine: 3,
+			startColumn: 7,
+			endLine: 3,
+			endColumn: 14,
+		});
 	});
 
 	it("reports candidates rejected by capture and whole-file predicates", async () => {
@@ -150,6 +173,17 @@ describe("semantic rule conditions", () => {
 		});
 	});
 
+	it("normalizes project-reference bounds for one capture", () => {
+		const rule = loadRule(`semanticCondition:
+  candidate:
+    regex: 'function\\s+(?<NAME>\\w+)'
+  references:
+    capture: NAME
+    min: 1
+    max: 2`);
+		expect(rule.semanticCondition?.[0]?.references).toEqual({ capture: "NAME", min: 1, max: 2 });
+	});
+
 	it("rejects ambiguous and malformed clauses with the rule, clause, and field", () => {
 		expect(() =>
 			loadRule(
@@ -181,19 +215,76 @@ describe("semantic rule conditions", () => {
 				"invalid-regex-rule",
 			),
 		).toThrow('Rule "invalid-regex-rule" semanticCondition clause 1 field "candidate.regex"');
+
+		expect(() =>
+			loadRule(
+				`semanticCondition:
+  candidate:
+    regex: 'function\\s+(?<NAME>\\w+)'
+  references:
+    capture: NAME`,
+				"missing-reference-bound",
+			),
+		).toThrow('Rule "missing-reference-bound" semanticCondition clause 1 field "references"');
+
+		expect(() =>
+			loadRule(
+				`semanticCondition:
+  candidate:
+    regex: 'function\\s+(?<NAME>\\w+)'
+  references:
+    capture: NAME
+    min: 2
+    max: 1`,
+				"inverted-reference-bound",
+			),
+		).toThrow('"min" must not exceed "max"');
+
+		expect(() =>
+			loadRule(
+				`semanticCondition:
+  candidate:
+    regex: 'function'
+  references:
+    capture: NAME
+    max: 1`,
+				"uncaptured-reference",
+			),
+		).toThrow('Rule "uncaptured-reference" semanticCondition clause 1 field "references.capture"');
 	});
 
-	it("rejects a regex candidate that matches an empty source range", async () => {
+	it("records candidate evaluation failures per clause without discarding prior evidence", async () => {
 		const rule = loadRule(
+			`semanticCondition:
+  - candidate:
+      regex: 'function\\s+(?<NAME>\\w+)'
+  - candidate:
+      regex: '(?=function)'`,
+			"clause-failure-rule",
+		);
+		const report = await evaluateSemanticRule(rule, "function local() {}", "ts");
+		expect(report.candidates).toMatchObject([{ clause: 1, status: "matched", captures: { NAME: "local" } }]);
+		expect(report.skipped).toMatchObject([
+			{
+				clause: 2,
+				reason: expect.stringContaining(
+					'Rule "clause-failure-rule" semanticCondition clause 2 field "candidate.regex"',
+				),
+			},
+		]);
+
+		const zeroWidth = loadRule(
 			`semanticCondition:
   candidate:
     regex: '(?=function)'`,
 			"zero-width-rule",
 		);
-
-		await expect(evaluateSemanticRule(rule, "function local() {}", "ts")).rejects.toThrow(
-			'Rule "zero-width-rule" semanticCondition clause 1 field "candidate.regex": candidate matched an empty source range',
-		);
+		const zeroWidthReport = await evaluateSemanticRule(zeroWidth, "function local() {}", "ts");
+		expect(zeroWidthReport.candidates).toEqual([]);
+		expect(zeroWidthReport.skipped[0]).toMatchObject({
+			clause: 1,
+			reason: expect.stringContaining("candidate matched an empty source range"),
+		});
 	});
 	it("renders normalized semantic conditions through rule://", async () => {
 		const rule = loadRule(`semanticCondition:

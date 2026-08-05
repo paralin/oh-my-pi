@@ -417,7 +417,7 @@ export interface LspServerCapabilities {
 	codeActionProvider?: boolean | { resolveProvider?: boolean };
 	hoverProvider?: boolean;
 	definitionProvider?: boolean;
-	referencesProvider?: boolean;
+	referencesProvider?: boolean | Record<string, unknown>;
 	documentSymbolProvider?: boolean;
 	workspaceSymbolProvider?: boolean;
 	diagnosticProvider?: boolean | Record<string, unknown>;

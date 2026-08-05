@@ -42,10 +42,17 @@ export interface SemanticFilePredicates {
 	forbidden?: SemanticMatcherSet;
 }
 
+export interface SemanticReferencePredicate {
+	capture: string;
+	min?: number;
+	max?: number;
+}
+
 export interface SemanticConditionClause {
 	candidate: SemanticCandidateMatcher;
 	captures?: Record<string, SemanticCapturePredicate>;
 	file?: SemanticFilePredicates;
+	references?: SemanticReferencePredicate;
 }
 
 /**
@@ -364,11 +371,48 @@ function parseSemanticMatcherSet(ruleName: string, clause: number, field: string
 	return { ...(ast ? { ast } : {}), ...(regex ? { regex } : {}) };
 }
 
+function parseSemanticReferences(ruleName: string, clause: number, value: unknown): SemanticReferencePredicate {
+	if (!isRecord(value)) {
+		throw semanticConditionError(ruleName, clause, "references", "expected an object");
+	}
+	rejectUnknownSemanticFields(ruleName, clause, "references", value, ["capture", "min", "max"]);
+	if (typeof value.capture !== "string" || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(value.capture)) {
+		throw semanticConditionError(ruleName, clause, "references.capture", "expected a capture name");
+	}
+	const parseBound = (field: "min" | "max"): number | undefined => {
+		const bound = value[field];
+		if (bound === undefined) return undefined;
+		if (typeof bound !== "number" || !Number.isInteger(bound) || bound < 0) {
+			throw semanticConditionError(ruleName, clause, `references.${field}`, "expected a non-negative integer");
+		}
+		return bound;
+	};
+	const min = parseBound("min");
+	const max = parseBound("max");
+	if (min === undefined && max === undefined) {
+		throw semanticConditionError(ruleName, clause, "references", 'expected at least one "min" or "max" bound');
+	}
+	if (min !== undefined && max !== undefined && min > max) {
+		throw semanticConditionError(ruleName, clause, "references", '"min" must not exceed "max"');
+	}
+	return { capture: value.capture, ...(min !== undefined ? { min } : {}), ...(max !== undefined ? { max } : {}) };
+}
+
+function semanticCandidateCaptures(candidate: SemanticCandidateMatcher): Set<string> {
+	const captures = new Set<string>();
+	const pattern = "regex" in candidate ? candidate.regex : candidate.ast;
+	const matcher = "regex" in candidate ? /\(\?<([A-Za-z_][A-Za-z0-9_]*)>/g : /\${1,3}([A-Za-z_][A-Za-z0-9_]*)/g;
+	for (const match of pattern.matchAll(matcher)) {
+		if (match[1]) captures.add(match[1]);
+	}
+	return captures;
+}
+
 function parseSemanticClause(ruleName: string, clause: number, value: unknown): SemanticConditionClause {
 	if (!isRecord(value)) {
 		throw semanticConditionError(ruleName, clause, "clause", "expected an object");
 	}
-	rejectUnknownSemanticFields(ruleName, clause, "clause", value, ["candidate", "captures", "file"]);
+	rejectUnknownSemanticFields(ruleName, clause, "clause", value, ["candidate", "captures", "file", "references"]);
 
 	if (!isRecord(value.candidate)) {
 		throw semanticConditionError(ruleName, clause, "candidate", "expected an object");
@@ -432,6 +476,17 @@ function parseSemanticClause(ruleName: string, clause: number, value: unknown): 
 		}
 	}
 
+	const references =
+		value.references === undefined ? undefined : parseSemanticReferences(ruleName, clause, value.references);
+	if (references && !semanticCandidateCaptures(candidate).has(references.capture)) {
+		throw semanticConditionError(
+			ruleName,
+			clause,
+			"references.capture",
+			`candidate does not capture ${references.capture}`,
+		);
+	}
+
 	let file: SemanticFilePredicates | undefined;
 	if (value.file !== undefined) {
 		if (!isRecord(value.file)) {
@@ -457,7 +512,12 @@ function parseSemanticClause(ruleName: string, clause: number, value: unknown): 
 		file = { ...(required ? { required } : {}), ...(forbidden ? { forbidden } : {}) };
 	}
 
-	return { candidate, ...(captures ? { captures } : {}), ...(file ? { file } : {}) };
+	return {
+		candidate,
+		...(captures ? { captures } : {}),
+		...(file ? { file } : {}),
+		...(references ? { references } : {}),
+	};
 }
 
 export function parseSemanticCondition(ruleName: string, value: unknown): SemanticConditionClause[] | undefined {

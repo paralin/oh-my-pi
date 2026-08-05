@@ -953,6 +953,28 @@ console.log("ok");
 			expect(result.matches[0]?.metaVariables?.MSG).toBe('"hi"');
 		});
 
+		it("returns exact ranges for captures with repeated source text", async () => {
+			const source = "function helper(helper) { return helper; }";
+			const result = await astMatch({
+				source,
+				lang: "ts",
+				patterns: ["function $NAME($ARG) { return $ARG; }"],
+				includeMeta: true,
+			});
+			const captures = result.matches[0]?.metaVariableRanges;
+			expect(captures?.NAME).toMatchObject({
+				text: "helper",
+				byteStart: source.indexOf("helper"),
+				byteEnd: source.indexOf("helper") + "helper".length,
+			});
+			expect(captures?.ARG).toMatchObject({
+				text: "helper",
+				byteStart: source.lastIndexOf("helper"),
+				byteEnd: source.lastIndexOf("helper") + "helper".length,
+			});
+			expect(captures?.NAME.byteStart).not.toBe(captures?.ARG.byteStart);
+		});
+
 		it("enforces metavariable equality within a pattern", async () => {
 			const same = await astMatch({
 				source: "if (x) clearTimeout(x);",

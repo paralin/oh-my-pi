@@ -20,20 +20,35 @@ export interface SemanticSourceRange {
 
 export interface SemanticCandidateReport {
 	clause: number;
-	status: "matched" | "rejected";
+	status: "matched" | "rejected" | "skipped";
 	reason: string;
 	range: SemanticSourceRange;
 	captures: Record<string, string>;
+	captureRanges: Record<string, SemanticSourceRange>;
+	referenceEvidence?: SemanticReferenceEvidence;
+}
+
+export interface SemanticReferenceEvidence {
+	capture: string;
+	count: number;
+	serverName: string;
+}
+
+export interface SemanticClauseSkipReport {
+	clause: number;
+	reason: string;
 }
 
 export interface SemanticEvaluationReport {
 	ruleName: string;
 	candidates: SemanticCandidateReport[];
+	skipped: SemanticClauseSkipReport[];
 }
 
 interface LocalCandidate {
 	range: SemanticSourceRange;
 	captures: Record<string, string>;
+	captureRanges: Record<string, SemanticSourceRange>;
 }
 
 interface LocalPredicateResult {
@@ -103,6 +118,19 @@ async function findAstCandidates(
 					endColumn: match.endColumn,
 				},
 				captures: match.metaVariables ?? {},
+				captureRanges: Object.fromEntries(
+					Object.entries(match.metaVariableRanges ?? {}).map(([name, capture]) => [
+						name,
+						{
+							byteStart: capture.byteStart,
+							byteEnd: capture.byteEnd,
+							startLine: capture.startLine,
+							startColumn: capture.startColumn,
+							endLine: capture.endLine,
+							endColumn: capture.endColumn,
+						},
+					]),
+				),
 			});
 		}
 		if (!result.limitReached || result.matches.length === 0) break;
@@ -136,7 +164,8 @@ function regexRange(source: string, start: number, end: number): SemanticSourceR
 
 function findRegexCandidates(rule: Rule, clause: number, pattern: string, source: string): LocalCandidate[] {
 	const compiled = compileRuleCondition(pattern);
-	const regex = new RegExp(compiled.source, compiled.flags.includes("g") ? compiled.flags : `${compiled.flags}g`);
+	const flags = Array.from(new Set(`${compiled.flags}gd`)).join("");
+	const regex = new RegExp(compiled.source, flags);
 	const candidates: LocalCandidate[] = [];
 	for (let match = regex.exec(source); match; match = regex.exec(source)) {
 		if (match[0].length === 0) {
@@ -144,9 +173,21 @@ function findRegexCandidates(rule: Rule, clause: number, pattern: string, source
 		}
 		const start = match.index;
 		const end = start + match[0].length;
+		const groups = match.groups ?? {};
+		const indices = (
+			match as RegExpExecArray & {
+				indices?: { groups?: Record<string, [number, number] | undefined> };
+			}
+		).indices?.groups;
+		const captureRanges: Record<string, SemanticSourceRange> = {};
+		for (const name of Object.keys(groups)) {
+			const range = indices?.[name];
+			if (range) captureRanges[name] = regexRange(source, range[0], range[1]);
+		}
 		candidates.push({
 			range: regexRange(source, start, end),
-			captures: match.groups ?? {},
+			captures: groups,
+			captureRanges,
 		});
 	}
 	return candidates;
@@ -244,6 +285,7 @@ async function evaluateClause(
 			reason: result.reason,
 			range: candidate.range,
 			captures: candidate.captures,
+			captureRanges: candidate.captureRanges,
 		};
 	});
 }
@@ -255,8 +297,17 @@ export async function evaluateSemanticRule(
 	changedRanges?: readonly { startLine: number; endLine: number }[],
 ): Promise<SemanticEvaluationReport> {
 	const candidates: SemanticCandidateReport[] = [];
+	const skipped: SemanticClauseSkipReport[] = [];
 	for (const [index, clause] of (rule.semanticCondition ?? []).entries()) {
-		candidates.push(...(await evaluateClause(rule, clause, index + 1, source, lang, changedRanges)));
+		const clauseNumber = index + 1;
+		try {
+			candidates.push(...(await evaluateClause(rule, clause, clauseNumber, source, lang, changedRanges)));
+		} catch (error) {
+			skipped.push({
+				clause: clauseNumber,
+				reason: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
-	return { ruleName: rule.name, candidates };
+	return { ruleName: rule.name, candidates, skipped };
 }

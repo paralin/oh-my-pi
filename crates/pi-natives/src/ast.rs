@@ -90,26 +90,48 @@ pub struct AstFindOptions<'env> {
 }
 
 /// One ast-grep match with source range and optional meta-variables.
+#[derive(Clone, Eq, PartialEq)]
+#[napi(object)]
+pub struct AstFindCapture {
+	/// Captured source text.
+	pub text:         String,
+	/// Start byte offset in the file (UTF-8 byte index).
+	pub byte_start:   u32,
+	/// End byte offset in the file (exclusive UTF-8 byte index).
+	pub byte_end:     u32,
+	/// 1-based start line.
+	pub start_line:   u32,
+	/// 1-based start column.
+	pub start_column: u32,
+	/// 1-based end line.
+	pub end_line:     u32,
+	/// 1-based end column.
+	pub end_column:   u32,
+}
+
 #[napi(object)]
 pub struct AstFindMatch {
 	/// Display path of the matching file.
-	pub path:           String,
+	pub path:                 String,
 	/// Matched source text.
-	pub text:           String,
+	pub text:                 String,
 	/// Start byte offset in the file (UTF-8 byte index).
-	pub byte_start:     u32,
+	pub byte_start:           u32,
 	/// End byte offset in the file (exclusive UTF-8 byte index).
-	pub byte_end:       u32,
+	pub byte_end:             u32,
 	/// 1-based start line.
-	pub start_line:     u32,
+	pub start_line:           u32,
 	/// 1-based start column.
-	pub start_column:   u32,
+	pub start_column:         u32,
 	/// 1-based end line.
-	pub end_line:       u32,
+	pub end_line:             u32,
 	/// 1-based end column.
-	pub end_column:     u32,
+	pub end_column:           u32,
 	/// Meta-variable name to captured text, when `includeMeta` was enabled.
-	pub meta_variables: Option<HashMap<String, String>>,
+	pub meta_variables:       Option<HashMap<String, String>>,
+	/// Meta-variable name to its exact source range, when `includeMeta` was
+	/// enabled.
+	pub meta_variable_ranges: Option<HashMap<String, AstFindCapture>>,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -147,9 +169,10 @@ impl PartialOrd for AstFindOrderKey {
 
 #[derive(Eq, PartialEq)]
 struct RetainedAstFindMatch {
-	key:            AstFindOrderKey,
-	text:           String,
-	meta_variables: Option<HashMap<String, String>>,
+	key:                  AstFindOrderKey,
+	text:                 String,
+	meta_variables:       Option<HashMap<String, String>>,
+	meta_variable_ranges: Option<HashMap<String, AstFindCapture>>,
 }
 
 impl Ord for RetainedAstFindMatch {
@@ -216,7 +239,7 @@ fn page_retained_matches(
 }
 
 fn retained_to_find_match(retained: RetainedAstFindMatch) -> AstFindMatch {
-	let RetainedAstFindMatch { key, text, meta_variables } = retained;
+	let RetainedAstFindMatch { key, text, meta_variables, meta_variable_ranges } = retained;
 	AstFindMatch {
 		path: key.path,
 		text,
@@ -227,6 +250,7 @@ fn retained_to_find_match(retained: RetainedAstFindMatch) -> AstFindMatch {
 		end_line: key.end_line,
 		end_column: key.end_column,
 		meta_variables,
+		meta_variable_ranges,
 	}
 }
 
@@ -754,10 +778,30 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 					};
 					match_sequence = match_sequence.saturating_add(1);
 					if should_retain_match(&retained_matches, retained_capacity, &key) {
-						let meta_variables = if include_meta {
-							Some(HashMap::<String, String>::from(matched.get_env().clone()))
+						let (meta_variables, meta_variable_ranges) = if include_meta {
+							let env = matched.get_env();
+							let values = HashMap::<String, String>::from(env.clone());
+							let ranges = values
+								.iter()
+								.filter_map(|(name, text)| {
+									let node = env.get_match(name)?;
+									let range = node.range();
+									let start = node.start_pos();
+									let end = node.end_pos();
+									Some((name.clone(), AstFindCapture {
+										text:         text.clone(),
+										byte_start:   to_u32(range.start),
+										byte_end:     to_u32(range.end),
+										start_line:   to_u32(start.line().saturating_add(1)),
+										start_column: to_u32(start.column(node).saturating_add(1)),
+										end_line:     to_u32(end.line().saturating_add(1)),
+										end_column:   to_u32(end.column(node).saturating_add(1)),
+									}))
+								})
+								.collect();
+							(Some(values), Some(ranges))
 						} else {
-							None
+							(None, None)
 						};
 						retain_bounded_match(
 							&mut retained_matches,
@@ -766,6 +810,7 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Promise<AstFindResult> {
 								key,
 								text: matched.text().into_owned(),
 								meta_variables,
+								meta_variable_ranges,
 							},
 						);
 					}
@@ -866,10 +911,30 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 					};
 					match_sequence = match_sequence.saturating_add(1);
 					if should_retain_match(&retained_matches, retained_capacity, &key) {
-						let meta_variables = if include_meta {
-							Some(HashMap::<String, String>::from(matched.get_env().clone()))
+						let (meta_variables, meta_variable_ranges) = if include_meta {
+							let env = matched.get_env();
+							let values = HashMap::<String, String>::from(env.clone());
+							let ranges = values
+								.iter()
+								.filter_map(|(name, text)| {
+									let node = env.get_match(name)?;
+									let range = node.range();
+									let start = node.start_pos();
+									let end = node.end_pos();
+									Some((name.clone(), AstFindCapture {
+										text:         text.clone(),
+										byte_start:   to_u32(range.start),
+										byte_end:     to_u32(range.end),
+										start_line:   to_u32(start.line().saturating_add(1)),
+										start_column: to_u32(start.column(node).saturating_add(1)),
+										end_line:     to_u32(end.line().saturating_add(1)),
+										end_column:   to_u32(end.column(node).saturating_add(1)),
+									}))
+								})
+								.collect();
+							(Some(values), Some(ranges))
 						} else {
-							None
+							(None, None)
 						};
 						retain_bounded_match(
 							&mut retained_matches,
@@ -878,6 +943,7 @@ pub fn ast_match(options: AstMatchOptions<'_>) -> task::Promise<AstMatchResult> 
 								key,
 								text: matched.text().into_owned(),
 								meta_variables,
+								meta_variable_ranges,
 							},
 						);
 					}
@@ -1241,7 +1307,7 @@ mod tests {
 
 	fn retained_test_match(line: u32) -> RetainedAstFindMatch {
 		RetainedAstFindMatch {
-			key:            AstFindOrderKey {
+			key:                  AstFindOrderKey {
 				path:         "file.ts".to_string(),
 				start_line:   line,
 				start_column: 1,
@@ -1251,8 +1317,9 @@ mod tests {
 				byte_end:     line,
 				sequence:     u64::from(line),
 			},
-			text:           String::new(),
-			meta_variables: None,
+			text:                 String::new(),
+			meta_variables:       None,
+			meta_variable_ranges: None,
 		}
 	}
 
