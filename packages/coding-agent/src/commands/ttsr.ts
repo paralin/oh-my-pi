@@ -1,11 +1,13 @@
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 /**
- * `omp ttsr` — inspect and test Time-Traveling Stream Rules.
+ * `omp ttsr` — inspect and test Time-Traveling Stream Rules and whole-file semantic rules.
  *
  * `omp ttsr test` feeds a snippet (inline, --file, or stdin) through the real
- * TTSR matching pipeline and reports which rules would trigger. `omp ttsr list`
- * shows every TTSR-registered rule the current project/user config would load.
+ * TTSR matching pipeline. Semantic rules evaluate the supplied whole snippet;
+ * project references are used only when --file is the actual source file.
+ * `omp ttsr list` shows every TTSR-registered rule and effective provider gates.
+ * `omp ttsr scan` evaluates complete files in whole-file mode.
  */
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { ttsrHelp as commandHelp } from "../cli/command-help";
@@ -34,7 +36,10 @@ export default class Ttsr extends Command {
 	};
 
 	static flags = {
-		file: Flags.string({ description: "Snippet file path, or - for stdin (ttsr test)" }),
+		file: Flags.string({
+			description:
+				"Snippet/source file path, or - for stdin (ttsr test; semantic references require the actual file)",
+		}),
 		rule: Flags.string({
 			char: "r",
 			description: "Rule markdown file to test in isolation (skips project rule loading)",
@@ -66,7 +71,9 @@ export default class Ttsr extends Command {
 		"omp ttsr test --file src/foo.ts --source text",
 		"omp ttsr test --rule .omp/rules/no-any.md --source tool --path src/foo.ts 'const x: any = 1'",
 		"echo 'Box::leak(&mut v)' | omp ttsr test --file - --path src/lib.rs",
-		"omp ttsr test --source tool --tool edit --path src/foo.ts 'const x: any = 1'",
+		"omp ttsr test --rule .omp/rules/semantic.md --path src/foo.ts 'function foo() {}'",
+		"omp ttsr test --rule .omp/rules/semantic.md --file src/foo.ts --verbose",
+		"omp ttsr scan --json src/  # JSON reports mode=whole-file",
 		"omp ttsr scan",
 		"omp ttsr scan src/",
 		"omp ttsr scan -r .omp/rules/no-any.md src/",

@@ -75,6 +75,8 @@ Project-level bases:
 
 `CONFIG_DIR_NAME` is `.omp` (`packages/utils/src/dirs.ts`). `PI_CONFIG_DIR` changes the OMP user root used by the generic helpers. `PI_CODING_AGENT_DIR` is different: for the default profile it changes `getAgentDir()` consumers such as native discovery, settings, and runtime state, but it does **not** change the generic `getConfigDirs()` / `findConfigFile()` OMP base. Named profiles ignore `PI_CODING_AGENT_DIR`.
 
+For the TTSR settings and CLI, the project boundary is the exact working directory passed as `cwd`: project config is read from `<cwd>/.omp`, `<cwd>/.claude`, `<cwd>/.codex`, and `<cwd>/.gemini`. These lookups do not walk parent directories. This is separate from providers such as native rules and skills that intentionally walk ancestors for their own discovery behavior. A project rule found in a parent directory does not change the settings or provider gates for a command whose working directory is the child.
+
 ## Profiles
 
 A named profile (`omp --profile <name>`, `OMP_PROFILE`, or the legacy fallback `PI_PROFILE`) relocates the OMP user base. `OMP_PROFILE` wins when it is defined, including when it is explicitly empty; `default`, empty, or whitespace selects the default profile. When a profile is active, every OMP-native user-level path written here as `~/.omp/agent/...` normally resolves to `~/.omp/profiles/<name>/agent/...`. `--alias <command>` does not select a profile by itself: paired with `--profile`, it creates a shell shortcut for that profile.
@@ -288,8 +290,29 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 
 - Missing `TITLE_SYSTEM.md` keeps the bundled title prompts.
 - Discovery checks the current project directory bases first (`<cwd>/.omp`, `.claude`, `.codex`, `.gemini`), then the user bases in the generic helper order. Unlike native `SYSTEM.md`, project title discovery does **not** walk ancestor directories.
+
 - The override replaces only the automatic session-title generation system prompt; normal `SYSTEM.md` / `APPEND_SYSTEM.md` prompt customization is unaffected.
 - The online path asks the title model to wrap the title in `<title>...</title>` and parses it leniently from text (a plain sentence, a truncated/unclosed tag, or a stray `{"title": "..."}` JSON echo all still work). A `TITLE_SYSTEM.md` override gets the wrap-in-`<title>` instruction appended after it. The local tiny-title path keeps the `<title>...</title>` prefill/stop wrapper and uses this file as its system turn.
+
+## TTSR rule gates
+
+The TTSR group in `packages/coding-agent/src/config/settings-schema.ts` controls bundled rule providers through `ttsr.builtinRules`, `ttsr.apertureRules`, and `ttsr.disabledRules`:
+
+- `ttsr.builtinRules` defaults to `true` and controls the `builtin-defaults` provider.
+- `ttsr.apertureRules` defaults to `false` and controls the `aperture-defaults` provider.
+- `ttsr.disabledRules` defaults to `[]` and disables matching rule names from any provider.
+
+Enable the default-off provider only in the project directory that needs it:
+
+```yaml
+# <cwd>/.omp/config.yml
+ttsr:
+  apertureRules: true
+```
+
+Project settings use the exact session working directory. They read `<cwd>/.omp/config.yml` and do not inherit the same file from a parent directory. A session started in a nested repository, worktree, or unrelated directory therefore keeps `apertureRules: false` unless that exact directory enables it.
+
+The gates are independent. A rule name in `disabledRules` is removed even when its provider gate is on. Provider priority and `ruleCapability.key` name deduplication run first, so the first rule with a name wins and its `_source.provider` is the attribution used by runtime and `omp ttsr` output. These settings affect `bucketRules(...)`, `TtsrManager`, and CLI `list`, `test`, and `scan`; they do not alter unrelated capability providers.
 
 ## Skills subsystem
 
