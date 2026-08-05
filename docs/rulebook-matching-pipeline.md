@@ -7,12 +7,15 @@ This document describes how coding-agent discovers rules from supported config f
 - **Rulebook rules** (available to the model via system prompt + `rule://` URLs)
 - **TTSR rules** (Time Traveling Stream Rules)
 
-It reflects the current implementation, including partial semantics and metadata that is parsed but not enforced.
+It reflects the current implementation, including streaming and post-edit semantic matching.
 
 ## Implementation files
 
 - [`packages/coding-agent/src/capability/rule.ts`](../packages/coding-agent/src/capability/rule.ts)
 - [`packages/coding-agent/src/capability/rule-buckets.ts`](../packages/coding-agent/src/capability/rule-buckets.ts)
+- [`packages/coding-agent/src/capability/rule-semantic.ts`](../packages/coding-agent/src/capability/rule-semantic.ts)
+- [`packages/coding-agent/src/capability/successful-change-analyzer.ts`](../packages/coding-agent/src/capability/successful-change-analyzer.ts)
+- [`packages/coding-agent/src/cli/ttsr-cli.ts`](../packages/coding-agent/src/cli/ttsr-cli.ts)
 - [`packages/coding-agent/src/capability/index.ts`](../packages/coding-agent/src/capability/index.ts)
 - [`packages/coding-agent/src/discovery/index.ts`](../packages/coding-agent/src/discovery/index.ts)
 - [`packages/coding-agent/src/discovery/helpers.ts`](../packages/coding-agent/src/discovery/helpers.ts)
@@ -43,11 +46,32 @@ interface Rule {
   description?: string;
   condition?: string[];
   astCondition?: string[];
+  semanticCondition?: SemanticConditionClause[];
   scope?: string[];
   interruptMode?: "never" | "prose-only" | "tool-only" | "always";
   _source: SourceMeta;
 }
+
+interface SemanticConditionClause {
+  candidate: { ast: string } | { regex: string } | { codeRegex: string };
+  captures?: Record<string, { regex?: string[]; notRegex?: string[] }>;
+  file?: {
+    required?: { ast?: string[]; regex?: string[] };
+    forbidden?: { ast?: string[]; regex?: string[] };
+  };
+  references?: { capture: string; min?: number; max?: number };
+}
 ```
+
+`semanticCondition` accepts one clause object or a non-empty clause array. Each clause has exactly one candidate matcher. `candidate.ast` uses ast-grep patterns and `$NAME` or `$$$NODES` captures. `candidate.regex` is a raw regular expression and uses named groups such as `(?<NAME>...)`. `candidate.codeRegex` is a raw regular expression with candidate-local start-context semantics: each candidate match must start in executable source. The evaluator ignores comments, strings, regular-expression literals, templates, and JSX text at the candidate start. The match cannot begin in an excluded span.
+
+Every candidate records its clause number, status, reason, source `range`, capture values, and `captureRanges`. Ranges include byte start/end and one-based line and column start/end. A candidate is `matched` when its local predicates pass, `rejected` when a capture, whole-file predicate, or reference bound fails, and `skipped` when evidence is unavailable or evaluation is cancelled or fails. Clause-level failures appear in the report's `skipped` list without discarding candidates from other clauses.
+
+`captures` applies regex and anti-regex predicates to candidate captures. `file.required` and `file.forbidden` evaluate the entire final source, using either raw regex or AST predicates. All predicates in a matcher set must pass. A required matcher must find a match, and a forbidden matcher must not find one.
+
+`references` is optional and names a candidate capture whose source position is known. `min` and `max` are non-negative integer bounds, and at least one bound is required. The project-reference lookup counts unique call sites, excluding the declaration itself. Reference evidence records the capture, count, and language-server name. Bounds that fail reject the candidate. An unavailable or cancelled project reference lookup skips it instead.
+
+The normalized object is available in `rule://<name>` output under the semantic conditions section. Invalid fields, ambiguous candidate matchers, invalid regular expressions, and invalid reference bounds are reported with the rule name, clause number, and field.
 
 Capability identity is `rule.name` (`ruleCapability.key = rule => rule.name`).
 
@@ -64,6 +88,7 @@ Consequence: precedence and deduplication are **name-based only**. Two different
 - `windsurf` (priority `50`)
 - `cline` (priority `40`)
 - `github` (priority `30`)
+- `aperture-defaults` (priority `2`)
 - `builtin-defaults` (priority `1`)
 
 ### Native provider (`builtin.ts`)
@@ -192,7 +217,8 @@ Effective rule provider order is currently:
 5. `windsurf` (50)
 6. `cline` (40)
 7. `github` (30)
-8. `builtin-defaults` (1)
+8. `aperture-defaults` (2)
+9. `builtin-defaults` (1)
 
 ### Intra-provider ordering caveat
 
@@ -215,13 +241,16 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 
 1. Drop rules listed in `ttsr.disabledRules`.
 2. Drop rules from the `builtin-defaults` provider when `ttsr.builtinRules === false`.
-3. Register rules with a non-empty `condition` or `astCondition` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
-4. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
-5. Put remaining rules with `description` into `rulebookRules`.
+3. Drop rules from the `aperture-defaults` provider unless `ttsr.apertureRules === true`.
+4. Register rules with a non-empty `condition`, `astCondition`, or `semanticCondition` into `TtsrManager`; if registration succeeds, the rule is TTSR-only.
+5. Put remaining `alwaysApply === true` rules into `alwaysApplyRules`.
+6. Put remaining rules with `description` into `rulebookRules`.
+
+The three gates are independent. `builtinRules` defaults to `true`, `apertureRules` defaults to `false`, and `disabledRules` defaults to an empty list. A disabled name wins over either provider gate. Capability deduplication and first-wins provider precedence happen first, so a higher-priority rule with the same name is retained and its `_source.provider` remains the attribution shown by runtime and CLI inspection.
 
 ### Bucket behavior
 
-- **TTSR bucket**: any enabled rule with a non-empty parsed `condition` (regex) or `astCondition` (ast-grep patterns) that `TtsrManager.addRule(...)` accepts. Takes priority over other buckets.
+- **TTSR bucket**: any enabled rule with a non-empty parsed `condition` (regex), `astCondition` (ast-grep patterns), or `semanticCondition` that `TtsrManager.addRule(...)` accepts. Takes priority over other buckets. Streaming `condition` and `astCondition` matching remains separate from post-edit semantic evaluation.
 - **Always-apply bucket**: `alwaysApply === true`, not TTSR. Full content injected into system prompt. Resolvable via `rule://`.
 - **Rulebook bucket**: must have description, must not be TTSR, must not be `alwaysApply`. Listed in system prompt by name+description; content read on demand via `rule://`.
 - A rule with both a trigger condition and `alwaysApply` goes to TTSR only if TTSR registration accepts it; otherwise it can fall through to always-apply.
@@ -251,10 +280,11 @@ After rule discovery in `createAgentSession` (`sdk.ts`), `bucketRules(...)` appl
 - **Full rule content is auto-injected into the system prompt** (before the rulebook rules section).
 - Rule is also addressable via `rule://<name>` for re-reading.
 
-### `condition`, `astCondition`, `scope`, and `interruptMode`
+### `condition`, `astCondition`, `semanticCondition`, `scope`, and `interruptMode`
 
 - `condition` is the regex TTSR trigger field; legacy `ttsr_trigger` / `ttsrTrigger` are accepted as fallback inputs during parsing. A leading `(?i)`, `(?m)`, or `(?s)` inline flag group is translated to the equivalent JavaScript `RegExp` flags.
 - `astCondition` is the ast-grep trigger field: a string or YAML sequence of structural patterns, kept verbatim (no glob inference). It only matches on edit/write tool streams, where the language is inferred from the file path. A rule may set `condition`, `astCondition`, or both.
+- `semanticCondition` is a normalized post-edit clause list. It is evaluated against final edit/write destinations, not streaming snapshots. See the canonical schema above for candidate, capture, whole-file, and reference predicates.
 - `scope` narrows TTSR matching to an allowlist of stream surfaces. It accepts either a comma-separated YAML string or a YAML sequence. Omitting it watches assistant prose (`text`) and all tool arguments (`tool`), but not thinking.
 
   ```yaml
@@ -315,9 +345,24 @@ Implications:
 - Unknown names return error listing available rule names.
 - Returned content is raw `rule.content` (frontmatter stripped), content type `text/markdown`.
 
-## 9. Known partial / non-enforced semantics
+## 9. CLI inspection and whole-file evaluation
 
-1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `agents`, `cursor`, `windsurf`, `cline`, `github`, and embedded `builtin-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
+`omp ttsr list`, `omp ttsr test`, and `omp ttsr scan` are implemented in `packages/coding-agent/src/cli/ttsr-cli.ts` and exposed by `packages/coding-agent/src/commands/ttsr.ts`.
+
+`list` reports each registered rule with its `name`, rule `path`, source `provider`, enabled state, `condition`, `astCondition`, normalized `semanticCondition`, `scope`, `globs`, `interruptMode`, and effective provider gates. `builtinRules` is on by default, `apertureRules` is off by default, and `disabledRules` is applied independently. Provider attribution is the normalized `_source.provider` value after name-based deduplication.
+
+`test` treats the supplied inline text, `--file` content, or stdin as the whole evaluated source. It applies the selected `--source`, `--tool`, and `--path` context. It does not model a successful edit's changed ranges. Each `RuleMatchDetail` uses one normalized state: `matched`, `rejected`, `skipped`, or `out-of-scope`, and retains its `matched` and `defined` condition arrays. Semantic reports use `semantic: { ruleName, candidates, skipped }`, where candidates include clause numbers, status, reasons, ranges, captures, capture ranges, and reference evidence. Reports also retain the rule path, provider, scope, and interrupt mode. `--verbose` adds non-matching and out-of-scope rules. Project-reference predicates run only when the snippet is the actual file contents. If the reference service cannot provide evidence, the candidate is `skipped` with the unavailable-evidence reason rather than rejected.
+
+`scan` walks real files in the requested directory, applies the scan file-size and gitignore options, and evaluates each file as a whole source. It includes semantic-only rules and can use the project-reference service when a candidate requires it. Human output and JSON both label the result as whole-file evaluation; JSON sets `mode: "whole-file"`. Matched files retain provider, status, scope, interrupt mode, semantic reports, and reasons under `files`. Rejected, skipped, and out-of-scope details use the same fields under `evaluations`. The summary keeps file-read skips separate from rule-level semantic rejection and skip counts.
+
+For `list`, `test`, and `scan`, JSON and human verbose views describe the same normalized rule and candidate fields. Human output formats those fields for readability, while JSON preserves them as structured values.
+
+CLI whole-file evaluation is an inspection mode. Runtime semantic analysis instead runs after a successful `edit` or `write`, reads the final destination, and intersects candidates with the tool's changed ranges before local predicates and optional project references. A candidate that exists only outside those ranges can therefore appear in CLI `test` or `scan` but does not match the runtime post-edit path.
+
+## 10. Known partial / non-enforced semantics
+
+
+1. The rule providers currently loaded for `rules` are `native`, `omp-plugins`, `agents`, `cursor`, `windsurf`, `cline`, `github`, `builtin-defaults`, and `aperture-defaults`; provider files for other tools may parse other config formats but do not register rule loaders.
 2. `globs` metadata is surfaced to prompt/UI and is used as a global path gate for TTSR matching, but it is not used to automatically select rulebook rules for `rule://`.
-3. Rule selection for `rule://` includes rulebook, always-apply, and registered TTSR rules (so a triggered TTSR rule can be re-read), but not rules that registered no condition and carry neither a description nor `alwaysApply`.
+3. Rule selection for `rule://` includes rulebook, always-apply, and registered TTSR rules, including semantic-only rules, but not rules that registered no condition and carry neither a description nor `alwaysApply`.
 4. Discovery warnings (`loadCapability("rules").warnings`) are produced but `createAgentSession` does not currently surface/log them in this path.

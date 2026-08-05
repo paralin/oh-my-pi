@@ -10,6 +10,8 @@ import {
 	type TtsrTestArgs,
 } from "@oh-my-pi/pi-coding-agent/cli/ttsr-cli";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getActiveClients, getOrCreateClient, shutdownAll } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import type { ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { getProjectAgentDir, getProjectDir, removeSyncWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 let testTmpDir: string;
@@ -81,6 +83,40 @@ async function writeTempRule(condition: string, scope: string[], astCondition?: 
 	return tmp;
 }
 
+async function writeTempSemanticRule(candidate: string, scope: string[] = ["tool:edit(*.ts)"]): Promise<string> {
+	const dir = path.join(testTmpDir, `semantic-rule-${Math.random().toString(36).slice(2)}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const tmp = path.join(dir, "semantic-rule.md");
+	const scopeYaml = scope.map(s => `  - "${s}"`).join("\n");
+	await Bun.write(
+		tmp,
+		`---\ndescription: semantic test rule\nscope:\n${scopeYaml}\nsemanticCondition:\n  candidate:\n    regex: '${candidate.replace(/'/g, "''")}'\n---\nsemantic body\n`,
+	);
+	return tmp;
+}
+
+async function writeTempCodeRegexRule(candidate: string, scope: string[]): Promise<string> {
+	const dir = path.join(testTmpDir, `semantic-code-rule-${Math.random().toString(36).slice(2)}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const tmp = path.join(dir, "semantic-code-rule.md");
+	await Bun.write(
+		tmp,
+		`---\nscope: [${scope.map(value => `"${value}"`).join(", ")}]\nsemanticCondition:\n  candidate:\n    codeRegex: '${candidate.replace(/'/g, "''")}'\n---\nbody\n`,
+	);
+	return tmp;
+}
+
+async function writeTempSemanticReferenceRule(scope: string[] = ["tool:edit(*.ts)"]): Promise<string> {
+	const dir = path.join(testTmpDir, `semantic-reference-${Math.random().toString(36).slice(2)}`);
+	fs.mkdirSync(dir, { recursive: true });
+	const tmp = path.join(dir, "semantic-reference.md");
+	await Bun.write(
+		tmp,
+		`---\nscope: [${scope.map(value => `"${value}"`).join(", ")}]\nsemanticCondition:\n  candidate:\n    regex: 'function\\s+(?<NAME>\\w+)'\n  references:\n    capture: NAME\n    max: 1\n---\nbody\n`,
+	);
+	return tmp;
+}
+
 async function writeTempSnippet(content: string, ext: string): Promise<string> {
 	const dir = path.join(testTmpDir, `snippet-${Math.random().toString(36).slice(2)}`);
 	fs.mkdirSync(dir, { recursive: true });
@@ -97,9 +133,27 @@ function cleanupTmp(): void {
 }
 
 describe("omp ttsr", () => {
-	afterEach(() => {
+	afterEach(async () => {
 		restoreStreams();
 		cleanupTmp();
+		await shutdownAll();
+	});
+
+	it("shuts down LSP clients before returning", async () => {
+		const config: ServerConfig = {
+			command: process.execPath,
+			args: [path.resolve(import.meta.dir, "../fixtures/fake-lsp-server.ts")],
+			fileTypes: [".ts"],
+			rootMarkers: [],
+		};
+		await getOrCreateClient(config, testTmpDir, 1_000);
+		expect(getActiveClients()).toHaveLength(1);
+
+		captureStreams();
+		const rulePath = await writeTempRule("match", ["text"]);
+		await run({ action: "test", test: { rule: rulePath, snippet: "match", source: "text" } });
+
+		expect(getActiveClients()).toHaveLength(0);
 	});
 
 	describe("test — context inference and matching", () => {
@@ -216,6 +270,7 @@ describe("omp ttsr", () => {
 			const snippetPath = await writeTempSnippet("class A {}", "unknownext");
 			await run({ action: "test", test: { rule: rulePath, file: snippetPath, source: undefined } });
 			expect(stdout).toContain("note: inferred --source text from '.unknownext'");
+
 			expect(stdout).toContain("--source tool --tool edit");
 		});
 
@@ -226,6 +281,122 @@ describe("omp ttsr", () => {
 			await run({ action: "test", test: { rule: rulePath, file: snippetPath, source: "text" }, json: true });
 			const report = JSON.parse(stdout);
 			expect(report.inferenceNote).toBeUndefined();
+		});
+	});
+
+	describe("semantic whole-snippet reports", () => {
+		it("reports matched candidates with exact ranges and captures", async () => {
+			captureStreams();
+			const rulePath = await writeTempSemanticRule("function\\s+(?<NAME>\\w+)");
+			await run({
+				action: "test",
+				test: {
+					rule: rulePath,
+					source: "tool",
+					tool: "edit",
+					filePath: "src/foo.ts",
+					snippet: "function foo() {}",
+				},
+				json: true,
+			});
+			const report = JSON.parse(stdout);
+			const detail = report.triggered[0];
+			expect(detail.status).toBe("matched");
+			expect(detail.semantic.candidates[0]).toMatchObject({
+				status: "matched",
+				clause: 1,
+				captures: { NAME: "foo" },
+			});
+			expect(detail.semantic.candidates[0].range).toMatchObject({ startLine: 1, startColumn: 1 });
+		});
+
+		it("reports rejected and out-of-scope normalized states", async () => {
+			captureStreams();
+			const rejectedPath = await writeTempSemanticRule("never-matches");
+			await run({
+				action: "test",
+				test: {
+					rule: rejectedPath,
+					source: "tool",
+					tool: "edit",
+					filePath: "src/foo.ts",
+					snippet: "function foo() {}",
+				},
+				json: true,
+			});
+
+			expect(JSON.parse(stdout).notTriggered[0].status).toBe("rejected");
+
+			stdout = "";
+			const scopedPath = await writeTempSemanticRule("function", ["tool:edit(*.rs)"]);
+			await run({
+				action: "test",
+				test: {
+					rule: scopedPath,
+					source: "tool",
+					tool: "edit",
+					filePath: "src/foo.ts",
+					snippet: "function foo() {}",
+				},
+				json: true,
+			});
+			expect(JSON.parse(stdout).notTriggered[0].status).toBe("out-of-scope");
+		});
+
+		it("marks reference-dependent inline candidates skipped with unavailable evidence", async () => {
+			captureStreams();
+			const rulePath = await writeTempSemanticReferenceRule();
+			await run({
+				action: "test",
+				test: {
+					rule: rulePath,
+					source: "tool",
+					tool: "edit",
+					filePath: "src/foo.ts",
+					snippet: "function foo() {}",
+				},
+				json: true,
+			});
+			const candidate = JSON.parse(stdout).notTriggered[0].semantic.candidates[0];
+			expect(candidate.status).toBe("skipped");
+			expect(candidate.reason).toContain("actual edit/write file");
+		});
+
+		it("does not apply project reference evidence outside edit/write context", async () => {
+			captureStreams();
+			const rulePath = await writeTempSemanticReferenceRule(["tool"]);
+			const snippetPath = await writeTempSnippet("function foo() {}", "ts");
+			await run({
+				action: "test",
+				test: {
+					rule: rulePath,
+					file: snippetPath,
+					source: "tool",
+					tool: "shell",
+				},
+				json: true,
+			});
+			const candidate = JSON.parse(stdout).notTriggered[0].semantic.candidates[0];
+			expect(candidate.status).toBe("skipped");
+			expect(candidate.reason).toContain("actual edit/write file");
+		});
+
+		it("renders semantic details in human output", async () => {
+			captureStreams();
+			const rulePath = await writeTempSemanticRule("function\\s+(?<NAME>\\w+)");
+			await run({
+				action: "test",
+				test: {
+					rule: rulePath,
+					source: "tool",
+					tool: "edit",
+					filePath: "src/foo.ts",
+					snippet: "function foo() {}",
+					verbose: true,
+				},
+			});
+			expect(stdout).toContain("status=matched");
+			expect(stdout).toContain("semantic clause=1");
 		});
 	});
 
@@ -245,7 +416,11 @@ describe("omp ttsr", () => {
 				expect(first).toHaveProperty("enabled", true);
 				expect(first).toHaveProperty("condition");
 				expect(first).toHaveProperty("astCondition");
+				expect(first).toHaveProperty("semanticCondition");
 				expect(first).toHaveProperty("scope");
+				expect(first).toHaveProperty("globs");
+				expect(first).toHaveProperty("interruptMode");
+				expect(first).toHaveProperty("description");
 			}
 		});
 	});
@@ -292,6 +467,70 @@ describe("omp ttsr", () => {
 			expect(stdout).toContain("src/foo.ts");
 			expect(stdout).toContain("test-rule");
 			expect(process.exitCode).toBeFalsy();
+		});
+
+		it("scans semantic-only rules against complete files and labels whole-file mode", async () => {
+			captureStreams();
+			const projectDir = path.join(testTmpDir, `.tmp-ttsr-project-${Math.random().toString(36).slice(2)}`);
+			fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+			setProjectDir(projectDir);
+			await Bun.write(path.join(projectDir, "src/foo.ts"), "const before = 1;\nfunction foo() {}\n");
+			const rulePath = await writeTempSemanticRule("function\\s+(?<NAME>\\w+)", ["tool:edit(src/**/*.ts)"]);
+			await run({ action: "scan", scan: { directory: "src", rule: rulePath }, json: true });
+			const result = JSON.parse(stdout);
+			expect(result.mode).toBe("whole-file");
+			expect(result.files[0].matches[0].status).toBe("matched");
+			expect(result.files[0].matches[0].semantic.candidates[0].captures.NAME).toBe("foo");
+		});
+
+		it("reports rejected and skipped semantic whole-file evidence", async () => {
+			captureStreams();
+			const projectDir = path.join(testTmpDir, `.tmp-ttsr-project-${Math.random().toString(36).slice(2)}`);
+			fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+			setProjectDir(projectDir);
+			await Bun.write(path.join(projectDir, "src/foo.ts"), "const value = 1;\n");
+			const rejectedRule = await writeTempSemanticRule("function", ["tool:edit(src/**/*.ts)"]);
+			await run({ action: "scan", scan: { directory: "src", rule: rejectedRule }, json: true });
+			let result = JSON.parse(stdout);
+			expect(result.files).toEqual([]);
+			expect(result.evaluations[0].evaluations[0]).toMatchObject({
+				status: "rejected",
+				reason: "no semantic candidate matched",
+			});
+			expect(result.summary.semantic).toEqual({ rejected: 1, skipped: 0 });
+
+			stdout = "";
+			await Bun.write(path.join(projectDir, "src/foo.py"), "danger()\n");
+			const skippedRule = await writeTempCodeRegexRule("danger\\(", ["tool:edit(src/**/*.py)"]);
+			await run({ action: "scan", scan: { directory: "src", rule: skippedRule }, json: true });
+			result = JSON.parse(stdout);
+			const skipped = result.evaluations
+				.flatMap(
+					(file: { evaluations: Array<{ status: string; semantic?: { skipped?: unknown[] } }> }) =>
+						file.evaluations,
+				)
+				.find((evaluation: { status: string }) => evaluation.status === "skipped");
+			expect(skipped.semantic.skipped[0].reason).toContain("unsupported language");
+			expect(result.summary.semantic.skipped).toBe(1);
+		});
+
+		it("reports out-of-scope scan rules in JSON and verbose output", async () => {
+			captureStreams();
+			const projectDir = path.join(testTmpDir, `.tmp-ttsr-project-${Math.random().toString(36).slice(2)}`);
+			fs.mkdirSync(path.join(projectDir, "src"), { recursive: true });
+			setProjectDir(projectDir);
+			await Bun.write(path.join(projectDir, "src/foo.ts"), "function foo() {}\n");
+			const rulePath = await writeTempSemanticRule("function", ["tool:edit(*.go)"]);
+			await run({ action: "scan", scan: { directory: "src", rule: rulePath }, json: true });
+			const result = JSON.parse(stdout);
+			expect(result.evaluations[0].evaluations[0].status).toBe("out-of-scope");
+			expect(result.summary.skipped.noRelevantRules).toBe(1);
+
+			stdout = "";
+			await run({ action: "scan", scan: { directory: "src", rule: rulePath, verbose: true } });
+			expect(stdout).toContain("mode=whole-file");
+			expect(stdout).toContain("Evaluation details");
+			expect(stdout).toContain("status=out-of-scope");
 		});
 
 		it("keeps default scan output summary-only", async () => {
