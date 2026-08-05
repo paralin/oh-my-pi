@@ -3,6 +3,7 @@ import {
 	assertWorldRequestId,
 	DEFAULT_LOOKUP_TIMEOUT_MS,
 	formatWorldURI,
+	type InteractiveRootSpec,
 	MAX_SESSION_PAGE,
 	MAX_WORLD_READ_PAGE,
 	WORLD_LISTING_SELECTOR,
@@ -10,12 +11,14 @@ import {
 	WorldAuthorityError,
 	WorldClient,
 	type WorldEndpoint,
+	WorldEndpointError,
 	WorldOperationError,
 	type WorldService,
 } from "@oh-my-pi/pi-coding-agent/world/client";
-import { WORLD_SESSION_ENV, WORLD_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/world/config";
 import type { DialFn } from "@oh-my-pi/pi-coding-agent/world/transport";
+import { WORLD_SESSION_ENV, WORLD_SOCKET_ENV } from "../../src/world/config.js";
 import type {
+	AccessInteractiveRootResponse,
 	LookupDispatchIntentResponse,
 	ReadWorldURIResponse,
 	ResolveAgentPeerResponse,
@@ -94,6 +97,12 @@ interface FakeEndpointOptions {
 	agentTreeWatch?: WatchAgentTreeResponse[];
 	/** Durable caller mailbox records before the stream closes. */
 	mailboxWatch?: WatchPeerMailboxResponse[];
+	/** Failure raised by the caller mailbox stream. */
+	mailboxFailure?: Error;
+	/** Response held by one interactive-root admission call. */
+	interactiveResponse?: AccessInteractiveRootResponse;
+	/** Failure from adopting the admitted interactive child. */
+	adoptFailure?: Error;
 }
 
 /**
@@ -153,6 +162,7 @@ interface FakeEndpointLog {
 	watches: WorldRuntimeWatchRequest[];
 	runtimeReleases: number;
 	sessionReleases: number;
+	interactiveEvents: string[];
 }
 
 /**
@@ -179,6 +189,7 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 		watches: [],
 		runtimeReleases: 0,
 		sessionReleases: 0,
+		interactiveEvents: [],
 	};
 	const retire: Array<() => void> = [];
 	const openEndpoint = async (): Promise<WorldEndpoint> => {
@@ -248,6 +259,43 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 					aborted.promise.catch(() => {});
 				}
 			},
+			callInteractiveRootWithReceipt: async () => {
+				log.interactiveEvents.push("access");
+				return {
+					response: options.interactiveResponse ?? {},
+					commit: async () => {
+						log.interactiveEvents.push("commit");
+					},
+					abort: async () => {
+						log.interactiveEvents.push("abort");
+					},
+				};
+			},
+			adoptResource: async () => {
+				log.interactiveEvents.push("adopt");
+				if (options.adoptFailure) throw options.adoptFailure;
+			},
+			accessInteractiveRoot: resourceId => {
+				log.interactiveEvents.push(`bind:${resourceId}`);
+				return {
+					service: {
+						Rotate: async () => options.interactiveResponse?.binding ?? {},
+						Reconfigure: async () => options.interactiveResponse?.binding ?? {},
+					},
+					runtime: {
+						Mutate: async () => {
+							throw new Error("interactive runtime fake is unused");
+						},
+						WatchDispatch: () =>
+							(async function* () {
+								yield* [] as WorldRuntimeWatchResponse[];
+							})(),
+					},
+					release: async () => {
+						log.interactiveEvents.push("release");
+					},
+				};
+			},
 			accessRuntime: resourceId => {
 				log.boundResources.push(resourceId);
 				return {
@@ -277,6 +325,7 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 						WatchPeerMailbox: () => {
 							log.mailboxWatches += 1;
 							return (async function* () {
+								if (options.mailboxFailure) throw options.mailboxFailure;
 								for (const response of options.mailboxWatch ?? []) yield response;
 							})();
 						},
@@ -303,6 +352,7 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 			close: async () => {
 				usable = false;
 				log.closes++;
+				log.interactiveEvents.push("close");
 			},
 		};
 		return endpoint;
@@ -313,6 +363,33 @@ function fakeEndpoints(options: FakeEndpointOptions = {}) {
 	};
 	return { openEndpoint, log, retireAll };
 }
+const INTERACTIVE_SPEC: InteractiveRootSpec = {
+	ompSessionId: "omp-session-1",
+	processInstanceId: "process-1",
+	workingDirectory: "/worktree",
+	workspaceRoots: ["/worktree"],
+	provider: "openai",
+	model: "gpt-5",
+	transitionReason: "STARTUP",
+	protocolVersion: "omp-w5",
+	buildIdentity: "test-build",
+};
+
+const INTERACTIVE_RESPONSE: AccessInteractiveRootResponse = {
+	resourceId: 23,
+	binding: {
+		ompSessionId: "omp-session-1",
+		llmSessionObjectKey: "glados/llm-session/root",
+		dispatchIntentKey: "glados/dispatch/intent-1",
+		dispatchAttemptKey: "glados/dispatch/attempt-1",
+		claimGeneration: 1n,
+		manifestDigest: "manifest-1",
+		bindingGeneration: 1n,
+		configurationDigest: "config-1",
+		provider: "openai",
+		model: "gpt-5",
+	},
+};
 
 describe("unconfigured world client", () => {
 	// The whole integration is opt-in. With no socket configured the runtime
@@ -1033,6 +1110,87 @@ function runtimeClient(options: Parameters<typeof fakeEndpoints>[0] = {}) {
 	return { client, ...fake };
 }
 
+describe("interactive world attachment", () => {
+	test("advertises mutation capability before the root binding is adopted", () => {
+		const client = WorldClient.create({
+			env: {},
+			setting: SOCKET,
+			interactiveRoot: true,
+		})!;
+		expect(client.sessionKey).toBeUndefined();
+		expect(client.canMutate).toBe(true);
+		expect(client.interactiveBinding).toBeUndefined();
+	});
+
+	test("adopts the held root resource before committing its admission", async () => {
+		const fake = fakeEndpoints({ interactiveResponse: INTERACTIVE_RESPONSE });
+		const client = WorldClient.create({
+			env: {},
+			setting: SOCKET,
+			interactiveRoot: true,
+			openEndpoint: fake.openEndpoint,
+		})!;
+
+		const binding = await client.attachInteractiveRoot(INTERACTIVE_SPEC);
+
+		expect(binding.llmSessionObjectKey).toBe("glados/llm-session/root");
+		expect(client.sessionKey).toBe("glados/llm-session/root");
+		expect(fake.log.interactiveEvents).toEqual(["access", "adopt", "bind:23", "commit"]);
+	});
+
+	test("shares one held admission across concurrent interactive operations", async () => {
+		const fake = fakeEndpoints({ interactiveResponse: INTERACTIVE_RESPONSE });
+		const client = WorldClient.create({
+			env: {},
+			setting: SOCKET,
+			interactiveRoot: true,
+			openEndpoint: fake.openEndpoint,
+		})!;
+
+		const [first, second] = await Promise.all([
+			client.attachInteractiveRoot(INTERACTIVE_SPEC),
+			client.attachInteractiveRoot(INTERACTIVE_SPEC),
+		]);
+
+		expect(second).toEqual(first);
+		expect(fake.log.interactiveEvents).toEqual(["access", "adopt", "bind:23", "commit"]);
+	});
+
+	test("aborts the held root and closes the endpoint when adoption fails", async () => {
+		const fake = fakeEndpoints({
+			interactiveResponse: INTERACTIVE_RESPONSE,
+			adoptFailure: new Error("adoption rejected"),
+		});
+		const client = WorldClient.create({
+			env: {},
+			setting: SOCKET,
+			interactiveRoot: true,
+			openEndpoint: fake.openEndpoint,
+		})!;
+
+		await expect(client.attachInteractiveRoot(INTERACTIVE_SPEC)).rejects.toThrow("adoption rejected");
+
+		expect(fake.log.interactiveEvents).toEqual(["access", "adopt", "abort", "close"]);
+		expect(fake.log.closes).toBe(1);
+	});
+
+	test("aborts a held admission when the response has no resource binding", async () => {
+		const fake = fakeEndpoints();
+		const client = WorldClient.create({
+			env: {},
+			setting: SOCKET,
+			interactiveRoot: true,
+			openEndpoint: fake.openEndpoint,
+		})!;
+
+		await expect(client.attachInteractiveRoot(INTERACTIVE_SPEC)).rejects.toThrow(
+			"interactive root access returned no resource binding",
+		);
+
+		expect(fake.log.interactiveEvents).toEqual(["access", "abort"]);
+	});
+});
+
 describe("world runtime configuration", () => {
 	test("a socket without a caller session cannot mutate and dials nothing", async () => {
 		const { dial, calls } = recordingDial();
@@ -1308,6 +1466,16 @@ describe("World peer and session resources", () => {
 			consumedAt: "2026-08-04T12:00:00Z",
 			replayed: true,
 		});
+	});
+
+	test("classifies a failed mailbox stream as an endpoint failure", async () => {
+		const { client, log } = runtimeClient({
+			mailboxFailure: new Error("retired mailbox endpoint"),
+		});
+		const iterator = client.watchPeerMailbox()[Symbol.asyncIterator]();
+
+		await expect(iterator.next()).rejects.toBeInstanceOf(WorldEndpointError);
+		expect(log.closes).toBe(1);
 	});
 });
 

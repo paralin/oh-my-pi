@@ -5,6 +5,15 @@ export const WORLD_SOCKET_ENV = "OMP_WORLD_SOCKET";
 
 /** Environment override for the configured caller LlmSession object key. */
 export const WORLD_SESSION_ENV = "OMP_WORLD_SESSION";
+/** Optional environment override selecting attended interactive attachment. */
+export const WORLD_INTERACTIVE_ENV = "OMP_WORLD_INTERACTIVE";
+
+export interface WorldInteractiveSources {
+	/** Environment map to read {@link WORLD_INTERACTIVE_ENV} from. */
+	env?: Record<string, string | undefined>;
+	/** Configured attended attachment flag. */
+	interactiveSetting?: boolean | undefined;
+}
 
 export interface WorldSocketSources {
 	/** Environment map to read {@link WORLD_SOCKET_ENV} from. Defaults to `process.env`. */
@@ -20,8 +29,8 @@ export interface WorldSessionSources {
 	sessionSetting?: string | undefined;
 }
 
-/** Both halves of the World configuration, resolved the same way. */
-export interface WorldSources extends WorldSocketSources, WorldSessionSources {}
+/** World socket, static caller, and attended attachment configuration. */
+export interface WorldSources extends WorldSocketSources, WorldSessionSources, WorldInteractiveSources {}
 
 /**
  * Resolve the configured GLaDOS daemon Console socket path, or `undefined` when
@@ -74,13 +83,36 @@ export function resolveWorldSessionKey(sources: WorldSessionSources = {}): strin
 	const env = sources.env ?? process.env;
 	const fromEnv = env[WORLD_SESSION_ENV]?.trim();
 	if (fromEnv) return requireWorldObjectKey(fromEnv, WORLD_SESSION_ENV);
-
 	const fromSetting = (
 		sources.sessionSetting !== undefined ? sources.sessionSetting : readWorldSessionSetting()
 	)?.trim();
 	if (fromSetting) return requireWorldObjectKey(fromSetting, "world.session");
-
 	return undefined;
+}
+
+/** Resolve the attended attachment flag; environment wins over settings. */
+export function resolveWorldInteractive(sources: WorldInteractiveSources = {}): boolean {
+	const raw = (sources.env ?? process.env)[WORLD_INTERACTIVE_ENV]?.trim();
+	if (raw !== undefined && raw !== "") {
+		if (raw === "1" || raw.toLowerCase() === "true" || raw.toLowerCase() === "yes") return true;
+		if (raw === "0" || raw.toLowerCase() === "false" || raw.toLowerCase() === "no") return false;
+		throw new Error(`${WORLD_INTERACTIVE_ENV} must be boolean: ${raw}`);
+	}
+	if (sources.interactiveSetting !== undefined) return sources.interactiveSetting;
+	try {
+		return settings.get("world.interactive") === true;
+	} catch {
+		return false;
+	}
+}
+
+/** Validate interactive mode without parsing a static caller key. */
+export function validateWorldInteractiveConfiguration(sources: WorldSources = {}): void {
+	if (!resolveWorldInteractive(sources)) return;
+	if (!resolveWorldSocketPath(sources)) throw new Error("world.interactive requires a World socket");
+	const env = sources.env ?? process.env;
+	const staticCaller = env[WORLD_SESSION_ENV]?.trim() || sources.sessionSetting?.trim() || readWorldSessionSetting();
+	if (staticCaller) throw new Error("world.interactive cannot be combined with a static World caller");
 }
 
 /** Whether a World socket is configured at all. */

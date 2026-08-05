@@ -36,6 +36,8 @@ interface FakeClientOptions {
 	watch?: () => WorldDispatchSnapshot[];
 	/** Thrown by whichever method is called, before it records anything. */
 	throws?: Error;
+	/** Interactive roots have mutation authority without a static session key. */
+	interactive?: boolean;
 }
 
 /**
@@ -51,8 +53,8 @@ function fakeClient(options: FakeClientOptions = {}): { client: WorldClient; cal
 		if (options.throws) throw options.throws;
 	};
 	const client = {
-		canMutate: true,
-		sessionKey: CALLER,
+		canMutate: options.interactive ?? true,
+		sessionKey: options.interactive ? undefined : CALLER,
 		deriveIntentKey: (source: unknown) => ({ intentKey: "di:derived", source }),
 		submitDispatch: async (request: unknown) => {
 			raise();
@@ -123,6 +125,14 @@ describe("world tool admission", () => {
 	test("a socket-only root gets no tool", () => {
 		setWorldEnv(SOCKET, undefined);
 		expect(WorldTool.createIf(session())).toBeNull();
+	});
+	test("an interactive root activates the tool before its binding is attached", () => {
+		setWorldEnv(SOCKET, undefined);
+		const { client } = fakeClient({ interactive: true });
+
+		expect(client.sessionKey).toBeUndefined();
+		expect(client.canMutate).toBe(true);
+		expect(WorldTool.createIf(session({ worldClient: () => client }))).not.toBeNull();
 	});
 
 	test("a socket-plus-session root gets the tool", () => {

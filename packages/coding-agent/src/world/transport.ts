@@ -151,6 +151,16 @@ export class WorldTransport {
 		}
 		return this.#createRef(resourceId);
 	}
+	/** Commit adoption of a child returned by a held root RPC. */
+	async adoptResource(resourceId: number, signal?: AbortSignal): Promise<void> {
+		this.#ensureUsable();
+		if (!Number.isInteger(resourceId) || resourceId <= 0) {
+			throw new Error(`World resource id must be a positive integer: ${resourceId}`);
+		}
+		const service = this.#service;
+		if (!service || this.#clientHandleId === 0) throw new Error("World transport is not connected");
+		await this.#withAbort(service.ResourceRefAdopt({ clientHandleId: this.#clientHandleId, resourceId }), signal);
+	}
 
 	/**
 	 * Run the ResourceClient handshake at most once per transport.
@@ -178,15 +188,13 @@ export class WorldTransport {
 		} catch (error) {
 			throw this.#fail(error);
 		}
-		// Stated rather than implied: this client does not implement the held
-		// ResourceRpc receipt protocol, so it declines the adoption ack instead
-		// of taking the legacy path by leaving the field unset.
-		const iterator = service.ResourceClient({ supportsResourceAdoptionAck: false })[Symbol.asyncIterator]();
+		// Ask GLaDOS to hold child resources returned by root RPCs until the
+		// client explicitly adopts them. This closes the lost-response leak.
+		const iterator = service.ResourceClient({ supportsResourceAdoptionAck: true })[Symbol.asyncIterator]();
 		this.#clientStream = iterator;
 		const first = await iterator.next();
-		if (first.done) throw this.#fail(new Error("ResourceClient returned no root resource"));
-		const body = first.value.body;
-		if (body?.case !== "init") throw this.#fail(new Error("ResourceClient returned no root resource"));
+		const body = first.value?.body;
+		if (first.done || body?.case !== "init") throw this.#fail(new Error("ResourceClient returned no root resource"));
 		const clientHandleId = body.value.clientHandleId ?? 0;
 		const rootResourceId = body.value.rootResourceId ?? 0;
 		if (clientHandleId === 0) throw this.#fail(new Error("ResourceClient returned an empty client handle"));

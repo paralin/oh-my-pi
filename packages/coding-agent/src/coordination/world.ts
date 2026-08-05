@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
+import { ASYNC_JOB_OWNER_LIFECYCLE_ABORT } from "../async";
 import type { IrcMessage } from "../irc/bus";
 import { type AgentPeer, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { renderStructuredSubagentPrompt, type StructuredSubagentResult } from "../task/structured-subagent";
@@ -34,10 +35,13 @@ import type {
 	CoordinationMessageFilter,
 	CoordinationMessageReceipt,
 	CoordinationMessageRequest,
+	CoordinationModelTransition,
 	CoordinationPeerError,
 	CoordinationPeerRoster,
+	CoordinationSessionTransition,
 	CoordinationSpawnRequest,
 	CoordinationTaskHandle,
+	CoordinationTransitionToken,
 } from "./backend";
 import { buildExternalSubagentProfile, encodeExternalSubagentProfile } from "./external-subagent-profile";
 import { WorldAgentPeer, worldSessionLifecycle } from "./world-agent-peer";
@@ -62,6 +66,13 @@ export type WorldCoordinationClient = Pick<
 	| "watchAgentTree"
 	| "watchPeerMailbox"
 >;
+type WorldLifecycleClient = WorldCoordinationClient & {
+	readonly interactiveRoot?: boolean;
+	readonly interactiveBinding?: object;
+	rotateInteractiveRootTransition?: (transition: CoordinationSessionTransition) => Promise<void>;
+	reconfigureInteractiveRootTransition?: (transition: CoordinationModelTransition) => Promise<void>;
+	retireInteractiveRoot?: (reason: unknown) => Promise<void>;
+};
 const RESERVED_PEER_IDS: Readonly<Record<string, true>> = {
 	main: true,
 	all: true,
@@ -316,18 +327,157 @@ interface CachedWorldPeer {
 /** Coordination backend selected once for a configured World root. */
 export class WorldCoordinationBackend implements CoordinationBackend {
 	readonly kind = "world" as const;
-	readonly client: WorldCoordinationClient;
+	readonly client: WorldLifecycleClient;
 	readonly #sessions = new Map<string, string>();
 	readonly #peerCache = new Map<string, CachedWorldPeer>();
 	#closed = false;
 	#mailboxRouter: WorldMailboxRouter | undefined;
-
+	#mailboxReceiver:
+		| {
+				receiverPeerId: string;
+				receiver: Pick<AgentPeer, "deliverIrcMessage">;
+		  }
+		| undefined;
+	#generation = 0;
+	#quiesced = false;
+	#bound = true;
+	readonly #activeMutations = new Set<Promise<void>>();
 	constructor(client: WorldCoordinationClient) {
-		if (!client.canMutate) throw new Error("World coordination requires a caller LlmSession");
-		this.client = client;
+		const lifecycleClient = client as WorldLifecycleClient;
+		if (!client.canMutate && !lifecycleClient.interactiveRoot && !lifecycleClient.rotateInteractiveRootTransition) {
+			throw new Error("World coordination requires a caller LlmSession");
+		}
+		this.client = lifecycleClient;
+		this.#bound = lifecycleClient.interactiveRoot !== true || lifecycleClient.interactiveBinding !== undefined;
+		this.#quiesced = lifecycleClient.interactiveRoot === true && lifecycleClient.interactiveBinding === undefined;
+	}
+	#isRotatable(): boolean {
+		return this.client.interactiveRoot === true || this.client.rotateInteractiveRootTransition !== undefined;
+	}
+
+	/** Mark the startup attachment callable after its held Resource is committed. */
+	activateInteractiveRoot(): void {
+		if (!this.#isRotatable()) return;
+		if (!this.client.interactiveBinding) {
+			throw new Error("World interactive root has no accepted binding");
+		}
+		this.#bound = true;
+		this.#quiesced = false;
+		this.#startMailboxRouter();
+	}
+
+	#requireBound(operation: string): void {
+		if (this.#closed) throw new Error("World coordination backend is closed");
+		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) {
+			throw unavailable(operation);
+		}
+	}
+
+	async #runMutableOperation<T>(operation: string, run: () => Promise<T>): Promise<T> {
+		this.#requireBound(operation);
+		const settled = Promise.withResolvers<void>();
+		this.#activeMutations.add(settled.promise);
+		try {
+			return await run();
+		} finally {
+			this.#activeMutations.delete(settled.promise);
+			settled.resolve();
+		}
+	}
+
+	async beforeRootTransition(): Promise<CoordinationTransitionToken> {
+		if (this.#closed) throw new Error("World coordination backend is closed");
+		const token = { generation: ++this.#generation };
+		if (!this.#isRotatable()) return token;
+		this.#quiesced = true;
+		this.#bound = false;
+		await Promise.all([this.#mailboxRouter?.close(), ...this.#activeMutations]);
+		this.#mailboxRouter = undefined;
+		return token;
+	}
+
+	async afterSessionTransition(
+		token: CoordinationTransitionToken,
+		transition: CoordinationSessionTransition,
+	): Promise<void> {
+		if (!this.#isRotatable()) return;
+		this.#assertTransitionToken(token);
+		try {
+			const rotate = this.client.rotateInteractiveRootTransition;
+			if (!rotate) throw new Error("World interactive root does not support session rotation");
+			await rotate.call(this.client, transition);
+			this.#bound = true;
+			this.#quiesced = false;
+			this.#startMailboxRouter();
+		} catch (error) {
+			await this.#retire(error);
+			throw error;
+		}
+	}
+
+	async afterModelTransition(
+		token: CoordinationTransitionToken,
+		transition: CoordinationModelTransition,
+	): Promise<void> {
+		if (!this.#isRotatable()) return;
+		this.#assertTransitionToken(token);
+		try {
+			const reconfigure = this.client.reconfigureInteractiveRootTransition;
+			if (!reconfigure) throw new Error("World interactive root does not support model reconfiguration");
+			await reconfigure.call(this.client, transition);
+			this.#bound = true;
+			this.#quiesced = false;
+			this.#startMailboxRouter();
+		} catch (error) {
+			await this.#retire(error);
+			throw error;
+		}
+	}
+
+	async abortRootTransition(token: CoordinationTransitionToken, error: unknown): Promise<void> {
+		if (!this.#isRotatable()) return;
+		this.#assertTransitionToken(token);
+		await this.#retire(error);
+	}
+
+	#assertTransitionToken(token: CoordinationTransitionToken): void {
+		if (token.generation !== this.#generation) {
+			throw new Error("World coordination transition token is stale");
+		}
+	}
+
+	async #retire(reason: unknown): Promise<void> {
+		this.#bound = false;
+		this.#quiesced = true;
+		await this.#mailboxRouter?.close();
+		this.#mailboxRouter = undefined;
+		try {
+			if (this.client.retireInteractiveRoot) await this.client.retireInteractiveRoot(reason);
+			else await this.client.close();
+		} catch {
+			// Retirement is fail-closed: preserve the transition error and remain unbound.
+		}
+	}
+
+	#startMailboxRouter(): void {
+		if (this.#closed || !this.#bound || !this.#mailboxReceiver || this.#mailboxRouter) return;
+		const { receiverPeerId, receiver } = this.#mailboxReceiver;
+		const router = new WorldMailboxRouter({
+			client: this.client,
+			receiverPeerId,
+			receiver,
+			generation: this.#generation,
+			resolveSender: async (message, signal) => await this.#resolveMailboxSender(message, signal),
+		});
+		this.#mailboxRouter = router;
+		router.start();
 	}
 
 	async spawn(request: CoordinationSpawnRequest, signal?: AbortSignal): Promise<CoordinationTaskHandle> {
+		return await this.#runMutableOperation("World Task spawn", async () => await this.#spawn(request, signal));
+	}
+
+	async #spawn(request: CoordinationSpawnRequest, signal?: AbortSignal): Promise<CoordinationTaskHandle> {
 		let peerId = requirePeerId(request.peerId);
 		for (;;) {
 			signal?.throwIfAborted();
@@ -363,7 +513,12 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			};
 			const { intentKey } = this.client.deriveIntentKey(identity);
 			const existing = await this.client.lookupDispatchIntent(intentKey, signal);
-			if (existing.found) return await this.#attach(candidate, intentKey, existing.session, signal);
+			if (existing.found) {
+				if (existing.session?.sessionObjectKey?.trim()) {
+					return await this.#attach(candidate, intentKey, existing.session, signal);
+				}
+				throw new Error(`World Task ${intentKey} has no attached LlmSession`);
+			}
 
 			const peer = await this.client.resolveAgentPeer(peerId, signal);
 			if (peer.found) {
@@ -397,7 +552,9 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 				return await this.#attach(candidate, submitted.intentKey, submitted.session, signal);
 			} catch (error) {
 				const recovered = await this.client.lookupDispatchIntent(intentKey, signal);
-				if (recovered.found) return await this.#attach(candidate, intentKey, recovered.session, signal);
+				if (recovered.found && recovered.session?.sessionObjectKey?.trim()) {
+					return await this.#attach(candidate, intentKey, recovered.session, signal);
+				}
 				if (
 					error instanceof WorldOperationError &&
 					error.codeName === "PEER_IDENTITY_CONFLICT" &&
@@ -446,14 +603,19 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	): Promise<StructuredSubagentResult> {
 		let interrupt: Promise<void> | undefined;
 		const interruptFailure = Promise.withResolvers<never>();
+		const detach = new AbortController();
 		const requestInterrupt = () => {
 			if (interrupt) return;
+			if (signal?.reason === ASYNC_JOB_OWNER_LIFECYCLE_ABORT) {
+				detach.abort(ASYNC_JOB_OWNER_LIFECYCLE_ABORT);
+				return;
+			}
 			interrupt = this.interrupt(request.peerId, "Task cancelled by its parent");
 			interrupt.catch(error => interruptFailure.reject(error));
 		};
 		signal?.addEventListener("abort", requestInterrupt, { once: true });
 		if (signal?.aborted) requestInterrupt();
-		const snapshots = this.client.watchSession(sessionObjectKey)[Symbol.asyncIterator]();
+		const snapshots = this.client.watchSession(sessionObjectKey, detach.signal)[Symbol.asyncIterator]();
 		try {
 			for (;;) {
 				const next = await Promise.race([snapshots.next(), interruptFailure.promise]);
@@ -476,6 +638,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	}
 
 	async listPeers(signal?: AbortSignal): Promise<CoordinationPeerRoster> {
+		this.#requireBound("World peer listing");
 		signal?.throwIfAborted();
 		const [tree, sessions] = await Promise.all([
 			this.#readAgentTree(signal),
@@ -690,19 +853,16 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 
 	attachMailbox(receiverPeerId: string, receiver: Pick<AgentPeer, "deliverIrcMessage">): void {
 		if (this.#closed) throw new Error("World coordination backend is closed");
-		if (this.#mailboxRouter) throw new Error("World coordination mailbox is already attached");
-		const router = new WorldMailboxRouter({
-			client: this.client,
-			receiverPeerId,
-			receiver,
-			resolveSender: async (message, signal) => await this.#resolveMailboxSender(message, signal),
-		});
-		this.#mailboxRouter = router;
-		router.start();
+		if (this.#mailboxReceiver) throw new Error("World coordination mailbox is already attached");
+		this.#mailboxReceiver = { receiverPeerId, receiver };
+		this.#startMailboxRouter();
 	}
 
 	async send(request: CoordinationMessageRequest, signal?: AbortSignal): Promise<CoordinationMessageReceipt> {
-		if (this.#closed) throw new Error("World coordination backend is closed");
+		return await this.#runMutableOperation("World coordination send", async () => await this.#send(request, signal));
+	}
+
+	async #send(request: CoordinationMessageRequest, signal?: AbortSignal): Promise<CoordinationMessageReceipt> {
 		const targetPeerId = request.targetPeerId.trim();
 		if (!targetPeerId) throw new Error("World peer message target is required");
 		const target =
@@ -741,8 +901,8 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			replayed: result.replayed,
 		};
 	}
-
 	inbox(options?: { peek?: boolean; from?: string; replyTo?: string; limit?: number }): IrcMessage[] {
+		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("World mailbox inbox");
 		if (!this.#mailboxRouter) throw unavailable("mailbox inbox");
 		return this.#mailboxRouter.inbox(options);
 	}
@@ -752,6 +912,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<IrcMessage | null> {
+		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("World mailbox wait");
 		const router = this.#mailboxRouter;
 		if (!router) throw unavailable("mailbox wait");
 		const controller = new AbortController();
@@ -815,6 +976,13 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	}
 
 	async interrupt(peerId: string, reason: string, signal?: AbortSignal): Promise<void> {
+		await this.#runMutableOperation(
+			"World Task interrupt",
+			async () => await this.#interrupt(peerId, reason, signal),
+		);
+	}
+
+	async #interrupt(peerId: string, reason: string, signal?: AbortSignal): Promise<void> {
 		const id = requirePeerId(peerId);
 		let sessionObjectKey = this.#sessions.get(id);
 		if (!sessionObjectKey) {
@@ -838,15 +1006,19 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		this.#closed = true;
 		const peers = [...this.#peerCache.values()];
 		this.#peerCache.clear();
-		await this.#mailboxRouter?.close();
+		await Promise.all([this.#mailboxRouter?.close(), ...this.#activeMutations]);
+		this.#mailboxRouter = undefined;
+		this.#mailboxReceiver = undefined;
 		await Promise.all(peers.map(cached => cached.peer.dispose()));
 		await this.client.close();
 	}
 }
-
-/** Selects a mutable World backend only when socket and caller are both configured. */
-export function createWorldCoordinationBackend(options: WorldClientOptions = {}): WorldCoordinationBackend | undefined {
-	if (!resolveWorldSocketPath(options) || !resolveWorldSessionKey(options)) return undefined;
+export function createWorldCoordinationBackend(
+	options: WorldClientOptions & { client?: WorldCoordinationClient } = {},
+): WorldCoordinationBackend | undefined {
+	if (options.client) return new WorldCoordinationBackend(options.client);
+	const interactiveRoot = options.interactiveRoot === true;
+	if (!resolveWorldSocketPath(options) || (!interactiveRoot && !resolveWorldSessionKey(options))) return undefined;
 	const client = WorldClient.create(options);
 	if (!client) return undefined;
 	return new WorldCoordinationBackend(client);

@@ -1,0 +1,26 @@
+diff --git a/dist/srpc/client.js b/dist/srpc/client.js
+index d4a2f72c8ecad698d1dac3b73a6cd669d16cd2cf..7250cc486a4a1c27171bb0d149509383adbd5f21 100644
+--- a/dist/srpc/client.js
++++ b/dist/srpc/client.js
+@@ -102,7 +102,7 @@ export class Client {
+         const stream = await openStreamFn();
+         const call = new ClientRPC(rpcService, rpcMethod);
+         const onAbort = () => {
+-            call.writeCallCancel();
++            call.writeCallCancel().catch(() => { });
+             call.close(new Error(ERR_RPC_ABORT));
+         };
+         abortSignal?.addEventListener('abort', onAbort, { once: true });
+diff --git a/srpc/client.ts b/srpc/client.ts
+index b99b021b830adcb5d6290d554541643d491b1bf7..395ff9486a105d1c9d2d0130a5c56a12c20b960d 100644
+--- a/srpc/client.ts
++++ b/srpc/client.ts
+@@ -144,7 +144,7 @@ export class Client implements ProtoRpc, ReceiptRpc {
+     const stream = await openStreamFn()
+     const call = new ClientRPC(rpcService, rpcMethod)
+     const onAbort = () => {
+-      call.writeCallCancel()
++      call.writeCallCancel().catch(() => {})
+       call.close(new Error(ERR_RPC_ABORT))
+     }
+     abortSignal?.addEventListener('abort', onAbort, { once: true })

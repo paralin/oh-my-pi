@@ -492,18 +492,19 @@ export class WorldTool implements AgentTool<typeof worldSchema, WorldToolDetails
 	}
 
 	/**
-	 * Build the tool where this root can actually perform operations.
+	 * Build the tool when this session's World client can mutate.
 	 *
-	 * Both halves of the configuration are required. A socket-only root gets no
-	 * tool rather than a tool whose every call would be refused for want of a
-	 * caller, which is the difference between an unconfigured root and a broken
-	 * one.
+	 * Interactive roots carry their identity through Resource attachment, so an
+	 * owner-supplied client can be ready before it has a static session key.
+	 * Process-shared clients still require the complete environment or settings
+	 * configuration.
 	 */
 	static createIf(session: ToolSession): WorldTool | null {
+		const owned = session.worldClient?.();
+		if (owned) return owned.canMutate ? new WorldTool(owned) : null;
 		if (!isWorldRuntimeConfigured()) return null;
-		const client = session.worldClient?.() ?? sharedWorldClient();
-		if (!client?.canMutate) return null;
-		return new WorldTool(client);
+		const client = sharedWorldClient();
+		return client?.canMutate ? new WorldTool(client) : null;
 	}
 
 	async execute(

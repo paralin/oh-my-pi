@@ -62,6 +62,53 @@ export interface CoordinationMessageFilter {
 	replyTo?: string;
 }
 
+/** Reasons that can change the root's durable World identity. */
+export type CoordinationSessionTransitionReason =
+	| "startup"
+	| "new"
+	| "drop"
+	| "fork"
+	| "branch"
+	| "resume"
+	| "switch"
+	| "reload";
+
+/** Semantic identity committed by SessionManager before World rotation. */
+export interface CoordinationSessionTransition {
+	sessionId: string;
+	previousSessionId?: string;
+	reason: CoordinationSessionTransitionReason;
+	/** Exact provider selected for the committed session. */
+	provider: string;
+	/** Exact model selected for the committed session. */
+	model: string;
+}
+
+/** Exact provider/model selection committed by ModelControls. */
+export interface CoordinationModelTransition {
+	provider: string;
+	model: string;
+}
+
+/** Opaque quiesced-root lease. It is valid for exactly one terminal callback. */
+export interface CoordinationTransitionToken {
+	readonly generation: number;
+}
+
+/**
+ * Awaited root lifecycle owned by AgentSession and ModelControls.
+ *
+ * Local and static World backends implement these as no-ops. An attached
+ * backend must quiesce mutable work before a SessionManager commit, then
+ * rotate/reconfigure only after that commit and before the caller resumes.
+ */
+export interface CoordinationLifecycle {
+	beforeRootTransition(): Promise<CoordinationTransitionToken>;
+	afterSessionTransition(token: CoordinationTransitionToken, transition: CoordinationSessionTransition): Promise<void>;
+	afterModelTransition(token: CoordinationTransitionToken, transition: CoordinationModelTransition): Promise<void>;
+	abortRootTransition(token: CoordinationTransitionToken, error: unknown): Promise<void>;
+}
+
 /** Root-scoped coordination used by Task and Hub without changing their tool APIs. */
 export interface CoordinationBackend {
 	readonly kind: "world";

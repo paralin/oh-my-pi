@@ -1,6 +1,6 @@
 import type { IrcMessage } from "../irc/bus";
 import type { AgentPeer } from "../registry/agent-registry";
-import type { WorldClient } from "../world/client";
+import { type WorldClient, WorldEndpointError } from "../world/client";
 import type { AgentMessageSummary } from "../world/generated/llmsession.pb";
 import { PeerMessageAckOutcome } from "../world/generated/llmsession.pb";
 
@@ -12,7 +12,9 @@ export interface WorldMailboxFilter {
 	replyTo?: string;
 }
 
-type WorldMailboxClient = Pick<WorldClient, "ackPeerMessage" | "watchPeerMailbox">;
+type WorldMailboxClient = Pick<WorldClient, "ackPeerMessage" | "watchPeerMailbox"> & {
+	readonly connected?: boolean;
+};
 type WorldMailboxReceiver = Pick<AgentPeer, "deliverIrcMessage">;
 type AcceptedOutcome = "waiter" | "injected" | "queued" | "woken";
 
@@ -27,6 +29,8 @@ export interface WorldMailboxRouterOptions {
 	client: WorldMailboxClient;
 	receiverPeerId: string;
 	receiver: WorldMailboxReceiver;
+	/** Generation identity used to reject late records from a retired watch. */
+	generation?: number;
 	resolveSender(message: AgentMessageSummary, signal?: AbortSignal): Promise<string>;
 }
 
@@ -49,6 +53,7 @@ export class WorldMailboxRouter {
 	readonly #accepted = new Map<string, PeerMessageAckOutcome>();
 	#pump: Promise<void> | undefined;
 	#failure: Error | undefined;
+	#restartTimer: NodeJS.Timeout | undefined;
 	#closed = false;
 
 	constructor(options: WorldMailboxRouterOptions) {
@@ -60,12 +65,21 @@ export class WorldMailboxRouter {
 		if (this.#pump) return;
 		if (this.#closed) throw new Error("World mailbox router is closed");
 		const pump = this.#run();
+		this.#pump = pump;
 		pump.catch(error => {
 			if (this.#controller.signal.aborted) return;
+			if (error instanceof WorldEndpointError || this.#options.client.connected === false) {
+				this.#pump = undefined;
+				this.#restartTimer = setTimeout(() => {
+					this.#restartTimer = undefined;
+					if (!this.#closed) this.start();
+				}, 250);
+				this.#restartTimer.unref?.();
+				return;
+			}
 			this.#failure = error instanceof Error ? error : new Error(String(error));
 			this.#cancelWaiters(this.#failure);
 		});
-		this.#pump = pump;
 	}
 
 	/** Exposes the watch lifetime for focused runtime checks. */
@@ -137,6 +151,8 @@ export class WorldMailboxRouter {
 	async close(): Promise<void> {
 		if (this.#closed) return;
 		this.#closed = true;
+		clearTimeout(this.#restartTimer);
+		this.#restartTimer = undefined;
 		const reason = new Error("World mailbox router closed");
 		this.#controller.abort(reason);
 		this.#cancelWaiters(reason);
@@ -151,6 +167,7 @@ export class WorldMailboxRouter {
 	}
 
 	async #accept(summary: AgentMessageSummary): Promise<void> {
+		if (this.#closed) return;
 		const messageObjectKey = summary.messageObjectKey?.trim();
 		if (!messageObjectKey) throw new Error("World mailbox record has no message object key");
 		const remembered = this.#accepted.get(messageObjectKey);
@@ -159,6 +176,7 @@ export class WorldMailboxRouter {
 			return;
 		}
 		const message = await this.#message(summary);
+		if (this.#closed) return;
 		const waiter = this.#takeWaiter(message);
 		let outcome: AcceptedOutcome;
 		if (waiter) {

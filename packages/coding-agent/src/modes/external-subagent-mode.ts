@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { canonicalJsonStringify } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
+import { applyCodexHomeAuthToStorage } from "../cli/codex-home";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import {
@@ -175,14 +176,19 @@ export async function runExternalSubagentMode(
 			"async.enabled": true,
 			"task.isolation.mode": "none",
 		});
+		authStorage = await discoverAuthStorage();
+		applyCodexHomeAuthToStorage(
+			authStorage,
+			{ configuredHomes: settings.get("providers.codexHomes") },
+			env as NodeJS.ProcessEnv,
+		);
+		const modelRegistry = new ModelRegistry(authStorage);
 		const loadedSkills = await loadSkills({ cwd: profile.workspaceRoots[0] });
 		const selectedSkills = profile.agent.skills.map(name => {
 			const skill = loadedSkills.skills.find(candidate => candidate.name === name);
 			if (!skill) throw new Error(`frozen skill ${JSON.stringify(name)} is unavailable`);
 			return skill;
 		});
-		authStorage = await discoverAuthStorage();
-		const modelRegistry = new ModelRegistry(authStorage);
 		result = await runSubprocess({
 			cwd: profile.workspaceRoots[0]!,
 			additionalDirectories: profile.workspaceRoots.slice(1),

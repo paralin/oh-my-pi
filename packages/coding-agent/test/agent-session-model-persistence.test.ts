@@ -5,6 +5,7 @@ import { type Api, type AssistantMessage, Effort, type Model } from "@oh-my-pi/p
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { CoordinationLifecycle } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -97,6 +98,7 @@ describe("AgentSession model persistence", () => {
 		selectInitialModel?: (availableModels: Model<Api>[]) => Model<Api>;
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
+		coordinationLifecycle?: CoordinationLifecycle;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
 		const modelRegistry = sharedModelRegistry;
 		const model =
@@ -130,6 +132,7 @@ describe("AgentSession model persistence", () => {
 				: SessionManager.inMemory(),
 			settings: sessionSettings,
 			modelRegistry,
+			coordinationLifecycle: options?.coordinationLifecycle,
 		});
 
 		return { modelRegistry, settings: sessionSettings, session };
@@ -181,6 +184,71 @@ describe("AgentSession model persistence", () => {
 
 		await created.session.setModel(nextModel);
 		expect(modelChangedCount).toBe(1);
+	});
+
+	it("awaits interactive custody reconfiguration after the local model commit", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const calls: string[] = [];
+		const lifecycle: CoordinationLifecycle = {
+			async beforeRootTransition() {
+				calls.push("before");
+				return { generation: 1 };
+			},
+			async afterModelTransition(_token, transition) {
+				calls.push(`after:${transition.provider}/${transition.model}`);
+				entered.resolve();
+				await release.promise;
+			},
+			async afterSessionTransition() {
+				throw new Error("unexpected session transition");
+			},
+			async abortRootTransition() {
+				calls.push("abort");
+			},
+		};
+		const created = await createSession({ initialModel: defaultModel, coordinationLifecycle: lifecycle });
+
+		let settled = false;
+		const transition = created.session.setModel(nextModel).then(() => {
+			settled = true;
+		});
+		await entered.promise;
+
+		expect(created.session.model?.id).toBe(nextModel.id);
+		expect(settled).toBe(false);
+		expect(calls).toEqual(["before", `after:${nextModel.provider}/${nextModel.id}`]);
+
+		release.resolve();
+		await transition;
+		expect(settled).toBe(true);
+	});
+
+	it("restores the prior model when interactive custody reconfiguration fails", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const nextModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		let aborts = 0;
+		const lifecycle: CoordinationLifecycle = {
+			async beforeRootTransition() {
+				return { generation: 1 };
+			},
+			async afterModelTransition() {
+				throw new Error("custody rejected model");
+			},
+			async afterSessionTransition() {
+				throw new Error("unexpected session transition");
+			},
+			async abortRootTransition() {
+				aborts++;
+			},
+		};
+		const created = await createSession({ initialModel: defaultModel, coordinationLifecycle: lifecycle });
+
+		await expect(created.session.setModel(nextModel)).rejects.toThrow("custody rejected model");
+		expect(created.session.model?.id).toBe(defaultModel.id);
+		expect(aborts).toBe(1);
 	});
 
 	it("persists the default role when explicitly requested", async () => {
@@ -295,15 +363,36 @@ describe("AgentSession model persistence", () => {
 		const smolRoleValue = modelValue(smolModel);
 
 		const targetSessionFile = await writeRoleModelSession(defaultRoleValue, smolRoleValue);
+		const transitions: Parameters<CoordinationLifecycle["afterSessionTransition"]>[1][] = [];
+		const coordinationLifecycle: CoordinationLifecycle = {
+			async beforeRootTransition() {
+				return { generation: 1 };
+			},
+			async afterSessionTransition(_token, transition) {
+				transitions.push(transition);
+			},
+			async afterModelTransition() {
+				throw new Error("unexpected model transition");
+			},
+			async abortRootTransition() {},
+		};
 
 		const created = await createSession({
 			initialModel: defaultModel,
 			modelRoles: { default: defaultRoleValue, smol: smolRoleValue },
 			persist: true,
+			coordinationLifecycle,
 		});
 
 		await expect(created.session.switchSession(targetSessionFile)).resolves.toBe(true);
 		expect(created.session.model?.id).toBe(smolModel.id);
+		expect(transitions).toEqual([
+			expect.objectContaining({
+				reason: "resume",
+				provider: smolModel.provider,
+				model: smolModel.id,
+			}),
+		]);
 	});
 
 	it("restores the last active role model during startup resume", async () => {

@@ -4,8 +4,10 @@
  * This file handles CLI argument parsing and translates them into
  * createAgentSession() options. The SDK does the heavy lifting.
  */
+import { randomUUID } from "node:crypto";
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -97,6 +99,8 @@ import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { withTimeoutSignal } from "./utils/fetch-timeout";
+import { type InteractiveRootSpec, WorldClient } from "./world/client";
+import { resolveWorldInteractive, resolveWorldSocketPath, validateWorldInteractiveConfiguration } from "./world/config";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
@@ -1254,6 +1258,20 @@ export async function runRootCommand(
 			cwd,
 			configFiles: parsedArgs.config,
 		}));
+	const worldInteractive =
+		isInteractive &&
+		resolveWorldInteractive({
+			env: process.env,
+			interactiveSetting: settingsInstance.get("world.interactive"),
+		});
+	if (worldInteractive) {
+		validateWorldInteractiveConfiguration({
+			env: process.env,
+			interactiveSetting: settingsInstance.get("world.interactive"),
+			setting: settingsInstance.get("world.socket"),
+			sessionSetting: settingsInstance.get("world.session"),
+		});
+	}
 	const scratchCompactionOverrides =
 		parsedArgs.compactionMethod !== undefined
 			? resolveScratchCompactionOverrides(parsedArgs.compactionMethod)
@@ -1527,7 +1545,44 @@ export async function runRootCommand(
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
-	sessionOptions.coordinationBackend = createWorldCoordinationBackend();
+	let worldClient: WorldClient | undefined;
+	let interactiveRootSpec: InteractiveRootSpec | undefined;
+	if (worldInteractive) {
+		const socketPath = resolveWorldSocketPath({
+			env: process.env,
+			setting: settingsInstance.get("world.socket"),
+		});
+		if (!socketPath) throw new Error("world.interactive requires a World socket");
+		worldClient = WorldClient.create({ env: {}, setting: socketPath, interactiveRoot: true });
+		if (!worldClient) throw new Error("failed to construct interactive World client");
+		const canonical = (value: string): string => {
+			try {
+				return fsSync.realpathSync.native(value);
+			} catch {
+				return path.resolve(value);
+			}
+		};
+		const workspaceRoots = [...new Set([cwd, ...(sessionOptions.additionalDirectories ?? [])].map(canonical))];
+		interactiveRootSpec = {
+			ompSessionId: sessionManager?.getSessionId() ?? randomUUID(),
+			processInstanceId: randomUUID(),
+			workingDirectory: canonical(cwd),
+			workspaceRoots,
+			provider: sessionOptions.model?.provider ?? "",
+			model:
+				sessionOptions.model?.id ??
+				(typeof sessionOptions.modelPattern === "string" ? sessionOptions.modelPattern : ""),
+			transitionReason: "STARTUP",
+			protocolVersion: "omp-w5",
+			buildIdentity: VERSION,
+		};
+		sessionOptions.worldClient = () => worldClient;
+	}
+	const coordinationBackend = createWorldCoordinationBackend(worldClient ? { client: worldClient } : undefined);
+	sessionOptions.coordinationBackend = coordinationBackend;
+	if (worldInteractive && coordinationBackend) {
+		sessionOptions.coordinationLifecycle = coordinationBackend;
+	}
 
 	// OTEL: register global OTLP exporters when an endpoint is configured via
 	// env, then switch on the agent loop's telemetry hooks so traces, run-level
@@ -1656,6 +1711,15 @@ export async function runRootCommand(
 			eventBus,
 			preloadedExtensions: extensionsResult,
 		});
+
+		if (worldClient && interactiveRootSpec) {
+			await worldClient.attachInteractiveRoot({
+				...interactiveRootSpec,
+				provider: session.model?.provider ?? interactiveRootSpec.provider,
+				model: session.model?.id ?? interactiveRootSpec.model,
+			});
+			coordinationBackend?.activateInteractiveRoot();
+		}
 
 		// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
 		// scan, collab mirror, resumed process) has a sessionFile but no in-memory

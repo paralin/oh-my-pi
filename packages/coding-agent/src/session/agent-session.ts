@@ -99,7 +99,7 @@ import {
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
-import { type AsyncJob, AsyncJobManager } from "../async";
+import { ASYNC_JOB_OWNER_LIFECYCLE_ABORT, type AsyncJob, AsyncJobManager } from "../async";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
@@ -107,6 +107,7 @@ import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-temp
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { onAppendOnlyModeChanged, onModelRolesChanged } from "../config/settings";
+import type { CoordinationLifecycle, CoordinationTransitionToken } from "../coordination/backend";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getFileSnapshotStore } from "../edit/file-snapshot-store";
 import type { PythonResult } from "../eval/py/executor";
@@ -315,7 +316,6 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
-import { formatRetryFallbackSelector, type RetryFallbackSelector } from "./retry-fallback-chains";
 import {
 	buildScheduledNotification,
 	SCHEDULED_NOTIFICATION_KIND,
@@ -484,6 +484,7 @@ export class AgentSession {
 	readonly #scheduledPromptBatch = new Set<string>();
 	#scheduledPromptBatchTask: PromiseWithResolvers<void> | undefined;
 	readonly #onSessionTransition: (() => void) | undefined;
+	readonly #coordinationLifecycle: CoordinationLifecycle | undefined;
 	readonly #beginSessionFork: (() => Promise<void>) | undefined;
 	readonly #completeSessionFork:
 		| ((
@@ -1019,6 +1020,7 @@ export class AgentSession {
 		this.settings = config.settings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#onSessionTransition = config.onSessionTransition;
+		this.#coordinationLifecycle = config.coordinationLifecycle;
 		this.#beginSessionFork = config.beginSessionFork;
 		this.#completeSessionFork = config.completeSessionFork;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
@@ -1111,6 +1113,7 @@ export class AgentSession {
 			resolveActiveEditMode: () => this.#tools.resolveActiveEditMode(),
 			syncAfterModelChange: previousEditMode => this.#tools.syncAfterModelChange(previousEditMode),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
+			coordinationLifecycle: this.#coordinationLifecycle,
 			clearActiveRetryFallback: () => this.#recovery.clearActiveRetryFallback(),
 			clearInheritedProviderPromptCacheKey: () => this.#clearInheritedProviderPromptCacheKey(),
 			magicKeywordEnabled: keyword => this.#magicKeywordEnabled(keyword),
@@ -1969,7 +1972,7 @@ export class AgentSession {
 	#cancelOwnAsyncJobs(): void {
 		if (!this.#agentId) return;
 		const manager = this.#asyncJobManager;
-		manager?.cancelAll({ ownerId: this.#agentId });
+		manager?.cancelAll({ ownerId: this.#agentId }, ASYNC_JOB_OWNER_LIFECYCLE_ABORT);
 		manager?.evictCompletedJobs({ ownerId: this.#agentId });
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
@@ -6726,6 +6729,7 @@ export class AgentSession {
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -6738,23 +6742,25 @@ export class AgentSession {
 				return false;
 			}
 		}
-
 		this.#disconnectFromAgent();
 		await this.abort();
 		const sessionServicesSuspended = await this.#suspendSessionServices();
 		let advisorRecordersDetached = false;
+		let coordinationToken: CoordinationTransitionToken | undefined;
 		try {
 			if (this.isStreaming) await this.abort({ goalReason: "internal" });
+			await this.#bash.flushPending();
 			this.#cancelOwnAsyncJobs();
 			this.#closeAllProviderSessions("new session");
-			await this.#bash.flushPending();
 		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
 			await this.#resumeSessionServices(sessionServicesSuspended, false, "new session");
 			throw error;
 		}
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
 		try {
+			coordinationToken = await this.#beforeCoordinationTransition();
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
@@ -6788,6 +6794,11 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			await this.#afterSessionCoordinationTransition(coordinationToken, {
+				sessionId: this.sessionManager.getSessionId(),
+				previousSessionId,
+				reason: options?.drop ? "drop" : "new",
+			});
 			this.#markPrefixReset();
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
@@ -6819,6 +6830,9 @@ export class AgentSession {
 			}
 
 			return true;
+		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -6857,6 +6871,28 @@ export class AgentSession {
 			this.#scheduleSessionServiceRecovery(undefined);
 		}
 	}
+	async #beforeCoordinationTransition(): Promise<CoordinationTransitionToken | undefined> {
+		return this.#coordinationLifecycle?.beforeRootTransition();
+	}
+
+	async #abortCoordinationTransition(token: CoordinationTransitionToken | undefined, error: unknown): Promise<void> {
+		if (!token || !this.#coordinationLifecycle) return;
+		await this.#coordinationLifecycle.abortRootTransition(token, error);
+	}
+
+	async #afterSessionCoordinationTransition(
+		token: CoordinationTransitionToken | undefined,
+		transition: Omit<Parameters<CoordinationLifecycle["afterSessionTransition"]>[1], "provider" | "model">,
+	): Promise<void> {
+		if (!token || !this.#coordinationLifecycle) return;
+		const model = this.model;
+		if (!model) throw new Error("World root transition requires a selected model");
+		await this.#coordinationLifecycle.afterSessionTransition(token, {
+			...transition,
+			provider: model.provider,
+			model: model.id,
+		});
+	}
 
 	#scheduleSessionServiceRecovery(result: { oldSessionFile: string; newSessionFile: string } | undefined): void {
 		if (!this.#completeSessionFork || this.#isDisposed) return;
@@ -6889,6 +6925,7 @@ export class AgentSession {
 	async fork(): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 
 		// Emit session_before_switch event with reason "fork" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -6903,6 +6940,7 @@ export class AgentSession {
 		}
 
 		const sessionServicesSuspended = await this.#suspendSessionServices();
+		let coordinationToken: CoordinationTransitionToken | undefined;
 		let advisorRecordersDetached = false;
 		let sessionForkStarted = sessionServicesSuspended;
 		let forkResult: { oldSessionFile: string; newSessionFile: string } | undefined;
@@ -6915,6 +6953,7 @@ export class AgentSession {
 			// Fork keeps the conversation, but still needs a quiet artifact boundary:
 			// stop and settle in-flight advisors before muting their feeds.
 			await this.#advisors.drainAndDetachRecorders();
+			coordinationToken = await this.#beforeCoordinationTransition();
 			const bashTransition = this.#bash.beginSessionTransition();
 
 			// Fork the session (creates new session file with same entries)
@@ -6960,6 +6999,11 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#adoptInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			await this.#afterSessionCoordinationTransition(coordinationToken, {
+				sessionId: this.sessionManager.getSessionId(),
+				previousSessionId,
+				reason: "fork",
+			});
 			this.#markPrefixReset();
 			this.#memory.rekeyForCurrentSessionId();
 			this.#advisors.reattachRecorderFeeds();
@@ -6990,6 +7034,9 @@ export class AgentSession {
 			}
 
 			return true;
+		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
+			throw error;
 		} finally {
 			if (sessionForkStarted) await this.#completeSessionFork?.(forkResult);
 			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
@@ -7936,6 +7983,7 @@ export class AgentSession {
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
+		const previousSessionId = this.sessionManager.getSessionId();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
@@ -7951,6 +7999,7 @@ export class AgentSession {
 				return false;
 			}
 		}
+		let coordinationToken: CoordinationTransitionToken | undefined;
 
 		await this.abort({ goalReason: "internal" });
 		const sessionServicesSuspended = await this.#suspendSessionServices();
@@ -7962,6 +8011,7 @@ export class AgentSession {
 			// Flush pending writes before switching so restore snapshots reflect committed state.
 			await this.sessionManager.flush();
 		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
 			await this.#resumeSessionServices(sessionServicesSuspended, false, "session switch");
 			throw error;
 		}
@@ -8022,6 +8072,7 @@ export class AgentSession {
 				// still observe message_end, then mute before swapping files.
 				await this.#advisors.drainAndDetachRecorders();
 			}
+			coordinationToken = await this.#beforeCoordinationTransition();
 			await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
 			if (switchingToDifferentSession) {
@@ -8131,6 +8182,11 @@ export class AgentSession {
 			this.#models.restoreServiceTiers(
 				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
 			);
+			await this.#afterSessionCoordinationTransition(coordinationToken, {
+				sessionId: this.sessionManager.getSessionId(),
+				previousSessionId,
+				reason: switchingToDifferentSession ? "resume" : "reload",
+			});
 
 			if (switchingToDifferentSession) {
 				await this.#memory.resetContextForNewTranscript();
@@ -8174,6 +8230,7 @@ export class AgentSession {
 			sessionTransitioned = true;
 			return true;
 		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
 			this.sessionManager.restoreState(previousSessionState);
 			this.#freshProviderSessionId = previousFreshProviderSessionId;
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
@@ -8252,6 +8309,7 @@ export class AgentSession {
 		cancelled: boolean;
 	}> {
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
 		if (selectedEntry?.type !== "message" || selectedEntry.message.role !== "user") {
@@ -8277,6 +8335,7 @@ export class AgentSession {
 		}
 
 		const sessionServicesSuspended = await this.#suspendSessionServices();
+		let coordinationToken: CoordinationTransitionToken | undefined;
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
@@ -8295,6 +8354,7 @@ export class AgentSession {
 
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
+			coordinationToken = await this.#beforeCoordinationTransition();
 			try {
 				if (!selectedEntry.parentId) {
 					const title = this.sessionManager.getSessionName();
@@ -8316,6 +8376,11 @@ export class AgentSession {
 			this.#freshProviderSessionId = undefined;
 			this.#clearInheritedProviderPromptCacheKey();
 			this.#syncAgentSessionId();
+			await this.#afterSessionCoordinationTransition(coordinationToken, {
+				sessionId: this.sessionManager.getSessionId(),
+				previousSessionId,
+				reason: "branch",
+			});
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -8340,6 +8405,9 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			advisorRecordersDetached = false;
 			return { selectedText, selectedImages, cancelled: false };
+		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
@@ -8357,6 +8425,7 @@ export class AgentSession {
 		sessionId: string,
 	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
 		const previousSessionFile = this.sessionFile;
+		const previousSessionId = this.sessionManager.getSessionId();
 		if (!this.sessionManager.getSessionFile()) {
 			throw new Error("Cannot branch /btw: session is not persisted");
 		}
@@ -8411,6 +8480,7 @@ export class AgentSession {
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.agent.replaceQueues([], []);
 		const sessionServicesSuspended = await this.#suspendSessionServices();
+		let coordinationToken: CoordinationTransitionToken | undefined;
 		let sessionTransitioned = false;
 		let advisorRecordersDetached = false;
 		try {
@@ -8427,6 +8497,7 @@ export class AgentSession {
 
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
+			coordinationToken = await this.#beforeCoordinationTransition();
 			try {
 				if (this.sessionManager.getSessionId() !== sessionId) {
 					throw new Error("Cannot branch /btw: session changed since /btw started");
@@ -8451,6 +8522,11 @@ export class AgentSession {
 			this.#todo.syncFromBranch();
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
+			await this.#afterSessionCoordinationTransition(coordinationToken, {
+				sessionId: this.sessionManager.getSessionId(),
+				previousSessionId,
+				reason: "branch",
+			});
 			this.#memory.rekeyForCurrentSessionId();
 			await this.#memory.resetContextForNewTranscript();
 
@@ -8468,8 +8544,10 @@ export class AgentSession {
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 			this.#markPrefixReset();
 			advisorRecordersDetached = false;
-
 			return { cancelled: false, sessionFile: this.sessionFile };
+		} catch (error) {
+			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();

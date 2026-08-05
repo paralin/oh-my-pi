@@ -5,6 +5,8 @@ const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
+/** Marks async work detached by its owning session lifecycle rather than explicitly cancelled. */
+export const ASYNC_JOB_OWNER_LIFECYCLE_ABORT = new Error("Async job owner lifecycle ended");
 
 /**
  * Adaptive ("smart") `hub` poll-wait ladder (ms). A tight poll loop climbs
@@ -150,6 +152,7 @@ export class AsyncJobManager {
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
 	#deliveryLoop: Promise<void> | undefined;
+
 	#disposed = false;
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
@@ -415,10 +418,10 @@ export class AsyncJobManager {
 	 * matching agent registered; with no filter, cancels every running job
 	 * (used by `dispose()` to nuke the manager's state).
 	 */
-	cancelAll(filter?: AsyncJobFilter): void {
+	cancelAll(filter?: AsyncJobFilter, reason?: unknown): void {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
-			job.abortController.abort();
+			job.abortController.abort(reason);
 			this.#scheduleEviction(job.id);
 		}
 	}

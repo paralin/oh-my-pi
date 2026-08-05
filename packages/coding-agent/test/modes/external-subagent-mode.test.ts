@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import path from "node:path";
+import { CODEX_HOME_ENV, OPENAI_CODEX_OAUTH_TOKEN_ENV } from "@oh-my-pi/pi-coding-agent/cli/codex-home";
 import {
 	type ExternalSubagentProfileV1,
 	encodeExternalSubagentProfile,
@@ -103,6 +104,12 @@ describe("external subagent mode", () => {
 		value.profile.agent.skills = ["missing-frozen-skill"];
 		const encoded = encodeExternalSubagentProfile(value.profile);
 		await fs.writeFile(value.path, encoded.bytes, { mode: 0o600 });
+		const codexHome = path.join(value.profile.workspaceRoots[0]!, "codex");
+		await fs.mkdir(codexHome);
+		await fs.writeFile(
+			path.join(codexHome, "auth.json"),
+			JSON.stringify({ tokens: { access_token: "external-mode-token" } }),
+		);
 
 		let output = "";
 		const write = vi.spyOn(process.stdout, "write").mockImplementation(chunk => {
@@ -110,13 +117,15 @@ describe("external subagent mode", () => {
 			return true;
 		});
 		let result: SingleResult;
+		const env: NodeJS.ProcessEnv = {
+			...value.env,
+			[GLADOS_ADAPTER_CONFIG_DIGEST_ENV]: encoded.digest,
+			[WORLD_SOCKET_ENV]: path.join(value.profile.workspaceRoots[0]!, "world.sock"),
+			[WORLD_SESSION_ENV]: "glados/live/root/llm-session",
+			[CODEX_HOME_ENV]: codexHome,
+		};
 		try {
-			result = await runExternalSubagentMode({
-				...value.env,
-				[GLADOS_ADAPTER_CONFIG_DIGEST_ENV]: encoded.digest,
-				[WORLD_SOCKET_ENV]: path.join(value.profile.workspaceRoots[0]!, "world.sock"),
-				[WORLD_SESSION_ENV]: "glados/live/root/llm-session",
-			});
+			result = await runExternalSubagentMode(env);
 		} finally {
 			write.mockRestore();
 		}
@@ -124,6 +133,7 @@ describe("external subagent mode", () => {
 		expect(output.match(/"type":"glados_task_result_v1"/g)).toHaveLength(1);
 		expect(result.exitCode).toBe(1);
 		expect(result.error).toContain("missing-frozen-skill");
+		expect(env[OPENAI_CODEX_OAUTH_TOKEN_ENV]).toBe("external-mode-token");
 	});
 
 	test("maps every bounded progress and terminal field", () => {
