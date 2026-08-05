@@ -129,13 +129,12 @@ export class TtsrCoordinator {
 		let semanticRules: Rule[] = [];
 		if (this.#manager && ctx.successfulChanges && ctx.successfulChanges.length > 0) {
 			try {
-				const semanticMatches = await analyzeSuccessfulChanges(
-					this.#manager,
-					ctx.successfulChanges,
-					ctx.toolCall.name,
+				const analysis = await analyzeSuccessfulChanges(this.#manager, ctx.successfulChanges, {
+					toolName: ctx.toolCall.name,
+					cwd: this.#host.sessionManager.getCwd(),
 					signal,
-				);
-				semanticRules = this.#manager.claimInjectableRules(semanticMatches.map(match => match.rule));
+				});
+				semanticRules = this.#manager.claimInjectableRules(analysis.matches.map(match => match.rule));
 			} catch {
 				semanticRules = [];
 			}
