@@ -102,7 +102,10 @@ describe("dispatch intent key parity", () => {
 				continue;
 			}
 			expect(result.intentKey, vector.name).not.toBe(base.intentKey);
-			expect(seen.get(result.intentKey), `${vector.name} collides with ${seen.get(result.intentKey)}`).toBeUndefined();
+			expect(
+				seen.get(result.intentKey),
+				`${vector.name} collides with ${seen.get(result.intentKey)}`,
+			).toBeUndefined();
 			seen.set(result.intentKey, vector.name);
 			expect(result.source.peerId).toBe(vector.peerId);
 			expect(result.source.workerProfileDigest).toBe(vector.workerProfileDigest);

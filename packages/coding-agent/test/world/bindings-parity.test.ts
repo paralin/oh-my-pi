@@ -157,7 +157,9 @@ describe("vendored World surface", () => {
 		expect(shape).toContain(
 			"method WatchDispatch I=WorldRuntimeWatchRequest O=WorldRuntimeWatchResponse kind=ServerStreaming",
 		);
-		expect(shape).toContain("method ResolveAgentPeer I=ResolveAgentPeerRequest O=ResolveAgentPeerResponse kind=Unary");
+		expect(shape).toContain(
+			"method ResolveAgentPeer I=ResolveAgentPeerRequest O=ResolveAgentPeerResponse kind=Unary",
+		);
 		expect(shape).toContain(
 			"method WatchPeerMailbox I=WatchPeerMailboxRequest O=WatchPeerMailboxResponse kind=ServerStreaming",
 		);
