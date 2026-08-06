@@ -1,6 +1,8 @@
 import asset34 from "./python/NOTICE.txt" with { type: "text" };
 import asset4 from "./python/omp/__init__.py" with { type: "text" };
 import asset36 from "./python/omp/_managed.py" with { type: "text" };
+import asset40 from "./python/omp/code.py" with { type: "text" };
+import asset41 from "./python/omp/files.py" with { type: "text" };
 import asset5 from "./python/omp/harness.py" with { type: "text" };
 import asset6 from "./python/omp/mcp.py" with { type: "text" };
 import asset37 from "./python/omp/memory.py" with { type: "text" };
@@ -50,6 +52,8 @@ export const IPYTHON_PYTHON_ASSETS: readonly IpythonPythonAsset[] = [
 	{ path: "rlm/mcp_base.py", content: asset2 },
 	{ path: "rlm/skill.py", content: asset3 },
 	{ path: "omp/__init__.py", content: asset4 },
+	{ path: "omp/code.py", content: asset40 },
+	{ path: "omp/files.py", content: asset41 },
 	{ path: "omp/harness.py", content: asset5 },
 	{ path: "omp/mcp.py", content: asset6 },
 	{ path: "omp/session.py", content: asset7 },

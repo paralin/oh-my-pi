@@ -821,7 +821,7 @@ export interface FileDiagnosticsResult {
 
 type ServerVersionMap = Map<string, number>;
 
-interface GetDiagnosticsForFileOptions {
+export interface GetDiagnosticsForFileOptions {
 	signal?: AbortSignal;
 	minVersions?: ServerVersionMap;
 	expectedDocumentVersions?: ServerVersionMap;
@@ -879,7 +879,7 @@ async function captureOpenFileVersions(
  * @param minVersions - Minimum diagnostic versions per server (to detect stale results)
  * @returns Diagnostic results or undefined if no servers
  */
-async function getDiagnosticsForFile(
+export async function getDiagnosticsForFile(
 	absolutePath: string,
 	cwd: string,
 	servers: Array<[string, ServerConfig]>,

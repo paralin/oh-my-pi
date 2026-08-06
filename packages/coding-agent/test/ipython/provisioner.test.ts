@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type AgentFamilyService, createAgentFamilyIpythonHostHandlers } from "../../src/ipython/agent-family.js";
 import { IpythonBootGate, resolveIpythonBootConcurrency } from "../../src/ipython/boot-gate.js";
+import { createIpythonCodeHostHandlers } from "../../src/ipython/code-service.js";
 import type {
 	IpythonControllerOptions,
 	IpythonExecutionResult,
@@ -349,6 +350,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 		if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");
 		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-rlm-"));
 		const sidecarDir = path.join(tempRoot, "sidecar");
+		await fs.writeFile(path.join(tempRoot, "example.ts"), "export const value = console.log('hello');\n");
 		const admissions: TaskAdmissionRequest[] = [];
 		const task: TaskAdmissionService = {
 			async admit(request) {
@@ -435,6 +437,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				sessionId: "rlm-parent",
 				sidecarDir,
 				hostHandlers: composeIpythonHostHandlers(
+					createIpythonCodeHostHandlers({ cwd: tempRoot, snapshotOwner: {} }),
 					createRlmIpythonHostHandlers(task),
 					createAgentFamilyIpythonHostHandlers(family),
 				),
@@ -456,7 +459,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					"import contextlib, inspect, io, json, omp",
 					"help_text = io.StringIO()",
 					"with contextlib.redirect_stdout(help_text): help(omp.workspace.search)",
-					"print(json.dumps({'dir': 'workspace' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
+					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
 				].join("\n"),
 				{ hostContext: { ...hostContext, cellId: "discovery-cell", sequence: 0 } },
 			);
@@ -465,18 +468,32 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			}
 			const discovered = JSON.parse(discovery.stdout.trim()) as {
 				dir: boolean;
+				files: boolean;
+				code: boolean;
 				signature: string;
+				ast_signature: string;
 				help: string;
 				capabilities: string[];
 				edit_skill: string;
 				attach_skill: string;
 			};
 			expect(discovered.dir).toBe(true);
+			expect(discovered.files).toBe(true);
+			expect(discovered.code).toBe(true);
 			expect(discovered.signature).toContain("query");
+			expect(discovered.ast_signature).toContain("pattern");
 			expect(discovered.help).toContain("Search the workspace");
-			expect(discovered.capabilities).toEqual(expect.arrayContaining(["omp.workspace", "edit", "attach_image"]));
+			expect(discovered.capabilities).toEqual(
+				expect.arrayContaining(["omp.workspace", "omp.files", "omp.code", "edit", "attach_image"]),
+			);
 			expect(discovered.edit_skill).toEndWith("/skills/edit/SKILL.md");
 			expect(discovered.attach_skill).toEndWith("/skills/attach-image/SKILL.md");
+			const codeResult = await provisioner.execute(
+				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\n(read['path'], matches['total_matches'], matches['matches'][0]['path'])",
+				{ hostContext: { ...hostContext, cellId: "code-cell", sequence: 1 } },
+			);
+			expect(codeResult.status).toBe("ok");
+			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts')");
 			const spawned = await provisioner.execute(
 				"import rlm\nhandle = await rlm('Inspect this.', name='child-one', model='provider/model')\n(handle.rlm_child_id, handle.name, handle.model)",
 				{ hostContext },

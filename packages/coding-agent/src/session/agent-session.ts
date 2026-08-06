@@ -150,6 +150,7 @@ import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-ur
 import { createAgentFamilyIpythonHostHandlers } from "../ipython/agent-family";
 import { createIpythonCapabilityHostHandlers, createIpythonMcpOwner } from "../ipython/capability-service";
 import type { IpythonCellRequest, IpythonCellResult } from "../ipython/cell";
+import { createIpythonCodeHostHandlers, createIpythonLspOwner } from "../ipython/code-service";
 import type { IpythonProcessIds } from "../ipython/controller";
 import { OmpHarnessService } from "../ipython/harness-service";
 import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../ipython/host-bridge";
@@ -1215,6 +1216,14 @@ export class AgentSession {
 				hostHandlers: () =>
 					composeIpythonHostHandlers(
 						createFoundationalIpythonHostHandlers(),
+						createIpythonCodeHostHandlers({
+							cwd: this.sessionManager.getCwd(),
+							snapshotOwner: this,
+							lsp:
+								this.settings.get("lsp.enabled") === false
+									? undefined
+									: createIpythonLspOwner({ cwd: this.sessionManager.getCwd() }),
+						}),
 						createIpythonCapabilityHostHandlers({
 							cwd: this.sessionManager.getCwd(),
 							snapshotOwner: this,
