@@ -13,6 +13,7 @@ import type {
 	IpythonRestoreResult,
 	IpythonSnapshotResult,
 } from "../../src/ipython/controller.js";
+import { IpythonDebugService } from "../../src/ipython/debug-service.js";
 import { ipythonEnvironment } from "../../src/ipython/environment.js";
 import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../../src/ipython/host-bridge.js";
 import {
@@ -431,12 +432,14 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				OMP_IPYTHON_RUNTIME_PATH: pythonAbiSourcePath(),
 			},
 		});
+		const debug = new IpythonDebugService({ cwd: () => tempRoot });
 		const provisioner = new IpythonKernelProvisioner(
 			{
 				cwd: tempRoot,
 				sessionId: "rlm-parent",
 				sidecarDir,
 				hostHandlers: composeIpythonHostHandlers(
+					debug.handlers,
 					createIpythonCodeHostHandlers({ cwd: tempRoot, snapshotOwner: {} }),
 					createRlmIpythonHostHandlers(task),
 					createAgentFamilyIpythonHostHandlers(family),
@@ -459,7 +462,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					"import contextlib, inspect, io, json, omp",
 					"help_text = io.StringIO()",
 					"with contextlib.redirect_stdout(help_text): help(omp.workspace.search)",
-					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
+					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'debug': 'debug' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'debug_signature': str(inspect.signature(omp.debug.launch)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
 				].join("\n"),
 				{ hostContext: { ...hostContext, cellId: "discovery-cell", sequence: 0 } },
 			);
@@ -470,8 +473,10 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				dir: boolean;
 				files: boolean;
 				code: boolean;
+				debug: boolean;
 				signature: string;
 				ast_signature: string;
+				debug_signature: string;
 				help: string;
 				capabilities: string[];
 				edit_skill: string;
@@ -480,20 +485,22 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(discovered.dir).toBe(true);
 			expect(discovered.files).toBe(true);
 			expect(discovered.code).toBe(true);
+			expect(discovered.debug).toBe(true);
 			expect(discovered.signature).toContain("query");
 			expect(discovered.ast_signature).toContain("pattern");
+			expect(discovered.debug_signature).toContain("program");
 			expect(discovered.help).toContain("Search the workspace");
 			expect(discovered.capabilities).toEqual(
-				expect.arrayContaining(["omp.workspace", "omp.files", "omp.code", "edit", "attach_image"]),
+				expect.arrayContaining(["omp.workspace", "omp.files", "omp.code", "omp.debug", "edit", "attach_image"]),
 			);
 			expect(discovered.edit_skill).toEndWith("/skills/edit/SKILL.md");
 			expect(discovered.attach_skill).toEndWith("/skills/attach-image/SKILL.md");
 			const codeResult = await provisioner.execute(
-				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\n(read['path'], matches['total_matches'], matches['matches'][0]['path'])",
+				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\ndebug = await omp.debug.sessions()\n(read['path'], matches['total_matches'], matches['matches'][0]['path'], debug['active'])",
 				{ hostContext: { ...hostContext, cellId: "code-cell", sequence: 1 } },
 			);
 			expect(codeResult.status).toBe("ok");
-			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts')");
+			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts', None)");
 			const spawned = await provisioner.execute(
 				"import rlm\nhandle = await rlm('Inspect this.', name='child-one', model='provider/model')\n(handle.rlm_child_id, handle.name, handle.model)",
 				{ hostContext },
@@ -527,6 +534,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(familySends).toEqual([{ message: "hello", id: "agentmsg_python" }]);
 		} finally {
 			await provisioner.dispose();
+			await debug.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}
 	}, 120_000);

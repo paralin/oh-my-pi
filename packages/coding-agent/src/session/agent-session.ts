@@ -152,6 +152,7 @@ import { createIpythonCapabilityHostHandlers, createIpythonMcpOwner } from "../i
 import type { IpythonCellRequest, IpythonCellResult } from "../ipython/cell";
 import { createIpythonCodeHostHandlers, createIpythonLspOwner } from "../ipython/code-service";
 import type { IpythonProcessIds } from "../ipython/controller";
+import { IpythonDebugService } from "../ipython/debug-service";
 import { OmpHarnessService } from "../ipython/harness-service";
 import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../ipython/host-bridge";
 import {
@@ -609,6 +610,7 @@ export class AgentSession {
 	readonly #eval: EvalRunner;
 	readonly #ipython: IpythonSessionRuntime;
 	readonly #ipythonControls: OmpSessionControlService;
+	readonly #ipythonDebug: IpythonDebugService;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -1077,6 +1079,7 @@ export class AgentSession {
 			globalRoot: config.memoryAgentDir ?? getAgentDir(),
 			refresh: async () => await this.refreshBaseSystemPrompt(),
 		});
+		this.#ipythonDebug = new IpythonDebugService({ cwd: () => this.sessionManager.getCwd() });
 		const goalResponse = (includeCompletionReport = false) => {
 			const goal = this.#goalModeState?.goal ?? null;
 			return {
@@ -1216,6 +1219,7 @@ export class AgentSession {
 				hostHandlers: () =>
 					composeIpythonHostHandlers(
 						createFoundationalIpythonHostHandlers(),
+						this.#ipythonDebug.handlers,
 						createIpythonCodeHostHandlers({
 							cwd: this.sessionManager.getCwd(),
 							snapshotOwner: this,
@@ -4312,6 +4316,7 @@ export class AgentSession {
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
 			this.#ipython.dispose(),
+			this.#ipythonDebug.dispose(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			shutdownTinyTitleClient(),
@@ -7184,7 +7189,7 @@ export class AgentSession {
 	async #suspendSessionServices(): Promise<boolean> {
 		this.#cancelScheduledPromptDeliveriesForTransition();
 		this.#sessionServiceTransitionGeneration++;
-		await this.#ipython.suspend();
+		await Promise.all([this.#ipython.suspend(), this.#ipythonDebug.suspend()]);
 		try {
 			if (!this.#beginSessionFork) return false;
 			await this.#beginSessionFork();

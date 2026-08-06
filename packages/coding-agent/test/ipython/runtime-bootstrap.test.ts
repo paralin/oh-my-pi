@@ -295,7 +295,7 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 				"import os, sys; sys.path.insert(0, os.environ['OMP_IPYTHON_RUNTIME_PATH']); import dill, ipykernel, jupyter_client, zmq, rlm, omp, edit; (dill.__version__, ipykernel.__version__, jupyter_client.__version__, zmq.__version__, callable(rlm), len(omp.capabilities()), omp.skill_path('edit').is_file(), callable(edit.run))",
 			);
 			expect(cell.status).toBe("ok");
-			expect(cell.result).toBe("('0.4.1', '7.3.0', '8.9.1', '26.4.0', True, 18, True, True)");
+			expect(cell.result).toBe("('0.4.1', '7.3.0', '8.9.1', '26.4.0', True, 19, True, True)");
 			await controller.dispose();
 			controller = undefined;
 
