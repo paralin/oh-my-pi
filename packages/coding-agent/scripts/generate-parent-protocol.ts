@@ -22,6 +22,14 @@ const result = Bun.spawnSync(command, { cwd: packageRoot, stdout: "inherit", std
 if (!result.success) process.exit(result.exitCode);
 
 const files = ["parent-environment.pb.ts", "parent-environment_srpc.pb.ts"];
+const generatedFiles = files.map(file => resolve(generatedDir, file));
+const formatResult = Bun.spawnSync([resolve(binDir, "biome"), "check", "--write", ...generatedFiles], {
+	cwd: packageRoot,
+	stdout: "inherit",
+	stderr: "inherit",
+});
+if (!formatResult.success) process.exit(formatResult.exitCode);
+
 const sha256 = async (path: string) =>
 	new Bun.CryptoHasher("sha256").update(await Bun.file(path).arrayBuffer()).digest("hex");
 const manifest = {
