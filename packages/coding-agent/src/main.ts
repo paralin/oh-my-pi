@@ -874,6 +874,7 @@ export async function buildSessionOptions(
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
+	parentExtension?: string,
 ): Promise<CreateAgentSessionOptions> {
 	const options: CreateAgentSessionOptions = {
 		cwd: parsed.cwd ?? getProjectDir(),
@@ -1144,8 +1145,12 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
-	// Additional extension paths from CLI
-	const cliExtensionPaths = [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
+	// Explicit extension paths remain active when automatic discovery is disabled.
+	const cliExtensionPaths = [
+		...(parsed.extensions ?? []),
+		...(parsed.hooks ?? []),
+		...(parentExtension ? [parentExtension] : []),
+	];
 	if (cliExtensionPaths.length > 0) {
 		options.additionalExtensionPaths = cliExtensionPaths;
 	}
@@ -1537,6 +1542,7 @@ export async function runRootCommand(
 		sessionManager,
 		modelRegistry,
 		settingsInstance,
+		parentExtension,
 	);
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;

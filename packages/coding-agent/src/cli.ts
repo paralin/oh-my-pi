@@ -34,7 +34,7 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
-import { runExternalSubagentMode } from "./modes/external-subagent-mode";
+import { isExternalSubagentConfigured, runExternalSubagentMode } from "./modes/external-subagent-mode";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -396,7 +396,7 @@ export async function runCli(argv: string[]): Promise<void> {
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
 
-	if (process.env.GLADOS_ADAPTER_CONFIG) {
+	if (isExternalSubagentConfigured(process.env)) {
 		await runExternalSubagentMode(process.env);
 		return;
 	}

@@ -32,3 +32,22 @@ test("buildSessionOptions retains explicit extensions and hooks under --no-exten
 	expect(options.disableExtensionDiscovery).toBe(true);
 	expect(options.additionalExtensionPaths).toEqual([extensionPath, hookPath]);
 });
+
+test("buildSessionOptions loads the parent extension as an explicit entrypoint", async () => {
+	const parentExtension = tempDir.join("parent-extension.mjs");
+	const parsed = parseArgs(["--no-extensions"]);
+	const settings = Settings.isolated();
+	const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+
+	const options = await buildSessionOptions(
+		parsed,
+		[],
+		SessionManager.inMemory(),
+		modelRegistry,
+		settings,
+		parentExtension,
+	);
+
+	expect(options.disableExtensionDiscovery).toBe(true);
+	expect(options.additionalExtensionPaths).toEqual([parentExtension]);
+});

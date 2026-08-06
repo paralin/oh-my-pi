@@ -12,7 +12,7 @@ import {
 } from "../coordination/external-subagent-profile";
 import { createParentCoordinationBackend } from "../coordination/parent";
 import { loadSkills } from "../extensibility/skills";
-import { resolveParentSessionId, resolveParentSocketPath } from "../parent/config";
+import { resolveParentExtensionPath, resolveParentSessionId, resolveParentSocketPath } from "../parent/config";
 import { discoverAuthStorage } from "../sdk";
 import { runSubprocess } from "../task/executor";
 import { renderStructuredSubagentPrompt } from "../task/structured-subagent";
@@ -21,9 +21,15 @@ import type { AgentProgress, SingleResult } from "../task/types";
 export const PARENT_TASK_PROFILE_ENV = "OMP_PARENT_TASK_PROFILE";
 export const PARENT_TASK_PROFILE_DIGEST_ENV = "OMP_PARENT_TASK_PROFILE_DIGEST";
 
+/** Whether this process was launched as a parent-managed external Task. */
+export function isExternalSubagentConfigured(env: Record<string, string | undefined> = process.env): boolean {
+	return Boolean(env[PARENT_TASK_PROFILE_ENV]?.trim());
+}
+
 /** Versioned live progress record consumed by a parent environment. */
 export interface ExternalTaskProgressRecord {
 	type: "omp_parent_task_progress_v1";
+	providerSessionId: string;
 	taskProgress: {
 		lastIntent: string;
 		tokens: number;
@@ -41,6 +47,7 @@ export interface ExternalTaskProgressRecord {
 /** Versioned terminal result record consumed by a parent environment. */
 export interface ExternalTaskResultRecord {
 	type: "omp_parent_task_result_v1";
+	providerSessionId: string;
 	taskResult: Record<string, unknown>;
 }
 
@@ -71,9 +78,13 @@ async function emitRecord(record: ExternalTaskProgressRecord | ExternalTaskResul
 }
 
 /** Maps live Task state onto the versioned parent progress record. */
-export function externalTaskProgressRecord(progress: AgentProgress): ExternalTaskProgressRecord {
+export function externalTaskProgressRecord(
+	progress: AgentProgress,
+	providerSessionId = "",
+): ExternalTaskProgressRecord {
 	return {
 		type: "omp_parent_task_progress_v1",
+		providerSessionId,
 		taskProgress: {
 			lastIntent: progress.lastIntent ?? "",
 			tokens: progress.tokens,
@@ -90,7 +101,7 @@ export function externalTaskProgressRecord(progress: AgentProgress): ExternalTas
 }
 
 /** Maps the complete Task result onto the versioned parent terminal record. */
-export function externalTaskResultRecord(result: SingleResult): ExternalTaskResultRecord {
+export function externalTaskResultRecord(result: SingleResult, providerSessionId = ""): ExternalTaskResultRecord {
 	const usage = result.usage;
 	const extractedToolData = Object.entries(result.extractedToolData ?? {}).map(([toolName, values]) => ({
 		toolName,
@@ -98,6 +109,7 @@ export function externalTaskResultRecord(result: SingleResult): ExternalTaskResu
 	}));
 	return {
 		type: "omp_parent_task_result_v1",
+		providerSessionId,
 		taskResult: {
 			lastIntent: result.lastIntent ?? "",
 			exitCode: result.exitCode,
@@ -165,11 +177,13 @@ export async function runExternalSubagentMode(
 		throw new Error("external subagent mode requires OMP_PARENT_SOCKET and OMP_PARENT_SESSION");
 	const backend = createParentCoordinationBackend({ env });
 	if (!backend) throw new Error("external subagent mode could not create its parent coordination backend");
+	const parentExtension = resolveParentExtensionPath(env);
 
 	const startedAt = Date.now();
 	const jobs = new AsyncJobManager({ onJobComplete: () => {} });
 	let authStorage: Awaited<ReturnType<typeof discoverAuthStorage>> | undefined;
 	let progressWrites = Promise.resolve();
+	let providerSessionId = "";
 	let result: SingleResult;
 	try {
 		const settings = Settings.isolated({
@@ -219,6 +233,7 @@ export async function runExternalSubagentMode(
 			enableLsp: profile.agent.tools.includes("lsp"),
 			enableMCP: false,
 			restrictToolNames: true,
+			restrictedExtensionPaths: parentExtension ? [parentExtension] : [],
 			keepAlive: false,
 			...(profile.outputSchema
 				? {
@@ -233,8 +248,13 @@ export async function runExternalSubagentMode(
 			coordinationBackend: backend,
 			asyncJobManager: jobs,
 			skills: selectedSkills,
+			onSessionCreated: sessionId => {
+				providerSessionId = sessionId;
+			},
 			onProgress: progress => {
-				progressWrites = progressWrites.then(() => emitRecord(externalTaskProgressRecord(progress)));
+				progressWrites = progressWrites.then(() =>
+					emitRecord(externalTaskProgressRecord(progress, providerSessionId)),
+				);
 			},
 		});
 		await progressWrites;
@@ -251,6 +271,6 @@ export async function runExternalSubagentMode(
 		}
 		if (cleanupError !== undefined) result = failedResult(profile, cleanupError, startedAt);
 	}
-	await emitRecord(externalTaskResultRecord(result));
+	await emitRecord(externalTaskResultRecord(result, providerSessionId));
 	return result;
 }
