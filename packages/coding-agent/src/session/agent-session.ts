@@ -162,6 +162,7 @@ import {
 	IPYTHON_JOURNAL_MESSAGE_TYPE,
 	type IpythonJournalDetail,
 } from "../ipython/journal";
+import { IpythonRemoteService } from "../ipython/remote-service";
 import { createRlmIpythonHostHandlers } from "../ipython/rlm-host";
 import {
 	createSessionControlIpythonHostHandlers,
@@ -614,6 +615,7 @@ export class AgentSession {
 	readonly #ipythonControls: OmpSessionControlService;
 	readonly #ipythonDebug: IpythonDebugService;
 	readonly #ipythonGithub?: IpythonGithubService;
+	readonly #ipythonRemote: IpythonRemoteService;
 	readonly #ipythonWeb?: IpythonWebService;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
@@ -1085,6 +1087,7 @@ export class AgentSession {
 		});
 		this.#ipythonDebug = new IpythonDebugService({ cwd: () => this.sessionManager.getCwd() });
 		this.#ipythonGithub = config.createIpythonGithubService?.();
+		this.#ipythonRemote = new IpythonRemoteService({ cwd: () => this.sessionManager.getCwd() });
 		this.#ipythonWeb = config.createIpythonWebService?.();
 		const goalResponse = (includeCompletionReport = false) => {
 			const goal = this.#goalModeState?.goal ?? null;
@@ -1227,6 +1230,7 @@ export class AgentSession {
 						createFoundationalIpythonHostHandlers(),
 						this.#ipythonDebug.handlers,
 						this.#ipythonGithub?.handlers,
+						this.#ipythonRemote.handlers,
 						this.#ipythonWeb?.handlers,
 						createIpythonCodeHostHandlers({
 							cwd: this.sessionManager.getCwd(),

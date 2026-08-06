@@ -98,6 +98,11 @@ _CAPABILITIES = (
         "Use GitHub through host-owned command and cache services.",
     ),
     Capability(
+        "omp.remote",
+        "omp.remote",
+        "Use host-owned SSH connections and file-transfer services.",
+    ),
+    Capability(
         "omp.workspace",
         "omp.workspace",
         "Use validated OMP workspace search and edit services.",
@@ -139,6 +144,7 @@ from . import (
     harness,
     mcp,
     memory,
+    remote,
     rules,
     session,
     skills,
@@ -157,6 +163,7 @@ __all__ = [
     "host_request",
     "mcp",
     "memory",
+    "remote",
     "rules",
     "session",
     "skill_path",

@@ -8,6 +8,7 @@ import asset44 from "./python/omp/github.py" with { type: "text" };
 import asset5 from "./python/omp/harness.py" with { type: "text" };
 import asset6 from "./python/omp/mcp.py" with { type: "text" };
 import asset37 from "./python/omp/memory.py" with { type: "text" };
+import asset45 from "./python/omp/remote.py" with { type: "text" };
 import asset38 from "./python/omp/rules.py" with { type: "text" };
 import asset7 from "./python/omp/session.py" with { type: "text" };
 import asset39 from "./python/omp/skills.py" with { type: "text" };
@@ -66,6 +67,7 @@ export const IPYTHON_PYTHON_ASSETS: readonly IpythonPythonAsset[] = [
 	{ path: "omp/workspace.py", content: asset8 },
 	{ path: "omp/_managed.py", content: asset36 },
 	{ path: "omp/memory.py", content: asset37 },
+	{ path: "omp/remote.py", content: asset45 },
 	{ path: "omp/rules.py", content: asset38 },
 	{ path: "omp/skills.py", content: asset39 },
 	{ path: "agent_message/__init__.py", content: asset9 },

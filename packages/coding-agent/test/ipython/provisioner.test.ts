@@ -22,6 +22,7 @@ import {
 	IpythonKernelProvisioner,
 	type IpythonStartupProgress,
 } from "../../src/ipython/provisioner.js";
+import { IpythonRemoteService } from "../../src/ipython/remote-service.js";
 import { createRlmIpythonHostHandlers } from "../../src/ipython/rlm-host.js";
 import type { EnsureIpythonRuntimeOptions, IpythonRuntime } from "../../src/ipython/runtime-bootstrap.js";
 import { IpythonWebService } from "../../src/ipython/web-service.js";
@@ -458,6 +459,16 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			pullRequest: async params => ({ payload: { number: params.number }, status: "fresh" }),
 			pullRequestDiff: async params => ({ payload: { number: params.number, unified: "" }, status: "fresh" }),
 		});
+		const remote = new IpythonRemoteService({
+			cwd: () => tempRoot,
+			loadHosts: async () => [
+				{
+					name: "build",
+					host: "build.internal",
+					_source: { provider: "test", providerName: "Test", path: "/ssh.json", level: "project" },
+				},
+			],
+		});
 		const provisioner = new IpythonKernelProvisioner(
 			{
 				cwd: tempRoot,
@@ -467,6 +478,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					debug.handlers,
 					web.handlers,
 					github.handlers,
+					remote.handlers,
 					createIpythonCodeHostHandlers({ cwd: tempRoot, snapshotOwner: {} }),
 					createRlmIpythonHostHandlers(task),
 					createAgentFamilyIpythonHostHandlers(family),
@@ -489,7 +501,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					"import contextlib, inspect, io, json, omp",
 					"help_text = io.StringIO()",
 					"with contextlib.redirect_stdout(help_text): help(omp.workspace.search)",
-					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'debug': 'debug' in dir(omp), 'web': 'web' in dir(omp), 'github': 'github' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'debug_signature': str(inspect.signature(omp.debug.launch)), 'web_signature': str(inspect.signature(omp.web.search)), 'github_signature': str(inspect.signature(omp.github.issue)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
+					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'debug': 'debug' in dir(omp), 'web': 'web' in dir(omp), 'github': 'github' in dir(omp), 'remote': 'remote' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'debug_signature': str(inspect.signature(omp.debug.launch)), 'web_signature': str(inspect.signature(omp.web.search)), 'github_signature': str(inspect.signature(omp.github.issue)), 'remote_signature': str(inspect.signature(omp.remote.exec)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
 				].join("\n"),
 				{ hostContext: { ...hostContext, cellId: "discovery-cell", sequence: 0 } },
 			);
@@ -503,11 +515,13 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				debug: boolean;
 				web: boolean;
 				github: boolean;
+				remote: boolean;
 				signature: string;
 				ast_signature: string;
 				debug_signature: string;
 				web_signature: string;
 				github_signature: string;
+				remote_signature: string;
 				help: string;
 				capabilities: string[];
 				edit_skill: string;
@@ -519,11 +533,13 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(discovered.debug).toBe(true);
 			expect(discovered.web).toBe(true);
 			expect(discovered.github).toBe(true);
+			expect(discovered.remote).toBe(true);
 			expect(discovered.signature).toContain("query");
 			expect(discovered.ast_signature).toContain("pattern");
 			expect(discovered.debug_signature).toContain("program");
 			expect(discovered.web_signature).toContain("query");
 			expect(discovered.github_signature).toContain("number_or_url");
+			expect(discovered.remote_signature).toContain("command");
 			expect(discovered.help).toContain("Search the workspace");
 			expect(discovered.capabilities).toEqual(
 				expect.arrayContaining([
@@ -533,6 +549,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					"omp.debug",
 					"omp.web",
 					"omp.github",
+					"omp.remote",
 					"edit",
 					"attach_image",
 				]),
@@ -540,11 +557,11 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(discovered.edit_skill).toEndWith("/skills/edit/SKILL.md");
 			expect(discovered.attach_skill).toEndWith("/skills/attach-image/SKILL.md");
 			const codeResult = await provisioner.execute(
-				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\ndebug = await omp.debug.sessions()\nweb = await omp.web.search('query')\ngh = await omp.github.issue(7)\n(read['path'], matches['total_matches'], matches['matches'][0]['path'], debug['active'], web['response']['provider'], gh['payload']['number'])",
+				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\ndebug = await omp.debug.sessions()\nweb = await omp.web.search('query')\ngh = await omp.github.issue(7)\nremote = await omp.remote.hosts()\n(read['path'], matches['total_matches'], matches['matches'][0]['path'], debug['active'], web['response']['provider'], gh['payload']['number'], remote['items'][0]['name'])",
 				{ hostContext: { ...hostContext, cellId: "code-cell", sequence: 1 } },
 			);
 			expect(codeResult.status).toBe("ok");
-			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts', None, 'exa', 7)");
+			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts', None, 'exa', 7, 'build')");
 			const spawned = await provisioner.execute(
 				"import rlm\nhandle = await rlm('Inspect this.', name='child-one', model='provider/model')\n(handle.rlm_child_id, handle.name, handle.model)",
 				{ hostContext },
