@@ -4,7 +4,7 @@ import { withFileLock } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { sanitizeManagedDescription } from "../autolearn/managed-skills";
 
-export type HarnessKind = "prompt" | "memory" | "skill" | "subagent";
+export type HarnessKind = "prompt" | "memory" | "rule" | "skill" | "subagent";
 export type HarnessScope = "local" | "global";
 
 export interface HarnessEntry {
@@ -80,7 +80,7 @@ export interface OmpHarnessServiceOptions {
 	now?: () => Date;
 }
 
-const KINDS: readonly HarnessKind[] = ["prompt", "memory", "skill", "subagent"];
+const KINDS: readonly HarnessKind[] = ["prompt", "memory", "rule", "skill", "subagent"];
 const ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$/;
 const DISCOVERABLE_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const MAX_TITLE_CHARS = 256;
@@ -135,8 +135,9 @@ function generatedId(kind: HarnessKind): string {
 }
 
 const DOMAIN_DIR: Readonly<Record<HarnessKind, string>> = {
-	prompt: "managed-rules",
+	prompt: "managed-prompts",
 	memory: "managed-memory",
+	rule: "managed-rules",
 	skill: "managed-skills",
 	subagent: "managed-agents",
 };
@@ -178,7 +179,9 @@ function entryDocument(entry: HarnessEntry): string {
 	const native =
 		entry.kind === "skill" || entry.kind === "subagent"
 			? { name: entry.id, description: sanitizeManagedDescription(entry.title), ...metadata }
-			: metadata;
+			: entry.kind === "rule"
+				? { description: sanitizeManagedDescription(entry.title), alwaysApply: true, ...metadata }
+				: metadata;
 	return `---\n${YAML.stringify(native, null, 2).trimEnd()}\n---\n\n${content}\n`;
 }
 

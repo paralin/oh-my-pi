@@ -148,6 +148,7 @@ import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { createAgentFamilyIpythonHostHandlers } from "../ipython/agent-family";
+import { createIpythonCapabilityHostHandlers, createIpythonMcpOwner } from "../ipython/capability-service";
 import type { IpythonCellRequest, IpythonCellResult } from "../ipython/cell";
 import type { IpythonProcessIds } from "../ipython/controller";
 import { OmpHarnessService } from "../ipython/harness-service";
@@ -1214,6 +1215,19 @@ export class AgentSession {
 				hostHandlers: () =>
 					composeIpythonHostHandlers(
 						createFoundationalIpythonHostHandlers(),
+						createIpythonCapabilityHostHandlers({
+							cwd: this.sessionManager.getCwd(),
+							snapshotOwner: this,
+							harness,
+							mcp: config.mcpManager ? createIpythonMcpOwner(config.mcpManager) : undefined,
+							modelInfo: () => {
+								const model = this.model;
+								return model
+									? { id: `${model.provider}/${model.id}`, provider: model.provider, input: [...model.input] }
+									: { id: null, provider: null, input: [] };
+							},
+							refreshSystemPrompt: async () => await this.refreshBaseSystemPrompt(),
+						}),
 						createRlmIpythonHostHandlers(config.taskAdmissionService),
 						createAgentFamilyIpythonHostHandlers(config.agentFamilyService),
 						createSessionControlIpythonHostHandlers(this.#ipythonControls),

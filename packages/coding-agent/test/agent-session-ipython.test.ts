@@ -544,6 +544,107 @@ describeIntegration("AgentSession real IPython lifecycle", () => {
 		}
 	}, 120_000);
 
+	test("runs typed workspace, managed capability, and rich diff APIs from the real kernel", async () => {
+		const pythonExecutable = Bun.env.OMP_IPYTHON_TEST_PYTHON;
+		if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-capabilities-real-"));
+		const agentDir = path.join(tempRoot, "agent");
+		await fs.mkdir(agentDir);
+		await fs.writeFile(path.join(tempRoot, "capability.txt"), "alpha\nbeta\n");
+		await fs.writeFile(path.join(tempRoot, "hashline.txt"), "delta\nepsilon\n");
+		await fs.writeFile(
+			path.join(tempRoot, "pixel.png"),
+			Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+				"base64",
+			),
+		);
+		const authStorage = await AuthStorage.create(path.join(tempRoot, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempRoot, "models.yml"));
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("test model is unavailable");
+		const sessionManager = SessionManager.create(tempRoot, tempRoot);
+		const session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({}),
+			modelRegistry,
+			memoryAgentDir: agentDir,
+			createIpythonSessionGeneration: options =>
+				new RealSessionGeneration(options, pythonExecutable, {
+					PATH: `${path.dirname(pythonExecutable)}${path.delimiter}${Bun.env.PATH ?? ""}`,
+				}),
+		});
+		try {
+			session.subscribe(() => {});
+			const result = await session.executeIpythonCell({
+				origin: "direct",
+				code: [
+					"import json, edit, attach_image",
+					"from omp import workspace, memory, rules, skills, mcp",
+					"edited = await edit.run('capability.txt', 'beta', 'gamma')",
+					"search = await workspace.search('gamma', paths=['.'], limit=10)",
+					"anchor = await workspace.search('epsilon', paths=['hashline.txt'], limit=10)",
+					"anchored = await workspace.hashline_edit(anchor['snapshots'][0]['header'] + '\\nPUT 2-2:\\n+zeta')",
+					"mem = await memory.create('runtime-memory', 'Remember the host owner')",
+					"rule = await rules.create('runtime-rule', 'Retain typed boundaries')",
+					"skill = await skills.create('runtime-skill', 'Use the typed bridge')",
+					"servers = await mcp.servers()",
+					"image = await attach_image.run('pixel.png')",
+					"print(json.dumps({'edited': edited, 'search': search, 'mem': mem['id'], 'rule': rule['id'], 'skill': skill['id'], 'servers': servers, 'image': image, 'anchored': anchored['op']}, sort_keys=True))",
+				].join("\n"),
+			});
+			if (result.status !== "ok") {
+				throw new Error(`capability cell failed: ${result.stderr} ${JSON.stringify(result.errors)}`);
+			}
+			const payload = JSON.parse(result.stdout.trim()) as {
+				edited: string;
+				search: { matches: Array<{ path: string; line: number; text: string }> };
+				mem: string;
+				rule: string;
+				skill: string;
+				servers: { servers: unknown[] };
+				image: string;
+				anchored: string;
+			};
+			expect(payload.edited).toContain("capability.txt");
+			expect(payload.search.matches).toEqual([
+				expect.objectContaining({ path: "capability.txt", line: 2, text: "gamma" }),
+			]);
+			expect(payload).toMatchObject({
+				mem: "runtime-memory",
+				rule: "runtime-rule",
+				skill: "runtime-skill",
+				servers: { servers: [] },
+				image: expect.stringContaining("Loaded 1 image"),
+				anchored: "update",
+			});
+			expect(await fs.readFile(path.join(tempRoot, "capability.txt"), "utf8")).toBe("alpha\ngamma\n");
+			expect(await fs.readFile(path.join(tempRoot, "hashline.txt"), "utf8")).toBe("delta\nzeta\n");
+			expect(result.events).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "display",
+						data: expect.objectContaining({
+							"application/vnd.omp.diff+json": expect.objectContaining({ start_line: 2 }),
+						}),
+					}),
+					expect.objectContaining({
+						kind: "display",
+						data: expect.objectContaining({
+							"application/vnd.omp.attachment+json": expect.objectContaining({
+								mime_type: "image/png",
+							}),
+						}),
+					}),
+				]),
+			);
+		} finally {
+			await session.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 30_000);
+
 	test("restores a named checkpoint into a replacement kernel", async () => {
 		const pythonExecutable = Bun.env.OMP_IPYTHON_TEST_PYTHON;
 		if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");

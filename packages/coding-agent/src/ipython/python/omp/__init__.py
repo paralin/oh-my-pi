@@ -29,8 +29,11 @@ _CAPABILITIES = (
     Capability("rlm_heartbeat", "rlm_heartbeat", "Manage agent-owned heartbeats.", _ROOT / "skills/rlm-heartbeat/SKILL.md"),
     Capability("omp.session", "omp.session", "Inspect active-cell context and publish progress or artifacts."),
     Capability("omp.workspace", "omp.workspace", "Use validated OMP workspace search and edit services."),
-    Capability("omp.harness", "omp.harness", "Access memory, rule, skill, todo, and checkpoint services."),
-    Capability("omp.mcp", "omp.mcp", "Call host-owned MCP tools, resources, and prompts."),
+    Capability("omp.harness", "omp.harness", "Access continual harness, todo, and checkpoint services."),
+    Capability("omp.memory", "omp.memory", "Manage host-owned OMP memory records."),
+    Capability("omp.rules", "omp.rules", "Manage host-owned OMP rule records."),
+    Capability("omp.skills", "omp.skills", "Manage host-owned OMP skill records."),
+    Capability("omp.mcp", "omp.mcp", "Call host-owned MCP tools, resources, prompts, config, and refresh."),
 )
 
 
@@ -47,6 +50,18 @@ def skill_path(name: str) -> Path:
     raise KeyError(name)
 
 
-from . import harness, mcp, session, workspace
+from . import harness, mcp, memory, rules, session, skills, workspace
 
-__all__ = ["Capability", "capabilities", "harness", "host_request", "mcp", "session", "skill_path", "workspace"]
+__all__ = [
+    "Capability",
+    "capabilities",
+    "harness",
+    "host_request",
+    "mcp",
+    "memory",
+    "rules",
+    "session",
+    "skill_path",
+    "skills",
+    "workspace",
+]

@@ -36,6 +36,7 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { AgentFamilyService } from "../ipython/agent-family";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
+import type { MCPManager } from "../mcp/manager";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { TaskAdmissionService } from "../task/admission";
 import type { ConfiguredThinkingLevel } from "../thinking";
@@ -229,6 +230,8 @@ export interface AgentSessionConfig {
 	xdev?: XdevState;
 	/** Names pinned top-level during runtime repartitioning. */
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Host-owned MCP transport, credential, resource, prompt, and tool service. */
+	mcpManager?: MCPManager;
 	/** Accessor for live MCP server instructions. */
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	/** Time-traveling stream-rule manager. */

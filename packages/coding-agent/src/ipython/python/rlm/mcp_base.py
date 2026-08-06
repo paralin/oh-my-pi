@@ -53,6 +53,14 @@ class McpIntegration:
             raise McpToolError(str(payload.get("error") or "MCP tool returned an error"))
         return payload.get("result")
 
+    async def config(self) -> dict[str, Any]:
+        """Return non-credential host configuration for this server."""
+        return await host_request("mcp.config", {"server": self.server})
+
+    async def refresh(self) -> dict[str, Any]:
+        """Reconnect this server through OMP's host-owned auth and transport."""
+        return await host_request("mcp.refresh", {"server": self.server})
+
     async def list_resources(self) -> list[dict[str, Any]]:
         payload = await host_request("mcp.list_resources", {"server": self.server})
         resources = payload.get("resources")

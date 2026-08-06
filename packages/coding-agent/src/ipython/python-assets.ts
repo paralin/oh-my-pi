@@ -1,8 +1,12 @@
 import asset34 from "./python/NOTICE.txt" with { type: "text" };
 import asset4 from "./python/omp/__init__.py" with { type: "text" };
+import asset36 from "./python/omp/_managed.py" with { type: "text" };
 import asset5 from "./python/omp/harness.py" with { type: "text" };
 import asset6 from "./python/omp/mcp.py" with { type: "text" };
+import asset37 from "./python/omp/memory.py" with { type: "text" };
+import asset38 from "./python/omp/rules.py" with { type: "text" };
 import asset7 from "./python/omp/session.py" with { type: "text" };
+import asset39 from "./python/omp/skills.py" with { type: "text" };
 import asset8 from "./python/omp/workspace.py" with { type: "text" };
 import asset35 from "./python/pyproject.toml" with { type: "text" };
 import asset0 from "./python/rlm/__init__.py" with { type: "text" };
@@ -50,6 +54,10 @@ export const IPYTHON_PYTHON_ASSETS: readonly IpythonPythonAsset[] = [
 	{ path: "omp/mcp.py", content: asset6 },
 	{ path: "omp/session.py", content: asset7 },
 	{ path: "omp/workspace.py", content: asset8 },
+	{ path: "omp/_managed.py", content: asset36 },
+	{ path: "omp/memory.py", content: asset37 },
+	{ path: "omp/rules.py", content: asset38 },
+	{ path: "omp/skills.py", content: asset39 },
 	{ path: "agent_message/__init__.py", content: asset9 },
 	{ path: "skills/agent-message/SKILL.md", content: asset10 },
 	{ path: "skills/agent-message/pyproject.toml", content: asset11 },

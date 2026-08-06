@@ -6,9 +6,6 @@ import base64
 import io
 from pathlib import Path
 
-# Keep in sync with ATTACHMENT_DISPLAY_MIME in src/core/kernel/index.ts.
-_ATTACHMENT_DISPLAY_MIME = "application/vnd.omp.attachment+json"
-
 # Keep emitted attachments small enough that daemon clients can render and replay
 # image-heavy sessions without compressing megabytes of base64 on every update.
 _MAX_SOURCE_IMAGE_BYTES = 20_000_000
@@ -191,16 +188,13 @@ def _resize_image(filepath: Path, mime_type: str, size: int, dimensions: tuple[i
     )
 
 
-def _emit_attachment(filepath: Path, mime_type: str, size: int, dimensions: tuple[int, int]) -> str | None:
-    from IPython.display import display
+async def _emit_attachment(filepath: Path, mime_type: str, size: int, dimensions: tuple[int, int]) -> str | None:
+    from rlm import host_request
 
     data_b64, emitted_mime_type, resize_note = _resize_image(filepath, mime_type, size, dimensions)
-    display(
-        {
-            _ATTACHMENT_DISPLAY_MIME: {"mime_type": emitted_mime_type, "data": data_b64, "path": str(filepath)},
-            "text/plain": f"Loaded image into context: {filepath}",
-        },
-        raw=True,
+    await host_request(
+        "attachment.admit",
+        {"path": str(filepath), "mime_type": emitted_mime_type, "data": data_b64},
     )
     return resize_note
 
@@ -248,7 +242,7 @@ async def run(*paths: str) -> str:
     validated = [_validate_image(path) for path in paths]
     resize_notes = []
     for filepath, mime, size, dimensions in validated:
-        note = _emit_attachment(filepath, mime, size, dimensions)
+        note = await _emit_attachment(filepath, mime, size, dimensions)
         if note:
             resize_notes.append(f"{filepath}: {note}")
 

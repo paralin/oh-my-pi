@@ -23,3 +23,13 @@ async def read_resource(server: str, uri: str) -> Any:
 async def get_prompt(server: str, name: str, arguments: dict[str, str] | None = None) -> Any:
     return (await host_request("mcp.get_prompt", {"server": server, "name": name,
                                                   "arguments": arguments or {}})).get("result")
+
+
+async def config(server: str) -> dict[str, Any]:
+    """Return one server's non-credential host configuration."""
+    return await host_request("mcp.config", {"server": server})
+
+
+async def refresh(server: str) -> dict[str, Any]:
+    """Reconnect one server and refresh its host-owned capabilities."""
+    return await host_request("mcp.refresh", {"server": server})

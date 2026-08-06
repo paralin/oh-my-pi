@@ -3569,6 +3569,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
 			setActiveToolNames,
 			ensureWriteRegistered,
+			mcpManager,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();
