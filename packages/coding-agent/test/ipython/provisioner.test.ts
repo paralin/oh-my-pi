@@ -13,7 +13,7 @@ import type {
 	IpythonSnapshotResult,
 } from "../../src/ipython/controller.js";
 import { ipythonEnvironment } from "../../src/ipython/environment.js";
-import { composeIpythonHostHandlers } from "../../src/ipython/host-bridge.js";
+import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../../src/ipython/host-bridge.js";
 import {
 	type IpythonKernelController,
 	IpythonKernelProvisioner,
@@ -451,6 +451,32 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				origin: "model" as const,
 				authority: "trusted-cell" as const,
 			};
+			const discovery = await provisioner.execute(
+				[
+					"import contextlib, inspect, io, json, omp",
+					"help_text = io.StringIO()",
+					"with contextlib.redirect_stdout(help_text): help(omp.workspace.search)",
+					"print(json.dumps({'dir': 'workspace' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
+				].join("\n"),
+				{ hostContext: { ...hostContext, cellId: "discovery-cell", sequence: 0 } },
+			);
+			if (discovery.status !== "ok") {
+				throw new Error(`discovery cell failed: ${discovery.stderr} ${JSON.stringify(discovery.errors)}`);
+			}
+			const discovered = JSON.parse(discovery.stdout.trim()) as {
+				dir: boolean;
+				signature: string;
+				help: string;
+				capabilities: string[];
+				edit_skill: string;
+				attach_skill: string;
+			};
+			expect(discovered.dir).toBe(true);
+			expect(discovered.signature).toContain("query");
+			expect(discovered.help).toContain("Search the workspace");
+			expect(discovered.capabilities).toEqual(expect.arrayContaining(["omp.workspace", "edit", "attach_image"]));
+			expect(discovered.edit_skill).toEndWith("/skills/edit/SKILL.md");
+			expect(discovered.attach_skill).toEndWith("/skills/attach-image/SKILL.md");
 			const spawned = await provisioner.execute(
 				"import rlm\nhandle = await rlm('Inspect this.', name='child-one', model='provider/model')\n(handle.rlm_child_id, handle.name, handle.model)",
 				{ hostContext },
@@ -485,6 +511,245 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 		} finally {
 			await provisioner.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 120_000);
+
+	test("isolates concurrent root and child kernels behind shared Task and messaging owners", async () => {
+		const pythonExecutable = Bun.env.OMP_IPYTHON_TEST_PYTHON;
+		if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-root-child-"));
+		const rootCwd = path.join(tempRoot, "root");
+		const childCwd = path.join(tempRoot, "worktrees", "child");
+		const rootSidecar = path.join(tempRoot, "sessions", "root", "ipython");
+		const childSidecar = path.join(tempRoot, "sessions", "child", "ipython");
+		await Promise.all(
+			[rootCwd, childCwd, rootSidecar, childSidecar].map(directory => fs.mkdir(directory, { recursive: true })),
+		);
+		const ensureRuntime = async (options: EnsureIpythonRuntimeOptions): Promise<IpythonRuntime> => ({
+			pythonExecutable,
+			runtimeDir: path.dirname(pythonExecutable),
+			pythonPackageDir: path.join(path.dirname(pythonExecutable), "python"),
+			environment: {
+				...ipythonEnvironment(options.environment),
+				OMP_IPYTHON_RUNTIME_PATH: pythonAbiSourcePath(),
+			},
+		});
+		const admissions: Array<{ role: string; request: TaskAdmissionRequest }> = [];
+		const messages: Array<{ role: string; receiver: string | undefined; message: string }> = [];
+		const blocked = Promise.withResolvers<void>();
+		let blockedAborted = false;
+		const taskFor = (role: "root" | "child"): TaskAdmissionService => ({
+			async admit(request) {
+				admissions.push({ role, request });
+				if (request.assignment === "cancel me") {
+					blocked.resolve();
+					await new Promise<never>((_resolve, reject) => {
+						const abort = () => {
+							blockedAborted = true;
+							reject(request.signal?.reason ?? new Error("cancelled"));
+						};
+						if (request.signal?.aborted) abort();
+						else request.signal?.addEventListener("abort", abort, { once: true });
+					});
+				}
+				return {
+					id: `${role}-worker`,
+					name: `${role}-worker`,
+					jobId: `${role}-worker`,
+					sessionId: `${role}-worker-session`,
+					sessionDir: path.join(tempRoot, "sessions", `${role}-worker`),
+					model: "provider/model",
+					cwd: role === "root" ? rootCwd : childCwd,
+				};
+			},
+			findModels: () => [],
+			async listDirectChildren() {
+				return role === "root"
+					? [
+							{
+								id: "child-runtime",
+								name: "child-runtime",
+								activeSessionId: "child-session",
+								sessionId: "child-session",
+								sessionDir: path.join(tempRoot, "sessions", "child"),
+								status: "running" as const,
+								lifecycleStatus: "running" as const,
+							},
+						]
+					: [];
+			},
+			async deleteDirectChild() {
+				throw new Error("not used");
+			},
+		});
+		const familyFor = (role: "root" | "child"): AgentFamilyService => ({
+			roster: async () =>
+				role === "root"
+					? {
+							current: { name: "root", id: "Main", depth: 0 },
+							entries: [
+								{
+									relationship: "child",
+									name: "child-runtime",
+									id: "child-runtime",
+									depth: 1,
+									status: "running",
+								},
+							],
+						}
+					: {
+							current: { name: "child-runtime", id: "child-runtime", depth: 1 },
+							entries: [{ relationship: "parent", name: "root", id: "Main", depth: 0, status: "running" }],
+						},
+			async send(request) {
+				if (request.receiverName === "unrelated") throw new Error("unrelated agent is outside the nuclear family");
+				messages.push({ role, receiver: request.receiverName, message: request.message });
+				return { id: request.id, deliveryStatus: "delivered", message: request.message };
+			},
+			inbox: async () => ({ messages: [] }),
+			wait: async () => ({ message: null }),
+			observeList: async () => ({ agents: [] }),
+			observeGet: async () => ({ agent: null }),
+			observeRecent: async () => ({ messages: [] }),
+		});
+		const barrier = Promise.withResolvers<void>();
+		const barrierSessions = new Set<string>();
+		const handlersFor = (role: "root" | "child") =>
+			composeIpythonHostHandlers(
+				createFoundationalIpythonHostHandlers(),
+				createRlmIpythonHostHandlers(taskFor(role)),
+				createAgentFamilyIpythonHostHandlers(familyFor(role)),
+				{
+					"test.barrier": async request => {
+						barrierSessions.add(request.sessionId);
+						if (barrierSessions.size === 2) barrier.resolve();
+						await barrier.promise;
+						return {};
+					},
+				},
+			);
+		const root = new IpythonKernelProvisioner(
+			{ cwd: rootCwd, sessionId: "root-session", sidecarDir: rootSidecar, hostHandlers: handlersFor("root") },
+			{ ensureRuntime },
+		);
+		const child = new IpythonKernelProvisioner(
+			{ cwd: childCwd, sessionId: "child-session", sidecarDir: childSidecar, hostHandlers: handlersFor("child") },
+			{ ensureRuntime },
+		);
+		let rootIds: IpythonProcessIds | undefined;
+		let childIds: IpythonProcessIds | undefined;
+		const context = (
+			role: "root" | "child",
+			sequence: number,
+		): NonNullable<Parameters<IpythonKernelProvisioner["execute"]>[1]>["hostContext"] => {
+			const cwd = role === "root" ? rootCwd : childCwd;
+			const sidecar = role === "root" ? rootSidecar : childSidecar;
+			return {
+				sessionId: `${role}-session`,
+				cwd,
+				cellId: `${role}-cell-${sequence}`,
+				sequence,
+				origin: "model",
+				authority: "trusted-cell",
+				allocateArtifact: async request => ({
+					path: path.join(sidecar, `${role}-${request.label}.txt`),
+					mimeType: request.mimeType,
+					label: request.label,
+					bytes: 0,
+				}),
+			};
+		};
+		try {
+			await Promise.all([root.ensure(), child.ensure()]);
+			rootIds = root.processIds;
+			childIds = child.processIds;
+			if (!rootIds || !childIds) throw new Error("root and child kernels did not start");
+			expect(
+				new Set([rootIds.controllerPid, rootIds.kernelPid, childIds.controllerPid, childIds.kernelPid]).size,
+			).toBe(4);
+			const rootCode = [
+				"import agent_message, json, rlm",
+				"from rlm import host_request",
+				"from omp import session",
+				"await host_request('test.barrier')",
+				"info = await session.info()",
+				"artifact = await session.allocate_artifact('proof', mime_type='text/plain', suffix='.txt')",
+				"spawned = await rlm('root work', name='root-worker', isolated=False)",
+				"children = await rlm.list_subagents()",
+				"roster = await agent_message.list_agents()",
+				"receipt = await agent_message.send('hello child', receiver_role='child', receiver_name='child-runtime')",
+				"print(json.dumps({'info': info, 'artifact': artifact, 'spawned': spawned.name, 'children': [item.rlm_child_id for item in children], 'relations': [item['relationship'] for item in roster['entries']], 'receipt': receipt['deliveryStatus']}, sort_keys=True))",
+			].join("\n");
+			const childCode = [
+				"import agent_message, json, rlm",
+				"from rlm import host_request",
+				"from omp import session",
+				"await host_request('test.barrier')",
+				"info = await session.info()",
+				"artifact = await session.allocate_artifact('proof', mime_type='text/plain', suffix='.txt')",
+				"spawned = await rlm('child work', name='child-worker', isolated=True, apply=False, merge='patch')",
+				"children = await rlm.list_subagents()",
+				"roster = await agent_message.list_agents()",
+				"try:",
+				"    await agent_message.send('escape', receiver_role='sibling', receiver_name='unrelated')",
+				"    rejection = ''",
+				"except RuntimeError as error:",
+				"    rejection = str(error)",
+				"print(json.dumps({'info': info, 'artifact': artifact, 'spawned': spawned.name, 'children': [item.rlm_child_id for item in children], 'relations': [item['relationship'] for item in roster['entries']], 'rejection': rejection}, sort_keys=True))",
+			].join("\n");
+			const [rootResult, childResult] = await Promise.all([
+				root.execute(rootCode, { hostContext: context("root", 1) }),
+				child.execute(childCode, { hostContext: context("child", 1) }),
+			]);
+			if (rootResult.status !== "ok") {
+				throw new Error(`root cell failed: ${rootResult.stderr} ${JSON.stringify(rootResult.errors)}`);
+			}
+			if (childResult.status !== "ok") {
+				throw new Error(`child cell failed: ${childResult.stderr} ${JSON.stringify(childResult.errors)}`);
+			}
+			const rootPayload = JSON.parse(rootResult.stdout.trim()) as Record<string, unknown>;
+			const childPayload = JSON.parse(childResult.stdout.trim()) as Record<string, unknown>;
+			expect(rootPayload).toMatchObject({
+				info: { sessionId: "root-session", cwd: rootCwd },
+				artifact: { artifact: { path: path.join(rootSidecar, "root-proof.txt") } },
+				spawned: "root-worker",
+				children: ["child-runtime"],
+				relations: ["child"],
+				receipt: "delivered",
+			});
+			expect(childPayload).toMatchObject({
+				info: { sessionId: "child-session", cwd: childCwd },
+				artifact: { artifact: { path: path.join(childSidecar, "child-proof.txt") } },
+				spawned: "child-worker",
+				children: [],
+				relations: ["parent"],
+			});
+			expect(String(childPayload.rejection)).toContain("outside the nuclear family");
+			expect(barrierSessions).toEqual(new Set(["root-session", "child-session"]));
+			const policies = admissions.map(item => ({ role: item.role, isolation: item.request.isolation }));
+			expect(policies).toHaveLength(2);
+			expect(policies).toEqual(
+				expect.arrayContaining([
+					{ role: "root", isolation: { requested: false } },
+					{ role: "child", isolation: { requested: true, apply: false, merge: "patch" } },
+				]),
+			);
+			expect(messages).toEqual([{ role: "root", receiver: "child-runtime", message: "hello child" }]);
+
+			const cancelling = child.execute("import rlm\nawait rlm('cancel me')", { hostContext: context("child", 2) });
+			await blocked.promise;
+			await child.interrupt();
+			const cancelled = await cancelling;
+			expect(cancelled.status).toBe("aborted");
+			expect(blockedAborted).toBe(true);
+		} finally {
+			await Promise.all([root.dispose(), child.dispose()]);
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+		for (const ids of [rootIds, childIds]) {
+			if (!ids) continue;
+			expect(processExists(ids.controllerPid)).toBe(false);
+			expect(processExists(ids.kernelPid)).toBe(false);
 		}
 	}, 120_000);
 

@@ -19,4 +19,4 @@ async def progress(message: str, data: dict[str, Any] | None = None) -> dict[str
 
 async def allocate_artifact(label: str, *, mime_type: str = "application/octet-stream", suffix: str = "") -> dict[str, Any]:
     """Allocate one host-owned artifact path for the active cell."""
-    return await host_request("artifact.allocate", {"label": label, "mime_type": mime_type, "suffix": suffix})
+    return await host_request("artifact.allocate", {"label": label, "mimeType": mime_type, "suffix": suffix})
