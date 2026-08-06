@@ -31,12 +31,12 @@ export interface IrcMessage {
 	ts: number;
 	/** Message id being answered. */
 	replyTo?: string;
-	/** Sender is waiting for a correlated reply. Durable World messages preserve this bit. */
+	/** Sender is waiting for a correlated reply. Durable parent messages preserve this bit. */
 	expectsReply?: boolean;
-	/** Durable target-inbox order when the message came from the World mailbox. */
+	/** Durable target-inbox order when the message came from the parent mailbox. */
 	inboxSequence?: bigint;
 	/** Durable messages carry this marker so replies use the selected coordination backend. */
-	source?: "world";
+	source?: "parent";
 }
 
 export interface IrcDeliveryReceipt {

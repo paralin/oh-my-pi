@@ -185,7 +185,7 @@ function profileDigest(bytes: Uint8Array): string {
 export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileArgs): ExternalSubagentProfileV1 {
 	const { request, policy } = args;
 	if (policy.claudeCode || policy.isIsolated) {
-		throw new Error("unsupported_world_runtime: external Task requires a native, non-isolated policy");
+		throw new Error("unsupported_parent_runtime: external Task requires a native, non-isolated policy");
 	}
 	const rawSelector = policy.modelOverride ?? policy.parentActiveModelPattern;
 	const modelSelector = resolveConfiguredModelPatterns(rawSelector, request.session.settings);

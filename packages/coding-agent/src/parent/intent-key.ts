@@ -4,7 +4,7 @@ import * as path from "node:path";
 /**
  * The canonical semantic dispatch identity tuple.
  *
- * This mirrors `glados.sdk.llmsession.IntentKeySource` field for field. The
+ * This mirrors `omp.parent.IntentKeySource` field for field. The
  * daemon re-derives the key from this tuple and rejects a submission whose key
  * does not match, so every field here participates in the digest. PeerId and
  * workerProfileDigest are an all-or-neither trailing identity pair.
@@ -18,16 +18,16 @@ export interface IntentKeySource {
 	workingDirectory: string;
 	deliverablePaths: string[];
 	writeSurfaces: string[];
-	resumeSessionObjectKey?: string;
+	resumeSessionId?: string;
 	peerId?: string;
 	workerProfileDigest?: string;
 }
 
-/** Key prefix minted by the GLaDOS dispatch owner (`glados_dispatch.IntentKeyPrefix`). */
+/** Stable prefix for OMP parent Task intent keys. */
 export const INTENT_KEY_PREFIX = "di:";
 
 /** Repository the daemon assumes when a submission names none. */
-export const DEFAULT_DISPATCH_REPOSITORY = "github.com/aperturerobotics/glados";
+export const DEFAULT_DISPATCH_REPOSITORY = "local/unknown";
 
 const BASE32_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
@@ -60,7 +60,7 @@ function goCollapseSpace(value: string): string {
 /**
  * Derive the deterministic dispatch intent key for one identity tuple.
  *
- * The derivation is a wire contract with GLaDOS `core/dispatch.IntentKey`, not
+ * The derivation is a wire contract with parent environment `core/dispatch.IntentKey`, not
  * an implementation detail: the client computes this key *before* submitting so
  * a lost submit response is recoverable by looking the key up. Both sides
  * therefore have to agree byte for byte, which the shared golden vectors pin.
@@ -84,7 +84,7 @@ export function intentKey(source: IntentKeySource): { intentKey: string; source:
 		normalized.deliverablePaths.join("\n"),
 		normalized.writeSurfaces.join("\n"),
 	];
-	if (normalized.resumeSessionObjectKey) parts.push(normalized.resumeSessionObjectKey);
+	if (normalized.resumeSessionId) parts.push(normalized.resumeSessionId);
 	if (normalized.peerId && normalized.workerProfileDigest) {
 		parts.push(normalized.peerId, normalized.workerProfileDigest);
 	}
@@ -96,7 +96,7 @@ export function intentKey(source: IntentKeySource): { intentKey: string; source:
  * Return the canonical form of one identity tuple, or throw when it is not a
  * complete portable identity.
  *
- * Validation mirrors the World model's own: every path stays workspace-relative,
+ * Validation mirrors the parent's own: every path stays workspace-relative,
  * the objective collapses to single spaces, and path lists are sorted and
  * deduplicated so two callers that listed the same surfaces in different orders
  * claim the same work.
@@ -115,14 +115,14 @@ export function normalizeIntentKeySource(source: IntentKeySource): IntentKeySour
 		workingDirectory: canonicalWorkspaceDirectory(source.workingDirectory),
 		deliverablePaths: canonicalPathList(source.deliverablePaths, "deliverable path"),
 		writeSurfaces: canonicalPathList(source.writeSurfaces, "write surface"),
-		resumeSessionObjectKey: goTrimSpace(source.resumeSessionObjectKey ?? ""),
+		resumeSessionId: goTrimSpace(source.resumeSessionId ?? ""),
 		peerId: goTrimSpace(source.peerId ?? ""),
 		workerProfileDigest: goTrimSpace(source.workerProfileDigest ?? "").toLowerCase(),
 	};
 	if (normalized.deliverablePaths.length === 0) throw new Error("at least one deliverable path is required");
 	if (normalized.writeSurfaces.length === 0) throw new Error("at least one write surface is required");
-	if (/[\r\n\0]/.test(normalized.resumeSessionObjectKey ?? "")) {
-		throw new Error("resume session object key must not contain newline or NUL");
+	if (/[\r\n\0]/.test(normalized.resumeSessionId ?? "")) {
+		throw new Error("resume session ID must not contain newline or NUL");
 	}
 	if (Boolean(normalized.peerId) !== Boolean(normalized.workerProfileDigest)) {
 		throw new Error("peer id and worker profile digest must be provided together");
@@ -152,7 +152,7 @@ export function defaultCheckoutIdentity(repository: string): string {
 /** The owning artifact path the daemon defaults to for one repository. */
 export function defaultIntentOwnerArtifact(repository: string): string {
 	const name = defaultCheckoutIdentity(repository);
-	return path.posix.join("repos", name || "glados");
+	return path.posix.join("repos", name || "unknown");
 }
 
 /**

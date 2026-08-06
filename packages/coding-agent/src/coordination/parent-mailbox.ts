@@ -1,34 +1,34 @@
 import type { IrcMessage } from "../irc/bus";
+import { type ParentClient, ParentEndpointError } from "../parent/client";
+import type { AgentMessageSummary } from "../parent/generated/parent-environment.pb";
+import { PeerMessageAckOutcome } from "../parent/generated/parent-environment.pb";
 import type { AgentPeer } from "../registry/agent-registry";
-import { type WorldClient, WorldEndpointError } from "../world/client";
-import type { AgentMessageSummary } from "../world/generated/llmsession.pb";
-import { PeerMessageAckOutcome } from "../world/generated/llmsession.pb";
 
-/** Maximum accepted World messages retained for an explicit Hub inbox drain. */
-export const WORLD_MAILBOX_CAP = 100;
+/** Maximum accepted Parent messages retained for an explicit Hub inbox drain. */
+export const PARENT_MAILBOX_CAP = 100;
 
-export interface WorldMailboxFilter {
+export interface ParentMailboxFilter {
 	from?: string;
 	replyTo?: string;
 }
 
-type WorldMailboxClient = Pick<WorldClient, "ackPeerMessage" | "watchPeerMailbox"> & {
+type ParentMailboxClient = Pick<ParentClient, "ackPeerMessage" | "watchPeerMailbox"> & {
 	readonly connected?: boolean;
 };
-type WorldMailboxReceiver = Pick<AgentPeer, "deliverIrcMessage">;
+type ParentMailboxReceiver = Pick<AgentPeer, "deliverIrcMessage">;
 type AcceptedOutcome = "waiter" | "injected" | "queued" | "woken";
 
 interface MailboxWaiter {
-	filter: WorldMailboxFilter;
+	filter: ParentMailboxFilter;
 	resolve: (message: IrcMessage | null) => void;
 	reject: (error: Error) => void;
 	cancel: () => void;
 }
 
-export interface WorldMailboxRouterOptions {
-	client: WorldMailboxClient;
+export interface ParentMailboxRouterOptions {
+	client: ParentMailboxClient;
 	receiverPeerId: string;
-	receiver: WorldMailboxReceiver;
+	receiver: ParentMailboxReceiver;
 	/** Generation identity used to reject late records from a retired watch. */
 	generation?: number;
 	resolveSender(message: AgentMessageSummary, signal?: AbortSignal): Promise<string>;
@@ -45,8 +45,8 @@ const ACK_OUTCOME: Readonly<Record<AcceptedOutcome, PeerMessageAckOutcome>> = {
  * Routes the caller-bound durable mailbox into one local session. Acknowledged
  * records are retained only in the bounded local inbox needed by Hub.
  */
-export class WorldMailboxRouter {
-	readonly #options: WorldMailboxRouterOptions;
+export class ParentMailboxRouter {
+	readonly #options: ParentMailboxRouterOptions;
 	readonly #controller = new AbortController();
 	readonly #mailbox: IrcMessage[] = [];
 	readonly #waiters: MailboxWaiter[] = [];
@@ -56,19 +56,19 @@ export class WorldMailboxRouter {
 	#restartTimer: NodeJS.Timeout | undefined;
 	#closed = false;
 
-	constructor(options: WorldMailboxRouterOptions) {
+	constructor(options: ParentMailboxRouterOptions) {
 		this.#options = options;
 	}
 
 	/** Start the sole caller-bound watch. Idempotent. */
 	start(): void {
 		if (this.#pump) return;
-		if (this.#closed) throw new Error("World mailbox router is closed");
+		if (this.#closed) throw new Error("Parent mailbox router is closed");
 		const pump = this.#run();
 		this.#pump = pump;
 		pump.catch(error => {
 			if (this.#controller.signal.aborted) return;
-			if (error instanceof WorldEndpointError || this.#options.client.connected === false) {
+			if (error instanceof ParentEndpointError || this.#options.client.connected === false) {
 				this.#pump = undefined;
 				this.#restartTimer = setTimeout(() => {
 					this.#restartTimer = undefined;
@@ -105,11 +105,11 @@ export class WorldMailboxRouter {
 	}
 
 	/** Consume one accepted message matching sender and reply correlation. */
-	async wait(filter: WorldMailboxFilter, timeoutMs: number, signal?: AbortSignal): Promise<IrcMessage | null> {
+	async wait(filter: ParentMailboxFilter, timeoutMs: number, signal?: AbortSignal): Promise<IrcMessage | null> {
 		if (this.#failure) throw this.#failure;
-		if (this.#closed) throw new Error("World mailbox router is closed");
+		if (this.#closed) throw new Error("Parent mailbox router is closed");
 		if (signal?.aborted)
-			throw signal.reason instanceof Error ? signal.reason : new Error("World mailbox wait aborted");
+			throw signal.reason instanceof Error ? signal.reason : new Error("Parent mailbox wait aborted");
 		const pending = this.#takeInbox(filter);
 		if (pending) return pending;
 
@@ -136,7 +136,7 @@ export class WorldMailboxRouter {
 		};
 		if (signal) {
 			onAbort = () =>
-				waiter.reject(signal.reason instanceof Error ? signal.reason : new Error("World mailbox wait aborted"));
+				waiter.reject(signal.reason instanceof Error ? signal.reason : new Error("Parent mailbox wait aborted"));
 			signal.addEventListener("abort", onAbort, { once: true });
 		}
 		if (timeoutMs > 0) {
@@ -153,7 +153,7 @@ export class WorldMailboxRouter {
 		this.#closed = true;
 		clearTimeout(this.#restartTimer);
 		this.#restartTimer = undefined;
-		const reason = new Error("World mailbox router closed");
+		const reason = new Error("Parent mailbox router closed");
 		this.#controller.abort(reason);
 		this.#cancelWaiters(reason);
 		await this.#pump?.catch(() => undefined);
@@ -163,16 +163,16 @@ export class WorldMailboxRouter {
 		for await (const summary of this.#options.client.watchPeerMailbox(this.#controller.signal)) {
 			await this.#accept(summary);
 		}
-		if (!this.#controller.signal.aborted) throw new Error("World mailbox watch ended unexpectedly");
+		if (!this.#controller.signal.aborted) throw new Error("Parent mailbox watch ended unexpectedly");
 	}
 
 	async #accept(summary: AgentMessageSummary): Promise<void> {
 		if (this.#closed) return;
-		const messageObjectKey = summary.messageObjectKey?.trim();
-		if (!messageObjectKey) throw new Error("World mailbox record has no message object key");
-		const remembered = this.#accepted.get(messageObjectKey);
+		const messageId = summary.messageId?.trim();
+		if (!messageId) throw new Error("Parent mailbox record has no message object key");
+		const remembered = this.#accepted.get(messageId);
 		if (remembered !== undefined) {
-			await this.#ack(messageObjectKey, remembered);
+			await this.#ack(messageId, remembered);
 			return;
 		}
 		const message = await this.#message(summary);
@@ -187,30 +187,30 @@ export class WorldMailboxRouter {
 				expectsReply: message.expectsReply,
 			});
 			this.#mailbox.push(message);
-			if (this.#mailbox.length > WORLD_MAILBOX_CAP) this.#mailbox.shift();
+			if (this.#mailbox.length > PARENT_MAILBOX_CAP) this.#mailbox.shift();
 		}
 		const wireOutcome = ACK_OUTCOME[outcome];
-		this.#accepted.set(messageObjectKey, wireOutcome);
-		if (this.#accepted.size > WORLD_MAILBOX_CAP) {
+		this.#accepted.set(messageId, wireOutcome);
+		if (this.#accepted.size > PARENT_MAILBOX_CAP) {
 			const oldest = this.#accepted.keys().next();
 			if (!oldest.done) this.#accepted.delete(oldest.value);
 		}
-		await this.#ack(messageObjectKey, wireOutcome);
+		await this.#ack(messageId, wireOutcome);
 	}
 
 	async #message(summary: AgentMessageSummary): Promise<IrcMessage> {
 		const id = summary.clientMessageId;
-		if (!id || id.trim() !== id) throw new Error("World mailbox record has an invalid client message ID");
+		if (!id || id.trim() !== id) throw new Error("Parent mailbox record has an invalid client message ID");
 		const from = await this.#options.resolveSender(summary, this.#controller.signal);
 		const createdAt = Date.parse(summary.createdAt ?? "");
-		if (Number.isNaN(createdAt)) throw new Error(`World mailbox message ${id} has an invalid creation time`);
+		if (Number.isNaN(createdAt)) throw new Error(`Parent mailbox message ${id} has an invalid creation time`);
 		const inboxSequence = summary.inboxSequence;
 		if (inboxSequence === undefined || inboxSequence <= 0n) {
-			throw new Error(`World mailbox message ${id} has no positive inbox sequence`);
+			throw new Error(`Parent mailbox message ${id} has no positive inbox sequence`);
 		}
 		const replyTo = summary.replyToClientMessageId;
 		if (replyTo !== undefined && (!replyTo || replyTo.trim() !== replyTo)) {
-			throw new Error(`World mailbox message ${id} has an invalid reply client message ID`);
+			throw new Error(`Parent mailbox message ${id} has an invalid reply client message ID`);
 		}
 		return {
 			id,
@@ -221,16 +221,16 @@ export class WorldMailboxRouter {
 			...(replyTo ? { replyTo } : {}),
 			expectsReply: summary.expectsReply ?? false,
 			inboxSequence,
-			source: "world",
+			source: "parent",
 		};
 	}
 
-	async #ack(messageObjectKey: string, outcome: PeerMessageAckOutcome): Promise<void> {
-		const digest = Bun.SHA256.hash(`${messageObjectKey}\0${outcome}`, "hex").slice(0, 32);
+	async #ack(messageId: string, outcome: PeerMessageAckOutcome): Promise<void> {
+		const digest = Bun.SHA256.hash(`${messageId}\0${outcome}`, "hex").slice(0, 32);
 		await this.#options.client.ackPeerMessage(
 			{
-				requestId: `world-peer-ack:${digest}`,
-				messageObjectKey,
+				requestId: `parent-peer-ack:${digest}`,
+				messageId,
 				outcome,
 			},
 			this.#controller.signal,
@@ -244,7 +244,7 @@ export class WorldMailboxRouter {
 		return waiter;
 	}
 
-	#takeInbox(filter: WorldMailboxFilter): IrcMessage | undefined {
+	#takeInbox(filter: ParentMailboxFilter): IrcMessage | undefined {
 		const index = this.#mailbox.findIndex(message => matches(message, filter));
 		if (index === -1) return undefined;
 		const [message] = this.#mailbox.splice(index, 1);
@@ -256,6 +256,6 @@ export class WorldMailboxRouter {
 	}
 }
 
-function matches(message: IrcMessage, filter: WorldMailboxFilter): boolean {
+function matches(message: IrcMessage, filter: ParentMailboxFilter): boolean {
 	return (!filter.from || message.from === filter.from) && (!filter.replyTo || message.replyTo === filter.replyTo);
 }

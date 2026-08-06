@@ -451,25 +451,6 @@ describe("claude code runtime", () => {
 		expect(started.mcpServer.tools.map(tool => tool.name)).toEqual(["task", "hub", "yield"]);
 	});
 
-	// `world` is OMP-owned and served over the same MCP bridge, so a restricted
-	// child that lists it is asking for a tool it can actually be given rather
-	// than an unsupported one. Whether it is advertised stays a configuration
-	// question, decided by the bridge.
-	it("admits the OMP-owned world tools inside an explicit allowlist", async () => {
-		const queryLog = log();
-		await runClaudeCodeSubprocess({
-			options: executorOptions({
-				agent: { ...AGENT, tools: ["read", "world", "world_read"] },
-			}),
-			model: "claude-opus-5",
-			startQuery: fakeQuery([{ yieldArgs: { result: { data: { ok: true } } } }], queryLog),
-		});
-
-		const started = queryLog.requests[0];
-		expect(started.tools).toEqual(["Read"]);
-		expect(started.disallowedTools).toEqual(["Agent", "Task", "SendMessage"]);
-	});
-
 	it("rejects unsupported restricted OMP tools before query construction", async () => {
 		let queryConstructed = false;
 		const startQuery: StartClaudeCodeQuery = async () => {
@@ -480,12 +461,12 @@ describe("claude code runtime", () => {
 		await expect(
 			runClaudeCodeSubprocess({
 				options: executorOptions({
-					agent: { ...AGENT, tools: ["read", "lsp", "ast_grep"] },
+					agent: { ...AGENT, tools: ["read", "lsp", "ast_grep", "world", "world_read"] },
 				}),
 				model: "claude-opus-5",
 				startQuery,
 			}),
-		).rejects.toThrow("Unsupported restricted OMP tools for Claude Code runtime: ast_grep, lsp.");
+		).rejects.toThrow("Unsupported restricted OMP tools for Claude Code runtime: ast_grep, lsp, world, world_read.");
 		expect(queryConstructed).toBe(false);
 		expect(AgentRegistry.global().get("Worker")).toBeUndefined();
 	});

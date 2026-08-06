@@ -76,7 +76,7 @@ describe("hub unified wait", () => {
 		manager.cancel(job.id);
 	});
 
-	test("a World mailbox message settles the wait while a local Task watcher keeps running", async () => {
+	test("a Parent mailbox message settles the wait while a local Task watcher keeps running", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
@@ -87,10 +87,10 @@ describe("hub unified wait", () => {
 			to: string;
 			body: string;
 			ts: number;
-			source: "world";
+			source: "parent";
 		}>();
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({ peers: [], errors: [] }),
 			attachMailbox: () => {},
@@ -102,19 +102,19 @@ describe("hub unified wait", () => {
 		};
 		const tool = new HubTool(makeSession(manager, backend));
 
-		const pending = tool.execute("world_wait", { op: "wait" });
+		const pending = tool.execute("parent_wait", { op: "wait" });
 		mailbox.resolve({
-			id: "world-message",
+			id: "parent-message",
 			from: "foreign",
 			to: SELF_ID,
 			body: "durable result",
 			ts: Date.now(),
-			source: "world",
+			source: "parent",
 		});
 		const result = await pending;
 
 		const details = result.details as CoordinationDetails;
-		expect(details.waited).toEqual(expect.objectContaining({ id: "world-message", from: "foreign" }));
+		expect(details.waited).toEqual(expect.objectContaining({ id: "parent-message", from: "foreign" }));
 		expect(manager.getJob(job.id)?.status).toBe("running");
 		manager.cancel(job.id);
 	});

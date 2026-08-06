@@ -260,7 +260,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "list": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
-				const worldRoster = this.session.coordinationBackend
+				const parentRoster = this.session.coordinationBackend
 					? await this.session.coordinationBackend.listPeers(signal).catch(error => ({
 							peers: [],
 							errors: [
@@ -272,7 +272,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 							],
 						}))
 					: undefined;
-				return executeList(messaging.registry, messaging.senderId, worldRoster);
+				return executeList(messaging.registry, messaging.senderId, parentRoster);
 			}
 			case "send": {
 				const toPeer = params.to?.trim();

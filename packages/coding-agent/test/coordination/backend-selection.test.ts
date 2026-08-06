@@ -2,13 +2,13 @@ import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
-import { createWorldCoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/world";
+import { createParentCoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/parent";
+import { PARENT_SESSION_ENV, PARENT_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/parent/config";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { WORLD_SESSION_ENV, WORLD_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/world/index";
 
 const nativeAgent: AgentDefinition = {
 	name: "task",
@@ -23,7 +23,7 @@ const claudeAgent: AgentDefinition = {
 };
 
 const backend: CoordinationBackend = {
-	kind: "world",
+	kind: "parent",
 	spawn: () => Promise.reject(new Error("unused")),
 	listPeers: () => Promise.reject(new Error("unused")),
 	attachMailbox: () => {},
@@ -71,20 +71,19 @@ function textOf(value: { content: Array<{ type: string; text?: string }> }): str
 describe("coordination backend selection", () => {
 	afterEach(() => vi.restoreAllMocks());
 
-	test("selects World only when socket and caller session are both configured", async () => {
-		const socketOnly = createWorldCoordinationBackend({
-			env: { [WORLD_SOCKET_ENV]: "/tmp/glados.sock" },
-		});
-		expect(socketOnly).toBeUndefined();
-		expect(createWorldCoordinationBackend({ env: {} })).toBeUndefined();
+	test("selects Parent only when socket and caller session are both configured", async () => {
+		expect(() => createParentCoordinationBackend({ env: { [PARENT_SOCKET_ENV]: "/tmp/parent.sock" } })).toThrow(
+			"OMP_PARENT_SESSION is required",
+		);
+		expect(createParentCoordinationBackend({ env: {} })).toBeUndefined();
 
-		const selected = createWorldCoordinationBackend({
+		const selected = createParentCoordinationBackend({
 			env: {
-				[WORLD_SOCKET_ENV]: "/tmp/glados.sock",
-				[WORLD_SESSION_ENV]: "glados/live/root/llm-session",
+				[PARENT_SOCKET_ENV]: "/tmp/parent.sock",
+				[PARENT_SESSION_ENV]: "glados/live/root/llm-session",
 			},
 		});
-		expect(selected?.kind).toBe("world");
+		expect(selected?.kind).toBe("parent");
 		expect(selected?.client.connected).toBe(false);
 		await selected?.close();
 	});
@@ -102,14 +101,14 @@ describe("coordination backend selection", () => {
 			task: "work",
 			isolated: true,
 		});
-		expect(textOf(isolated)).toContain("unsupported_world_runtime");
+		expect(textOf(isolated)).toContain("unsupported_parent_runtime");
 
 		const claudeTool = await TaskTool.create(session());
 		const claude = await claudeTool.execute("claude", {
 			agent: "claude",
 			task: "work",
 		});
-		expect(textOf(claude)).toContain("unsupported_world_runtime");
+		expect(textOf(claude)).toContain("unsupported_parent_runtime");
 		expect(run).not.toHaveBeenCalled();
 	});
 
@@ -137,7 +136,7 @@ describe("coordination backend selection", () => {
 		expect(localRun).not.toHaveBeenCalled();
 	});
 
-	test("keeps a detached World Task in the local job manager and auto-delivers its result", async () => {
+	test("keeps a detached Parent Task in the local job manager and auto-delivers its result", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
 			agents: [nativeAgent],
 			projectAgentsDir: null,
@@ -172,9 +171,9 @@ describe("coordination backend selection", () => {
 				...session({ "async.enabled": true }),
 				asyncJobManager: manager,
 			});
-			const started = await tool.execute("world-async", { agent: "task", name: "ExactPeer", task: "work" });
+			const started = await tool.execute("parent-async", { agent: "task", name: "ExactPeer", task: "work" });
 			const jobId = started.details?.async?.jobId;
-			if (!jobId) throw new Error("World Task did not register a local job");
+			if (!jobId) throw new Error("Parent Task did not register a local job");
 			await admitted.promise;
 
 			expect(spawn.mock.calls[0]?.[0].peerId).toBe("ExactPeer");
@@ -229,9 +228,9 @@ describe("coordination backend selection", () => {
 				...session({ "async.enabled": true }),
 				asyncJobManager: manager,
 			});
-			const started = await tool.execute("world-cancel", { agent: "task", name: "Cancelable", task: "work" });
+			const started = await tool.execute("parent-cancel", { agent: "task", name: "Cancelable", task: "work" });
 			const jobId = started.details?.async?.jobId;
-			if (!jobId) throw new Error("World Task did not register a local job");
+			if (!jobId) throw new Error("Parent Task did not register a local job");
 			await admitted.promise;
 
 			expect(manager.cancel(jobId)).toBe(true);

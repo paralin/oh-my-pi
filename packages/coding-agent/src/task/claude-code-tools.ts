@@ -2,15 +2,12 @@ import { type } from "@oh-my-pi/omptype";
 import { type Tool, toolWireSchema } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
-import { readWorldAddress, renderWorldRead, worldAddressFromInput } from "../internal-urls/spacewave-protocol";
 import claudeCodeHubPrompt from "../prompts/tools/claude-code-hub.md" with { type: "text" };
 import claudeCodeYieldPrompt from "../prompts/tools/claude-code-yield.md" with { type: "text" };
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { HubTool } from "../tools/hub";
-import { WORLD_TOOL_NAME, WorldTool } from "../tools/world";
 import { YieldTool } from "../tools/yield";
-import { MAX_WORLD_READ_PAGE, WorldClient } from "../world/index.js";
 import { TaskTool } from ".";
 import type { ClaudeCodeMcpTool, ClaudeCodeToolResult } from "./claude-code-sdk";
 import { isClaudeCodeMcpObjectSchema } from "./claude-code-sdk";
@@ -21,25 +18,6 @@ import type { YieldItem } from "./types";
 
 /** MCP tools required in every Claude Code task runtime. */
 export const CLAUDE_CODE_MCP_TOOL_NAMES = ["task", "hub", "yield"] as const;
-
-/**
- * Read-only World tool, advertised only when a World socket is configured.
- *
- * It is not in {@link CLAUDE_CODE_MCP_TOOL_NAMES} on purpose: those are
- * required in every run, and this one is absent whenever no daemon is
- * configured. A required-but-conditional tool would make an unconfigured root
- * look like a broken one.
- */
-export const CLAUDE_CODE_WORLD_READ_TOOL_NAME = "world_read";
-
-/**
- * Authority-checked World operations, advertised only when this root also names
- * a caller session.
- *
- * Conditional for the same reason `world_read` is, one step further in: a socket
- * alone leaves the peer with reads and no way to be charged for a change.
- */
-export const CLAUDE_CODE_WORLD_TOOL_NAME = WORLD_TOOL_NAME;
 
 const CLAUDE_CODE_HUB_OPS = ["list", "send", "inbox", "wait", "jobs", "cancel"] as const;
 const CLAUDE_CODE_HUB_OP_BY_NAME: Readonly<Record<string, true | undefined>> = {
@@ -269,120 +247,6 @@ function buildHubMcpTool(hubTool: HubTool, signal: AbortSignal): ClaudeCodeMcpTo
 	};
 }
 
-/**
- * Forward the peer abort only while this unary read is pending.
- *
- * starpc retains its abort listener until the stream pipe closes, which can
- * outlive the unary response. Passing the peer lifetime signal directly would
- * let a later peer shutdown cancel an already-completed call.
- */
-async function withPeerSignal<T>(peerSignal: AbortSignal, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
-	const operation = new AbortController();
-	const abort = () => operation.abort(peerSignal.reason);
-	if (peerSignal.aborted) abort();
-	else peerSignal.addEventListener("abort", abort, { once: true });
-	try {
-		return await run(operation.signal);
-	} finally {
-		peerSignal.removeEventListener("abort", abort);
-	}
-}
-
-async function readWorldForPeer(uri: string, client: WorldClient, limit: number | undefined, peerSignal: AbortSignal) {
-	return await withPeerSignal(peerSignal, signal => readWorldAddress(uri, client, { limit, signal }));
-}
-
-/**
- * Build the read-only World tool for one Claude task peer.
- *
- * It calls the same `readWorldAddress` and `renderWorldRead` the native
- * `spacewave://` handler calls, so the two paths cannot drift: there is one
- * World operation and one renderer, reached two ways.
- */
-function buildWorldReadMcpTool(client: WorldClient, signal: AbortSignal): ClaudeCodeMcpTool {
-	return {
-		name: CLAUDE_CODE_WORLD_READ_TOOL_NAME,
-		description: [
-			"Read one canonical GLaDOS World URL.",
-			"",
-			"URL form: spacewave:///u/{session_idx}/so/{space_id}/-/{objectKey}",
-			"A trailing /- reads the bounded key listing under that key instead.",
-			"The URL path is sent exactly as written and is never percent-decoded.",
-			"Read-only: there is no World write through this tool.",
-		].join("\n"),
-		inputSchema: {
-			type: "object",
-			properties: {
-				url: {
-					type: "string",
-					description: "Canonical World URL, e.g. spacewave:///u/1/so/{space_id}/-/glados/projections/agent-tree",
-				},
-				limit: {
-					type: "integer",
-					minimum: 1,
-					maximum: MAX_WORLD_READ_PAGE,
-					description: `Maximum keys in a listing. Defaults to ${MAX_WORLD_READ_PAGE}.`,
-				},
-			},
-			required: ["url"],
-			additionalProperties: false,
-		},
-		handler: async args => {
-			try {
-				const url = args.url;
-				if (typeof url !== "string") throw new Error("world_read requires a string url.");
-				const uri = worldAddressFromInput(url);
-				const rawLimit = args.limit;
-				const limit = rawLimit === undefined ? undefined : Number(rawLimit);
-				const read = await readWorldForPeer(uri, client, limit, signal);
-				return {
-					content: [{ type: "text" as const, text: renderWorldRead(uri, read).content }],
-				};
-			} catch (error) {
-				return toolFailure(error);
-			}
-		},
-	};
-}
-
-/**
- * Build the authority-checked World tool for one Claude task peer.
- *
- * It is the native {@link WorldTool}: the same schema, the same argument
- * validation, the same client methods, and the same renderer. Advertising a
- * hand-written copy of the schema here is exactly the drift the shared tool
- * exists to prevent, so the wire schema is derived from the tool itself.
- *
- * A structured refusal comes back as rendered text with `isError`, which is the
- * bridge's only result shape. The typed error is what produced that text, so
- * both runtimes report the same fields.
- */
-function buildWorldMcpTool(client: WorldClient, signal: AbortSignal): ClaudeCodeMcpTool {
-	const worldTool = new WorldTool(client);
-	let calls = 0;
-	return {
-		name: worldTool.name,
-		description: worldTool.description,
-		inputSchema: objectToolSchema(worldTool),
-		handler: async args => {
-			try {
-				const params = worldTool.parameters(args);
-				if (params instanceof type.errors) {
-					throw new Error(`Invalid OMP world arguments: ${params.summary}`);
-				}
-				const toolCallId = `claude-world-${++calls}`;
-				const result = await withPeerSignal(signal, operation => worldTool.execute(toolCallId, params, operation));
-				return {
-					content: toolResultContent(result.content),
-					isError: result.isError === true,
-				};
-			} catch (error) {
-				return toolFailure(error);
-			}
-		},
-	};
-}
-
 /** Build the OMP coordination tools admitted to one Claude task peer. */
 export async function createClaudeCodeMcpTools(options: ClaudeCodeToolBridgeOptions): Promise<ClaudeCodeMcpTool[]> {
 	const session = createClaudeCodeToolSession(options.executor, options.registry);
@@ -398,25 +262,5 @@ export async function createClaudeCodeMcpTools(options: ClaudeCodeToolBridgeOpti
 		buildHubMcpTool(hubTool, options.signal),
 		buildYieldMcpTool(yieldTool, options.yieldItems, options.onTerminalYield),
 	];
-	// One client for this peer's whole run, selected once from the
-	// configuration the task started under. `create` dials nothing and returns
-	// undefined when nothing is configured, so an unconfigured root simply does
-	// not get the tool rather than getting one that can only fail.
-	const worldClient = WorldClient.create();
-	if (worldClient) {
-		// The peer's signal ends the run, so it is what releases the client.
-		// The rejection is observed here because an abort handler has no caller
-		// to return it to: an unobserved one would surface as an unhandled
-		// rejection and fail the process over a best-effort cleanup.
-		options.signal.addEventListener("abort", () => void worldClient.close().catch(() => {}), { once: true });
-		tools.push(buildWorldReadMcpTool(worldClient, options.signal));
-		// The write-capable tool needs the second half of the configuration. A
-		// socket-only root keeps exactly its W2 surface rather than gaining a tool
-		// whose every call would be refused for want of a caller identity.
-		const agentTools = options.executor.agent.tools;
-		if (worldClient.canMutate && (!agentTools?.length || agentTools.includes(WORLD_TOOL_NAME))) {
-			tools.push(buildWorldMcpTool(worldClient, options.signal));
-		}
-	}
 	return tools;
 }

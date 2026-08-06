@@ -5,7 +5,18 @@ import { ASYNC_JOB_OWNER_LIFECYCLE_ABORT } from "@oh-my-pi/pi-coding-agent/async
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CoordinationSpawnRequest } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { decodeExternalSubagentProfile } from "@oh-my-pi/pi-coding-agent/coordination/external-subagent-profile";
-import { WorldCoordinationBackend, type WorldCoordinationClient } from "@oh-my-pi/pi-coding-agent/coordination/world";
+import {
+	ParentCoordinationBackend,
+	type ParentCoordinationClient,
+} from "@oh-my-pi/pi-coding-agent/coordination/parent";
+import type {
+	DispatchIntentLookup,
+	ParentAgentPeerResolution,
+	ParentDispatchSubmit,
+	ParentDispatchSubmitResult,
+} from "@oh-my-pi/pi-coding-agent/parent/client";
+import { type ParentClient, ParentOperationError } from "@oh-my-pi/pi-coding-agent/parent/client";
+import { type IntentKeySource, intentKey } from "@oh-my-pi/pi-coding-agent/parent/intent-key";
 import type {
 	EffectiveSubagentPolicy,
 	StructuredSubagentRequest,
@@ -14,27 +25,19 @@ import type { AgentDefinition, AgentProgress } from "@oh-my-pi/pi-coding-agent/t
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import type {
-	DispatchIntentLookup,
-	WorldAgentPeerResolution,
-	WorldDispatchSubmit,
-	WorldDispatchSubmitResult,
-} from "@oh-my-pi/pi-coding-agent/world/client";
-import { type WorldClient, WorldOperationError } from "@oh-my-pi/pi-coding-agent/world/client";
-import { type IntentKeySource, intentKey } from "@oh-my-pi/pi-coding-agent/world/intent-key";
-import type {
 	AgentSummary,
 	AgentTreeSnapshot,
 	SessionSnapshot,
 	SessionSummary,
-} from "../../src/world/generated/llmsession.pb.js";
+} from "../../src/parent/generated/parent-environment.pb.js";
 import {
-	WorldOperationFailureCode,
-	WorldRuntimeOperation,
-	WorldTaskAgentSource,
-} from "../../src/world/generated/llmsession.pb.js";
+	ParentFailureCode,
+	ParentSessionState,
+	TaskAgentSource,
+} from "../../src/parent/generated/parent-environment.pb.js";
 
 const PARENT_SESSION = "glados/operators/test/llm-session/root";
-const WORKTREE = path.join(os.homedir(), "wt", "world-task-test");
+const WORKTREE = path.join(os.homedir(), "wt", "parent-task-test");
 const AGENT: AgentDefinition = {
 	name: "task",
 	description: "Task worker",
@@ -51,39 +54,39 @@ function absent(): DispatchIntentLookup {
 
 function sessionSummary(peerId: string): SessionSummary {
 	return {
-		sessionObjectKey: `glados/test/llm-session/${peerId}`,
-		parentSessionObjectKey: PARENT_SESSION,
-		agentObjectKey: `glados/test/agent/${peerId}`,
-		state: "LLM_SESSION_STATE_ACTIVE",
+		sessionId: `glados/test/llm-session/${peerId}`,
+		parentSessionId: PARENT_SESSION,
+		agentId: `glados/test/agent/${peerId}`,
+		state: ParentSessionState.ACTIVE,
 	};
 }
 
-function peerResolution(peerId: string, session?: SessionSummary): WorldAgentPeerResolution {
+function peerResolution(peerId: string, session?: SessionSummary): ParentAgentPeerResolution {
 	const agent: AgentSummary = {
-		agentObjectKey: `glados/test/agent/${peerId}`,
-		parentAgentObjectKey: "glados/test/agent/root",
+		agentId: `glados/test/agent/${peerId}`,
+		parentAgentId: "glados/test/agent/root",
 		name: peerId,
 		peerId,
-		activeLlmSessionObjectKeys: session?.sessionObjectKey ? [session.sessionObjectKey] : [],
+		activeSessionIds: session?.sessionId ? [session.sessionId] : [],
 	};
 	return { found: true, agent, session, inactive: session === undefined };
 }
 
-class FakeWorldClient implements WorldCoordinationClient {
+class FakeParentClient implements ParentCoordinationClient {
 	readonly canMutate = true;
 	readonly connected = false;
 	readonly sessionKey = PARENT_SESSION;
 	readonly calls: string[] = [];
-	readonly submissions: WorldDispatchSubmit[] = [];
-	readonly interrupts: Array<{ requestId: string; targetSessionObjectKey: string; reason?: string }> = [];
+	readonly submissions: ParentDispatchSubmit[] = [];
+	readonly interrupts: Array<{ requestId: string; targetSessionId: string; reason?: string }> = [];
 	lookup: (key: string, signal?: AbortSignal) => Promise<DispatchIntentLookup> = async () => absent();
-	resolve: (peerId: string) => Promise<WorldAgentPeerResolution> = async () => ({
+	resolve: (peerId: string) => Promise<ParentAgentPeerResolution> = async () => ({
 		found: false,
 		agent: undefined,
 		session: undefined,
 		inactive: false,
 	});
-	submit: (request: WorldDispatchSubmit) => Promise<WorldDispatchSubmitResult> = async request => {
+	submit: (request: ParentDispatchSubmit) => Promise<ParentDispatchSubmitResult> = async request => {
 		const peerId = request.taskAgent?.peerId ?? "missing";
 		const session = sessionSummary(peerId);
 		this.resolve = async candidate =>
@@ -92,11 +95,11 @@ class FakeWorldClient implements WorldCoordinationClient {
 				: { found: false, agent: undefined, session: undefined, inactive: false };
 		return { requestId: "submit", intentKey: intentKey(request.identity).intentKey, session, custody: undefined };
 	};
-	watch: (sessionObjectKey: string, signal?: AbortSignal) => AsyncIterable<SessionSnapshot> = () =>
+	watch: (sessionId: string, signal?: AbortSignal) => AsyncIterable<SessionSnapshot> = () =>
 		(async function* () {
 			yield { taskResult: { output: "done", exitCode: 0 } };
 		})();
-	interrupt: (request: { requestId: string; targetSessionObjectKey: string; reason?: string }) => Promise<void> =
+	interrupt: (request: { requestId: string; targetSessionId: string; reason?: string }) => Promise<void> =
 		async () => {};
 
 	deriveIntentKey(source: IntentKeySource): { intentKey: string; source: IntentKeySource } {
@@ -108,20 +111,20 @@ class FakeWorldClient implements WorldCoordinationClient {
 		return await this.lookup(key, signal);
 	}
 
-	async resolveAgentPeer(peerId: string): Promise<WorldAgentPeerResolution> {
+	async resolveAgentPeer(peerId: string): Promise<ParentAgentPeerResolution> {
 		this.calls.push(`resolve:${peerId}`);
 		return await this.resolve(peerId);
 	}
 
-	async submitDispatch(request: WorldDispatchSubmit): Promise<WorldDispatchSubmitResult> {
+	async submitDispatch(request: ParentDispatchSubmit): Promise<ParentDispatchSubmitResult> {
 		this.calls.push(`submit:${request.taskAgent?.peerId ?? ""}`);
 		this.submissions.push(request);
 		return await this.submit(request);
 	}
 
-	async *watchSession(sessionObjectKey: string, signal?: AbortSignal): AsyncGenerator<SessionSnapshot, void, void> {
-		this.calls.push(`watch:${sessionObjectKey}`);
-		for await (const snapshot of this.watch(sessionObjectKey, signal)) yield snapshot;
+	async *watchSession(sessionId: string, signal?: AbortSignal): AsyncGenerator<SessionSnapshot, void, void> {
+		this.calls.push(`watch:${sessionId}`);
+		for await (const snapshot of this.watch(sessionId, signal)) yield snapshot;
 	}
 
 	async listSessions(): Promise<SessionSummary[]> {
@@ -132,34 +135,34 @@ class FakeWorldClient implements WorldCoordinationClient {
 		yield { agents: [] };
 	}
 
-	sendPeerMessage(): ReturnType<WorldClient["sendPeerMessage"]> {
+	sendPeerMessage(): ReturnType<ParentClient["sendPeerMessage"]> {
 		return Promise.reject(new Error("unused"));
 	}
 
-	watchPeerMailbox(): ReturnType<WorldClient["watchPeerMailbox"]> {
+	watchPeerMailbox(): ReturnType<ParentClient["watchPeerMailbox"]> {
 		return (async function* () {})();
 	}
 
-	ackPeerMessage(): ReturnType<WorldClient["ackPeerMessage"]> {
+	ackPeerMessage(): ReturnType<ParentClient["ackPeerMessage"]> {
 		return Promise.reject(new Error("unused"));
 	}
 
-	async interruptSession(request: { requestId: string; targetSessionObjectKey: string; reason?: string }): Promise<{
+	async interruptSession(request: { requestId: string; targetSessionId: string; reason?: string }): Promise<{
 		requestId: string;
 		operation: "session_interrupt";
-		targetSessionObjectKey: string;
+		targetSessionId: string;
 		dispatchKey: string;
 		acceptedSequence: bigint;
 		detail: string;
 		replayed: boolean;
 	}> {
-		this.calls.push(`interrupt:${request.targetSessionObjectKey}`);
+		this.calls.push(`interrupt:${request.targetSessionId}`);
 		this.interrupts.push(request);
 		await this.interrupt(request);
 		return {
 			requestId: request.requestId,
 			operation: "session_interrupt",
-			targetSessionObjectKey: request.targetSessionObjectKey,
+			targetSessionId: request.targetSessionId,
 			dispatchKey: "interrupt/1",
 			acceptedSequence: 1n,
 			detail: "accepted",
@@ -229,10 +232,10 @@ beforeEach(() => {
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("World durable Task spawn", () => {
+describe("Parent durable Task spawn", () => {
 	test.each(["main", "all", "__advisor", "MAIN"])("rejects reserved peer ID %s before daemon access", async peerId => {
-		const client = new FakeWorldClient();
-		const backend = new WorldCoordinationBackend(client);
+		const client = new FakeParentClient();
+		const backend = new ParentCoordinationBackend(client);
 		await expect(backend.spawn(spawnRequest(peerId))).rejects.toThrow(/reserved/);
 		expect(client.calls).toEqual([]);
 	});
@@ -240,27 +243,26 @@ describe("World durable Task spawn", () => {
 	test.each(["worker/name", "../escape", "worker name", "naïve", "x".repeat(257)])(
 		"rejects invalid peer ID %s before daemon access",
 		async peerId => {
-			const client = new FakeWorldClient();
-			const backend = new WorldCoordinationBackend(client);
+			const client = new FakeParentClient();
+			const backend = new ParentCoordinationBackend(client);
 			await expect(backend.spawn(spawnRequest(peerId))).rejects.toThrow(/peer ID must contain/);
 			expect(client.calls).toEqual([]);
 		},
 	);
 
 	test("looks up the full intent first and attaches without submitting", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		const session = sessionSummary("worker");
 		client.lookup = async () => ({
 			found: true,
 			intentState: "ACTIVE",
-			activeAttemptKey: "attempt/1",
+			activeAttemptId: "attempt/1",
 			attemptState: "ACTIVE",
 			session,
-			custody: undefined,
-			awaitingCustody: false,
+			awaitingParent: false,
 		});
 		client.resolve = async peerId => peerResolution(peerId, session);
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const handle = await backend.spawn(spawnRequest());
 		expect(handle.peerId).toBe("worker");
@@ -270,8 +272,8 @@ describe("World durable Task spawn", () => {
 	});
 
 	test("submits the same identity with the frozen Task profile", async () => {
-		const client = new FakeWorldClient();
-		const backend = new WorldCoordinationBackend(client);
+		const client = new FakeParentClient();
+		const backend = new ParentCoordinationBackend(client);
 		await backend.spawn(spawnRequest());
 
 		expect(client.calls[0]?.startsWith("lookup:di:")).toBe(true);
@@ -281,7 +283,7 @@ describe("World durable Task spawn", () => {
 		expect(client.calls[0]).toBe(`lookup:${derived.intentKey}`);
 		expect(submit!.identity.peerId).toBe("worker");
 		expect(submit!.identity.workerProfileDigest).toBe(submit!.taskAgent?.workerProfileDigest);
-		expect(submit!.taskAgent?.agentSource).toBe(WorldTaskAgentSource.BUNDLED);
+		expect(submit!.taskAgent?.agentSource).toBe(TaskAgentSource.BUNDLED);
 		expect(submit!.taskAgent?.peerId).toBe("worker");
 		const profile = decodeExternalSubagentProfile(
 			submit!.taskAgent?.workerProfile ?? new Uint8Array(),
@@ -292,7 +294,7 @@ describe("World durable Task spawn", () => {
 	});
 
 	test("recovers a lost submit response through the precomputed intent", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		let accepted: DispatchIntentLookup = absent();
 		client.lookup = async () => accepted;
 		client.submit = async request => {
@@ -301,16 +303,15 @@ describe("World durable Task spawn", () => {
 			accepted = {
 				found: true,
 				intentState: "ACTIVE",
-				activeAttemptKey: "attempt/1",
+				activeAttemptId: "attempt/1",
 				attemptState: "ACTIVE",
 				session,
-				custody: undefined,
-				awaitingCustody: false,
+				awaitingParent: false,
 			};
 			client.resolve = async candidate => peerResolution(candidate, session);
 			throw new Error("connection lost after admission");
 		};
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const handle = await backend.spawn(spawnRequest());
 		expect(handle.peerId).toBe("worker");
@@ -319,7 +320,7 @@ describe("World durable Task spawn", () => {
 	});
 
 	test("preserves the submission failure when recovery finds no attached session", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		let lookups = 0;
 		client.lookup = async () => {
 			lookups += 1;
@@ -328,24 +329,23 @@ describe("World durable Task spawn", () => {
 				: {
 						found: true,
 						intentState: "ACTIVE",
-						activeAttemptKey: "attempt/1",
+						activeAttemptId: "attempt/1",
 						attemptState: "FAILED",
 						session: undefined,
-						custody: undefined,
-						awaitingCustody: false,
+						awaitingParent: false,
 					};
 		};
 		client.submit = async () => {
 			throw new Error("adapter launch failed");
 		};
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		await expect(backend.spawn(spawnRequest())).rejects.toThrow("adapter launch failed");
 		expect(lookups).toBe(2);
 	});
 
 	test("stops lost-response recovery when the caller aborts", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		const abort = new AbortController();
 		let lookups = 0;
 		client.lookup = async (_key, signal) => {
@@ -359,32 +359,31 @@ describe("World durable Task spawn", () => {
 			abort.abort(new Error("caller stopped"));
 			throw new Error("connection lost");
 		};
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		await expect(backend.spawn(spawnRequest(), abort.signal)).rejects.toThrow(/caller stopped/);
 		expect(lookups).toBe(2);
 	});
 
 	test("fails an exact supplied peer conflict without submission", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		client.resolve = async peerId => peerResolution(peerId, sessionSummary(peerId));
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		await expect(backend.spawn(spawnRequest("claimed", false))).rejects.toThrow(/peer identity conflict: claimed/);
 		expect(client.submissions).toHaveLength(0);
 	});
 
 	test("advances a generated suffix after a racing daemon conflict", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		let attempts = 0;
 		client.submit = async request => {
 			attempts += 1;
 			if (attempts === 1) {
-				throw new WorldOperationError(
+				throw new ParentOperationError(
 					"dispatch_submit",
 					{
-						code: WorldOperationFailureCode.PEER_IDENTITY_CONFLICT,
-						operation: WorldRuntimeOperation.DISPATCH_SUBMIT,
+						code: ParentFailureCode.PEER_IDENTITY_CONFLICT,
 						detail: "racing peer reservation",
 					},
 					"submit-race",
@@ -397,10 +396,9 @@ describe("World durable Task spawn", () => {
 				requestId: "submit-2",
 				intentKey: intentKey(request.identity).intentKey,
 				session,
-				custody: undefined,
 			};
 		};
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const handle = await backend.spawn(spawnRequest("worker", true));
 		expect(handle.peerId).toBe("worker-2");
@@ -408,9 +406,9 @@ describe("World durable Task spawn", () => {
 	});
 });
 
-describe("World Task session watch", () => {
+describe("Parent Task session watch", () => {
 	test("maps live progress and every terminal SingleResult field", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		client.watch = () =>
 			(async function* () {
 				yield {
@@ -464,7 +462,7 @@ describe("World Task session watch", () => {
 					},
 				};
 			})();
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		const handle = await backend.spawn(spawnRequest());
 		const progress: AgentProgress[] = [];
 		const execution = await handle.wait(undefined, update => progress.push(update));
@@ -537,7 +535,7 @@ describe("World Task session watch", () => {
 	});
 
 	test("sends one stable interrupt on abort and waits for terminal settlement", async () => {
-		const client = new FakeWorldClient();
+		const client = new FakeParentClient();
 		const releaseTerminal = Promise.withResolvers<void>();
 		const interrupted = Promise.withResolvers<void>();
 		client.interrupt = async () => interrupted.resolve();
@@ -553,7 +551,7 @@ describe("World Task session watch", () => {
 					},
 				};
 			})();
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		const handle = await backend.spawn(spawnRequest());
 		const abort = new AbortController();
 		const settled = handle.wait(abort.signal);
@@ -570,12 +568,12 @@ describe("World Task session watch", () => {
 		releaseTerminal.resolve();
 		expect((await settled).result.aborted).toBe(true);
 		expect(client.interrupts).toHaveLength(1);
-		expect(client.interrupts[0]?.requestId).toMatch(/^world-task-interrupt:[0-9a-f]{32}$/);
+		expect(client.interrupts[0]?.requestId).toMatch(/^parent-task-interrupt:[0-9a-f]{32}$/);
 	});
 
 	test("detaches an owner-lifecycle watch without interrupting its durable child", async () => {
-		const client = new FakeWorldClient();
-		client.watch = (_sessionObjectKey, signal) =>
+		const client = new FakeParentClient();
+		client.watch = (_sessionId, signal) =>
 			(async function* () {
 				await new Promise<never>((_resolve, reject) => {
 					const detach = () => reject(signal?.reason);
@@ -584,7 +582,7 @@ describe("World Task session watch", () => {
 				});
 				yield {};
 			})();
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		const handle = await backend.spawn(spawnRequest());
 		const abort = new AbortController();
 		const settled = handle.wait(abort.signal);

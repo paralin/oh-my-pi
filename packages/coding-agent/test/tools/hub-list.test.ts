@@ -2,17 +2,13 @@ import { describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
+import { ParentOperationError } from "@oh-my-pi/pi-coding-agent/parent/client";
 import { type AgentPeer, AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
 import { executeList } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
-import { WorldAuthorityError, WorldOperationError } from "@oh-my-pi/pi-coding-agent/world/client";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import {
-	WorldAuthorityDenialCode,
-	WorldOperationFailureCode,
-	WorldRuntimeOperation,
-} from "../../src/world/generated/llmsession.pb.js";
+import { ParentFailureCode } from "../../src/parent/generated/parent-environment.pb.js";
 
 describe("hub list", () => {
 	it("restores persisted peers after the process registry is lost", async () => {
@@ -50,7 +46,7 @@ describe("hub list", () => {
 		expect(registry.get("Worker")?.sessionFile).toBe(workerSessionFile);
 	});
 
-	it("merges World rows, retains collisions, and exposes projection errors", async () => {
+	it("merges Parent rows, retains collisions, and exposes projection errors", async () => {
 		const peer: AgentPeer = {
 			messages: [],
 			deliverIrcMessage: async () => "injected",
@@ -77,7 +73,7 @@ describe("hub list", () => {
 			peers: [
 				{
 					id: "worker",
-					displayName: "World worker",
+					displayName: "Parent worker",
 					kind: "sub",
 					status: "running",
 					session: peer,
@@ -105,10 +101,10 @@ describe("hub list", () => {
 		);
 		expect(result.details?.peers?.[0]?.source).toBeUndefined();
 		expect(result.details?.peers?.[1]).toEqual(
-			expect.objectContaining({ id: "worker", displayName: "World worker", source: "world" }),
+			expect.objectContaining({ id: "worker", displayName: "Parent worker", source: "parent" }),
 		);
 		expect(result.details?.peers?.[2]).toEqual(
-			expect.objectContaining({ id: "failed", status: "aborted", source: "world" }),
+			expect.objectContaining({ id: "failed", status: "aborted", source: "parent" }),
 		);
 		expect(result.details?.rosterErrors).toEqual([
 			expect.objectContaining({ code: "identity_conflict", peerId: "worker" }),
@@ -119,7 +115,7 @@ describe("hub list", () => {
 		expect(content.text).toContain("identity_conflict");
 	});
 
-	it("loads the World roster through the root-scoped Hub backend", async () => {
+	it("loads the Parent roster through the root-scoped Hub backend", async () => {
 		const peer: AgentPeer = {
 			messages: [],
 			deliverIrcMessage: async () => "queued",
@@ -137,7 +133,7 @@ describe("hub list", () => {
 		const now = Date.now();
 		let listed = 0;
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => {
 				listed += 1;
@@ -178,10 +174,10 @@ describe("hub list", () => {
 		const result = await new HubTool(session).execute("list", { op: "list" });
 		expect(listed).toBe(1);
 		if (!result.details || !("peers" in result.details)) throw new Error("Expected coordination details");
-		expect(result.details.peers).toEqual([expect.objectContaining({ id: "foreign", source: "world" })]);
+		expect(result.details.peers).toEqual([expect.objectContaining({ id: "foreign", source: "parent" })]);
 	});
 
-	it("routes World sends and await-reply correlation through the backend", async () => {
+	it("routes Parent sends and await-reply correlation through the backend", async () => {
 		const peer: AgentPeer = {
 			messages: [],
 			deliverIrcMessage: async () => "queued",
@@ -200,7 +196,7 @@ describe("hub list", () => {
 		const filters: Parameters<CoordinationBackend["waitMessage"]>[0][] = [];
 		const now = Date.now();
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({
 				peers: [
@@ -224,7 +220,7 @@ describe("hub list", () => {
 					to: request.targetPeerId,
 					outcome: "queued",
 					queueOutcome: "queued_live",
-					messageObjectKey: "glados/messages/1",
+					messageId: "message-1",
 					inboxSequence: 7n,
 					replayed: false,
 				};
@@ -239,7 +235,7 @@ describe("hub list", () => {
 					body: "done",
 					ts: now + 1,
 					replyTo: filter.replyTo,
-					source: "world",
+					source: "parent",
 				};
 			},
 			interrupt: () => Promise.reject(new Error("unused")),
@@ -274,7 +270,7 @@ describe("hub list", () => {
 					to: "foreign",
 					body: "status?",
 					expectsReply: true,
-					source: "world",
+					source: "parent",
 				}),
 			}),
 		);
@@ -286,7 +282,7 @@ describe("hub list", () => {
 		expect(result.details.waited).toEqual(expect.objectContaining({ id: "reply-1", replyTo: sent[0]?.message.id }));
 	});
 
-	it("drains and waits on the World mailbox through Hub", async () => {
+	it("drains and waits on the Parent mailbox through Hub", async () => {
 		const peer: AgentPeer = {
 			messages: [],
 			deliverIrcMessage: async () => "queued",
@@ -319,12 +315,12 @@ describe("hub list", () => {
 				to: MAIN_AGENT_ID,
 				body: "unsolicited",
 				ts: now,
-				source: "world" as const,
+				source: "parent" as const,
 			},
 		];
 		let drain = true;
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({ peers: [foreignRef], errors: [] }),
 			attachMailbox: () => {},
@@ -341,7 +337,7 @@ describe("hub list", () => {
 				to: MAIN_AGENT_ID,
 				body: "later",
 				ts: now + 1,
-				source: "world",
+				source: "parent",
 			}),
 			interrupt: () => Promise.reject(new Error("unused")),
 			close: () => Promise.resolve(),
@@ -366,7 +362,7 @@ describe("hub list", () => {
 		);
 	});
 
-	it("reports a local and World identity collision without sending either path", async () => {
+	it("reports a local and Parent identity collision without sending either path", async () => {
 		const peer: AgentPeer = {
 			messages: [],
 			deliverIrcMessage: async () => "queued",
@@ -379,13 +375,13 @@ describe("hub list", () => {
 		let sends = 0;
 		const now = Date.now();
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({
 				peers: [
 					{
 						id: "worker",
-						displayName: "World",
+						displayName: "Parent",
 						kind: "sub",
 						status: "running",
 						session: peer,
@@ -426,7 +422,7 @@ describe("hub list", () => {
 		]);
 	});
 
-	it("keeps a terminal World target refusal typed and never falls back locally", async () => {
+	it("keeps a terminal Parent target refusal typed and never falls back locally", async () => {
 		const peer: AgentPeer = {
 			messages: [],
 			deliverIrcMessage: async () => "queued",
@@ -436,17 +432,16 @@ describe("hub list", () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: peer });
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({ peers: [], errors: [] }),
 			attachMailbox: () => {},
 			send: () =>
 				Promise.reject(
-					new WorldOperationError(
-						"world.agent.message.send",
+					new ParentOperationError(
+						"peer message send",
 						{
-							operation: WorldRuntimeOperation.AGENT_MESSAGE_SEND,
-							code: WorldOperationFailureCode.TARGET_SESSION_TERMINAL,
+							code: ParentFailureCode.TARGET_SESSION_TERMINAL,
 							detail: "the exact reply target has settled",
 						},
 						"send-1",
@@ -476,32 +471,30 @@ describe("hub list", () => {
 		});
 
 		expect(result.isError).toBe(true);
-		if (!result.details || !("worldError" in result.details)) throw new Error("Expected coordination details");
-		expect(result.details.worldError).toEqual({
+		if (!result.details || !("parentError" in result.details)) throw new Error("Expected coordination details");
+		expect(result.details.parentError).toEqual({
 			kind: "operation",
-			operation: "world.agent.message.send",
-			code: WorldOperationFailureCode.TARGET_SESSION_TERMINAL,
+			operation: "coordination",
+			code: ParentFailureCode.TARGET_SESSION_TERMINAL,
 			codeName: "TARGET_SESSION_TERMINAL",
 			detail: "the exact reply target has settled",
+			requiredCapability: "",
 		});
 	});
 
-	it("keeps a World message permission denial typed", async () => {
+	it("keeps a Parent message permission denial typed", async () => {
 		const registry = new AgentRegistry();
 		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: null });
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({ peers: [], errors: [] }),
 			attachMailbox: () => {},
 			send: () =>
 				Promise.reject(
-					new WorldAuthorityError("world.agent.message.send", {
-						operation: WorldRuntimeOperation.AGENT_MESSAGE_SEND,
-						callerSessionObjectKey: "glados/test/llm-session/caller",
-						capabilityDigest: "sha256:cap",
-						code: WorldAuthorityDenialCode.OPERATION_NOT_ALLOWED,
-						requiredPermission: "world.agent.message.send",
+					new ParentOperationError("peer message send", {
+						code: ParentFailureCode.CAPABILITY_NOT_ALLOWED,
+						requiredCapability: "agent.message.send",
 						detail: "the caller manifest does not allow messaging",
 					}),
 				),
@@ -524,13 +517,13 @@ describe("hub list", () => {
 		const result = await new HubTool(session).execute("send", { op: "send", to: "main", message: "hello" });
 
 		expect(result.isError).toBe(true);
-		if (!result.details || !("worldError" in result.details)) throw new Error("Expected coordination details");
-		expect(result.details.worldError).toEqual({
-			kind: "authority",
-			operation: "world.agent.message.send",
-			code: WorldAuthorityDenialCode.OPERATION_NOT_ALLOWED,
-			codeName: "OPERATION_NOT_ALLOWED",
-			requiredPermission: "world.agent.message.send",
+		if (!result.details || !("parentError" in result.details)) throw new Error("Expected coordination details");
+		expect(result.details.parentError).toEqual({
+			kind: "operation",
+			operation: "coordination",
+			code: ParentFailureCode.CAPABILITY_NOT_ALLOWED,
+			codeName: "CAPABILITY_NOT_ALLOWED",
+			requiredCapability: "agent.message.send",
 			detail: "the caller manifest does not allow messaging",
 		});
 	});
