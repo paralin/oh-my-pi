@@ -83,6 +83,50 @@ describe("restricted sessions sharing extension providers", () => {
 		};
 	}
 
+	test("evaluates explicit restricted extensions without exposing extra tools", async () => {
+		const markerPath = path.join(tempDir, "restricted-extension-loaded");
+		const extensionPath = path.join(tempDir, "restricted-extension.mjs");
+		fs.writeFileSync(
+			extensionPath,
+			`import fs from "node:fs";
+export default api => {
+  fs.writeFileSync(${JSON.stringify(markerPath)}, "loaded");
+  api.registerTool({
+    name: "restricted-extra",
+    description: "restriction probe",
+    parameters: api.typebox.Type.Object({}),
+    async execute() { return { content: [{ type: "text", text: "" }] }; },
+  });
+};
+`,
+		);
+		const { session: parent } = await createAgentSession({
+			...createOptions(),
+			extensions: [providerExtension],
+		});
+
+		try {
+			const { session: child, extensionsResult } = await createAgentSession({
+				...createOptions(),
+				model: parent.model,
+				restrictToolNames: true,
+				toolNames: ["read"],
+				preloadedExtensionPaths: [extensionPath],
+				allowRestrictedExtensions: true,
+			});
+
+			try {
+				expect(fs.readFileSync(markerPath, "utf8")).toBe("loaded");
+				expect(extensionsResult.extensions.map(extension => extension.resolvedPath)).toEqual([extensionPath]);
+				expect(child.getActiveToolNames()).toEqual(["read"]);
+			} finally {
+				await child.dispose();
+			}
+		} finally {
+			await parent.dispose();
+		}
+	});
+
 	test("does not unregister the parent's provider when extension loading is restricted", async () => {
 		const { session: parent } = await createAgentSession({
 			...createOptions(),

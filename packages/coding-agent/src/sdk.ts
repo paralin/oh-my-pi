@@ -510,6 +510,12 @@ export interface CreateAgentSessionOptions {
 	 * and ambient custom tools remain disabled. Default: false.
 	 */
 	allowRestrictedCustomTools?: boolean;
+	/**
+	 * Evaluate only caller-supplied extension paths inside a restricted session.
+	 * Their tools remain excluded; lifecycle hooks and protocol handlers remain
+	 * active. Default: false.
+	 */
+	allowRestrictedExtensions?: boolean;
 
 	/** Output schema for structured completion (subagents). */
 	outputSchema?: unknown;
@@ -2071,11 +2077,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
+		if (restrictToolNames && options.allowRestrictedExtensions !== true) {
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];
 			extensionsResult = await loadExtensions([], cwd, eventBus);
+		} else if (restrictToolNames) {
+			// A restricted session evaluates only the exact paths its caller supplied.
+			// Registered tools remain excluded below; protocol handlers and lifecycle
+			// hooks can still extend the explicitly permitted built-in tools.
+			extensionPaths = options.preloadedExtensionPaths ?? [];
+			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
+			for (const { path, error } of extensionsResult.errors) {
+				logger.error("Failed to load restricted extension", { path, error });
+			}
 		} else if (options.preloadedExtensions) {
 			extensionsResult = {
 				...options.preloadedExtensions,

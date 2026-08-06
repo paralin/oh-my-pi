@@ -9,6 +9,7 @@ import {
 import {
 	externalTaskProgressRecord,
 	externalTaskResultRecord,
+	isExternalSubagentConfigured,
 	loadExternalSubagentProfile,
 	PARENT_TASK_PROFILE_DIGEST_ENV,
 	PARENT_TASK_PROFILE_ENV,
@@ -73,6 +74,12 @@ afterEach(async () => {
 });
 
 describe("external subagent mode", () => {
+	test("selects external mode from the parent task profile", () => {
+		expect(isExternalSubagentConfigured({ [PARENT_TASK_PROFILE_ENV]: "/tmp/profile.json" })).toBe(true);
+		expect(isExternalSubagentConfigured({ GLADOS_ADAPTER_CONFIG: "/tmp/profile.json" })).toBe(false);
+		expect(isExternalSubagentConfigured({ [PARENT_TASK_PROFILE_ENV]: "   " })).toBe(false);
+	});
+
 	test("loads only an absolute mode-0600 canonical profile with its digest", async () => {
 		const value = await fixture();
 		expect(await loadExternalSubagentProfile(value.env)).toEqual(value.profile);
@@ -157,7 +164,9 @@ describe("external subagent mode", () => {
 			currentTool: "read",
 			cost: 0.25,
 		};
-		expect(externalTaskProgressRecord(progress).taskProgress).toMatchObject({
+		const progressRecord = externalTaskProgressRecord(progress, "provider-session-1");
+		expect(progressRecord.providerSessionId).toBe("provider-session-1");
+		expect(progressRecord.taskProgress).toMatchObject({
 			lastIntent: "inspect mailbox",
 			tokens: 12,
 			requests: 2,
@@ -215,7 +224,9 @@ describe("external subagent mode", () => {
 			extractedToolData: { read: [{ path: "a" }] },
 			retryFailure: { attempt: 2, errorMessage: "quota" },
 		};
-		expect(externalTaskResultRecord(result).taskResult).toMatchObject({
+		const resultRecord = externalTaskResultRecord(result, "provider-session-1");
+		expect(resultRecord.providerSessionId).toBe("provider-session-1");
+		expect(resultRecord.taskResult).toMatchObject({
 			lastIntent: "return result",
 			exitCode: 7,
 			output: "done",

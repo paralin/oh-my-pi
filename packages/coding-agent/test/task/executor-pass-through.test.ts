@@ -136,6 +136,23 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.preloadedCustomToolPaths).toBe(preloadedCustomToolPaths);
 	});
 
+	it("forwards only parent-authorized extensions to a restricted child", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			restrictToolNames: true,
+			preloadedExtensionPaths: ["/unrestricted/extension.ts"],
+			restrictedExtensionPaths: ["/parent/authorized-extension.ts"],
+		});
+
+		expect(result.exitCode).toBe(0);
+		const forwarded = spy.mock.calls[0]?.[0];
+		expect(forwarded?.allowRestrictedExtensions).toBe(true);
+		expect(forwarded?.preloadedExtensionPaths).toEqual(["/parent/authorized-extension.ts"]);
+	});
+
 	it("forwards an exact credential resolver without replacing it", async () => {
 		const session = yieldEmittingSession();
 		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));

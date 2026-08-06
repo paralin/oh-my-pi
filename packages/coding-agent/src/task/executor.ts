@@ -414,6 +414,8 @@ export interface ExecutorOptions {
 	restrictToolNames?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** Receives the child provider-session identity after session creation. */
+	onSessionCreated?: (providerSessionId: string) => void;
 	/**
 	 * Epochs (ms, `Date.now()`) bracketing the concurrency-semaphore wait:
 	 * `invokedAt` is stamped at the spawn boundary before `acquire()`,
@@ -440,6 +442,11 @@ export interface ExecutorOptions {
 	 * extension against its own `ExtensionAPI` (cwd, eventBus, runtime).
 	 */
 	preloadedExtensionPaths?: string[];
+	/**
+	 * Parent-authorized extension entrypoints that remain active when tool names
+	 * are restricted. Tool restriction still filters their registered tools.
+	 */
+	restrictedExtensionPaths?: string[];
 	/**
 	 * Parent's discovered custom-tool source paths. Forwarded to skip the
 	 * `.omp/tools/` FS scan in the subagent; the subagent then re-binds each
@@ -3171,6 +3178,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			const restrictedExtensionPaths = options.restrictedExtensionPaths ?? [];
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
@@ -3201,13 +3209,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
+				allowRestrictedExtensions: restrictedExtensionPaths.length > 0,
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,
-				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
+				preloadedExtensionPaths:
+					restrictedExtensionPaths.length > 0
+						? [...(restrictToolNames ? [] : (options.preloadedExtensionPaths ?? [])), ...restrictedExtensionPaths]
+						: restrictToolNames
+							? []
+							: options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
@@ -3269,8 +3283,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			sessionCreatedAt = performance.now();
-
 			monitor.setActiveSession(session);
+			options.onSessionCreated?.(session.sessionId);
 			installRegistryStatusSync(session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
