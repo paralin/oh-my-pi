@@ -19,25 +19,102 @@ class Capability:
 _ROOT = Path(__file__).resolve().parent.parent
 _CAPABILITIES = (
     Capability("rlm", "rlm", "Admit and inspect OMP Task children."),
-    Capability("agent_message", "agent_message", "Message reachable family agents.", _ROOT / "skills/agent-message/SKILL.md"),
-    Capability("agent_observe", "agent_observe", "Observe reachable family agents.", _ROOT / "skills/agent-observe/SKILL.md"),
-    Capability("attach_image", "attach_image", "Attach a local image to model context.", _ROOT / "skills/attach-image/SKILL.md"),
-    Capability("compact", "compact", "Inspect or schedule OMP compaction.", _ROOT / "skills/compact/SKILL.md"),
-    Capability("edit", "edit", "Apply one exact string replacement.", _ROOT / "skills/edit/SKILL.md"),
-    Capability("goal", "goal", "Manage the persistent thread goal.", _ROOT / "skills/goal/SKILL.md"),
-    Capability("refine", "refine", "Schedule continual-harness refinement.", _ROOT / "skills/refine/SKILL.md"),
-    Capability("rlm_heartbeat", "rlm_heartbeat", "Manage agent-owned heartbeats.", _ROOT / "skills/rlm-heartbeat/SKILL.md"),
-    Capability("omp.session", "omp.session", "Inspect active-cell context and publish progress or artifacts."),
-    Capability("omp.files", "omp.files", "Read, write, and glob bounded workspace files through OMP owners."),
-    Capability("omp.code", "omp.code", "Search and rewrite syntax trees and query language intelligence."),
-    Capability("omp.debug", "omp.debug", "Control one session-private Debug Adapter Protocol lifecycle."),
-    Capability("omp.web", "omp.web", "Search and extract web resources through host-owned providers."),
-    Capability("omp.workspace", "omp.workspace", "Use validated OMP workspace search and edit services."),
-    Capability("omp.harness", "omp.harness", "Access continual harness, todo, and checkpoint services."),
+    Capability(
+        "agent_message",
+        "agent_message",
+        "Message reachable family agents.",
+        _ROOT / "skills/agent-message/SKILL.md",
+    ),
+    Capability(
+        "agent_observe",
+        "agent_observe",
+        "Observe reachable family agents.",
+        _ROOT / "skills/agent-observe/SKILL.md",
+    ),
+    Capability(
+        "attach_image",
+        "attach_image",
+        "Attach a local image to model context.",
+        _ROOT / "skills/attach-image/SKILL.md",
+    ),
+    Capability(
+        "compact",
+        "compact",
+        "Inspect or schedule OMP compaction.",
+        _ROOT / "skills/compact/SKILL.md",
+    ),
+    Capability(
+        "edit",
+        "edit",
+        "Apply one exact string replacement.",
+        _ROOT / "skills/edit/SKILL.md",
+    ),
+    Capability(
+        "goal",
+        "goal",
+        "Manage the persistent thread goal.",
+        _ROOT / "skills/goal/SKILL.md",
+    ),
+    Capability(
+        "refine",
+        "refine",
+        "Schedule continual-harness refinement.",
+        _ROOT / "skills/refine/SKILL.md",
+    ),
+    Capability(
+        "rlm_heartbeat",
+        "rlm_heartbeat",
+        "Manage agent-owned heartbeats.",
+        _ROOT / "skills/rlm-heartbeat/SKILL.md",
+    ),
+    Capability(
+        "omp.session",
+        "omp.session",
+        "Inspect active-cell context and publish progress or artifacts.",
+    ),
+    Capability(
+        "omp.files",
+        "omp.files",
+        "Read, write, and glob bounded workspace files through OMP owners.",
+    ),
+    Capability(
+        "omp.code",
+        "omp.code",
+        "Search and rewrite syntax trees and query language intelligence.",
+    ),
+    Capability(
+        "omp.debug",
+        "omp.debug",
+        "Control one session-private Debug Adapter Protocol lifecycle.",
+    ),
+    Capability(
+        "omp.web",
+        "omp.web",
+        "Search and extract web resources through host-owned providers.",
+    ),
+    Capability(
+        "omp.github",
+        "omp.github",
+        "Use GitHub through host-owned command and cache services.",
+    ),
+    Capability(
+        "omp.workspace",
+        "omp.workspace",
+        "Use validated OMP workspace search and edit services.",
+    ),
+    Capability(
+        "omp.harness",
+        "omp.harness",
+        "Access continual harness, todo, and checkpoint services.",
+    ),
     Capability("omp.memory", "omp.memory", "Manage host-owned OMP memory records."),
     Capability("omp.rules", "omp.rules", "Manage host-owned OMP rule records."),
     Capability("omp.skills", "omp.skills", "Manage host-owned OMP skill records."),
-    Capability("omp.mcp", "omp.mcp", "Call host-owned MCP tools, resources, prompts, config, and refresh."),
+    Capability(
+        "omp.mcp",
+        "omp.mcp",
+        "Call host-owned MCP tools, resources, prompts, config, and refresh.",
+    ),
 )
 
 
@@ -54,7 +131,20 @@ def skill_path(name: str) -> Path:
     raise KeyError(name)
 
 
-from . import code, debug, files, harness, mcp, memory, rules, session, skills, web, workspace
+from . import (
+    code,
+    debug,
+    files,
+    github,
+    harness,
+    mcp,
+    memory,
+    rules,
+    session,
+    skills,
+    web,
+    workspace,
+)
 
 __all__ = [
     "Capability",
@@ -62,6 +152,7 @@ __all__ = [
     "code",
     "debug",
     "files",
+    "github",
     "harness",
     "host_request",
     "mcp",

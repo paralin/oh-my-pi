@@ -153,6 +153,7 @@ import type { IpythonCellRequest, IpythonCellResult } from "../ipython/cell";
 import { createIpythonCodeHostHandlers, createIpythonLspOwner } from "../ipython/code-service";
 import type { IpythonProcessIds } from "../ipython/controller";
 import { IpythonDebugService } from "../ipython/debug-service";
+import type { IpythonGithubService } from "../ipython/github-service";
 import { OmpHarnessService } from "../ipython/harness-service";
 import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../ipython/host-bridge";
 import {
@@ -612,6 +613,7 @@ export class AgentSession {
 	readonly #ipython: IpythonSessionRuntime;
 	readonly #ipythonControls: OmpSessionControlService;
 	readonly #ipythonDebug: IpythonDebugService;
+	readonly #ipythonGithub?: IpythonGithubService;
 	readonly #ipythonWeb?: IpythonWebService;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
@@ -1082,6 +1084,7 @@ export class AgentSession {
 			refresh: async () => await this.refreshBaseSystemPrompt(),
 		});
 		this.#ipythonDebug = new IpythonDebugService({ cwd: () => this.sessionManager.getCwd() });
+		this.#ipythonGithub = config.createIpythonGithubService?.();
 		this.#ipythonWeb = config.createIpythonWebService?.();
 		const goalResponse = (includeCompletionReport = false) => {
 			const goal = this.#goalModeState?.goal ?? null;
@@ -1223,6 +1226,7 @@ export class AgentSession {
 					composeIpythonHostHandlers(
 						createFoundationalIpythonHostHandlers(),
 						this.#ipythonDebug.handlers,
+						this.#ipythonGithub?.handlers,
 						this.#ipythonWeb?.handlers,
 						createIpythonCodeHostHandlers({
 							cwd: this.sessionManager.getCwd(),

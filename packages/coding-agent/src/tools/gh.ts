@@ -285,7 +285,7 @@ const githubSchema = type({
 	"tail?": type("number").describe("log lines per failed job"),
 });
 
-type GithubInput = typeof githubSchema.infer;
+export type GithubInput = typeof githubSchema.infer;
 
 export interface GhToolDetails {
 	meta?: OutputMeta;
@@ -2477,33 +2477,43 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 		onUpdate?: AgentToolUpdateCallback<GhToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<GhToolDetails>> {
-		return untilAborted(signal, async () => {
-			switch (params.op) {
-				case "repo_view":
-					return executeRepoView(this.session, params, signal);
-				case "file_read":
-					return executeFileRead(this.session, params, signal);
-				case "pr_create":
-					return executePrCreate(this.session, params, signal);
-				case "pr_checkout":
-					return executePrCheckout(this.session, params, signal);
-				case "pr_push":
-					return executePrPush(this.session, params, signal);
-				case "search_issues":
-					return executeSearchIssues(this.session, params, signal);
-				case "search_prs":
-					return executeSearchPrs(this.session, params, signal);
-				case "search_code":
-					return executeSearchCode(this.session, params, signal);
-				case "search_commits":
-					return executeSearchCommits(this.session, params, signal);
-				case "search_repos":
-					return executeSearchRepos(this.session, params, signal);
-				case "run_watch":
-					return executeRunWatch(this.session, this.name, params, signal, onUpdate);
-			}
-		});
+		return executeGithubOperation(this.session, params, signal, onUpdate);
 	}
+}
+
+/** Executes one validated GitHub domain operation without an AgentTool dispatch. */
+export async function executeGithubOperation(
+	session: ToolSession,
+	params: GithubInput,
+	signal?: AbortSignal,
+	onUpdate?: AgentToolUpdateCallback<GhToolDetails>,
+): Promise<AgentToolResult<GhToolDetails>> {
+	return untilAborted(signal, async () => {
+		switch (params.op) {
+			case "repo_view":
+				return executeRepoView(session, params, signal);
+			case "file_read":
+				return executeFileRead(session, params, signal);
+			case "pr_create":
+				return executePrCreate(session, params, signal);
+			case "pr_checkout":
+				return executePrCheckout(session, params, signal);
+			case "pr_push":
+				return executePrPush(session, params, signal);
+			case "search_issues":
+				return executeSearchIssues(session, params, signal);
+			case "search_prs":
+				return executeSearchPrs(session, params, signal);
+			case "search_code":
+				return executeSearchCode(session, params, signal);
+			case "search_commits":
+				return executeSearchCommits(session, params, signal);
+			case "search_repos":
+				return executeSearchRepos(session, params, signal);
+			case "run_watch":
+				return executeRunWatch(session, "github", params, signal, onUpdate);
+		}
+	});
 }
 
 async function executeRepoView(

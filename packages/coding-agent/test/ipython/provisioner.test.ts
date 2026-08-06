@@ -15,6 +15,7 @@ import type {
 } from "../../src/ipython/controller.js";
 import { IpythonDebugService } from "../../src/ipython/debug-service.js";
 import { ipythonEnvironment } from "../../src/ipython/environment.js";
+import { IpythonGithubService } from "../../src/ipython/github-service.js";
 import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../../src/ipython/host-bridge.js";
 import {
 	type IpythonKernelController,
@@ -451,6 +452,12 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				},
 			}),
 		});
+		const github = new IpythonGithubService({
+			execute: async params => ({ content: [{ type: "text", text: params.op }], details: {} }),
+			issue: async params => ({ payload: { number: Number(params.issue) }, status: "fresh" }),
+			pullRequest: async params => ({ payload: { number: params.number }, status: "fresh" }),
+			pullRequestDiff: async params => ({ payload: { number: params.number, unified: "" }, status: "fresh" }),
+		});
 		const provisioner = new IpythonKernelProvisioner(
 			{
 				cwd: tempRoot,
@@ -459,6 +466,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				hostHandlers: composeIpythonHostHandlers(
 					debug.handlers,
 					web.handlers,
+					github.handlers,
 					createIpythonCodeHostHandlers({ cwd: tempRoot, snapshotOwner: {} }),
 					createRlmIpythonHostHandlers(task),
 					createAgentFamilyIpythonHostHandlers(family),
@@ -481,7 +489,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					"import contextlib, inspect, io, json, omp",
 					"help_text = io.StringIO()",
 					"with contextlib.redirect_stdout(help_text): help(omp.workspace.search)",
-					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'debug': 'debug' in dir(omp), 'web': 'web' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'debug_signature': str(inspect.signature(omp.debug.launch)), 'web_signature': str(inspect.signature(omp.web.search)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
+					"print(json.dumps({'dir': 'workspace' in dir(omp), 'files': 'files' in dir(omp), 'code': 'code' in dir(omp), 'debug': 'debug' in dir(omp), 'web': 'web' in dir(omp), 'github': 'github' in dir(omp), 'signature': str(inspect.signature(omp.workspace.search)), 'ast_signature': str(inspect.signature(omp.code.ast_search)), 'debug_signature': str(inspect.signature(omp.debug.launch)), 'web_signature': str(inspect.signature(omp.web.search)), 'github_signature': str(inspect.signature(omp.github.issue)), 'help': help_text.getvalue(), 'capabilities': [item.name for item in omp.capabilities()], 'edit_skill': str(omp.skill_path('edit')), 'attach_skill': str(omp.skill_path('attach_image'))}, sort_keys=True))",
 				].join("\n"),
 				{ hostContext: { ...hostContext, cellId: "discovery-cell", sequence: 0 } },
 			);
@@ -494,10 +502,12 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				code: boolean;
 				debug: boolean;
 				web: boolean;
+				github: boolean;
 				signature: string;
 				ast_signature: string;
 				debug_signature: string;
 				web_signature: string;
+				github_signature: string;
 				help: string;
 				capabilities: string[];
 				edit_skill: string;
@@ -508,10 +518,12 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(discovered.code).toBe(true);
 			expect(discovered.debug).toBe(true);
 			expect(discovered.web).toBe(true);
+			expect(discovered.github).toBe(true);
 			expect(discovered.signature).toContain("query");
 			expect(discovered.ast_signature).toContain("pattern");
 			expect(discovered.debug_signature).toContain("program");
 			expect(discovered.web_signature).toContain("query");
+			expect(discovered.github_signature).toContain("number_or_url");
 			expect(discovered.help).toContain("Search the workspace");
 			expect(discovered.capabilities).toEqual(
 				expect.arrayContaining([
@@ -520,6 +532,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 					"omp.code",
 					"omp.debug",
 					"omp.web",
+					"omp.github",
 					"edit",
 					"attach_image",
 				]),
@@ -527,11 +540,11 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(discovered.edit_skill).toEndWith("/skills/edit/SKILL.md");
 			expect(discovered.attach_skill).toEndWith("/skills/attach-image/SKILL.md");
 			const codeResult = await provisioner.execute(
-				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\ndebug = await omp.debug.sessions()\nweb = await omp.web.search('query')\n(read['path'], matches['total_matches'], matches['matches'][0]['path'], debug['active'], web['response']['provider'])",
+				"import omp\nread = await omp.files.read('example.ts', limit=10)\nmatches = await omp.code.ast_search('console.log($$$ARGS)', path='.')\ndebug = await omp.debug.sessions()\nweb = await omp.web.search('query')\ngh = await omp.github.issue(7)\n(read['path'], matches['total_matches'], matches['matches'][0]['path'], debug['active'], web['response']['provider'], gh['payload']['number'])",
 				{ hostContext: { ...hostContext, cellId: "code-cell", sequence: 1 } },
 			);
 			expect(codeResult.status).toBe("ok");
-			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts', None, 'exa')");
+			expect(codeResult.result).toBe("('example.ts', 1, 'example.ts', None, 'exa', 7)");
 			const spawned = await provisioner.execute(
 				"import rlm\nhandle = await rlm('Inspect this.', name='child-one', model='provider/model')\n(handle.rlm_child_id, handle.name, handle.model)",
 				{ hostContext },
