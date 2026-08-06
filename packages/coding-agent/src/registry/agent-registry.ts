@@ -91,7 +91,7 @@ export interface AgentRef {
 	kind: AgentKind;
 	parentId?: string;
 	status: AgentStatus;
-	/** Local refs are null exactly when parked/aborted; projected World refs may retain a monitor proxy. */
+	/** Local refs are null exactly when parked or aborted; projected Parent refs may retain a monitor proxy. */
 	session: AgentPeer | null;
 	sessionFile: string | null;
 	createdAt: number;

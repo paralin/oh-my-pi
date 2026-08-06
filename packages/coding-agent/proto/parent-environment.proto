@@ -1,0 +1,322 @@
+syntax = "proto3";
+package omp.parent;
+
+option go_package = "github.com/can1357/oh-my-pi/packages/coding-agent/parent;omp_parent";
+
+// ParentEnvironmentService binds one OMP process to a provider-neutral parent
+// environment and carries the Task and Hub coordination contract. OpenEnvironment
+// is a lifetime stream: closing it releases the environment and its interactive
+// root, if any. Every other call uses the opaque environment ID returned first.
+service ParentEnvironmentService {
+  rpc OpenEnvironment(OpenEnvironmentRequest) returns (stream OpenEnvironmentResponse);
+  rpc RotateInteractiveRoot(RotateInteractiveRootRequest) returns (InteractiveRootBinding);
+  rpc ReconfigureInteractiveRoot(ReconfigureInteractiveRootRequest) returns (InteractiveRootBinding);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc LookupTaskIntent(LookupTaskIntentRequest) returns (LookupTaskIntentResponse);
+  rpc SubmitTask(SubmitTaskRequest) returns (SubmitTaskResponse);
+  rpc WatchSession(WatchSessionRequest) returns (stream WatchSessionResponse);
+  rpc WatchAgentTree(WatchAgentTreeRequest) returns (stream WatchAgentTreeResponse);
+  rpc ResolveAgentPeer(ResolveAgentPeerRequest) returns (ResolveAgentPeerResponse);
+  rpc SendPeerMessage(SendPeerMessageRequest) returns (SendPeerMessageResponse);
+  rpc AckPeerMessage(AckPeerMessageRequest) returns (AckPeerMessageResponse);
+  rpc WatchPeerMailbox(WatchPeerMailboxRequest) returns (stream WatchPeerMailboxResponse);
+  rpc InterruptSession(InterruptSessionRequest) returns (InterruptSessionResponse);
+}
+
+message OpenEnvironmentRequest {
+  oneof root {
+    string managed_session_id = 1;
+    InteractiveRootSpec interactive_root = 2;
+  }
+}
+message OpenEnvironmentResponse {
+  string environment_id = 1;
+  InteractiveRootBinding interactive_binding = 2;
+}
+
+enum InteractiveRootTransitionReason {
+  INTERACTIVE_ROOT_TRANSITION_REASON_UNKNOWN = 0;
+  INTERACTIVE_ROOT_TRANSITION_REASON_STARTUP = 1;
+  INTERACTIVE_ROOT_TRANSITION_REASON_NEW = 2;
+  INTERACTIVE_ROOT_TRANSITION_REASON_DROP = 3;
+  INTERACTIVE_ROOT_TRANSITION_REASON_FORK = 4;
+  INTERACTIVE_ROOT_TRANSITION_REASON_BRANCH = 5;
+  INTERACTIVE_ROOT_TRANSITION_REASON_RESUME = 6;
+  INTERACTIVE_ROOT_TRANSITION_REASON_SWITCH = 7;
+  INTERACTIVE_ROOT_TRANSITION_REASON_RECONFIGURE = 8;
+  INTERACTIVE_ROOT_TRANSITION_REASON_RECONNECT = 9;
+}
+message InteractiveRootSpec {
+  string omp_session_id = 1;
+  string process_instance_id = 2;
+  string working_directory = 3;
+  repeated string workspace_roots = 4;
+  string provider = 5;
+  string model = 6;
+  InteractiveRootTransitionReason transition_reason = 7;
+  string predecessor_omp_session_id = 8;
+  string protocol_version = 9;
+  string build_identity = 10;
+}
+message InteractiveRootBinding {
+  string omp_session_id = 1;
+  string parent_session_id = 2;
+  uint64 generation = 3;
+  string configuration_digest = 4;
+  string provider = 5;
+  string model = 6;
+}
+message RotateInteractiveRootRequest {
+  string environment_id = 1;
+  InteractiveRootSpec spec = 2;
+}
+message ReconfigureInteractiveRootRequest {
+  string environment_id = 1;
+  InteractiveRootSpec spec = 2;
+}
+
+message ListSessionsRequest { string environment_id = 1; uint32 limit = 2; }
+message ListSessionsResponse { repeated SessionSummary sessions = 1; }
+message LookupTaskIntentRequest {
+  string environment_id = 1;
+  string intent_key = 2;
+  bool wait_for_parent = 3;
+}
+message LookupTaskIntentResponse {
+  bool found = 1;
+  string intent_state = 2;
+  string active_attempt_id = 3;
+  string attempt_state = 4;
+  SessionSummary session = 5;
+  bool awaiting_parent = 6;
+}
+
+message SubmitTaskRequest {
+  string environment_id = 1;
+  string request_id = 2;
+  string objective = 3;
+  string done_criteria = 4;
+  repeated string adapter_argv = 5;
+  string worktree_path = 6;
+  string working_directory = 7;
+  uint64 max_runtime_seconds = 8;
+  string model = 9;
+  TaskIntentIdentity intent_identity = 10;
+  repeated ParentCapability child_capabilities = 11;
+  TaskAgentSpec task_agent = 12;
+}
+message SubmitTaskResponse {
+  string request_id = 1;
+  string intent_key = 2;
+  SessionSummary session = 3;
+  ParentFailure failure = 4;
+}
+
+enum ParentCapability {
+  PARENT_CAPABILITY_UNKNOWN = 0;
+  PARENT_CAPABILITY_TASK_SUBMIT = 1;
+  PARENT_CAPABILITY_TASK_WATCH = 2;
+  PARENT_CAPABILITY_QUESTION_ANSWER = 3;
+  PARENT_CAPABILITY_SESSION_INPUT = 4;
+  PARENT_CAPABILITY_SESSION_INTERRUPT = 5;
+  PARENT_CAPABILITY_PEER_MESSAGE_SEND = 6;
+  PARENT_CAPABILITY_PEER_MESSAGE_RECEIVE = 7;
+}
+message TaskIntentIdentity { TaskIntentSource source = 1; string intent_key = 2; }
+message TaskIntentSource {
+  string owner_artifact = 1;
+  string objective = 2;
+  string repository = 3;
+  string checkout_identity = 4;
+  string worktree_identity = 5;
+  string working_directory = 6;
+  repeated string deliverable_paths = 7;
+  repeated string write_surfaces = 8;
+  string resume_session_id = 9;
+  string peer_id = 10;
+  string worker_profile_digest = 11;
+}
+
+enum TaskAgentSource {
+  TASK_AGENT_SOURCE_UNKNOWN = 0;
+  TASK_AGENT_SOURCE_BUNDLED = 1;
+  TASK_AGENT_SOURCE_USER = 2;
+  TASK_AGENT_SOURCE_PROJECT = 3;
+}
+message TaskAgentSpec {
+  string peer_id = 1;
+  string display_name = 2;
+  string agent_type = 3;
+  TaskAgentSource agent_source = 4;
+  string purpose = 5;
+  bytes worker_profile = 6;
+  string worker_profile_digest = 7;
+}
+
+message WatchSessionRequest { string environment_id = 1; string session_id = 2; }
+message WatchSessionResponse { SessionSnapshot snapshot = 1; }
+message WatchAgentTreeRequest { string environment_id = 1; }
+message WatchAgentTreeResponse { AgentTreeSnapshot snapshot = 1; }
+message ResolveAgentPeerRequest { string environment_id = 1; string peer_id = 2; }
+message ResolveAgentPeerResponse {
+  bool found = 1;
+  AgentSummary agent = 2;
+  SessionSummary session = 3;
+  bool inactive = 4;
+  ParentFailure failure = 5;
+}
+message SendPeerMessageRequest {
+  string environment_id = 1;
+  string request_id = 2;
+  string client_message_id = 3;
+  string body = 4;
+  string reply_to_client_message_id = 5;
+  bool expects_reply = 6;
+  oneof target { string target_peer_id = 7; bool target_parent = 8; }
+}
+message SendPeerMessageResponse {
+  string request_id = 1;
+  string message_id = 2;
+  string client_message_id = 3;
+  string to_agent_id = 4;
+  string target_session_id = 5;
+  uint64 inbox_sequence = 6;
+  PeerMessageOutcome outcome = 7;
+  bool replayed = 8;
+  ParentFailure failure = 9;
+}
+message AckPeerMessageRequest {
+  string environment_id = 1;
+  string request_id = 2;
+  string message_id = 3;
+  PeerMessageAckOutcome outcome = 4;
+}
+message AckPeerMessageResponse {
+  string request_id = 1;
+  string message_id = 2;
+  string consumed_by_session_id = 3;
+  string consumed_at = 4;
+  bool replayed = 5;
+  ParentFailure failure = 6;
+}
+message WatchPeerMailboxRequest { string environment_id = 1; }
+message WatchPeerMailboxResponse { oneof result { AgentMessageSummary message = 1; ParentFailure failure = 2; } }
+message InterruptSessionRequest {
+  string environment_id = 1;
+  string request_id = 2;
+  string target_session_id = 3;
+  string reason = 4;
+}
+message InterruptSessionResponse {
+  string request_id = 1;
+  string target_session_id = 2;
+  uint64 accepted_sequence = 3;
+  string detail = 4;
+  bool replayed = 5;
+  ParentFailure failure = 6;
+}
+
+enum ParentFailureCode {
+  PARENT_FAILURE_CODE_UNKNOWN = 0;
+  PARENT_FAILURE_CODE_INVALID_REQUEST = 1;
+  PARENT_FAILURE_CODE_MISSING_TARGET = 2;
+  PARENT_FAILURE_CODE_RETRY_CONFLICT = 3;
+  PARENT_FAILURE_CODE_UNAVAILABLE = 4;
+  PARENT_FAILURE_CODE_REJECTED = 5;
+  PARENT_FAILURE_CODE_AMBIGUOUS_ACTIVE_PEER = 6;
+  PARENT_FAILURE_CODE_TARGET_SESSION_TERMINAL = 7;
+  PARENT_FAILURE_CODE_PEER_IDENTITY_CONFLICT = 8;
+  PARENT_FAILURE_CODE_UNSUPPORTED_RUNTIME = 9;
+  PARENT_FAILURE_CODE_CALLER_NOT_FOUND = 10;
+  PARENT_FAILURE_CODE_CALLER_MANIFEST_UNAVAILABLE = 11;
+  PARENT_FAILURE_CODE_CAPABILITY_NOT_ALLOWED = 12;
+}
+message ParentFailure {
+  ParentFailureCode code = 1;
+  string target_id = 2;
+  string required_capability = 3;
+  string detail = 4;
+}
+enum PeerMessageOutcome {
+  PEER_MESSAGE_OUTCOME_UNKNOWN = 0;
+  PEER_MESSAGE_OUTCOME_QUEUED_LIVE = 1;
+  PEER_MESSAGE_OUTCOME_QUEUED_INACTIVE = 2;
+}
+enum PeerMessageAckOutcome {
+  PEER_MESSAGE_ACK_OUTCOME_UNKNOWN = 0;
+  PEER_MESSAGE_ACK_OUTCOME_WAITER = 1;
+  PEER_MESSAGE_ACK_OUTCOME_INJECTED = 2;
+  PEER_MESSAGE_ACK_OUTCOME_QUEUED = 3;
+  PEER_MESSAGE_ACK_OUTCOME_WOKEN = 4;
+}
+enum ParentSessionState {
+  PARENT_SESSION_STATE_UNKNOWN = 0;
+  PARENT_SESSION_STATE_CREATED = 1;
+  PARENT_SESSION_STATE_ACTIVE = 2;
+  PARENT_SESSION_STATE_AWAITING_PROCESS = 3;
+  PARENT_SESSION_STATE_BLOCKED = 4;
+  PARENT_SESSION_STATE_AWAITING_USER = 5;
+  PARENT_SESSION_STATE_DORMANT = 6;
+  PARENT_SESSION_STATE_COMPLETE = 7;
+  PARENT_SESSION_STATE_ARCHIVED = 8;
+  PARENT_SESSION_STATE_FAILED = 9;
+  PARENT_SESSION_STATE_CANCELED = 10;
+}
+message SessionSnapshot {
+  SessionSummary session = 1;
+  repeated SessionTurn turns = 2;
+  string run_state = 3;
+  string stop_reason = 4;
+  repeated AgentMessageSummary inbox_messages = 5;
+  TaskProgressSummary progress = 6;
+  TaskResultSummary task_result = 7;
+}
+message SessionSummary {
+  string session_id = 1;
+  string agent_id = 2;
+  string provider = 3;
+  ParentSessionState state = 4;
+  int64 input_tokens = 5;
+  int64 output_tokens = 6;
+  string updated_at = 7;
+  string completed_at = 8;
+  string canceled_at = 9;
+  string failure = 10;
+  string blocker = 11;
+  string provider_session_id = 12;
+  string parent_session_id = 13;
+  string model = 14;
+}
+message SessionTurn { string turn_id = 1; string role = 2; string content = 3; string created_at = 4; }
+message TaskUsageCost { double input = 1; double output = 2; double cache_read = 3; double cache_write = 4; double total = 5; }
+message TaskUsageSummary { int64 input = 1; int64 output = 2; int64 cache_read = 3; int64 cache_write = 4; int64 total_tokens = 5; int64 reasoning_tokens = 6; TaskUsageCost cost = 7; }
+message TaskExtractedToolData { string tool_name = 1; repeated string values = 2; }
+message TaskRetryFailure { uint32 attempt = 1; string error_message = 2; }
+enum TaskArtifactStreamKind { TASK_ARTIFACT_STREAM_KIND_UNKNOWN = 0; TASK_ARTIFACT_STREAM_KIND_STDOUT = 1; TASK_ARTIFACT_STREAM_KIND_STDERR = 2; }
+message TaskArtifactRef { string artifact_ref = 1; TaskArtifactStreamKind stream_kind = 2; uint64 retained_bytes = 3; uint64 produced_bytes = 4; bool truncated = 5; string content_digest = 6; }
+message TaskProgressSummary { string last_intent = 1; int64 tokens = 2; uint64 requests = 3; int64 context_tokens = 4; int64 context_window = 5; string resolved_model = 6; uint64 duration_ms = 7; string active_tool_name = 8; string updated_at = 9; double cost = 10; }
+message TaskResultSummary {
+  string last_intent = 1; int32 exit_code = 2; string output = 3; string stderr = 4;
+  bool truncated = 5; string structured_output = 6; uint64 duration_ms = 7;
+  int64 tokens = 8; uint64 requests = 9; int64 context_tokens = 10;
+  int64 context_window = 11; string resolved_model = 12;
+  bool resolved_model_is_fallback = 13; string error = 14; bool aborted = 15;
+  string abort_reason = 16; TaskUsageSummary usage = 17;
+  repeated TaskExtractedToolData extracted_tool_data = 18;
+  TaskRetryFailure retry_failure = 19; repeated TaskArtifactRef artifacts = 20;
+}
+message AgentMessageSummary {
+  string message_id = 1; string from_agent_id = 2; string to_agent_id = 3;
+  string source_session_id = 4; string target_session_id = 5;
+  string body = 6; string created_at = 7; string delivered_at = 8;
+  string acked_at = 9; string failure = 10; uint64 inbox_sequence = 11;
+  string client_message_id = 12; string reply_to_client_message_id = 13;
+  bool expects_reply = 14; string consumed_by_session_id = 15;
+  string consumed_at = 16; PeerMessageAckOutcome consumption_outcome = 17;
+  PeerMessageOutcome queue_outcome = 18;
+}
+message AgentTreeSnapshot { uint64 revision = 1; repeated AgentSummary agents = 2; }
+message AgentSummary {
+  string agent_id = 1; string parent_agent_id = 2; string name = 3;
+  repeated string active_session_ids = 4; string peer_id = 5;
+}

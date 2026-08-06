@@ -20,7 +20,7 @@ export interface CoordinationSpawnRequest {
 	temporaryArtifacts: boolean;
 }
 
-/** One admitted World Task whose durable session can be watched locally. */
+/** One admitted Parent Task whose durable session can be watched locally. */
 export interface CoordinationTaskHandle {
 	readonly peerId: string;
 	wait(signal?: AbortSignal, onProgress?: (progress: AgentProgress) => void): Promise<StructuredSubagentResult>;
@@ -32,7 +32,7 @@ export interface CoordinationPeerError {
 	detail: string;
 }
 
-/** Durable World rows plus per-row failures that must not hide valid peers. */
+/** Durable parent rows plus per-row failures that must not hide valid peers. */
 export interface CoordinationPeerRoster {
 	peers: AgentRef[];
 	errors: CoordinationPeerError[];
@@ -47,12 +47,12 @@ export interface CoordinationMessageRequest {
 
 export type CoordinationQueueOutcome = "queued_live" | "queued_inactive";
 
-/** Durable storage receipt for one World peer message. */
+/** Durable storage receipt for one parent peer message. */
 export interface CoordinationMessageReceipt {
 	to: string;
 	outcome: "queued";
 	queueOutcome: CoordinationQueueOutcome;
-	messageObjectKey: string;
+	messageId: string;
 	inboxSequence: bigint;
 	replayed: boolean;
 }
@@ -62,7 +62,7 @@ export interface CoordinationMessageFilter {
 	replyTo?: string;
 }
 
-/** Reasons that can change the root's durable World identity. */
+/** Reasons that can change the root's durable parent identity. */
 export type CoordinationSessionTransitionReason =
 	| "startup"
 	| "new"
@@ -73,7 +73,7 @@ export type CoordinationSessionTransitionReason =
 	| "switch"
 	| "reload";
 
-/** Semantic identity committed by SessionManager before World rotation. */
+/** Semantic identity committed by SessionManager before parent rotation. */
 export interface CoordinationSessionTransition {
 	sessionId: string;
 	previousSessionId?: string;
@@ -98,7 +98,7 @@ export interface CoordinationTransitionToken {
 /**
  * Awaited root lifecycle owned by AgentSession and ModelControls.
  *
- * Local and static World backends implement these as no-ops. An attached
+ * Local and static parent backends implement these as no-ops. An attached
  * backend must quiesce mutable work before a SessionManager commit, then
  * rotate/reconfigure only after that commit and before the caller resumes.
  */
@@ -111,7 +111,7 @@ export interface CoordinationLifecycle {
 
 /** Root-scoped coordination used by Task and Hub without changing their tool APIs. */
 export interface CoordinationBackend {
-	readonly kind: "world";
+	readonly kind: "parent";
 	spawn(request: CoordinationSpawnRequest, signal?: AbortSignal): Promise<CoordinationTaskHandle>;
 	listPeers(signal?: AbortSignal): Promise<CoordinationPeerRoster>;
 	attachMailbox(receiverPeerId: string, receiver: Pick<AgentPeer, "deliverIrcMessage">): void;

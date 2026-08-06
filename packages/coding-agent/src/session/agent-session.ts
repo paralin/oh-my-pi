@@ -1105,7 +1105,7 @@ export class AgentSession {
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			wakeForIrc: records => this.#wakeForIrc(records),
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
-			sendWorldIrcReply: config.sendWorldIrcReply,
+			sendParentIrcReply: config.sendParentIrcReply,
 		};
 		this.#irc = new IrcBridge(ircHost);
 		const prewalkHost: PrewalkCoordinatorHost = {
@@ -7190,7 +7190,7 @@ export class AgentSession {
 	): Promise<void> {
 		if (!token || !this.#coordinationLifecycle) return;
 		const model = this.model;
-		if (!model) throw new Error("World root transition requires a selected model");
+		if (!model) throw new Error("parent root transition requires a selected model");
 		await this.#coordinationLifecycle.afterSessionTransition(token, {
 			...transition,
 			provider: model.provider,

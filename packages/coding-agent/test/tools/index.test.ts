@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { CONDITIONAL_TOOLS, createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { WORLD_SESSION_ENV, WORLD_SOCKET_ENV, type WorldClient } from "@oh-my-pi/pi-coding-agent/world/index";
+import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -468,92 +467,5 @@ describe("createTools", () => {
 
 		expect(withoutHub).not.toContain("hub");
 		expect(withHub).toContain("hub");
-	});
-});
-
-const WORLD_SOCKET = "/run/glados/console.sock";
-const WORLD_CALLER = "glados/llm-session/caller";
-
-/** A client stand-in: admission must not depend on a reachable daemon. */
-function boundWorldClient(): WorldClient {
-	return { canMutate: true, sessionKey: WORLD_CALLER } as unknown as WorldClient;
-}
-
-function setWorldEnv(socket: string | undefined, caller: string | undefined): void {
-	if (socket === undefined) delete process.env[WORLD_SOCKET_ENV];
-	else process.env[WORLD_SOCKET_ENV] = socket;
-	if (caller === undefined) delete process.env[WORLD_SESSION_ENV];
-	else process.env[WORLD_SESSION_ENV] = caller;
-}
-
-describe("world tool admission", () => {
-	afterEach(() => {
-		setWorldEnv(undefined, undefined);
-	});
-
-	it("keeps world out of BUILTIN_TOOLS and in the conditional map", () => {
-		expect(Object.keys(CONDITIONAL_TOOLS)).toEqual(["world"]);
-	});
-
-	it("omits world from an unconfigured root", async () => {
-		setWorldEnv(undefined, undefined);
-		const session = createTestSession({ settings: createSettingsWithOverrides({ "tools.xdev": false }) });
-		const names = (await createTools(session)).map(t => t.name);
-		expect(names).not.toContain("world");
-	});
-
-	// A socket alone is the W2 surface: reads through `spacewave://`, no tool.
-	it("omits world from a socket-only root", async () => {
-		setWorldEnv(WORLD_SOCKET, undefined);
-		const session = createTestSession({ settings: createSettingsWithOverrides({ "tools.xdev": false }) });
-		const names = (await createTools(session)).map(t => t.name);
-		expect(names).not.toContain("world");
-	});
-
-	it("keeps malformed World configuration from aborting tool creation", async () => {
-		setWorldEnv("relative/console.sock", WORLD_CALLER);
-		const session = createTestSession({ settings: createSettingsWithOverrides({ "tools.xdev": false }) });
-		const names = (await createTools(session)).map(t => t.name);
-		expect(names).not.toContain("world");
-		expect(names).toContain("read");
-	});
-
-	it("adds world once both the socket and the caller session are configured", async () => {
-		setWorldEnv(WORLD_SOCKET, WORLD_CALLER);
-		const session = createTestSession({
-			settings: createSettingsWithOverrides({ "tools.xdev": false }),
-			worldClient: boundWorldClient,
-		});
-		const names = (await createTools(session)).map(t => t.name);
-		expect(names).toContain("world");
-	});
-
-	// The existing restriction rules keep deciding who gets it: a restricted
-	// child receives world only when it asked for it.
-	it("gives a restricted child world only when its list names it", async () => {
-		setWorldEnv(WORLD_SOCKET, WORLD_CALLER);
-		const withoutWorld = (
-			await createTools(
-				createTestSession({ restrictToolNames: true, requireYieldTool: true, worldClient: boundWorldClient }),
-				["read"],
-			)
-		).map(t => t.name);
-		expect(withoutWorld).not.toContain("world");
-
-		const withWorld = (
-			await createTools(
-				createTestSession({ restrictToolNames: true, requireYieldTool: true, worldClient: boundWorldClient }),
-				["read", "world"],
-			)
-		).map(t => t.name);
-		expect(withWorld).toContain("world");
-	});
-
-	it("refuses a restricted child world when the root is not configured for it", async () => {
-		setWorldEnv(WORLD_SOCKET, undefined);
-		const names = (
-			await createTools(createTestSession({ restrictToolNames: true, requireYieldTool: true }), ["read", "world"])
-		).map(t => t.name);
-		expect(names).not.toContain("world");
 	});
 });

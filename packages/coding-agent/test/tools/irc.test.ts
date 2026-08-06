@@ -78,7 +78,7 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 
 function createRealSession(
 	overrides: Partial<Record<SettingPath, unknown>> = {},
-	sendWorldIrcReply?: AgentSessionConfig["sendWorldIrcReply"],
+	sendParentIrcReply?: AgentSessionConfig["sendParentIrcReply"],
 ): {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -94,7 +94,7 @@ function createRealSession(
 		}),
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, ...overrides }),
-		sendWorldIrcReply,
+		sendParentIrcReply,
 		modelRegistry: {} as never,
 	});
 	return { session, sessionManager };
@@ -1136,8 +1136,8 @@ describe("IRC", () => {
 			expect(record.details).toMatchObject({ to: "0-Sub", body: "auto answer" });
 		});
 
-		it("routes a durable message auto-reply through its World backend", async () => {
-			const sent: Parameters<NonNullable<AgentSessionConfig["sendWorldIrcReply"]>>[0][] = [];
+		it("routes a durable message auto-reply through its Parent backend", async () => {
+			const sent: Parameters<NonNullable<AgentSessionConfig["sendParentIrcReply"]>>[0][] = [];
 			const observed = Promise.withResolvers<void>();
 			const { session } = createRealSession({ "async.enabled": false }, async message => {
 				sent.push(message);
@@ -1158,13 +1158,13 @@ describe("IRC", () => {
 
 			await session.deliverIrcMessage(
 				{
-					id: "world-question",
+					id: "parent-question",
 					from: "main",
 					to: "Child",
 					body: "status?",
 					ts: Date.now(),
 					expectsReply: true,
-					source: "world",
+					source: "parent",
 				},
 				{ expectsReply: true },
 			);
@@ -1175,7 +1175,7 @@ describe("IRC", () => {
 					from: "Child",
 					to: "main",
 					body: "durable answer",
-					replyTo: "world-question",
+					replyTo: "parent-question",
 				},
 			]);
 		});

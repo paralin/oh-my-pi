@@ -10,20 +10,20 @@ import {
 	decodeExternalSubagentProfile,
 	type ExternalSubagentProfileV1,
 } from "../coordination/external-subagent-profile";
-import { createWorldCoordinationBackend } from "../coordination/world";
+import { createParentCoordinationBackend } from "../coordination/parent";
 import { loadSkills } from "../extensibility/skills";
+import { resolveParentSessionId, resolveParentSocketPath } from "../parent/config";
 import { discoverAuthStorage } from "../sdk";
 import { runSubprocess } from "../task/executor";
 import { renderStructuredSubagentPrompt } from "../task/structured-subagent";
 import type { AgentProgress, SingleResult } from "../task/types";
-import { resolveWorldSessionKey, resolveWorldSocketPath } from "../world/config";
 
-export const GLADOS_ADAPTER_CONFIG_ENV = "GLADOS_ADAPTER_CONFIG";
-export const GLADOS_ADAPTER_CONFIG_DIGEST_ENV = "GLADOS_ADAPTER_CONFIG_DIGEST";
+export const PARENT_TASK_PROFILE_ENV = "OMP_PARENT_TASK_PROFILE";
+export const PARENT_TASK_PROFILE_DIGEST_ENV = "OMP_PARENT_TASK_PROFILE_DIGEST";
 
-/** Versioned live progress record consumed by GLaDOS. */
+/** Versioned live progress record consumed by a parent environment. */
 export interface ExternalTaskProgressRecord {
-	type: "glados_task_progress_v1";
+	type: "omp_parent_task_progress_v1";
 	taskProgress: {
 		lastIntent: string;
 		tokens: number;
@@ -38,16 +38,16 @@ export interface ExternalTaskProgressRecord {
 	};
 }
 
-/** Versioned terminal result record consumed by GLaDOS. */
+/** Versioned terminal result record consumed by a parent environment. */
 export interface ExternalTaskResultRecord {
-	type: "glados_task_result_v1";
+	type: "omp_parent_task_result_v1";
 	taskResult: Record<string, unknown>;
 }
 
 function requireExternalProfilePath(env: Record<string, string | undefined>): string {
-	const value = env[GLADOS_ADAPTER_CONFIG_ENV]?.trim();
+	const value = env[PARENT_TASK_PROFILE_ENV]?.trim();
 	if (!value || !path.isAbsolute(value)) {
-		throw new Error(`${GLADOS_ADAPTER_CONFIG_ENV} must be an absolute file path`);
+		throw new Error(`${PARENT_TASK_PROFILE_ENV} must be an absolute file path`);
 	}
 	return value;
 }
@@ -59,9 +59,9 @@ export async function loadExternalSubagentProfile(
 	const profilePath = requireExternalProfilePath(env);
 	const info = await fs.stat(profilePath);
 	if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
-		throw new Error(`${GLADOS_ADAPTER_CONFIG_ENV} must name a mode-0600 regular file`);
+		throw new Error(`${PARENT_TASK_PROFILE_ENV} must name a mode-0600 regular file`);
 	}
-	const digest = env[GLADOS_ADAPTER_CONFIG_DIGEST_ENV]?.trim() ?? "";
+	const digest = env[PARENT_TASK_PROFILE_DIGEST_ENV]?.trim() ?? "";
 	const bytes = await fs.readFile(profilePath);
 	return decodeExternalSubagentProfile(bytes, digest);
 }
@@ -70,10 +70,10 @@ async function emitRecord(record: ExternalTaskProgressRecord | ExternalTaskResul
 	if (!process.stdout.write(`${JSON.stringify(record)}\n`)) await once(process.stdout, "drain");
 }
 
-/** Maps live Task state onto the versioned GLaDOS progress record. */
+/** Maps live Task state onto the versioned parent progress record. */
 export function externalTaskProgressRecord(progress: AgentProgress): ExternalTaskProgressRecord {
 	return {
-		type: "glados_task_progress_v1",
+		type: "omp_parent_task_progress_v1",
 		taskProgress: {
 			lastIntent: progress.lastIntent ?? "",
 			tokens: progress.tokens,
@@ -89,7 +89,7 @@ export function externalTaskProgressRecord(progress: AgentProgress): ExternalTas
 	};
 }
 
-/** Maps the complete Task result onto the versioned GLaDOS terminal record. */
+/** Maps the complete Task result onto the versioned parent terminal record. */
 export function externalTaskResultRecord(result: SingleResult): ExternalTaskResultRecord {
 	const usage = result.usage;
 	const extractedToolData = Object.entries(result.extractedToolData ?? {}).map(([toolName, values]) => ({
@@ -97,7 +97,7 @@ export function externalTaskResultRecord(result: SingleResult): ExternalTaskResu
 		values: values.map(value => canonicalJsonStringify(value)),
 	}));
 	return {
-		type: "glados_task_result_v1",
+		type: "omp_parent_task_result_v1",
 		taskResult: {
 			lastIntent: result.lastIntent ?? "",
 			exitCode: result.exitCode,
@@ -159,12 +159,12 @@ export async function runExternalSubagentMode(
 	env: Record<string, string | undefined> = process.env,
 ): Promise<SingleResult> {
 	const profile = await loadExternalSubagentProfile(env);
-	const socketPath = resolveWorldSocketPath({ env });
-	const sessionKey = resolveWorldSessionKey({ env });
+	const socketPath = resolveParentSocketPath({ env });
+	const sessionKey = resolveParentSessionId({ env });
 	if (!socketPath || !sessionKey)
-		throw new Error("external subagent mode requires OMP_WORLD_SOCKET and OMP_WORLD_SESSION");
-	const backend = createWorldCoordinationBackend({ env });
-	if (!backend) throw new Error("external subagent mode could not create its World coordination backend");
+		throw new Error("external subagent mode requires OMP_PARENT_SOCKET and OMP_PARENT_SESSION");
+	const backend = createParentCoordinationBackend({ env });
+	if (!backend) throw new Error("external subagent mode could not create its parent coordination backend");
 
 	const startedAt = Date.now();
 	const jobs = new AsyncJobManager({ onJobComplete: () => {} });

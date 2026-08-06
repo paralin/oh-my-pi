@@ -1,0 +1,12 @@
+{
+  "schema": "proto/parent-environment.proto",
+  "schemaSha256": "2b32ffd71637ff186431a810c996a096fc6de3840c1f2bd4ebaf76c4ffa5fa43",
+  "generated": {
+    "parent-environment.pb.ts": "321d656597f519298e30c4fe045f030d4ccbb002d10cf1b831831430977fe8a8",
+    "parent-environment_srpc.pb.ts": "368badd72a6ffe9c022bb934f2a709333952aff36f7df2e452957112242ab209"
+  },
+  "plugins": {
+    "protobuf": "protoc-gen-es-lite target=ts,ts_nocheck=false",
+    "starpc": "protoc-gen-es-starpc target=ts"
+  }
+}

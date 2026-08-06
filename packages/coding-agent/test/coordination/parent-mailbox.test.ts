@@ -1,16 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { WORLD_MAILBOX_CAP, WorldMailboxRouter } from "@oh-my-pi/pi-coding-agent/coordination/world-mailbox";
+import { PARENT_MAILBOX_CAP, ParentMailboxRouter } from "@oh-my-pi/pi-coding-agent/coordination/parent-mailbox";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { type ParentClient, ParentEndpointError } from "@oh-my-pi/pi-coding-agent/parent/client";
 import type { AgentPeer } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { type WorldClient, WorldEndpointError } from "@oh-my-pi/pi-coding-agent/world/client";
-import type { AgentMessageSummary } from "../../src/world/generated/llmsession.pb.js";
-import { PeerMessageAckOutcome } from "../../src/world/generated/llmsession.pb.js";
+import type { AgentMessageSummary } from "../../src/parent/generated/parent-environment.pb.js";
+import { PeerMessageAckOutcome } from "../../src/parent/generated/parent-environment.pb.js";
 
 function summary(index: number, overrides: Partial<AgentMessageSummary> = {}): AgentMessageSummary {
 	return {
-		messageObjectKey: `glados/messages/${index}`,
-		fromAgentObjectKey: "glados/agents/sender",
-		sourceLlmSessionObjectKey: "glados/sessions/sender",
+		messageId: `glados/messages/${index}`,
+		fromAgentId: "glados/agents/sender",
+		sourceSessionId: "glados/sessions/sender",
 		clientMessageId: `message-${index}`,
 		body: `body ${index}`,
 		createdAt: `2026-08-04T12:00:${String(index % 60).padStart(2, "0")}Z`,
@@ -21,7 +21,7 @@ function summary(index: number, overrides: Partial<AgentMessageSummary> = {}): A
 
 class MailboxClient {
 	readonly messages: AgentMessageSummary[];
-	readonly acknowledgements: Parameters<WorldClient["ackPeerMessage"]>[0][] = [];
+	readonly acknowledgements: Parameters<ParentClient["ackPeerMessage"]>[0][] = [];
 	readonly processed = Promise.withResolvers<void>();
 	holdOpen = true;
 
@@ -29,7 +29,7 @@ class MailboxClient {
 		this.messages = messages;
 	}
 
-	watchPeerMailbox(signal?: AbortSignal): ReturnType<WorldClient["watchPeerMailbox"]> {
+	watchPeerMailbox(signal?: AbortSignal): ReturnType<ParentClient["watchPeerMailbox"]> {
 		const messages = this.messages;
 		const holdOpen = this.holdOpen;
 		return (async function* () {
@@ -44,14 +44,14 @@ class MailboxClient {
 	}
 
 	async ackPeerMessage(
-		request: Parameters<WorldClient["ackPeerMessage"]>[0],
-	): ReturnType<WorldClient["ackPeerMessage"]> {
+		request: Parameters<ParentClient["ackPeerMessage"]>[0],
+	): ReturnType<ParentClient["ackPeerMessage"]> {
 		this.acknowledgements.push(request);
 		if (this.acknowledgements.length === this.messages.length) this.processed.resolve();
 		return {
 			requestId: request.requestId,
-			messageObjectKey: request.messageObjectKey,
-			consumedByLlmSessionObjectKey: "glados/sessions/receiver",
+			messageId: request.messageId,
+			consumedBySessionId: "glados/sessions/receiver",
 			consumedAt: "2026-08-04T12:01:00Z",
 			replayed: false,
 		};
@@ -70,8 +70,8 @@ function receiver(
 	};
 }
 
-function router(client: MailboxClient, target: Pick<AgentPeer, "deliverIrcMessage">): WorldMailboxRouter {
-	return new WorldMailboxRouter({
+function router(client: MailboxClient, target: Pick<AgentPeer, "deliverIrcMessage">): ParentMailboxRouter {
+	return new ParentMailboxRouter({
 		client,
 		receiverPeerId: "receiver",
 		receiver: target,
@@ -79,7 +79,7 @@ function router(client: MailboxClient, target: Pick<AgentPeer, "deliverIrcMessag
 	});
 }
 
-describe("WorldMailboxRouter", () => {
+describe("ParentMailboxRouter", () => {
 	test("gives a matching waiter first claim and acknowledges the exact record", async () => {
 		const client = new MailboxClient([
 			summary(1, {
@@ -101,13 +101,13 @@ describe("WorldMailboxRouter", () => {
 			replyTo: "question-1",
 			expectsReply: true,
 			inboxSequence: 1n,
-			source: "world",
+			source: "parent",
 		});
 		await client.processed.promise;
 		expect(deliveries).toEqual([]);
 		expect(client.acknowledgements).toEqual([
 			expect.objectContaining({
-				messageObjectKey: "glados/messages/1",
+				messageId: "glados/messages/1",
 				outcome: PeerMessageAckOutcome.WAITER,
 			}),
 		]);
@@ -116,17 +116,19 @@ describe("WorldMailboxRouter", () => {
 	});
 
 	test("passes unmatched records through the session and retains a bounded local inbox", async () => {
-		const client = new MailboxClient(Array.from({ length: WORLD_MAILBOX_CAP + 1 }, (_, index) => summary(index + 1)));
+		const client = new MailboxClient(
+			Array.from({ length: PARENT_MAILBOX_CAP + 1 }, (_, index) => summary(index + 1)),
+		);
 		const deliveries: IrcMessage[] = [];
 		const mailbox = router(client, receiver(deliveries, "queued"));
 		mailbox.start();
 		await client.processed.promise;
 
-		expect(deliveries).toHaveLength(WORLD_MAILBOX_CAP + 1);
-		expect(client.acknowledgements).toHaveLength(WORLD_MAILBOX_CAP + 1);
+		expect(deliveries).toHaveLength(PARENT_MAILBOX_CAP + 1);
+		expect(client.acknowledgements).toHaveLength(PARENT_MAILBOX_CAP + 1);
 		expect(client.acknowledgements[0]?.outcome).toBe(PeerMessageAckOutcome.QUEUED);
 		const peeked = mailbox.inbox({ peek: true });
-		expect(peeked).toHaveLength(WORLD_MAILBOX_CAP);
+		expect(peeked).toHaveLength(PARENT_MAILBOX_CAP);
 		expect(peeked[0]?.id).toBe("message-2");
 		expect(mailbox.inbox()).toEqual(peeked);
 		expect(mailbox.inbox()).toEqual([]);
@@ -182,7 +184,7 @@ describe("WorldMailboxRouter", () => {
 			return (async function* () {
 				client.connected = true;
 				yield* [] as AgentMessageSummary[];
-				throw new WorldEndpointError(new Error("retired endpoint closed"));
+				throw new ParentEndpointError(new Error("retired endpoint closed"));
 			})();
 		};
 		const deliveries: IrcMessage[] = [];
@@ -225,7 +227,7 @@ describe("WorldMailboxRouter", () => {
 		const waiting = mailbox.wait({ from: "sender" }, 0);
 
 		await mailbox.close();
-		await expect(waiting).rejects.toThrow("World mailbox router closed");
+		await expect(waiting).rejects.toThrow("Parent mailbox router closed");
 		expect(client.acknowledgements).toEqual([]);
 	});
 });

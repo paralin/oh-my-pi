@@ -5665,22 +5665,6 @@ export const SETTINGS_SCHEMA = {
 		default: "unset" as const,
 	},
 
-	// World (hidden; all daemon attachment is inert until explicitly enabled)
-	"world.socket": {
-		type: "string",
-		default: undefined,
-	},
-
-	"world.session": {
-		type: "string",
-		default: undefined,
-	},
-
-	"world.interactive": {
-		type: "boolean",
-		default: false,
-	},
-
 	"gc.blobs": { type: "boolean", default: true },
 
 	"gc.archive": { type: "boolean", default: true },
@@ -5981,40 +5965,6 @@ export interface GcSettings {
 	retainNewestPerCwd: number;
 }
 
-export interface WorldSettings {
-	/**
-	 * Absolute path to the GLaDOS daemon Console socket — the value of
-	 * `GLADOS_CONSOLE_SOCKET`, defaulting to `<state>/glados/console.sock`.
-	 *
-	 * It has to be that socket specifically. Only the Console socket serves the
-	 * GLaDOS resource surface as its root resource; the Spacewave socket also
-	 * answers the ResourceClient handshake, so pointing this at it connects
-	 * cleanly and then fails every call with an unknown-service error.
-	 *
-	 * Unset means the World integration is inactive: no transport is
-	 * constructed and no socket is dialed. `OMP_WORLD_SOCKET` takes precedence
-	 * over this value.
-	 */
-	socket: string | undefined;
-
-	/**
-	 * World object key of the LlmSession this root's World operations are
-	 * charged to.
-	 *
-	 * GLaDOS reads this session's frozen capability manifest and answers every
-	 * authority-checked operation from it. The key selects whose permissions
-	 * apply; it does not prove which process opened the socket, which remains
-	 * the local Unix socket's job.
-	 *
-	 * Unset with a socket set is a complete configuration: that root keeps
-	 * read-only `spacewave://` access and is not given the `world` tool.
-	 * `OMP_WORLD_SESSION` takes precedence over this value, matching
-	 * `world.socket`.
-	 */
-	session: string | undefined;
-	/** Opt-in attended World root attachment for the ordinary interactive TUI. */
-	interactive: boolean;
-}
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -6037,7 +5987,6 @@ export interface GroupTypeMap {
 	shellMinimizer: ShellMinimizerSettings;
 	codexResets: CodexResetsSettings;
 	gc: GcSettings;
-	world: WorldSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

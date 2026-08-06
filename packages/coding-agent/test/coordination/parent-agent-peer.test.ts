@@ -1,33 +1,36 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { WorldCoordinationBackend, type WorldCoordinationClient } from "@oh-my-pi/pi-coding-agent/coordination/world";
 import {
-	WorldAgentPeer,
-	WorldPeerProjectionError,
-	worldSessionLifecycle,
-} from "@oh-my-pi/pi-coding-agent/coordination/world-agent-peer";
+	ParentCoordinationBackend,
+	type ParentCoordinationClient,
+} from "@oh-my-pi/pi-coding-agent/coordination/parent";
+import {
+	ParentAgentPeer,
+	ParentPeerProjectionError,
+	parentSessionLifecycle,
+} from "@oh-my-pi/pi-coding-agent/coordination/parent-agent-peer";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import {
+	type ParentAgentPeerResolution,
+	type ParentClient,
+	type ParentDispatchSubmit,
+	type ParentDispatchSubmitResult,
+	ParentOperationError,
+} from "@oh-my-pi/pi-coding-agent/parent/client";
+import { type IntentKeySource, intentKey } from "@oh-my-pi/pi-coding-agent/parent/intent-key";
 import { type AgentPeer, AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
-import {
-	type WorldAgentPeerResolution,
-	type WorldClient,
-	type WorldDispatchSubmit,
-	type WorldDispatchSubmitResult,
-	WorldOperationError,
-} from "@oh-my-pi/pi-coding-agent/world/client";
-import { type IntentKeySource, intentKey } from "@oh-my-pi/pi-coding-agent/world/intent-key";
 import type {
 	AgentMessageSummary,
 	AgentTreeSnapshot,
 	SessionSnapshot,
 	SessionSummary,
-} from "../../src/world/generated/llmsession.pb.js";
+} from "../../src/parent/generated/parent-environment.pb.js";
 import {
+	ParentFailureCode,
+	ParentSessionState,
 	PeerMessageAckOutcome,
 	PeerMessageOutcome,
-	WorldOperationFailureCode,
-	WorldRuntimeOperation,
-} from "../../src/world/generated/llmsession.pb.js";
+} from "../../src/parent/generated/parent-environment.pb.js";
 
 const ROOT_SESSION = "glados/test/llm-session/root";
 const ROOT_AGENT = "glados/test/agent/root";
@@ -50,7 +53,7 @@ function message(overrides: Partial<IrcMessage> = {}): IrcMessage {
 	};
 }
 
-class RosterClient implements WorldCoordinationClient {
+class RosterClient implements ParentCoordinationClient {
 	readonly canMutate = true;
 	readonly connected = true;
 	readonly calls: string[] = [];
@@ -60,9 +63,9 @@ class RosterClient implements WorldCoordinationClient {
 	tree: AgentTreeSnapshot = { agents: [] };
 	sessions: SessionSummary[] = [];
 	snapshots = new Map<string, SessionSnapshot[]>();
-	resolutions = new Map<string, WorldAgentPeerResolution | Error>();
-	readonly sentMessages: Parameters<WorldClient["sendPeerMessage"]>[0][] = [];
-	readonly acknowledgements: Parameters<WorldClient["ackPeerMessage"]>[0][] = [];
+	resolutions = new Map<string, ParentAgentPeerResolution | Error>();
+	readonly sentMessages: Parameters<ParentClient["sendPeerMessage"]>[0][] = [];
+	readonly acknowledgements: Parameters<ParentClient["ackPeerMessage"]>[0][] = [];
 	readonly ackObserved = Promise.withResolvers<void>();
 	mailboxMessages: AgentMessageSummary[] = [];
 	mailboxGate: Promise<void> | undefined;
@@ -78,7 +81,7 @@ class RosterClient implements WorldCoordinationClient {
 		return { found: false };
 	}
 
-	async submitDispatch(_request: WorldDispatchSubmit): Promise<WorldDispatchSubmitResult> {
+	async submitDispatch(_request: ParentDispatchSubmit): Promise<ParentDispatchSubmitResult> {
 		throw new Error("unused");
 	}
 
@@ -87,7 +90,7 @@ class RosterClient implements WorldCoordinationClient {
 		return this.sessions.slice(0, limit);
 	}
 
-	async resolveAgentPeer(peerId: string): Promise<WorldAgentPeerResolution> {
+	async resolveAgentPeer(peerId: string): Promise<ParentAgentPeerResolution> {
 		this.calls.push(`resolve:${peerId}`);
 		const value = this.resolutions.get(peerId);
 		if (value instanceof Error) throw value;
@@ -106,23 +109,22 @@ class RosterClient implements WorldCoordinationClient {
 	}
 
 	async sendPeerMessage(
-		request: Parameters<WorldClient["sendPeerMessage"]>[0],
-	): ReturnType<WorldClient["sendPeerMessage"]> {
+		request: Parameters<ParentClient["sendPeerMessage"]>[0],
+	): ReturnType<ParentClient["sendPeerMessage"]> {
 		this.sentMessages.push(request);
 		return {
 			requestId: request.requestId,
-			messageObjectKey: `glados/test/message/${request.clientMessageId}`,
+			messageId: `glados/test/message/${request.clientMessageId}`,
 			clientMessageId: request.clientMessageId,
-			toAgentObjectKey: "glados/test/agent/target",
-			targetLlmSessionObjectKey:
-				this.sendOutcome === PeerMessageOutcome.QUEUED_LIVE ? "glados/test/llm-session/target" : "",
+			toAgentId: "glados/test/agent/target",
+			targetSessionId: this.sendOutcome === PeerMessageOutcome.QUEUED_LIVE ? "glados/test/llm-session/target" : "",
 			inboxSequence: 1n,
 			outcome: this.sendOutcome,
 			replayed: false,
 		};
 	}
 
-	watchPeerMailbox(signal?: AbortSignal): ReturnType<WorldClient["watchPeerMailbox"]> {
+	watchPeerMailbox(signal?: AbortSignal): ReturnType<ParentClient["watchPeerMailbox"]> {
 		const client = this;
 		return (async function* () {
 			await client.mailboxGate;
@@ -137,42 +139,42 @@ class RosterClient implements WorldCoordinationClient {
 	}
 
 	async ackPeerMessage(
-		request: Parameters<WorldClient["ackPeerMessage"]>[0],
-	): ReturnType<WorldClient["ackPeerMessage"]> {
+		request: Parameters<ParentClient["ackPeerMessage"]>[0],
+	): ReturnType<ParentClient["ackPeerMessage"]> {
 		this.acknowledgements.push(request);
 		this.ackObserved.resolve();
 		return {
 			requestId: request.requestId,
-			messageObjectKey: request.messageObjectKey,
-			consumedByLlmSessionObjectKey: this.sessionKey,
+			messageId: request.messageId,
+			consumedBySessionId: this.sessionKey,
 			consumedAt: "2026-08-04T12:00:00Z",
 			replayed: false,
 		};
 	}
 
-	async *watchSession(sessionObjectKey: string): AsyncGenerator<SessionSnapshot, void, void> {
-		this.calls.push(`watchSession:${sessionObjectKey}`);
+	async *watchSession(sessionId: string): AsyncGenerator<SessionSnapshot, void, void> {
+		this.calls.push(`watchSession:${sessionId}`);
 		try {
-			for (const snapshot of this.snapshots.get(sessionObjectKey) ?? []) yield snapshot;
+			for (const snapshot of this.snapshots.get(sessionId) ?? []) yield snapshot;
 		} finally {
-			this.releases.set(sessionObjectKey, (this.releases.get(sessionObjectKey) ?? 0) + 1);
+			this.releases.set(sessionId, (this.releases.get(sessionId) ?? 0) + 1);
 		}
 	}
 
-	async interruptSession(request: { targetSessionObjectKey: string }): Promise<{
+	async interruptSession(request: { targetSessionId: string }): Promise<{
 		requestId: string;
 		operation: "session_interrupt";
-		targetSessionObjectKey: string;
+		targetSessionId: string;
 		dispatchKey: string;
 		acceptedSequence: bigint;
 		detail: string;
 		replayed: boolean;
 	}> {
-		this.interrupts.push(request.targetSessionObjectKey);
+		this.interrupts.push(request.targetSessionId);
 		return {
 			requestId: "interrupt",
 			operation: "session_interrupt",
-			targetSessionObjectKey: request.targetSessionObjectKey,
+			targetSessionId: request.targetSessionId,
 			dispatchKey: "dispatch/1",
 			acceptedSequence: 1n,
 			detail: "accepted",
@@ -185,11 +187,11 @@ class RosterClient implements WorldCoordinationClient {
 	}
 }
 
-function activeSession(peerId: string, state = "LLM_SESSION_STATE_LIVE"): SessionSummary {
+function activeSession(peerId: string, state = ParentSessionState.ACTIVE): SessionSummary {
 	return {
-		sessionObjectKey: `glados/test/llm-session/${peerId}`,
-		agentObjectKey: `glados/test/agent/${peerId}`,
-		parentSessionObjectKey: ROOT_SESSION,
+		sessionId: `glados/test/llm-session/${peerId}`,
+		agentId: `glados/test/agent/${peerId}`,
+		parentSessionId: ROOT_SESSION,
 		state,
 		updatedAt: "2026-08-04T10:00:00Z",
 	};
@@ -197,30 +199,35 @@ function activeSession(peerId: string, state = "LLM_SESSION_STATE_LIVE"): Sessio
 
 function configureRoot(client: RosterClient): void {
 	const root: SessionSummary = {
-		sessionObjectKey: ROOT_SESSION,
-		agentObjectKey: ROOT_AGENT,
-		state: "LLM_SESSION_STATE_LIVE",
+		sessionId: ROOT_SESSION,
+		agentId: ROOT_AGENT,
+		state: ParentSessionState.ACTIVE,
 	};
 	client.sessions.push(root);
 	client.snapshots.set(ROOT_SESSION, [{ session: root }]);
 	client.tree = {
-		agents: [{ agentObjectKey: ROOT_AGENT, name: "Operator", activeLlmSessionObjectKeys: [ROOT_SESSION] }],
+		agents: [{ agentId: ROOT_AGENT, name: "Operator", activeSessionIds: [ROOT_SESSION] }],
 	};
 }
 
-function addPeer(client: RosterClient, peerId: string, state = "LLM_SESSION_STATE_LIVE"): SessionSummary {
+function addPeer(client: RosterClient, peerId: string, state = ParentSessionState.ACTIVE): SessionSummary {
 	const session = activeSession(peerId, state);
-	const inactive = /(?:^|_)(?:COMPLETE|ARCHIVED|FAILED|CANCELED)$/.test(state);
+	const inactive = new Set([
+		ParentSessionState.COMPLETE,
+		ParentSessionState.ARCHIVED,
+		ParentSessionState.FAILED,
+		ParentSessionState.CANCELED,
+	]).has(state);
 	const agent = {
-		agentObjectKey: session.agentObjectKey,
-		parentAgentObjectKey: ROOT_AGENT,
+		agentId: session.agentId,
+		parentAgentId: ROOT_AGENT,
 		name: peerId.toUpperCase(),
 		peerId,
-		activeLlmSessionObjectKeys: inactive ? [] : [session.sessionObjectKey!],
+		activeSessionIds: inactive ? [] : [session.sessionId!],
 	};
 	client.tree.agents?.push(agent);
 	client.sessions.push(session);
-	client.snapshots.set(session.sessionObjectKey!, [
+	client.snapshots.set(session.sessionId!, [
 		{
 			session,
 			turns: [{ turnId: `${peerId}-turn`, role: "assistant", content: `${peerId} history` }],
@@ -244,36 +251,36 @@ afterEach(() => {
 	AgentRegistry.resetGlobalForTests();
 });
 
-describe("World session lifecycle projection", () => {
+describe("Parent session lifecycle projection", () => {
 	test.each([
-		["LLM_SESSION_STATE_CREATED", "running", false, true],
-		["LLM_SESSION_STATE_LIVE", "running", false, true],
-		["LLM_SESSION_STATE_AWAITING_PROCESS", "running", false, true],
-		["LLM_SESSION_STATE_BLOCKED", "idle", false, true],
-		["LLM_SESSION_STATE_AWAITING_USER", "idle", false, true],
-		["LLM_SESSION_STATE_DORMANT", "parked", false, false],
-		["LLM_SESSION_STATE_COMPLETE", "idle", true, false],
-		["LLM_SESSION_STATE_ARCHIVED", "idle", true, false],
-		["LLM_SESSION_STATE_FAILED", "aborted", true, false],
-		["LLM_SESSION_STATE_CANCELED", "aborted", true, false],
+		[ParentSessionState.CREATED, "running", false, true],
+		[ParentSessionState.ACTIVE, "running", false, true],
+		[ParentSessionState.AWAITING_PROCESS, "running", false, true],
+		[ParentSessionState.BLOCKED, "idle", false, true],
+		[ParentSessionState.AWAITING_USER, "idle", false, true],
+		[ParentSessionState.DORMANT, "parked", false, false],
+		[ParentSessionState.COMPLETE, "idle", true, false],
+		[ParentSessionState.ARCHIVED, "idle", true, false],
+		[ParentSessionState.FAILED, "aborted", true, false],
+		[ParentSessionState.CANCELED, "aborted", true, false],
 	] as const)("maps %s without inference", (state, status, inactive, mailboxLive) => {
-		expect(worldSessionLifecycle("worker", { sessionObjectKey: "session", state })).toEqual({
+		expect(parentSessionLifecycle("worker", { sessionId: "session", state })).toEqual({
 			status,
 			inactive,
 			mailboxLive,
 		});
 	});
 
-	test.each(["", "LLM_SESSION_STATE_UNKNOWN", "LLM_SESSION_STATE_RUNNING"])("rejects unknown lifecycle %s", state => {
-		expect(() => worldSessionLifecycle("worker", { sessionObjectKey: "session", state })).toThrow(
-			WorldPeerProjectionError,
+	test.each([ParentSessionState.UNKNOWN, 99 as ParentSessionState])("rejects unknown lifecycle %s", state => {
+		expect(() => parentSessionLifecycle("worker", { sessionId: "session", state })).toThrow(
+			ParentPeerProjectionError,
 		);
 	});
 });
 
-describe("WorldAgentPeer", () => {
+describe("ParentAgentPeer", () => {
 	test("reads history and messages from the latest complete session snapshot", async () => {
-		const session = activeSession("worker", "LLM_SESSION_STATE_BLOCKED");
+		const session = activeSession("worker", ParentSessionState.BLOCKED);
 		let releases = 0;
 		const deliveries: IrcMessage[] = [];
 		const aborts: string[] = [];
@@ -296,7 +303,7 @@ describe("WorldAgentPeer", () => {
 					}
 				})(),
 		};
-		const peer = await WorldAgentPeer.open({
+		const peer = await ParentAgentPeer.open({
 			client,
 			peerId: "worker",
 			session,
@@ -317,12 +324,12 @@ describe("WorldAgentPeer", () => {
 			messages: [
 				{ role: "assistant", content: [{ type: "text", text: "durable history" }] },
 				{ role: "user", content: "next step" },
-				{ role: "custom", customType: "world-turn:system", content: "provider context", display: true },
+				{ role: "custom", customType: "parent-turn:system", content: "provider context", display: true },
 			],
-			sourceLabel: `World session ${session.sessionObjectKey}`,
+			sourceLabel: `Parent session ${session.sessionId}`,
 		});
 		expect(formatSessionHistoryMarkdown(history.messages)).toContain("durable history");
-		expect(formatSessionHistoryMarkdown(history.messages)).toContain("[world-turn:system] provider context");
+		expect(formatSessionHistoryMarkdown(history.messages)).toContain("[parent-turn:system] provider context");
 		expect(await peer.deliverIrcMessage(message())).toBe("queued");
 		await peer.abort({ reason: "stop" });
 		expect(deliveries).toHaveLength(1);
@@ -335,9 +342,9 @@ describe("WorldAgentPeer", () => {
 		const session = activeSession("worker");
 		let releases = 0;
 		let mutations = 0;
-		const peer = await WorldAgentPeer.open({
+		const peer = await ParentAgentPeer.open({
 			client: {
-				watchSession: (_sessionObjectKey, signal) =>
+				watchSession: (_sessionId, signal) =>
 					(async function* () {
 						try {
 							yield { session };
@@ -367,7 +374,7 @@ describe("WorldAgentPeer", () => {
 	});
 });
 
-describe("World roster", () => {
+describe("Parent roster", () => {
 	test("projects active, inactive, failed, history, and parent identity without registering proxies", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({
@@ -380,9 +387,9 @@ describe("World roster", () => {
 		const client = new RosterClient();
 		configureRoot(client);
 		addPeer(client, "worker");
-		addPeer(client, "dormant", "LLM_SESSION_STATE_DORMANT");
-		addPeer(client, "failed", "LLM_SESSION_STATE_FAILED");
-		const backend = new WorldCoordinationBackend(client);
+		addPeer(client, "dormant", ParentSessionState.DORMANT);
+		addPeer(client, "failed", ParentSessionState.FAILED);
+		const backend = new ParentCoordinationBackend(client);
 
 		const roster = await backend.listPeers();
 		expect(roster.errors).toEqual([]);
@@ -418,35 +425,35 @@ describe("World roster", () => {
 		});
 		const client = new RosterClient();
 		const parent: SessionSummary = {
-			sessionObjectKey: ROOT_SESSION,
-			agentObjectKey: ROOT_AGENT,
-			state: "LLM_SESSION_STATE_BLOCKED",
+			sessionId: ROOT_SESSION,
+			agentId: ROOT_AGENT,
+			state: ParentSessionState.BLOCKED,
 		};
 		const child: SessionSummary = {
-			sessionObjectKey: "glados/test/llm-session/child",
-			agentObjectKey: "glados/test/agent/child",
-			parentSessionObjectKey: ROOT_SESSION,
-			state: "LLM_SESSION_STATE_LIVE",
+			sessionId: "glados/test/llm-session/child",
+			agentId: "glados/test/agent/child",
+			parentSessionId: ROOT_SESSION,
+			state: ParentSessionState.ACTIVE,
 		};
-		client.sessionKey = child.sessionObjectKey!;
+		client.sessionKey = child.sessionId!;
 		client.sessions = [parent, child];
 		client.tree = {
 			agents: [
-				{ agentObjectKey: ROOT_AGENT, name: "Operator" },
+				{ agentId: ROOT_AGENT, name: "Operator" },
 				{
-					agentObjectKey: child.agentObjectKey,
-					parentAgentObjectKey: ROOT_AGENT,
+					agentId: child.agentId,
+					parentAgentId: ROOT_AGENT,
 					peerId: "child",
 					name: "Child",
-					activeLlmSessionObjectKeys: [child.sessionObjectKey!],
+					activeSessionIds: [child.sessionId!],
 				},
 			],
 		};
 		client.snapshots.set(ROOT_SESSION, [
 			{ session: parent, turns: [{ turnId: "parent-turn", role: "assistant", content: "parent history" }] },
 		]);
-		client.snapshots.set(child.sessionObjectKey!, [{ session: child }]);
-		const backend = new WorldCoordinationBackend(client);
+		client.snapshots.set(child.sessionId!, [{ session: child }]);
+		const backend = new ParentCoordinationBackend(client);
 
 		const roster = await backend.listPeers();
 		expect(roster.errors).toEqual([]);
@@ -465,14 +472,14 @@ describe("World roster", () => {
 		await backend.close();
 	});
 
-	test("returns a World collision row for the merge layer to reject", async () => {
+	test("returns a Parent collision row for the merge layer to reject", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: MAIN_AGENT_ID, displayName: "Main", kind: "main", session: localPeer });
 		registry.register({ id: "worker", displayName: "Local worker", kind: "sub", session: localPeer });
 		const client = new RosterClient();
 		configureRoot(client);
 		addPeer(client, "worker");
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const roster = await backend.listPeers();
 		expect(roster.peers.map(ref => ref.id)).toEqual(["worker"]);
@@ -486,20 +493,19 @@ describe("World roster", () => {
 		const client = new RosterClient();
 		configureRoot(client);
 		addPeer(client, "ambiguous");
-		addPeer(client, "unknown", "LLM_SESSION_STATE_UNKNOWN");
+		addPeer(client, "unknown", ParentSessionState.UNKNOWN);
 		client.resolutions.set(
 			"ambiguous",
-			new WorldOperationError(
-				"world.agent.message.receive",
+			new ParentOperationError(
+				"parent.agent.message.receive",
 				{
-					code: WorldOperationFailureCode.AMBIGUOUS_ACTIVE_PEER,
-					operation: WorldRuntimeOperation.AGENT_MESSAGE_RECEIVE,
+					code: ParentFailureCode.AMBIGUOUS_ACTIVE_PEER,
 					detail: "two active Task sessions",
 				},
 				"",
 			),
 		);
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const roster = await backend.listPeers();
 		expect(roster.peers).toEqual([]);
@@ -512,9 +518,9 @@ describe("World roster", () => {
 
 	test("rejects a roster when the bound session identity is missing", async () => {
 		const client = new RosterClient();
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
-		await expect(backend.listPeers()).rejects.toThrow(`Bound World LlmSession ${ROOT_SESSION} is missing`);
+		await expect(backend.listPeers()).rejects.toThrow(`Bound Parent LlmSession ${ROOT_SESSION} is missing`);
 		await backend.close();
 	});
 
@@ -525,7 +531,7 @@ describe("World roster", () => {
 		const resolution = client.resolutions.get("worker");
 		if (!resolution || resolution instanceof Error) throw new Error("missing worker resolution");
 		client.resolutions.set("worker", { ...resolution, session: undefined, inactive: true });
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const roster = await backend.listPeers();
 		expect(roster.peers).toEqual([]);
@@ -540,10 +546,10 @@ describe("World roster", () => {
 	});
 });
 
-describe("World peer messaging", () => {
+describe("Parent peer messaging", () => {
 	test("stores ordinary and reserved-parent sends with stable typed receipts", async () => {
 		const client = new RosterClient();
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 
 		const live = await backend.send({
 			targetPeerId: "worker",
@@ -576,7 +582,7 @@ describe("World peer messaging", () => {
 				targetPeerId: "glados/test/llm-session/worker",
 				message: message({ id: "send-raw-session" }),
 			}),
-		).rejects.toThrow("World Task peer ID must contain");
+		).rejects.toThrow("Parent Task peer ID must contain");
 		expect(client.sentMessages).toHaveLength(2);
 		await backend.close();
 	});
@@ -584,37 +590,37 @@ describe("World peer messaging", () => {
 	test("maps the manifest parent to reserved main and gives a filtered waiter first claim", async () => {
 		const client = new RosterClient();
 		const parent: SessionSummary = {
-			sessionObjectKey: ROOT_SESSION,
-			agentObjectKey: ROOT_AGENT,
-			state: "LLM_SESSION_STATE_BLOCKED",
+			sessionId: ROOT_SESSION,
+			agentId: ROOT_AGENT,
+			state: ParentSessionState.BLOCKED,
 		};
 		const child: SessionSummary = {
-			sessionObjectKey: "glados/test/llm-session/child",
-			agentObjectKey: "glados/test/agent/child",
-			parentSessionObjectKey: ROOT_SESSION,
-			state: "LLM_SESSION_STATE_LIVE",
+			sessionId: "glados/test/llm-session/child",
+			agentId: "glados/test/agent/child",
+			parentSessionId: ROOT_SESSION,
+			state: ParentSessionState.ACTIVE,
 		};
-		client.sessionKey = child.sessionObjectKey!;
+		client.sessionKey = child.sessionId!;
 		client.sessions = [parent, child];
 		client.tree = {
 			agents: [
-				{ agentObjectKey: ROOT_AGENT, name: "Operator", activeLlmSessionObjectKeys: [ROOT_SESSION] },
+				{ agentId: ROOT_AGENT, name: "Operator", activeSessionIds: [ROOT_SESSION] },
 				{
-					agentObjectKey: child.agentObjectKey,
-					parentAgentObjectKey: ROOT_AGENT,
+					agentId: child.agentId,
+					parentAgentId: ROOT_AGENT,
 					peerId: "child",
 					name: "Child",
-					activeLlmSessionObjectKeys: [child.sessionObjectKey!],
+					activeSessionIds: [child.sessionId!],
 				},
 			],
 		};
 		client.snapshots.set(ROOT_SESSION, [{ session: parent }]);
-		client.snapshots.set(child.sessionObjectKey!, [{ session: child }]);
+		client.snapshots.set(child.sessionId!, [{ session: child }]);
 		client.mailboxMessages = [
 			{
-				messageObjectKey: "glados/test/message/parent",
-				fromAgentObjectKey: ROOT_AGENT,
-				sourceLlmSessionObjectKey: ROOT_SESSION,
+				messageId: "glados/test/message/parent",
+				fromAgentId: ROOT_AGENT,
+				sourceSessionId: ROOT_SESSION,
 				clientMessageId: "parent-message",
 				replyToClientMessageId: "question-1",
 				body: "parent reply",
@@ -626,7 +632,7 @@ describe("World peer messaging", () => {
 		client.mailboxGate = mailboxGate.promise;
 		client.treeHoldOpen = true;
 		const deliveries: IrcMessage[] = [];
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		backend.attachMailbox("child", {
 			deliverIrcMessage: async incoming => {
 				deliveries.push(incoming);
@@ -645,13 +651,13 @@ describe("World peer messaging", () => {
 				to: "child",
 				replyTo: "question-1",
 				inboxSequence: 3n,
-				source: "world",
+				source: "parent",
 			}),
 		);
 		expect(deliveries).toEqual([]);
 		expect(client.acknowledgements).toEqual([
 			expect.objectContaining({
-				messageObjectKey: "glados/test/message/parent",
+				messageId: "glados/test/message/parent",
 				outcome: PeerMessageAckOutcome.WAITER,
 			}),
 		]);
@@ -661,9 +667,9 @@ describe("World peer messaging", () => {
 	test("lets a filtered wait follow an inactive durable peer into its next session", async () => {
 		const client = new RosterClient();
 		configureRoot(client);
-		addPeer(client, "worker", "LLM_SESSION_STATE_FAILED");
+		addPeer(client, "worker", ParentSessionState.FAILED);
 		client.treeHoldOpen = true;
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		backend.attachMailbox(MAIN_AGENT_ID, localPeer);
 
 		expect(await backend.waitMessage({ from: "worker" }, 5)).toBeNull();
@@ -674,7 +680,7 @@ describe("World peer messaging", () => {
 		const client = new RosterClient();
 		configureRoot(client);
 		client.treeHoldOpen = true;
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		backend.attachMailbox(MAIN_AGENT_ID, localPeer);
 
 		await expect(backend.waitMessage({ from: "missing" }, 1_000)).rejects.toThrow(

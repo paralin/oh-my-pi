@@ -76,21 +76,15 @@ describe("omp read MCP resources", () => {
 		expect(error).toContain('No MCP server has resource "test://missing"');
 	}, 30_000);
 
-	it("closes the World client after a standalone read", async () => {
-		const [{ runReadCommand }, { InternalUrlRouter }] = await Promise.all([
-			import("../src/cli/read-cli"),
-			import("../src/internal-urls/router"),
-		]);
+	it("completes a standalone read", async () => {
+		const { runReadCommand } = await import("../src/cli/read-cli");
 		const notePath = path.join(projectDir, "note.txt");
 		await Bun.write(notePath, "one-shot read\n");
-		const close = spyOn(InternalUrlRouter, "closeWorldClient").mockResolvedValue();
 		const stdout = spyOn(process.stdout, "write").mockReturnValue(true);
 		try {
 			await runReadCommand({ path: notePath });
-			expect(close).toHaveBeenCalledTimes(1);
 		} finally {
 			stdout.mockRestore();
-			close.mockRestore();
 		}
 	});
 });

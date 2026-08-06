@@ -734,7 +734,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				const policy = policies[unsupportedIndex]!;
 				const runtime = policy.claudeCode ? "claude-code" : "isolated";
 				return createTaskModeError(
-					`unsupported_world_runtime: World Task supports only native, non-isolated workers; item ${unsupportedIndex + 1} selected ${runtime}`,
+					`unsupported_parent_runtime: Parent Task supports only native, non-isolated workers; item ${unsupportedIndex + 1} selected ${runtime}`,
 				);
 			}
 		}

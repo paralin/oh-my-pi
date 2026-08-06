@@ -129,8 +129,8 @@ export interface AgentSessionConfig {
 	settings: Settings;
 	/** Awaited custody boundary for session and model identity changes. */
 	coordinationLifecycle?: CoordinationLifecycle;
-	/** Sends an auto-reply back through the durable backend that delivered its World message. */
-	sendWorldIrcReply?: (message: Omit<IrcMessage, "id" | "source" | "ts">) => Promise<IrcDeliveryReceipt>;
+	/** Sends an auto-reply back through the durable backend that delivered its parent message. */
+	sendParentIrcReply?: (message: Omit<IrcMessage, "id" | "source" | "ts">) => Promise<IrcDeliveryReceipt>;
 	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
 	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */

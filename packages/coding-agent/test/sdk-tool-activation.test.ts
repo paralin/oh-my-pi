@@ -145,13 +145,13 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		removeSyncWithRetries(registryAuthDir);
 	});
 
-	it("attaches the root session to its World mailbox after construction", async () => {
+	it("attaches the root session to its Parent mailbox after construction", async () => {
 		const tempDir = makeTempDir();
 		let attachedAgentId: string | undefined;
 		let attachedReceiver: AgentSession | undefined;
 		let closed = false;
 		const backend: CoordinationBackend = {
-			kind: "world",
+			kind: "parent",
 			spawn: () => Promise.reject(new Error("unused")),
 			listPeers: async () => ({ peers: [], errors: [] }),
 			attachMailbox: (agentId, receiver) => {

@@ -49,7 +49,7 @@ import { ModelsConfigFile } from "./config/models-config";
 import { resolveScratchCompactionOverrides } from "./config/scratch-compaction-method";
 import { serviceTierSettingToTier } from "./config/service-tier";
 import { getDefault, type SettingPath, Settings, type SettingValue, settings } from "./config/settings";
-import { createWorldCoordinationBackend } from "./coordination/world";
+import { createParentCoordinationBackend } from "./coordination/parent";
 import { initializeWithSettings } from "./discovery";
 import {
 	clearPluginRootsAndCaches,
@@ -72,6 +72,8 @@ import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { createWarpEventBridgeExtension } from "./modes/warp-events";
+import { type InteractiveRootSpec, ParentClient } from "./parent/client";
+import { resolveParentExtensionPath, resolveParentSessionId, resolveParentSocketPath } from "./parent/config";
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import {
 	type CreateAgentSessionOptions,
@@ -103,8 +105,6 @@ import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { withTimeoutSignal } from "./utils/fetch-timeout";
-import { type InteractiveRootSpec, WorldClient } from "./world/client";
-import { resolveWorldInteractive, resolveWorldSocketPath, validateWorldInteractiveConfiguration } from "./world/config";
 
 type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
@@ -1296,7 +1296,12 @@ export async function runRootCommand(
 		// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
 		// Explicit roots remain authorized under `--no-extensions`; only ambient
 		// extension discovery is disabled.
-		const cliExtensions = [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
+		const parentExtension = resolveParentExtensionPath();
+		const cliExtensions = [
+			...(parsedArgs.extensions ?? []),
+			...(parsedArgs.hooks ?? []),
+			...(parentExtension ? [parentExtension] : []),
+		];
 		injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
 			mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
 			replace: true,
@@ -1336,19 +1341,11 @@ export async function runRootCommand(
 			cwd,
 			configFiles: parsedArgs.config,
 		}));
-	const worldInteractive =
-		isInteractive &&
-		resolveWorldInteractive({
-			env: process.env,
-			interactiveSetting: settingsInstance.get("world.interactive"),
-		});
-	if (worldInteractive) {
-		validateWorldInteractiveConfiguration({
-			env: process.env,
-			interactiveSetting: settingsInstance.get("world.interactive"),
-			setting: settingsInstance.get("world.socket"),
-			sessionSetting: settingsInstance.get("world.session"),
-		});
+	const parentSocketPath = resolveParentSocketPath();
+	const parentSessionId = resolveParentSessionId();
+	const parentInteractive = parentSocketPath !== undefined && parentSessionId === undefined && isInteractive;
+	if (parentSocketPath && !parentSessionId && !parentInteractive) {
+		throw new Error("OMP_PARENT_SESSION is required outside an interactive parent root");
 	}
 	const scratchCompactionOverrides =
 		parsedArgs.compactionMethod !== undefined
@@ -1627,16 +1624,10 @@ export async function runRootCommand(
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
-	let worldClient: WorldClient | undefined;
+	const parentClient = ParentClient.create({ interactiveRoot: parentInteractive });
 	let interactiveRootSpec: InteractiveRootSpec | undefined;
-	if (worldInteractive) {
-		const socketPath = resolveWorldSocketPath({
-			env: process.env,
-			setting: settingsInstance.get("world.socket"),
-		});
-		if (!socketPath) throw new Error("world.interactive requires a World socket");
-		worldClient = WorldClient.create({ env: {}, setting: socketPath, interactiveRoot: true });
-		if (!worldClient) throw new Error("failed to construct interactive World client");
+	if (parentInteractive) {
+		if (!parentClient) throw new Error("failed to construct interactive parent client");
 		const canonical = (value: string): string => {
 			try {
 				return fsSync.realpathSync.native(value);
@@ -1655,16 +1646,13 @@ export async function runRootCommand(
 				sessionOptions.model?.id ??
 				(typeof sessionOptions.modelPattern === "string" ? sessionOptions.modelPattern : ""),
 			transitionReason: "STARTUP",
-			protocolVersion: "omp-w5",
+			protocolVersion: "omp-parent-v1",
 			buildIdentity: VERSION,
 		};
-		sessionOptions.worldClient = () => worldClient;
 	}
-	const coordinationBackend = createWorldCoordinationBackend(worldClient ? { client: worldClient } : undefined);
+	const coordinationBackend = createParentCoordinationBackend(parentClient ? { client: parentClient } : undefined);
 	sessionOptions.coordinationBackend = coordinationBackend;
-	if (worldInteractive && coordinationBackend) {
-		sessionOptions.coordinationLifecycle = coordinationBackend;
-	}
+	if (parentInteractive && coordinationBackend) sessionOptions.coordinationLifecycle = coordinationBackend;
 
 	// OTEL: register global OTLP exporters when an endpoint is configured via
 	// env, then switch on the agent loop's telemetry hooks so traces, run-level
@@ -1807,8 +1795,8 @@ export async function runRootCommand(
 			await session.dispose();
 			throw error;
 		}
-		if (worldClient && interactiveRootSpec) {
-			await worldClient.attachInteractiveRoot({
+		if (parentClient && interactiveRootSpec) {
+			await parentClient.attachInteractiveRoot({
 				...interactiveRootSpec,
 				provider: session.model?.provider ?? interactiveRootSpec.provider,
 				model: session.model?.id ?? interactiveRootSpec.model,

@@ -17,12 +17,12 @@ import type { CoordinationBackend, CoordinationPeerRoster } from "../../coordina
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
+import { ParentOperationError } from "../../parent/client";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { isAgentSession } from "../../session/agent-session";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
-import { WorldAuthorityError, WorldOperationError } from "../../world/client";
 import {
 	createCachedComponent,
 	formatBadge,
@@ -76,8 +76,8 @@ export function drainPendingInbox(
 	from?: string,
 	coordinationBackend?: CoordinationBackend,
 ): IrcMessage | undefined {
-	const world = coordinationBackend?.inbox({ from, limit: 1 })[0];
-	if (world) return world;
+	const parent = coordinationBackend?.inbox({ from, limit: 1 })[0];
+	if (parent) return parent;
 	const session = registry.get(senderId)?.session;
 	return isAgentSession(session) ? session.drainPendingIrcInboxMessages(senderId, { from, limit: 1 })[0] : undefined;
 }
@@ -97,22 +97,22 @@ export function messageResult(senderId: string, waited: IrcMessage): AgentToolRe
 export async function executeList(
 	registry: AgentRegistry,
 	senderId: string,
-	worldRoster?: CoordinationPeerRoster,
+	parentRoster?: CoordinationPeerRoster,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	let localRefs = registry.list();
 	if (!localRefs.some(ref => ref.id !== senderId && ref.status !== "aborted" && ref.kind !== "advisor")) {
 		await registerPersistedSubagents(registry, registry.get(senderId)?.sessionFile);
 		localRefs = registry.list();
 	}
-	const rosterErrors = [...(worldRoster?.errors ?? [])];
+	const rosterErrors = [...(parentRoster?.errors ?? [])];
 	const localIds = new Set(localRefs.filter(ref => ref.kind !== "advisor").map(ref => ref.id));
-	for (const ref of worldRoster?.peers ?? []) {
+	for (const ref of parentRoster?.peers ?? []) {
 		if (!localIds.has(ref.id)) continue;
 		if (rosterErrors.some(error => error.code === "identity_conflict" && error.peerId === ref.id)) continue;
 		rosterErrors.push({
 			code: "identity_conflict",
 			peerId: ref.id,
-			detail: `Peer ID ${ref.id} is present in both the local registry and the World Agent tree`,
+			detail: `Peer ID ${ref.id} is present in both the local registry and the parent Agent tree`,
 		});
 	}
 
@@ -129,7 +129,7 @@ export async function executeList(
 			lastActivity: ref.lastActivity,
 			activity: ref.activity,
 		}));
-	const worldPeers: HubPeerInfo[] = (worldRoster?.peers ?? [])
+	const parentPeers: HubPeerInfo[] = (parentRoster?.peers ?? [])
 		.filter(ref => ref.id !== senderId && ref.kind !== "advisor")
 		.map(ref => ({
 			id: ref.id,
@@ -140,9 +140,9 @@ export async function executeList(
 			unread: 0,
 			lastActivity: ref.lastActivity,
 			activity: ref.activity,
-			source: "world" as const,
+			source: "parent" as const,
 		}));
-	const peers = [...localPeers, ...worldPeers];
+	const peers = [...localPeers, ...parentPeers];
 	const lines: string[] = [];
 	if (peers.length === 0) {
 		lines.push("No other agents.");
@@ -155,7 +155,7 @@ export async function executeList(
 				peer.parentId ? `parent ${peer.parentId}` : undefined,
 				`active ${formatDuration(Math.max(0, Date.now() - peer.lastActivity))} ago`,
 			].filter(Boolean);
-			const source = peer.source === "world" ? " · world" : "";
+			const source = peer.source === "parent" ? " · parent" : "";
 			lines.push(
 				`- ${peer.id} [${peer.displayName} · ${peer.kind} · ${peer.status}${source}] — ${extras.join(", ")}`,
 			);
@@ -166,7 +166,7 @@ export async function executeList(
 		}
 	}
 	if (rosterErrors.length) {
-		lines.push("", `${rosterErrors.length} World roster error(s):`);
+		lines.push("", `${rosterErrors.length} Parent roster error(s):`);
 		for (const error of rosterErrors) lines.push(`- ${error.peerId}: ${error.code} — ${error.detail}`);
 	}
 	return {
@@ -188,34 +188,21 @@ export interface HubSendParams {
 	timeoutMs?: number;
 }
 
-function worldErrorDetails(error: unknown): Pick<CoordinationDetails, "worldError"> {
-	if (error instanceof WorldAuthorityError) {
-		return {
-			worldError: {
-				kind: "authority",
-				operation: error.operation,
-				code: error.code,
-				codeName: error.codeName,
-				detail: error.detail,
-				requiredPermission: error.requiredPermission,
-			},
-		};
-	}
-	if (error instanceof WorldOperationError) {
-		return {
-			worldError: {
-				kind: "operation",
-				operation: error.operation,
-				code: error.code,
-				codeName: error.codeName,
-				detail: error.detail,
-			},
-		};
-	}
-	return {};
+function parentErrorDetails(error: unknown): Pick<CoordinationDetails, "parentError"> {
+	if (!(error instanceof ParentOperationError)) return {};
+	return {
+		parentError: {
+			kind: "operation",
+			operation: "coordination",
+			code: error.code,
+			codeName: error.codeName,
+			detail: error.detail,
+			requiredCapability: error.requiredCapability,
+		},
+	};
 }
 
-async function executeWorldSend(
+async function executeParentSend(
 	deps: {
 		senderId: string;
 		settings: Settings;
@@ -234,11 +221,11 @@ async function executeWorldSend(
 		ts: Date.now(),
 		...(params.replyTo ? { replyTo: params.replyTo } : {}),
 		expectsReply: params.await || undefined,
-		source: "world",
+		source: "parent",
 	};
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(deps.settings, params.timeoutMs) : undefined;
 	const waitAbort = params.await ? new AbortController() : undefined;
-	const waitCancelled = new Error("World IRC await cancelled");
+	const waitCancelled = new Error("Parent IRC await cancelled");
 	let removeAbortListener: (() => void) | undefined;
 	const waiting =
 		params.await && waitAbort
@@ -280,7 +267,7 @@ async function executeWorldSend(
 				from: deps.senderId,
 				to,
 				receipts: [{ to, outcome: "failed", error: detail }],
-				...worldErrorDetails(error),
+				...parentErrorDetails(error),
 			});
 		}
 		const lines = [
@@ -373,7 +360,7 @@ export async function executeSend(
 				op: "send",
 				from: senderId,
 				to,
-				...worldErrorDetails(error),
+				...parentErrorDetails(error),
 			});
 		}
 		const rosterError = roster.errors.find(error => error.peerId === to);
@@ -385,13 +372,13 @@ export async function executeSend(
 				rosterErrors: [rosterError],
 			});
 		}
-		const worldTarget = roster.peers.some(ref => ref.id === to);
+		const parentTarget = roster.peers.some(ref => ref.id === to);
 		const localTarget = registry.get(to);
-		if (worldTarget && localTarget) {
+		if (parentTarget && localTarget) {
 			const conflict = {
 				code: "identity_conflict" as const,
 				peerId: to,
-				detail: `Peer ID ${to} is present in both the local registry and the World Agent tree`,
+				detail: `Peer ID ${to} is present in both the local registry and the parent Agent tree`,
 			};
 			return hubErrorResult(conflict.detail, {
 				op: "send",
@@ -400,8 +387,8 @@ export async function executeSend(
 				rosterErrors: [conflict],
 			});
 		}
-		if (worldTarget || rosterError !== undefined || !localTarget) {
-			return await executeWorldSend(
+		if (parentTarget || rosterError !== undefined || !localTarget) {
+			return await executeParentSend(
 				{ senderId, settings, coordinationBackend: backend },
 				to,
 				message,
@@ -548,20 +535,20 @@ export async function executeMessageWait(
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
-		let useWorld = coordinationBackend !== undefined;
+		let useParent = coordinationBackend !== undefined;
 		if (coordinationBackend && from) {
 			const roster = await coordinationBackend.listPeers(signal);
 			const rosterError = roster.errors.find(error => error.peerId === from);
 			if (rosterError?.code === "identity_conflict") throw new Error(rosterError.detail);
-			const worldTarget = roster.peers.some(ref => ref.id === from);
+			const parentTarget = roster.peers.some(ref => ref.id === from);
 			const localTarget = registry.get(from);
-			if (worldTarget && localTarget) {
-				throw new Error(`Peer ID ${from} is present in both the local registry and the World Agent tree`);
+			if (parentTarget && localTarget) {
+				throw new Error(`Peer ID ${from} is present in both the local registry and the parent Agent tree`);
 			}
-			useWorld = worldTarget || rosterError !== undefined || !localTarget;
+			useParent = parentTarget || rosterError !== undefined || !localTarget;
 		}
 		const waited =
-			useWorld && coordinationBackend
+			useParent && coordinationBackend
 				? await coordinationBackend.waitMessage({ from }, timeoutMs, signal)
 				: await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
 						liveness: { registry, senderId },
@@ -580,7 +567,7 @@ export async function executeMessageWait(
 		return hubErrorResult(error instanceof Error ? error.message : String(error), {
 			op: "wait",
 			from: senderId,
-			...worldErrorDetails(error),
+			...parentErrorDetails(error),
 		});
 	}
 }
@@ -594,9 +581,9 @@ export function executeInbox(
 	const busMessages = IrcBus.global().inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages = isAgentSession(session) ? session.drainPendingIrcInboxMessages(senderId) : [];
-	const worldMessages = coordinationBackend?.inbox({ peek }) ?? [];
+	const parentMessages = coordinationBackend?.inbox({ peek }) ?? [];
 	const unique = new Map<string, IrcMessage>();
-	for (const message of [...busMessages, ...pendingMessages, ...worldMessages]) unique.set(message.id, message);
+	for (const message of [...busMessages, ...pendingMessages, ...parentMessages]) unique.set(message.id, message);
 	const messages = [...unique.values()].sort((a, b) => {
 		const timeOrder = a.ts - b.ts;
 		if (timeOrder !== 0) return timeOrder;

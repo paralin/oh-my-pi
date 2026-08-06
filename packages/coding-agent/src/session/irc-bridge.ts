@@ -21,7 +21,7 @@ export interface IrcBridgeHost {
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: CustomMessage[]): void;
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
-	sendWorldIrcReply?: (message: Omit<IrcMessage, "id" | "source" | "ts">) => Promise<IrcDeliveryReceipt>;
+	sendParentIrcReply?: (message: Omit<IrcMessage, "id" | "source" | "ts">) => Promise<IrcDeliveryReceipt>;
 }
 
 /** Build the canonical model-facing record for one incoming peer message. */
@@ -203,7 +203,7 @@ export class IrcBridge {
 			this.#asides.push(record);
 			const outgoing = { from: msg.to, to: msg.from, body, replyTo: msg.id };
 			const receipt =
-				msg.source === "world" ? await this.#sendWorldReply(outgoing) : await IrcBus.global().send(outgoing);
+				msg.source === "parent" ? await this.#sendParentReply(outgoing) : await IrcBus.global().send(outgoing);
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}
@@ -212,9 +212,9 @@ export class IrcBridge {
 		}
 	}
 
-	async #sendWorldReply(message: Omit<IrcMessage, "id" | "source" | "ts">): Promise<IrcDeliveryReceipt> {
-		const send = this.#host.sendWorldIrcReply;
-		if (!send) throw new Error("World IRC reply backend is unavailable");
+	async #sendParentReply(message: Omit<IrcMessage, "id" | "source" | "ts">): Promise<IrcDeliveryReceipt> {
+		const send = this.#host.sendParentIrcReply;
+		if (!send) throw new Error("Parent IRC reply backend is unavailable");
 		return await send(message);
 	}
 }

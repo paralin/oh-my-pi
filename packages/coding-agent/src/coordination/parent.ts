@@ -3,11 +3,7 @@ import * as os from "node:os";
 import path from "node:path";
 import { ASYNC_JOB_OWNER_LIFECYCLE_ABORT } from "../async";
 import type { IrcMessage } from "../irc/bus";
-import { type AgentPeer, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { renderStructuredSubagentPrompt, type StructuredSubagentResult } from "../task/structured-subagent";
-import type { AgentProgress, AgentSource, SingleResult, StructuredSubagentOutput } from "../task/types";
-import * as git from "../utils/git";
-import { resolveWorldSessionKey, resolveWorldSocketPath } from "../world/config";
+import { resolveParentSocketPath } from "../parent/config";
 import type {
 	AgentMessageSummary,
 	AgentSummary,
@@ -15,21 +11,25 @@ import type {
 	SessionSummary,
 	TaskProgressSummary,
 	TaskResultSummary,
-} from "../world/generated/llmsession.pb";
-import { PeerMessageOutcome, WorldTaskAgentSource } from "../world/generated/llmsession.pb";
+} from "../parent/generated/parent-environment.pb";
+import { ParentSessionState, PeerMessageOutcome, TaskAgentSource } from "../parent/generated/parent-environment.pb";
 import {
 	MAX_SESSION_PAGE,
-	WORLD_CHILD_PERMISSIONS,
-	WorldClient,
-	type WorldClientOptions,
-	WorldOperationError,
-} from "../world/index";
+	PARENT_CHILD_CAPABILITIES,
+	ParentClient,
+	type ParentClientOptions,
+	ParentOperationError,
+} from "../parent/index";
 import {
 	DEFAULT_DISPATCH_REPOSITORY,
 	defaultCheckoutIdentity,
 	defaultIntentOwnerArtifact,
 	semanticWorkingDirectory,
-} from "../world/intent-key";
+} from "../parent/intent-key";
+import { type AgentPeer, type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { renderStructuredSubagentPrompt, type StructuredSubagentResult } from "../task/structured-subagent";
+import type { AgentProgress, AgentSource, SingleResult, StructuredSubagentOutput } from "../task/types";
+import * as git from "../utils/git";
 import type {
 	CoordinationBackend,
 	CoordinationMessageFilter,
@@ -44,12 +44,12 @@ import type {
 	CoordinationTransitionToken,
 } from "./backend";
 import { buildExternalSubagentProfile, encodeExternalSubagentProfile } from "./external-subagent-profile";
-import { WorldAgentPeer, worldSessionLifecycle } from "./world-agent-peer";
-import { WorldMailboxRouter } from "./world-mailbox";
+import { ParentAgentPeer, parentSessionLifecycle } from "./parent-agent-peer";
+import { ParentMailboxRouter } from "./parent-mailbox";
 
-/** Public World client surface required by Task and Hub coordination. */
-export type WorldCoordinationClient = Pick<
-	WorldClient,
+/** Public Parent client surface required by Task and Hub coordination. */
+export type ParentCoordinationClient = Pick<
+	ParentClient,
 	| "ackPeerMessage"
 	| "canMutate"
 	| "connected"
@@ -66,7 +66,7 @@ export type WorldCoordinationClient = Pick<
 	| "watchAgentTree"
 	| "watchPeerMailbox"
 >;
-type WorldLifecycleClient = WorldCoordinationClient & {
+type ParentLifecycleClient = ParentCoordinationClient & {
 	readonly interactiveRoot?: boolean;
 	readonly interactiveBinding?: object;
 	rotateInteractiveRootTransition?: (transition: CoordinationSessionTransition) => Promise<void>;
@@ -78,21 +78,26 @@ const RESERVED_PEER_IDS: Readonly<Record<string, true>> = {
 	all: true,
 	__advisor: true,
 };
-const WORLD_PARENT_PEER_ID = "main";
-const TERMINAL_SESSION_STATE = /(?:^|_)(?:COMPLETE|ARCHIVED|FAILED|CANCELED)$/;
+const PARENT_PEER_ID = "main";
+const TERMINAL_SESSION_STATES = new Set([
+	ParentSessionState.COMPLETE,
+	ParentSessionState.ARCHIVED,
+	ParentSessionState.FAILED,
+	ParentSessionState.CANCELED,
+]);
 
 function unavailable(operation: string): Error {
-	return new Error(`World coordination ${operation} is unavailable until its durable adapter is installed`);
+	return new Error(`Parent coordination ${operation} is unavailable until its durable adapter is installed`);
 }
 
 function requirePeerId(value: string): string {
 	const peerId = value.trim();
-	if (!peerId) throw new Error("World Task peer ID is required");
+	if (!peerId) throw new Error("Parent Task peer ID is required");
 	if (!/^[A-Za-z0-9_.-]{1,256}$/.test(peerId)) {
-		throw new Error("World Task peer ID must contain 1-256 ASCII letters, digits, dots, underscores, or hyphens");
+		throw new Error("Parent Task peer ID must contain 1-256 ASCII letters, digits, dots, underscores, or hyphens");
 	}
 	if (RESERVED_PEER_IDS[peerId.toLowerCase()]) {
-		throw new Error(`World Task peer ID ${JSON.stringify(peerId)} is reserved`);
+		throw new Error(`Parent Task peer ID ${JSON.stringify(peerId)} is reserved`);
 	}
 	return peerId;
 }
@@ -103,14 +108,14 @@ function nextPeerId(value: string): string {
 	return `${match[1]}-${Number(match[2]) + 1}`;
 }
 
-function sourceOnWire(source: AgentSource): WorldTaskAgentSource {
+function sourceOnWire(source: AgentSource): TaskAgentSource {
 	switch (source) {
 		case "bundled":
-			return WorldTaskAgentSource.BUNDLED;
+			return TaskAgentSource.BUNDLED;
 		case "user":
-			return WorldTaskAgentSource.USER;
+			return TaskAgentSource.USER;
 		case "project":
-			return WorldTaskAgentSource.PROJECT;
+			return TaskAgentSource.PROJECT;
 	}
 }
 
@@ -152,12 +157,12 @@ async function portableWorktreeIdentity(worktreePath: string): Promise<string> {
 	}
 	const fromHome = relativeIdentity(await resolvedPath(os.homedir()), worktree);
 	if (fromHome) return fromHome;
-	throw new Error(`World Task worktree ${JSON.stringify(worktree)} is outside the configured workspace and home`);
+	throw new Error(`Parent Task worktree ${JSON.stringify(worktree)} is outside the configured workspace and home`);
 }
 
 function numberFromWire(value: bigint | undefined, field: string): number {
 	const result = Number(value ?? 0n);
-	if (!Number.isSafeInteger(result)) throw new Error(`World Task ${field} exceeds JavaScript's safe integer range`);
+	if (!Number.isSafeInteger(result)) throw new Error(`Parent Task ${field} exceeds JavaScript's safe integer range`);
 	return result;
 }
 
@@ -165,7 +170,7 @@ function parseStructuredOutput(value: string | undefined): StructuredSubagentOut
 	if (!value) return undefined;
 	const parsed: unknown = JSON.parse(value);
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-		throw new Error("World Task structured output is not an object");
+		throw new Error("Parent Task structured output is not an object");
 	}
 	const record = parsed as Record<string, unknown>;
 	const source = record.source;
@@ -176,7 +181,7 @@ function parseStructuredOutput(value: string | undefined): StructuredSubagentOut
 		(mode !== "permissive" && mode !== "strict") ||
 		(status !== "valid" && status !== "invalid" && status !== "unavailable")
 	) {
-		throw new Error("World Task structured output metadata is invalid");
+		throw new Error("Parent Task structured output metadata is invalid");
 	}
 	return {
 		source,
@@ -192,7 +197,7 @@ function parseExtractedToolData(rows: TaskResultSummary["extractedToolData"]): R
 	const result: Record<string, unknown[]> = {};
 	for (const row of rows) {
 		const toolName = row.toolName?.trim();
-		if (!toolName) throw new Error("World Task extracted tool data has no tool name");
+		if (!toolName) throw new Error("Parent Task extracted tool data has no tool name");
 		const values = row.values?.map(value => JSON.parse(value)) ?? [];
 		const toolValues = result[toolName] ?? [];
 		toolValues.push(...values);
@@ -308,30 +313,30 @@ function sessionTimestamp(session: SessionSummary): number {
 	return 0;
 }
 
-function latestSessionForAgent(sessions: SessionSummary[], agentObjectKey: string): SessionSummary | undefined {
+function latestSessionForAgent(sessions: SessionSummary[], agentId: string): SessionSummary | undefined {
 	return sessions
-		.filter(session => session.agentObjectKey === agentObjectKey)
+		.filter(session => session.agentId === agentId)
 		.sort(
 			(left, right) =>
 				sessionTimestamp(right) - sessionTimestamp(left) ||
-				(right.sessionObjectKey ?? "").localeCompare(left.sessionObjectKey ?? ""),
+				(right.sessionId ?? "").localeCompare(left.sessionId ?? ""),
 		)[0];
 }
 
-interface CachedWorldPeer {
-	sessionObjectKey: string | undefined;
-	peer: WorldAgentPeer;
+interface CachedParentPeer {
+	sessionId: string | undefined;
+	peer: ParentAgentPeer;
 	ref: AgentRef;
 }
 
-/** Coordination backend selected once for a configured World root. */
-export class WorldCoordinationBackend implements CoordinationBackend {
-	readonly kind = "world" as const;
-	readonly client: WorldLifecycleClient;
+/** Coordination backend selected once for a configured Parent root. */
+export class ParentCoordinationBackend implements CoordinationBackend {
+	readonly kind = "parent" as const;
+	readonly client: ParentLifecycleClient;
 	readonly #sessions = new Map<string, string>();
-	readonly #peerCache = new Map<string, CachedWorldPeer>();
+	readonly #peerCache = new Map<string, CachedParentPeer>();
 	#closed = false;
-	#mailboxRouter: WorldMailboxRouter | undefined;
+	#mailboxRouter: ParentMailboxRouter | undefined;
 	#mailboxReceiver:
 		| {
 				receiverPeerId: string;
@@ -342,10 +347,10 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	#quiesced = false;
 	#bound = true;
 	readonly #activeMutations = new Set<Promise<void>>();
-	constructor(client: WorldCoordinationClient) {
-		const lifecycleClient = client as WorldLifecycleClient;
+	constructor(client: ParentCoordinationClient) {
+		const lifecycleClient = client as ParentLifecycleClient;
 		if (!client.canMutate && !lifecycleClient.interactiveRoot && !lifecycleClient.rotateInteractiveRootTransition) {
-			throw new Error("World coordination requires a caller LlmSession");
+			throw new Error("Parent coordination requires a caller LlmSession");
 		}
 		this.client = lifecycleClient;
 		this.#bound = lifecycleClient.interactiveRoot !== true || lifecycleClient.interactiveBinding !== undefined;
@@ -359,7 +364,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	activateInteractiveRoot(): void {
 		if (!this.#isRotatable()) return;
 		if (!this.client.interactiveBinding) {
-			throw new Error("World interactive root has no accepted binding");
+			throw new Error("Parent interactive root has no accepted binding");
 		}
 		this.#bound = true;
 		this.#quiesced = false;
@@ -367,7 +372,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	}
 
 	#requireBound(operation: string): void {
-		if (this.#closed) throw new Error("World coordination backend is closed");
+		if (this.#closed) throw new Error("Parent coordination backend is closed");
 		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) {
 			throw unavailable(operation);
 		}
@@ -386,7 +391,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	}
 
 	async beforeRootTransition(): Promise<CoordinationTransitionToken> {
-		if (this.#closed) throw new Error("World coordination backend is closed");
+		if (this.#closed) throw new Error("Parent coordination backend is closed");
 		const token = { generation: ++this.#generation };
 		if (!this.#isRotatable()) return token;
 		this.#quiesced = true;
@@ -404,7 +409,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		this.#assertTransitionToken(token);
 		try {
 			const rotate = this.client.rotateInteractiveRootTransition;
-			if (!rotate) throw new Error("World interactive root does not support session rotation");
+			if (!rotate) throw new Error("Parent interactive root does not support session rotation");
 			await rotate.call(this.client, transition);
 			this.#bound = true;
 			this.#quiesced = false;
@@ -423,7 +428,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		this.#assertTransitionToken(token);
 		try {
 			const reconfigure = this.client.reconfigureInteractiveRootTransition;
-			if (!reconfigure) throw new Error("World interactive root does not support model reconfiguration");
+			if (!reconfigure) throw new Error("Parent interactive root does not support model reconfiguration");
 			await reconfigure.call(this.client, transition);
 			this.#bound = true;
 			this.#quiesced = false;
@@ -442,7 +447,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 
 	#assertTransitionToken(token: CoordinationTransitionToken): void {
 		if (token.generation !== this.#generation) {
-			throw new Error("World coordination transition token is stale");
+			throw new Error("Parent coordination transition token is stale");
 		}
 	}
 
@@ -462,7 +467,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	#startMailboxRouter(): void {
 		if (this.#closed || !this.#bound || !this.#mailboxReceiver || this.#mailboxRouter) return;
 		const { receiverPeerId, receiver } = this.#mailboxReceiver;
-		const router = new WorldMailboxRouter({
+		const router = new ParentMailboxRouter({
 			client: this.client,
 			receiverPeerId,
 			receiver,
@@ -474,7 +479,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	}
 
 	async spawn(request: CoordinationSpawnRequest, signal?: AbortSignal): Promise<CoordinationTaskHandle> {
-		return await this.#runMutableOperation("World Task spawn", async () => await this.#spawn(request, signal));
+		return await this.#runMutableOperation("Parent Task spawn", async () => await this.#spawn(request, signal));
 	}
 
 	async #spawn(request: CoordinationSpawnRequest, signal?: AbortSignal): Promise<CoordinationTaskHandle> {
@@ -482,7 +487,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		for (;;) {
 			signal?.throwIfAborted();
 			if ((request.request.session.agentRegistry ?? AgentRegistry.global()).get(peerId)) {
-				if (!request.generated) throw new Error(`World Task peer identity conflict: ${peerId}`);
+				if (!request.generated) throw new Error(`Parent Task peer identity conflict: ${peerId}`);
 				peerId = nextPeerId(peerId);
 				continue;
 			}
@@ -514,15 +519,15 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			const { intentKey } = this.client.deriveIntentKey(identity);
 			const existing = await this.client.lookupDispatchIntent(intentKey, signal);
 			if (existing.found) {
-				if (existing.session?.sessionObjectKey?.trim()) {
+				if (existing.session?.sessionId?.trim()) {
 					return await this.#attach(candidate, intentKey, existing.session, signal);
 				}
-				throw new Error(`World Task ${intentKey} has no attached LlmSession`);
+				throw new Error(`Parent Task ${intentKey} has no attached LlmSession`);
 			}
 
 			const peer = await this.client.resolveAgentPeer(peerId, signal);
 			if (peer.found) {
-				if (!request.generated) throw new Error(`World Task peer identity conflict: ${peerId}`);
+				if (!request.generated) throw new Error(`Parent Task peer identity conflict: ${peerId}`);
 				peerId = nextPeerId(peerId);
 				continue;
 			}
@@ -536,7 +541,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 						workingDirectory: candidate.request.session.cwd,
 						maxRuntimeSeconds: Math.ceil(profile.maxRuntimeMs / 1000),
 						model: profile.modelSelector[0],
-						childWorldOperations: [...WORLD_CHILD_PERMISSIONS],
+						childCapabilities: [...PARENT_CHILD_CAPABILITIES],
 						taskAgent: {
 							peerId,
 							displayName: candidate.label,
@@ -552,11 +557,11 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 				return await this.#attach(candidate, submitted.intentKey, submitted.session, signal);
 			} catch (error) {
 				const recovered = await this.client.lookupDispatchIntent(intentKey, signal);
-				if (recovered.found && recovered.session?.sessionObjectKey?.trim()) {
+				if (recovered.found && recovered.session?.sessionId?.trim()) {
 					return await this.#attach(candidate, intentKey, recovered.session, signal);
 				}
 				if (
-					error instanceof WorldOperationError &&
+					error instanceof ParentOperationError &&
 					error.codeName === "PEER_IDENTITY_CONFLICT" &&
 					request.generated
 				) {
@@ -571,33 +576,32 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 	async #attach(
 		request: CoordinationSpawnRequest,
 		intentKey: string,
-		session: { sessionObjectKey?: string; parentSessionObjectKey?: string } | undefined,
+		session: { sessionId?: string; parentSessionId?: string } | undefined,
 		signal?: AbortSignal,
 	): Promise<CoordinationTaskHandle> {
-		const sessionObjectKey = session?.sessionObjectKey?.trim();
-		if (!sessionObjectKey) throw new Error(`World Task ${intentKey} has no attached LlmSession`);
-		if (session?.parentSessionObjectKey !== this.client.sessionKey) {
-			throw new Error(`World Task ${intentKey} belongs to another parent LlmSession`);
+		const sessionId = session?.sessionId?.trim();
+		if (!sessionId) throw new Error(`Parent Task ${intentKey} has no attached LlmSession`);
+		if (session?.parentSessionId !== this.client.sessionKey) {
+			throw new Error(`Parent Task ${intentKey} belongs to another parent LlmSession`);
 		}
 		const peer = await this.client.resolveAgentPeer(request.peerId, signal);
 		if (!peer.found || peer.agent?.peerId !== request.peerId) {
-			throw new Error(`World Task ${intentKey} does not resolve peer ${request.peerId}`);
+			throw new Error(`Parent Task ${intentKey} does not resolve peer ${request.peerId}`);
 		}
-		if (peer.session?.sessionObjectKey && peer.session.sessionObjectKey !== sessionObjectKey) {
-			throw new Error(`World Task peer ${request.peerId} resolves another active LlmSession`);
+		if (peer.session?.sessionId && peer.session.sessionId !== sessionId) {
+			throw new Error(`Parent Task peer ${request.peerId} resolves another active LlmSession`);
 		}
-		this.#sessions.set(request.peerId, sessionObjectKey);
+		this.#sessions.set(request.peerId, sessionId);
 		return {
 			peerId: request.peerId,
-			wait: async (signal, onProgress) =>
-				await this.#watchTask(request, intentKey, sessionObjectKey, signal, onProgress),
+			wait: async (signal, onProgress) => await this.#watchTask(request, intentKey, sessionId, signal, onProgress),
 		};
 	}
 
 	async #watchTask(
 		request: CoordinationSpawnRequest,
 		intentKey: string,
-		sessionObjectKey: string,
+		sessionId: string,
 		signal?: AbortSignal,
 		onProgress?: (progress: AgentProgress) => void,
 	): Promise<StructuredSubagentResult> {
@@ -615,30 +619,30 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		};
 		signal?.addEventListener("abort", requestInterrupt, { once: true });
 		if (signal?.aborted) requestInterrupt();
-		const snapshots = this.client.watchSession(sessionObjectKey, detach.signal)[Symbol.asyncIterator]();
+		const snapshots = this.client.watchSession(sessionId, detach.signal)[Symbol.asyncIterator]();
 		try {
 			for (;;) {
 				const next = await Promise.race([snapshots.next(), interruptFailure.promise]);
-				if (next.done) throw new Error(`World Task ${intentKey} session watch ended before a terminal result`);
+				if (next.done) throw new Error(`Parent Task ${intentKey} session watch ended before a terminal result`);
 				const snapshot = next.value;
 				if (snapshot.progress) onProgress?.(progressFromSnapshot(request, snapshot.progress));
 				if (snapshot.taskResult) {
 					if (interrupt) await interrupt;
 					return await resultFromSnapshot(request, snapshot.taskResult);
 				}
-				if (TERMINAL_SESSION_STATE.test(snapshot.session?.state ?? "")) {
-					throw new Error(`World Task ${intentKey} reached terminal state without TaskResultSummary`);
+				if (TERMINAL_SESSION_STATES.has(snapshot.session?.state ?? ParentSessionState.UNKNOWN)) {
+					throw new Error(`Parent Task ${intentKey} reached terminal state without TaskResultSummary`);
 				}
 			}
 		} finally {
 			signal?.removeEventListener("abort", requestInterrupt);
-			await snapshots.return?.();
+			await snapshots.return?.(undefined);
 			interruptFailure.promise.catch(() => {});
 		}
 	}
 
 	async listPeers(signal?: AbortSignal): Promise<CoordinationPeerRoster> {
-		this.#requireBound("World peer listing");
+		this.#requireBound("Parent peer listing");
 		signal?.throwIfAborted();
 		const [tree, sessions] = await Promise.all([
 			this.#readAgentTree(signal),
@@ -647,20 +651,20 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		const errors: CoordinationPeerError[] = [];
 		const peers: AgentRef[] = [];
 		const callerSession =
-			sessions.find(session => session.sessionObjectKey === this.client.sessionKey) ??
+			sessions.find(session => session.sessionId === this.client.sessionKey) ??
 			(await this.#readSessionSummary(this.client.sessionKey, signal));
-		if (!callerSession) throw new Error(`Bound World LlmSession ${this.client.sessionKey} is missing`);
-		const callerAgentObjectKey = callerSession.agentObjectKey?.trim();
+		if (!callerSession) throw new Error(`Bound Parent LlmSession ${this.client.sessionKey} is missing`);
+		const callerAgentObjectKey = callerSession.agentId?.trim();
 		if (!callerAgentObjectKey) {
-			throw new Error(`Bound World LlmSession ${this.client.sessionKey} has no Agent object key`);
+			throw new Error(`Bound Parent LlmSession ${this.client.sessionKey} has no Agent object key`);
 		}
 		const agentsByKey = new Map(
 			(tree.agents ?? [])
-				.filter((agent): agent is AgentSummary & { agentObjectKey: string } => !!agent.agentObjectKey)
-				.map(agent => [agent.agentObjectKey, agent]),
+				.filter((agent): agent is AgentSummary & { agentId: string } => !!agent.agentId)
+				.map(agent => [agent.agentId, agent]),
 		);
 		const callerAgent = agentsByKey.get(callerAgentObjectKey);
-		if (!callerAgent) throw new Error(`Bound World Agent ${callerAgentObjectKey} is absent from the Agent tree`);
+		if (!callerAgent) throw new Error(`Bound Parent Agent ${callerAgentObjectKey} is absent from the Agent tree`);
 		const boundLocalId = callerAgent.peerId?.trim() || MAIN_AGENT_ID;
 		const peerCounts = new Map<string, number>();
 		for (const agent of tree.agents ?? []) {
@@ -672,14 +676,14 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 
 		for (const agent of tree.agents ?? []) {
 			const peerId = agent.peerId?.trim();
-			if (!peerId || agent.agentObjectKey === callerAgentObjectKey) continue;
+			if (!peerId || agent.agentId === callerAgentObjectKey) continue;
 			if ((peerCounts.get(peerId) ?? 0) > 1) {
 				if (!duplicated.has(peerId)) {
 					duplicated.add(peerId);
 					errors.push({
 						code: "identity_conflict",
 						peerId,
-						detail: `World Agent tree contains more than one Agent with peer ID ${peerId}`,
+						detail: `Parent Agent tree contains more than one Agent with peer ID ${peerId}`,
 					});
 				}
 				continue;
@@ -687,43 +691,42 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			try {
 				const resolved = await this.client.resolveAgentPeer(peerId, signal);
 				if (!resolved.found || resolved.agent?.peerId !== peerId) {
-					throw new Error(`World Agent tree peer ${peerId} does not resolve exactly`);
+					throw new Error(`Parent Agent tree peer ${peerId} does not resolve exactly`);
 				}
-				if (resolved.agent.agentObjectKey !== agent.agentObjectKey) {
-					throw new Error(`World peer ${peerId} resolves a different Agent object`);
+				if (resolved.agent.agentId !== agent.agentId) {
+					throw new Error(`Parent peer ${peerId} resolves a different Agent object`);
 				}
-				const activeSessionObjectKeys = (agent.activeLlmSessionObjectKeys ?? []).filter(Boolean);
+				const activeSessionObjectKeys = (agent.activeSessionIds ?? []).filter(Boolean);
 				if (activeSessionObjectKeys.length > 1) {
-					throw new Error(`World peer ${peerId} has more than one active LlmSession`);
+					throw new Error(`Parent peer ${peerId} has more than one active LlmSession`);
 				}
 				if (resolved.inactive) {
 					if (resolved.session || activeSessionObjectKeys.length !== 0) {
-						throw new Error(`World peer ${peerId} has inconsistent inactive-session resolution`);
+						throw new Error(`Parent peer ${peerId} has inconsistent inactive-session resolution`);
 					}
 				} else {
-					const resolvedSessionObjectKey = resolved.session?.sessionObjectKey;
+					const resolvedSessionObjectKey = resolved.session?.sessionId;
 					if (
 						!resolvedSessionObjectKey ||
 						activeSessionObjectKeys.length !== 1 ||
 						activeSessionObjectKeys[0] !== resolvedSessionObjectKey
 					) {
-						throw new Error(`World peer ${peerId} has inconsistent active-session resolution`);
+						throw new Error(`Parent peer ${peerId} has inconsistent active-session resolution`);
 					}
 				}
 				const session =
-					resolved.session ??
-					(agent.agentObjectKey ? latestSessionForAgent(sessions, agent.agentObjectKey) : undefined);
-				if (session?.agentObjectKey !== agent.agentObjectKey) {
-					throw new Error(`World peer ${peerId} resolves a session for a different Agent`);
+					resolved.session ?? (agent.agentId ? latestSessionForAgent(sessions, agent.agentId) : undefined);
+				if (session?.agentId !== agent.agentId) {
+					throw new Error(`Parent peer ${peerId} resolves a session for a different Agent`);
 				}
-				if (session && worldSessionLifecycle(peerId, session).inactive !== resolved.inactive) {
-					throw new Error(`World peer ${peerId} lifecycle disagrees with its inactive resolution`);
+				if (session && parentSessionLifecycle(peerId, session).inactive !== resolved.inactive) {
+					throw new Error(`Parent peer ${peerId} lifecycle disagrees with its inactive resolution`);
 				}
 				const parentId =
-					agent.parentAgentObjectKey === callerAgentObjectKey
+					agent.parentAgentId === callerAgentObjectKey
 						? boundLocalId
-						: agentsByKey.get(agent.parentAgentObjectKey ?? "")?.peerId;
-				const ref = await this.#worldRef(peerId, agent, session, parentId, signal);
+						: agentsByKey.get(agent.parentAgentId ?? "")?.peerId;
+				const ref = await this.#parentRef(peerId, agent, session, parentId, signal);
 				seen.add(peerId);
 				peers.push(ref);
 			} catch (error) {
@@ -735,25 +738,25 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			}
 		}
 
-		const parentSessionObjectKey = callerSession?.parentSessionObjectKey?.trim();
-		if (parentSessionObjectKey) {
+		const parentSessionId = callerSession?.parentSessionId?.trim();
+		if (parentSessionId) {
 			try {
 				const parentSession =
-					sessions.find(session => session.sessionObjectKey === parentSessionObjectKey) ??
-					(await this.#readSessionSummary(parentSessionObjectKey, signal));
-				if (!parentSession) throw new Error(`Manifest parent LlmSession ${parentSessionObjectKey} is missing`);
-				const parentAgent = agentsByKey.get(parentSession.agentObjectKey ?? "");
+					sessions.find(session => session.sessionId === parentSessionId) ??
+					(await this.#readSessionSummary(parentSessionId, signal));
+				if (!parentSession) throw new Error(`Manifest parent LlmSession ${parentSessionId} is missing`);
+				const parentAgent = agentsByKey.get(parentSession.agentId ?? "");
 				const mainAgent: AgentSummary = {
-					agentObjectKey: parentSession.agentObjectKey,
+					agentId: parentSession.agentId,
 					name: parentAgent?.name || "Parent",
-					peerId: WORLD_PARENT_PEER_ID,
+					peerId: PARENT_PEER_ID,
 				};
-				peers.push(await this.#worldRef(WORLD_PARENT_PEER_ID, mainAgent, parentSession, undefined, signal));
-				seen.add(WORLD_PARENT_PEER_ID);
+				peers.push(await this.#parentRef(PARENT_PEER_ID, mainAgent, parentSession, undefined, signal));
+				seen.add(PARENT_PEER_ID);
 			} catch (error) {
 				errors.push({
 					code: "projection_error",
-					peerId: WORLD_PARENT_PEER_ID,
+					peerId: PARENT_PEER_ID,
 					detail: error instanceof Error ? error.message : String(error),
 				});
 			}
@@ -771,38 +774,35 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		const iterator = this.client.watchAgentTree(signal)[Symbol.asyncIterator]();
 		try {
 			const first = await iterator.next();
-			if (first.done) throw new Error("World Agent-tree watch ended before its initial snapshot");
+			if (first.done) throw new Error("Parent Agent-tree watch ended before its initial snapshot");
 			return first.value;
 		} finally {
-			await iterator.return?.();
+			await iterator.return?.(undefined);
 		}
 	}
 
-	async #readSessionSummary(
-		sessionObjectKey: string | undefined,
-		signal?: AbortSignal,
-	): Promise<SessionSummary | undefined> {
-		if (!sessionObjectKey) return undefined;
-		const iterator = this.client.watchSession(sessionObjectKey, signal)[Symbol.asyncIterator]();
+	async #readSessionSummary(sessionId: string | undefined, signal?: AbortSignal): Promise<SessionSummary | undefined> {
+		if (!sessionId) return undefined;
+		const iterator = this.client.watchSession(sessionId, signal)[Symbol.asyncIterator]();
 		try {
 			const first = await iterator.next();
 			if (first.done) return undefined;
 			return first.value.session;
 		} finally {
-			await iterator.return?.();
+			await iterator.return?.(undefined);
 		}
 	}
 
-	async #worldRef(
+	async #parentRef(
 		peerId: string,
 		agent: AgentSummary,
 		session: SessionSummary | undefined,
 		parentId: string | undefined,
 		signal?: AbortSignal,
 	): Promise<AgentRef> {
-		const sessionObjectKey = session?.sessionObjectKey;
+		const sessionId = session?.sessionId;
 		const cached = this.#peerCache.get(peerId);
-		if (cached && cached.sessionObjectKey === sessionObjectKey) {
+		if (cached && cached.sessionId === sessionId) {
 			cached.ref.displayName = agent.name?.trim() || peerId;
 			cached.ref.parentId = parentId;
 			cached.ref.status = cached.peer.status;
@@ -815,7 +815,7 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			await cached.peer.dispose();
 		}
 		let ref: AgentRef | undefined;
-		const peer = await WorldAgentPeer.open(
+		const peer = await ParentAgentPeer.open(
 			{
 				client: this.client,
 				peerId,
@@ -847,32 +847,32 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			lastActivity,
 			activity: peer.activity,
 		};
-		this.#peerCache.set(peerId, { sessionObjectKey, peer, ref });
+		this.#peerCache.set(peerId, { sessionId, peer, ref });
 		return ref;
 	}
 
 	attachMailbox(receiverPeerId: string, receiver: Pick<AgentPeer, "deliverIrcMessage">): void {
-		if (this.#closed) throw new Error("World coordination backend is closed");
-		if (this.#mailboxReceiver) throw new Error("World coordination mailbox is already attached");
+		if (this.#closed) throw new Error("Parent coordination backend is closed");
+		if (this.#mailboxReceiver) throw new Error("Parent coordination mailbox is already attached");
 		this.#mailboxReceiver = { receiverPeerId, receiver };
 		this.#startMailboxRouter();
 	}
 
 	async send(request: CoordinationMessageRequest, signal?: AbortSignal): Promise<CoordinationMessageReceipt> {
-		return await this.#runMutableOperation("World coordination send", async () => await this.#send(request, signal));
+		return await this.#runMutableOperation("Parent coordination send", async () => await this.#send(request, signal));
 	}
 
 	async #send(request: CoordinationMessageRequest, signal?: AbortSignal): Promise<CoordinationMessageReceipt> {
 		const targetPeerId = request.targetPeerId.trim();
-		if (!targetPeerId) throw new Error("World peer message target is required");
+		if (!targetPeerId) throw new Error("Parent peer message target is required");
 		const target =
-			targetPeerId === WORLD_PARENT_PEER_ID
+			targetPeerId === PARENT_PEER_ID
 				? ({ kind: "parent" } as const)
 				: ({ kind: "peer", peerId: requirePeerId(targetPeerId) } as const);
 		const digest = Bun.SHA256.hash(`${this.client.sessionKey}\0${request.message.id}`, "hex").slice(0, 32);
 		const result = await this.client.sendPeerMessage(
 			{
-				requestId: `world-peer-send:${digest}`,
+				requestId: `parent-peer-send:${digest}`,
 				clientMessageId: request.message.id,
 				body: request.message.body,
 				replyToClientMessageId: request.message.replyTo,
@@ -890,19 +890,19 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 				queueOutcome = "queued_inactive";
 				break;
 			default:
-				throw new Error(`World peer message ${request.message.id} returned an unknown queue outcome`);
+				throw new Error(`Parent peer message ${request.message.id} returned an unknown queue outcome`);
 		}
 		return {
 			to: targetPeerId,
 			outcome: "queued",
 			queueOutcome,
-			messageObjectKey: result.messageObjectKey,
+			messageId: result.messageId,
 			inboxSequence: result.inboxSequence,
 			replayed: result.replayed,
 		};
 	}
 	inbox(options?: { peek?: boolean; from?: string; replyTo?: string; limit?: number }): IrcMessage[] {
-		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("World mailbox inbox");
+		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("Parent mailbox inbox");
 		if (!this.#mailboxRouter) throw unavailable("mailbox inbox");
 		return this.#mailboxRouter.inbox(options);
 	}
@@ -912,13 +912,13 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		timeoutMs: number,
 		signal?: AbortSignal,
 	): Promise<IrcMessage | null> {
-		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("World mailbox wait");
+		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("Parent mailbox wait");
 		const router = this.#mailboxRouter;
 		if (!router) throw unavailable("mailbox wait");
 		const controller = new AbortController();
-		const cancel = new Error("World mailbox wait settled");
+		const cancel = new Error("Parent mailbox wait settled");
 		const forwardAbort = (): void => {
-			controller.abort(signal?.reason instanceof Error ? signal.reason : new Error("World mailbox wait aborted"));
+			controller.abort(signal?.reason instanceof Error ? signal.reason : new Error("Parent mailbox wait aborted"));
 		};
 		if (signal?.aborted) forwardAbort();
 		else signal?.addEventListener("abort", forwardAbort, { once: true });
@@ -941,60 +941,59 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			if (from) {
 				const ref = roster.peers.find(peer => peer.id === from);
 				if (!ref) throw new Error(`IRC wait aborted: agent "${from}" is not running`);
-				if (
-					from === WORLD_PARENT_PEER_ID &&
-					(!(ref.session instanceof WorldAgentPeer) || !ref.session.mailboxLive)
-				) {
+				if (from === PARENT_PEER_ID && (!(ref.session instanceof ParentAgentPeer) || !ref.session.mailboxLive)) {
 					throw new Error(`IRC wait aborted: agent "${from}" is not running`);
 				}
 				return;
 			}
-			const hasLivePeer = roster.peers.some(ref => ref.session instanceof WorldAgentPeer && ref.session.mailboxLive);
+			const hasLivePeer = roster.peers.some(
+				ref => ref.session instanceof ParentAgentPeer && ref.session.mailboxLive,
+			);
 			if (!hasLivePeer) throw new Error("IRC wait aborted: no running peers remain");
 		};
 		await check();
 		for await (const _snapshot of this.client.watchAgentTree(signal)) await check();
-		throw new Error("World Agent-tree watch ended during mailbox wait");
+		throw new Error("Parent Agent-tree watch ended during mailbox wait");
 	}
 
 	async #resolveMailboxSender(message: AgentMessageSummary, signal?: AbortSignal): Promise<string> {
-		const sourceSessionObjectKey = message.sourceLlmSessionObjectKey?.trim();
+		const sourceSessionObjectKey = message.sourceSessionId?.trim();
 		const callerSession = await this.#readSessionSummary(this.client.sessionKey, signal);
-		if (sourceSessionObjectKey && sourceSessionObjectKey === callerSession?.parentSessionObjectKey?.trim()) {
-			return WORLD_PARENT_PEER_ID;
+		if (sourceSessionObjectKey && sourceSessionObjectKey === callerSession?.parentSessionId?.trim()) {
+			return PARENT_PEER_ID;
 		}
-		const fromAgentObjectKey = message.fromAgentObjectKey?.trim();
-		if (!fromAgentObjectKey) throw new Error("World mailbox record has no source Agent object key");
+		const fromAgentId = message.fromAgentId?.trim();
+		if (!fromAgentId) throw new Error("Parent mailbox record has no source Agent object key");
 		const tree = await this.#readAgentTree(signal);
-		const matches = (tree.agents ?? []).filter(agent => agent.agentObjectKey === fromAgentObjectKey);
+		const matches = (tree.agents ?? []).filter(agent => agent.agentId === fromAgentId);
 		if (matches.length !== 1) {
-			throw new Error(`World mailbox source Agent ${fromAgentObjectKey} does not resolve exactly`);
+			throw new Error(`Parent mailbox source Agent ${fromAgentId} does not resolve exactly`);
 		}
 		const peerId = matches[0]?.peerId?.trim();
-		if (!peerId) throw new Error(`World mailbox source Agent ${fromAgentObjectKey} has no peer ID`);
+		if (!peerId) throw new Error(`Parent mailbox source Agent ${fromAgentId} has no peer ID`);
 		return peerId;
 	}
 
 	async interrupt(peerId: string, reason: string, signal?: AbortSignal): Promise<void> {
 		await this.#runMutableOperation(
-			"World Task interrupt",
+			"Parent Task interrupt",
 			async () => await this.#interrupt(peerId, reason, signal),
 		);
 	}
 
 	async #interrupt(peerId: string, reason: string, signal?: AbortSignal): Promise<void> {
 		const id = requirePeerId(peerId);
-		let sessionObjectKey = this.#sessions.get(id);
-		if (!sessionObjectKey) {
+		let sessionId = this.#sessions.get(id);
+		if (!sessionId) {
 			const peer = await this.client.resolveAgentPeer(id, signal);
-			sessionObjectKey = peer.session?.sessionObjectKey;
+			sessionId = peer.session?.sessionId;
 		}
-		if (!sessionObjectKey) throw new Error(`World Task peer ${id} has no active LlmSession`);
-		const digest = Bun.SHA256.hash(`${sessionObjectKey}\0${reason}`, "hex").slice(0, 32);
+		if (!sessionId) throw new Error(`Parent Task peer ${id} has no active LlmSession`);
+		const digest = Bun.SHA256.hash(`${sessionId}\0${reason}`, "hex").slice(0, 32);
 		await this.client.interruptSession(
 			{
-				requestId: `world-task-interrupt:${digest}`,
-				targetSessionObjectKey: sessionObjectKey,
+				requestId: `parent-task-interrupt:${digest}`,
+				targetSessionId: sessionId,
 				reason,
 			},
 			signal,
@@ -1013,13 +1012,12 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 		await this.client.close();
 	}
 }
-export function createWorldCoordinationBackend(
-	options: WorldClientOptions & { client?: WorldCoordinationClient } = {},
-): WorldCoordinationBackend | undefined {
-	if (options.client) return new WorldCoordinationBackend(options.client);
-	const interactiveRoot = options.interactiveRoot === true;
-	if (!resolveWorldSocketPath(options) || (!interactiveRoot && !resolveWorldSessionKey(options))) return undefined;
-	const client = WorldClient.create(options);
+export function createParentCoordinationBackend(
+	options: ParentClientOptions & { client?: ParentCoordinationClient } = {},
+): ParentCoordinationBackend | undefined {
+	if (options.client) return new ParentCoordinationBackend(options.client);
+	if (!resolveParentSocketPath(options)) return undefined;
+	const client = ParentClient.create(options);
 	if (!client) return undefined;
-	return new WorldCoordinationBackend(client);
+	return new ParentCoordinationBackend(client);
 }

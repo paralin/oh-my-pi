@@ -6,8 +6,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
-import type { WorldAuthorityDenialCode, WorldOperationFailureCode } from "../../world/generated/llmsession.pb";
-import type { WorldOperation } from "../../world/operations";
+import type { ParentFailureCode } from "../../parent/generated/parent-environment.pb";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
 /**
@@ -39,7 +38,7 @@ export interface HubPeerInfo {
 	unread: number;
 	lastActivity: number;
 	activity?: string;
-	source?: "world";
+	source?: "parent";
 }
 
 /** Background-job row surfaced by `wait`/`cancel`/`jobs` results. */
@@ -79,22 +78,14 @@ export interface AgentActivitySnapshot {
 	ageMs: number;
 }
 
-export type HubWorldError =
-	| {
-			kind: "authority";
-			operation: WorldOperation;
-			code: WorldAuthorityDenialCode;
-			codeName: string;
-			detail: string;
-			requiredPermission: string;
-	  }
-	| {
-			kind: "operation";
-			operation: WorldOperation;
-			code: WorldOperationFailureCode;
-			codeName: string;
-			detail: string;
-	  };
+export interface HubParentError {
+	kind: "operation";
+	operation: string;
+	code: ParentFailureCode;
+	codeName: string;
+	detail: string;
+	requiredCapability: string;
+}
 /** Result details for messaging and job ops; fields are disjoint per op. */
 export interface CoordinationDetails {
 	op: HubOp;
@@ -106,7 +97,7 @@ export interface CoordinationDetails {
 	inbox?: IrcMessage[];
 	peers?: HubPeerInfo[];
 	rosterErrors?: Array<{ code: "identity_conflict" | "projection_error"; peerId: string; detail: string }>;
-	worldError?: HubWorldError;
+	parentError?: HubParentError;
 	jobs?: JobSnapshot[];
 	cancelled?: { id: string; status: CancelStatus }[];
 	/** Running subagents not represented by a job row in this result. */

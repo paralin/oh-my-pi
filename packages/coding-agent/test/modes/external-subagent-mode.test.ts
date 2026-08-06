@@ -9,14 +9,14 @@ import {
 import {
 	externalTaskProgressRecord,
 	externalTaskResultRecord,
-	GLADOS_ADAPTER_CONFIG_DIGEST_ENV,
-	GLADOS_ADAPTER_CONFIG_ENV,
 	loadExternalSubagentProfile,
+	PARENT_TASK_PROFILE_DIGEST_ENV,
+	PARENT_TASK_PROFILE_ENV,
 	runExternalSubagentMode,
 } from "@oh-my-pi/pi-coding-agent/modes/external-subagent-mode";
+import { PARENT_SESSION_ENV, PARENT_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/parent/config";
 import type { AgentProgress, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
-import { WORLD_SESSION_ENV, WORLD_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/world/index";
 
 const roots: string[] = [];
 
@@ -62,8 +62,8 @@ async function fixture(): Promise<{
 		profile,
 		path: profilePath,
 		env: {
-			[GLADOS_ADAPTER_CONFIG_ENV]: profilePath,
-			[GLADOS_ADAPTER_CONFIG_DIGEST_ENV]: encoded.digest,
+			[PARENT_TASK_PROFILE_ENV]: profilePath,
+			[PARENT_TASK_PROFILE_DIGEST_ENV]: encoded.digest,
 		},
 	};
 }
@@ -83,20 +83,20 @@ describe("external subagent mode", () => {
 		await expect(
 			loadExternalSubagentProfile({
 				...value.env,
-				[GLADOS_ADAPTER_CONFIG_DIGEST_ENV]: "0".repeat(64),
+				[PARENT_TASK_PROFILE_DIGEST_ENV]: "0".repeat(64),
 			}),
 		).rejects.toThrow("digest");
 		await expect(
 			loadExternalSubagentProfile({
 				...value.env,
-				[GLADOS_ADAPTER_CONFIG_ENV]: "relative.json",
+				[PARENT_TASK_PROFILE_ENV]: "relative.json",
 			}),
 		).rejects.toThrow("absolute");
 	});
 
-	test("rejects missing World identity before provider startup", async () => {
+	test("rejects missing Parent identity before provider startup", async () => {
 		const value = await fixture();
-		await expect(runExternalSubagentMode(value.env)).rejects.toThrow("OMP_WORLD_SOCKET and OMP_WORLD_SESSION");
+		await expect(runExternalSubagentMode(value.env)).rejects.toThrow("OMP_PARENT_SOCKET and OMP_PARENT_SESSION");
 	});
 
 	test("terminalizes setup failures before provider startup", async () => {
@@ -119,9 +119,9 @@ describe("external subagent mode", () => {
 		let result: SingleResult;
 		const env: NodeJS.ProcessEnv = {
 			...value.env,
-			[GLADOS_ADAPTER_CONFIG_DIGEST_ENV]: encoded.digest,
-			[WORLD_SOCKET_ENV]: path.join(value.profile.workspaceRoots[0]!, "world.sock"),
-			[WORLD_SESSION_ENV]: "glados/live/root/llm-session",
+			[PARENT_TASK_PROFILE_DIGEST_ENV]: encoded.digest,
+			[PARENT_SOCKET_ENV]: path.join(value.profile.workspaceRoots[0]!, "parent.sock"),
+			[PARENT_SESSION_ENV]: "glados/live/root/llm-session",
 			[CODEX_HOME_ENV]: codexHome,
 		};
 		try {
@@ -130,7 +130,7 @@ describe("external subagent mode", () => {
 			write.mockRestore();
 		}
 
-		expect(output.match(/"type":"glados_task_result_v1"/g)).toHaveLength(1);
+		expect(output.match(/"type":"omp_parent_task_result_v1"/g)).toHaveLength(1);
 		expect(result.exitCode).toBe(1);
 		expect(result.error).toContain("missing-frozen-skill");
 		expect(env[OPENAI_CODEX_OAUTH_TOKEN_ENV]).toBe("external-mode-token");

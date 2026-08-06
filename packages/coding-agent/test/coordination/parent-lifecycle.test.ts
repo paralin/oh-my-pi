@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { WorldCoordinationBackend, type WorldCoordinationClient } from "@oh-my-pi/pi-coding-agent/coordination/world";
-import { PeerMessageOutcome } from "../../src/world/generated/llmsession.pb.js";
+import {
+	ParentCoordinationBackend,
+	type ParentCoordinationClient,
+} from "@oh-my-pi/pi-coding-agent/coordination/parent";
+import { PeerMessageOutcome } from "../../src/parent/generated/parent-environment.pb.js";
 
 const ROTATION = {
 	sessionId: "omp-session-2",
@@ -10,7 +13,7 @@ const ROTATION = {
 	reason: "switch" as const,
 };
 
-describe("interactive World lifecycle", () => {
+describe("interactive Parent lifecycle", () => {
 	test("waits for root custody rotation before completing a session transition", async () => {
 		const rotation = Promise.withResolvers<void>();
 		const calls: string[] = [];
@@ -24,13 +27,13 @@ describe("interactive World lifecycle", () => {
 				await rotation.promise;
 				calls.push("rotate-complete");
 			},
-		} as unknown as WorldCoordinationClient & {
+		} as unknown as ParentCoordinationClient & {
 			interactiveRoot: true;
 			interactiveBinding: object;
 			rotateInteractiveRootTransition(transition: typeof ROTATION): Promise<void>;
 			calls: string[];
 		};
-		const backend = new WorldCoordinationBackend(client);
+		const backend = new ParentCoordinationBackend(client);
 		const token = await backend.beforeRootTransition();
 
 		let completed = false;
@@ -48,7 +51,7 @@ describe("interactive World lifecycle", () => {
 		expect(completed).toBe(true);
 	});
 
-	test("preserves the World client receiver across model reconfiguration", async () => {
+	test("preserves the Parent client receiver across model reconfiguration", async () => {
 		const client = {
 			canMutate: true,
 			interactiveRoot: true,
@@ -56,8 +59,8 @@ describe("interactive World lifecycle", () => {
 			async reconfigureInteractiveRootTransition(transition: { provider: string; model: string }) {
 				expect(transition.model).toBe("claude-sonnet-4-5");
 			},
-		} as unknown as WorldCoordinationClient;
-		const backend = new WorldCoordinationBackend(client);
+		} as unknown as ParentCoordinationClient;
+		const backend = new ParentCoordinationBackend(client);
 		const token = await backend.beforeRootTransition();
 
 		await backend.afterModelTransition(token, {
@@ -66,7 +69,7 @@ describe("interactive World lifecycle", () => {
 		});
 	});
 
-	test("drains an entered World mutation before rotating root custody", async () => {
+	test("drains an entered Parent mutation before rotating root custody", async () => {
 		const sendStarted = Promise.withResolvers<void>();
 		const allowSend = Promise.withResolvers<void>();
 		const client = {
@@ -79,17 +82,17 @@ describe("interactive World lifecycle", () => {
 				await allowSend.promise;
 				return {
 					requestId: request.requestId,
-					messageObjectKey: "glados/messages/1",
+					messageId: "glados/messages/1",
 					clientMessageId: request.clientMessageId,
-					toAgentObjectKey: "glados/agents/peer",
-					targetLlmSessionObjectKey: "glados/sessions/peer",
+					toAgentId: "glados/agents/peer",
+					targetSessionId: "glados/sessions/peer",
 					inboxSequence: 1n,
 					outcome: PeerMessageOutcome.QUEUED_LIVE,
 					replayed: false,
 				};
 			},
-		} as unknown as WorldCoordinationClient;
-		const backend = new WorldCoordinationBackend(client);
+		} as unknown as ParentCoordinationClient;
+		const backend = new ParentCoordinationBackend(client);
 		const sending = backend.send({
 			targetPeerId: "peer",
 			message: {

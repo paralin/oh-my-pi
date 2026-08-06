@@ -67,7 +67,6 @@ import type { CoordinationBackend, CoordinationLifecycle } from "./coordination/
 import { CronManager } from "./cron";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
-import type { WorldClient } from "./world/client.js";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -560,8 +559,6 @@ export interface CreateAgentSessionOptions {
 	coordinationBackend?: CoordinationBackend;
 	/** Awaited custody boundary for top-level session and model transitions. */
 	coordinationLifecycle?: CoordinationLifecycle;
-	/** Sole World client supplied to tools for an attached interactive root. */
-	worldClient?: () => WorldClient | undefined;
 	/** Settings instance. Default: Settings.init({ cwd, agentDir }) */
 	settings?: Settings;
 	/**
@@ -1749,7 +1746,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			lspReadOnly,
 			enableIrc: options.enableIrc,
 			coordinationBackend: options.coordinationBackend,
-			worldClient: options.worldClient,
 			restrictToolNames,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
@@ -3476,7 +3472,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialAdvisorCosts,
 			settings,
 			coordinationLifecycle: options.coordinationLifecycle,
-			sendWorldIrcReply: options.coordinationBackend
+			sendParentIrcReply: options.coordinationBackend
 				? async message =>
 						await options.coordinationBackend!.send({
 							targetPeerId: message.to,
@@ -3484,7 +3480,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								...message,
 								id: Snowflake.next(),
 								ts: Date.now(),
-								source: "world",
+								source: "parent",
 							},
 						})
 				: undefined,
