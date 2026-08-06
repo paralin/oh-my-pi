@@ -13,9 +13,11 @@ export interface FileLockOptions {
 	retries?: number;
 	/** Delay between acquisition attempts. */
 	retryDelayMs?: number;
+	/** Cancels a contended acquisition without waiting for the next attempt. */
+	signal?: AbortSignal;
 }
 
-const DEFAULT_OPTIONS: Required<FileLockOptions> = {
+const DEFAULT_OPTIONS: Required<Pick<FileLockOptions, "retries" | "retryDelayMs">> = {
 	retries: 50,
 	retryDelayMs: 100,
 };
@@ -29,14 +31,40 @@ function tryAcquireLock(lockPath: string): NativeFileLock | null {
 	return lock.acquired ? lock : null;
 }
 
+function abortReason(signal: AbortSignal): Error {
+	return signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw abortReason(signal);
+}
+
+async function waitForRetry(delayMs: number, signal: AbortSignal | undefined): Promise<void> {
+	if (!signal) {
+		await Bun.sleep(delayMs);
+		return;
+	}
+	throwIfAborted(signal);
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const onAbort = () => resolve();
+	signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		await Promise.race([Bun.sleep(delayMs), promise]);
+		throwIfAborted(signal);
+	} finally {
+		signal.removeEventListener("abort", onAbort);
+	}
+}
+
 async function acquireLock(filePath: string, options: FileLockOptions = {}): Promise<NativeFileLock> {
 	const opts = { ...DEFAULT_OPTIONS, ...options };
 	const lockPath = getLockPath(filePath);
 
 	for (let attempt = 0; attempt < opts.retries; attempt++) {
+		throwIfAborted(opts.signal);
 		const lock = tryAcquireLock(lockPath);
 		if (lock) return lock;
-		if (attempt + 1 < opts.retries) await Bun.sleep(opts.retryDelayMs);
+		if (attempt + 1 < opts.retries) await waitForRetry(opts.retryDelayMs, opts.signal);
 	}
 
 	throw new Error(`Failed to acquire lock for ${filePath} after ${opts.retries} attempts`);

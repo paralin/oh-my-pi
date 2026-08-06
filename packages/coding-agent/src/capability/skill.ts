@@ -28,6 +28,10 @@ export interface SkillFrontmatter {
 	 * @see https://agentskills.io/specification
 	 */
 	disableModelInvocation?: boolean;
+	/** Python skill package metadata. */
+	type?: "markdown" | "python";
+	python_import?: string;
+	python_callable?: string;
 	[key: string]: unknown;
 }
 

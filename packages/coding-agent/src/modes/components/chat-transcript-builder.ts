@@ -18,6 +18,7 @@ import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
+import { IPYTHON_JOURNAL_MESSAGE_TYPE, isIpythonJournalDetail } from "../../ipython/journal";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
@@ -50,6 +51,7 @@ import {
 } from "./compaction-summary-message";
 import { CustomMessageComponent } from "./custom-message";
 import { EvalExecutionComponent } from "./eval-execution";
+import { IpythonCellMessageComponent } from "./ipython-cell-message";
 import { type LateDiagnosticsFile, LateDiagnosticsMessageComponent } from "./late-diagnostics-message";
 import { groupedReadUsageCallIds, ReadToolGroupComponent, readArgsCollapseIntoGroup } from "./read-tool-group";
 import { SkillMessageComponent } from "./skill-message";
@@ -464,6 +466,12 @@ export class ChatTranscriptBuilder {
 
 	#appendCustomMessage(message: Extract<AgentMessage, { role: "custom" | "hookMessage" }>): void {
 		if (!message.display) return;
+		if (message.customType === IPYTHON_JOURNAL_MESSAGE_TYPE && isIpythonJournalDetail(message.details)) {
+			const component = new IpythonCellMessageComponent(message.details);
+			this.#trackExpandable(component);
+			this.container.addChild(component);
+			return;
+		}
 		if (message.customType === "async-result") {
 			this.container.addChild(buildAsyncResultBlock(message));
 			return;

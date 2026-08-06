@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { getProjectDir, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
@@ -27,6 +28,10 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
+	/** Importable Python package metadata retained from an authored SKILL.md. */
+	pythonImport?: string;
+	pythonCallable?: string;
+	pythonPath?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -59,6 +64,20 @@ export function setActiveSkills(value: readonly Skill[]): void {
 /** Reset the active skill snapshot. Test-only. */
 export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
+}
+
+function pythonSkillMetadata(skill: CapabilitySkill): Pick<Skill, "pythonImport" | "pythonCallable" | "pythonPath"> {
+	if (skill.frontmatter?.type !== "python") return {};
+	const pythonImport = skill.frontmatter.python_import;
+	const pythonCallable = skill.frontmatter.python_callable;
+	if (typeof pythonImport !== "string" || !pythonImport || typeof pythonCallable !== "string" || !pythonCallable) {
+		return {};
+	}
+	return {
+		pythonImport,
+		pythonCallable,
+		pythonPath: path.join(path.dirname(skill.path), "src"),
+	};
 }
 
 /**
@@ -105,6 +124,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...pythonSkillMetadata(capSkill),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -240,6 +260,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				...pythonSkillMetadata(capSkill),
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -277,6 +298,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					...pythonSkillMetadata(capSkill),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -377,6 +399,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...pythonSkillMetadata(capSkill),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);

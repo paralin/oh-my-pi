@@ -7,6 +7,7 @@ import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../coll
 import { settings } from "../../config/settings";
 import { getEditClipboard } from "../../edit/edit-clipboard";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
+import { IPYTHON_JOURNAL_MESSAGE_TYPE, isIpythonJournalDetail } from "../../ipython/journal";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
@@ -21,6 +22,7 @@ import {
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
+import { IpythonCellMessageComponent } from "../../modes/components/ipython-cell-message";
 import {
 	type LateDiagnosticsFile,
 	LateDiagnosticsMessageComponent,
@@ -159,6 +161,12 @@ export class UiHelpers {
 			case "hookMessage":
 			case "custom": {
 				if (message.display) {
+					if (message.customType === IPYTHON_JOURNAL_MESSAGE_TYPE && isIpythonJournalDetail(message.details)) {
+						const component = new IpythonCellMessageComponent(message.details);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
 					if (message.customType === "async-result") {
 						this.ctx.chatContainer.addChild(buildAsyncResultBlock(message));
 						break;

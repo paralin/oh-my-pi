@@ -11,6 +11,7 @@ import type { AssistantMessage, Model, ToolExample, TSchema } from "@oh-my-pi/pi
 import { renderDelimitedThinking, renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { YAML } from "bun";
+import { IPYTHON_JOURNAL_MESSAGE_TYPE, isIpythonJournalDetail, renderIpythonJournalText } from "../ipython/journal";
 import { canonicalizeMessage } from "../utils/thinking-display";
 import {
 	type BashExecutionMessage,
@@ -168,6 +169,10 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {
 			const customMsg = msg as CustomMessage | HookMessage;
+			if (customMsg.customType === IPYTHON_JOURNAL_MESSAGE_TYPE && isIpythonJournalDetail(customMsg.details)) {
+				lines.push("## IPython\n", renderIpythonJournalText(customMsg.details), "\n");
+				continue;
+			}
 			lines.push(`## ${customMsg.customType}\n`);
 			if (typeof customMsg.content === "string") {
 				lines.push(customMsg.content);

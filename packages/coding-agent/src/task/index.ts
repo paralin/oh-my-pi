@@ -16,8 +16,9 @@
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
+import { formatModelString } from "../config/model-resolver";
 import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
@@ -44,7 +45,17 @@ import {
 import "../tools/review";
 import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { AgentRegistry } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { USER_INTERRUPT_LABEL } from "../session/messages";
+import type {
+	SubagentRuntimeAdmission,
+	TaskAdmissionRequest,
+	TaskAdmissionService,
+	TaskChildAdmission,
+	TaskChildProjection,
+	TaskIsolationControls,
+	TaskModelProjection,
+} from "./admission";
 import { addImplicitModelRoleAgents, type DiscoveryResult, discoverAgents } from "./discovery";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
@@ -99,6 +110,16 @@ function addUsageTotals(target: Usage, usage: Partial<Usage>): void {
 }
 
 // Re-export types and utilities
+export type {
+	SubagentRuntimeAdmission,
+	TaskAdmissionRequest,
+	TaskAdmissionService,
+	TaskChildAdmission,
+	TaskChildProjection,
+	TaskIsolationControls,
+	TaskModelProjection,
+} from "./admission";
+export { isTaskAdmissionService } from "./admission";
 export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
@@ -142,6 +163,23 @@ interface TaskDescriptionOptions {
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
 	parentSpawns: string;
+}
+
+interface StructuredSpawnOverrides {
+	model?: string;
+	isolation?: TaskIsolationControls;
+	keepAlive?: boolean;
+	onAdmission?: (admission: SubagentRuntimeAdmission) => void;
+}
+
+function childStatus(status: AgentRef["status"]): TaskChildProjection["status"] {
+	if (status === "running") return "running";
+	if (status === "aborted") return "error";
+	return "completed";
+}
+
+function abortMessage(signal: AbortSignal): string {
+	return signal.reason instanceof Error ? signal.reason.message : "RLM admission was interrupted";
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -486,7 +524,7 @@ function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
  * item. When `async.enabled` is on, spawns run as AsyncJobManager jobs; when
  * disabled, the tool blocks until every spawn finishes.
  */
-export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme> {
+export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme>, TaskAdmissionService {
 	readonly name = "task";
 	readonly approval = "exec" as const;
 	readonly formatApprovalDetails = (args: unknown): string[] => {
@@ -568,6 +606,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * spawns and work already parked in the semaphore queue.
 	 */
 	#spawnSemaphore: Semaphore | undefined;
+	/** Non-authoritative session metadata; AgentRegistry remains the only child roster. */
+	readonly #admissionMetadata = new Map<string, SubagentRuntimeAdmission>();
+	readonly #pendingAdmissionNames = new Set<string>();
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
@@ -634,17 +675,22 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * normalized task params rather than smuggling internal policy over the
 	 * task wire contract.
 	 */
-	#resolveSpawnPreflight(params: TaskParams) {
+	#resolveSpawnPreflight(params: TaskParams, overrides?: StructuredSpawnOverrides) {
 		return resolveEffectiveSubagentPolicy({
 			session: this.session,
 			invocationKind: "task",
 			assignment: (params.task ?? "").trim(),
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
+			model: overrides?.model,
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...(params.effort !== undefined ? { effort: params.effort } : {}),
-			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+			...(overrides?.isolation
+				? { isolation: overrides.isolation }
+				: "isolated" in params
+					? { isolation: { requested: params.isolated } }
+					: {}),
 			blockedAgent: this.#blockedAgent,
 			enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 			enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
@@ -658,6 +704,267 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	static async create(session: ToolSession): Promise<TaskTool> {
 		const { agents } = await discoverAgentsForCreate(session.cwd);
 		return new TaskTool(session, agents);
+	}
+
+	#availableModels(): TaskModelProjection[] {
+		const bySelector = new Map<string, TaskModelProjection>();
+		const registry = this.session.modelRegistry;
+		if (!registry) return [];
+		for (const model of registry.getAvailable()) {
+			const selector = formatModelString(model);
+			bySelector.set(selector, {
+				provider: model.provider,
+				id: model.id,
+				name: model.name || model.id,
+				selector,
+			});
+		}
+		return [...bySelector.values()].sort((left, right) => left.selector.localeCompare(right.selector));
+	}
+
+	findModels(query: string, limit: number): TaskModelProjection[] {
+		const normalize = (value: string): string => value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+		const normalized = normalize(query.trim());
+		return this.#availableModels()
+			.map(model => {
+				const fields = [model.selector, model.id, model.name].map(normalize);
+				let score = normalized ? Number.POSITIVE_INFINITY : 0;
+				if (normalized) {
+					const exact = fields.indexOf(normalized);
+					const prefix = fields.findIndex(field => field.startsWith(normalized));
+					const partial = fields.findIndex(field => field.includes(normalized));
+					if (exact >= 0) score = exact;
+					else if (prefix >= 0) score = 3 + prefix;
+					else if (partial >= 0) score = 6 + partial;
+				}
+				return { model, score };
+			})
+			.filter(candidate => Number.isFinite(candidate.score))
+			.sort((left, right) => left.score - right.score || left.model.selector.localeCompare(right.model.selector))
+			.slice(0, limit)
+			.map(candidate => candidate.model);
+	}
+
+	#assertExactModel(selector: string): void {
+		if (!this.#availableModels().some(model => model.selector === selector)) {
+			throw new Error(
+				`RLM model must be one exact selector returned by rlm.find_models(); unavailable selector: ${selector}`,
+			);
+		}
+	}
+
+	#projectChild(ref: AgentRef): TaskChildProjection {
+		const admitted = this.#admissionMetadata.get(ref.id);
+		const sessionFile = admitted?.sessionFile ?? ref.sessionFile ?? undefined;
+		const sessionDir = admitted?.sessionDir ?? (sessionFile ? path.dirname(sessionFile) : this.session.cwd);
+		return {
+			id: ref.id,
+			name: admitted?.name ?? ref.id,
+			...(ref.session && admitted?.sessionId ? { activeSessionId: admitted.sessionId } : {}),
+			...(admitted?.sessionId ? { sessionId: admitted.sessionId } : {}),
+			sessionDir,
+			status: childStatus(ref.status),
+			lifecycleStatus: ref.status,
+			...(admitted?.model || ref.history?.resolvedModel
+				? { model: admitted?.model ?? ref.history?.resolvedModel }
+				: {}),
+		};
+	}
+
+	async #directChildren(signal?: AbortSignal): Promise<AgentRef[]> {
+		if (signal?.aborted) throw new Error(abortMessage(signal));
+		const parentId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
+		const local = (this.session.agentRegistry ?? AgentRegistry.global())
+			.list()
+			.filter(ref => ref.kind === "sub" && ref.parentId === parentId);
+		const backend = this.session.coordinationBackend;
+		if (!backend) return local;
+		const roster = await backend.listPeers(signal);
+		const world = roster.peers.filter(ref => ref.kind === "sub" && ref.parentId === parentId);
+		const byId = new Map(local.map(ref => [ref.id, ref]));
+		for (const ref of world) {
+			if (byId.has(ref.id)) throw new Error(`Child identity conflict between Task and World: ${ref.id}`);
+			byId.set(ref.id, ref);
+		}
+		const relevantError = roster.errors.find(error => error.peerId === parentId || byId.has(error.peerId));
+		if (relevantError) throw new Error(relevantError.detail);
+		return [...byId.values()];
+	}
+
+	async listDirectChildren(signal?: AbortSignal): Promise<TaskChildProjection[]> {
+		const children = await this.#directChildren(signal);
+		return children
+			.sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
+			.map(ref => this.#projectChild(ref));
+	}
+
+	async deleteDirectChild(target: string, signal?: AbortSignal): Promise<TaskChildProjection> {
+		const selector = target.trim();
+		if (!selector) throw new Error("RLM child target must be a nonempty string");
+		const parentId = this.session.getAgentId?.() ?? MAIN_AGENT_ID;
+		const children = await this.#directChildren(signal);
+		const matches = children.filter(
+			candidate => candidate.id === selector || this.#admissionMetadata.get(candidate.id)?.name === selector,
+		);
+		if (matches.length === 0) throw new Error(`Direct Task child not found: ${selector}`);
+		if (matches.length > 1) throw new Error(`Direct Task child name is ambiguous: ${selector}`);
+		const ref = matches[0]!;
+		const before = this.#projectChild(ref);
+		const registry = this.session.agentRegistry ?? AgentRegistry.global();
+		const local = registry.get(ref.id);
+		if (local === ref) {
+			const manager = this.session.asyncJobManager;
+			const job = manager?.getJob(ref.id);
+			if (job && job.ownerId === parentId) {
+				if (job.status === "running") manager?.cancel(job.id, { ownerId: parentId });
+				manager?.acknowledgeDeliveries([job.id]);
+				if (signal) await untilAborted(signal, () => job.promise);
+				else await job.promise;
+			}
+			const current = registry.get(ref.id);
+			if (current?.kind === "sub" && current.parentId === parentId) {
+				if (current.status === "running" && current.session) {
+					await current.session.abort({ reason: USER_INTERRUPT_LABEL });
+				}
+				const lifecycle = this.session.agentLifecycle?.();
+				if (lifecycle) await lifecycle.release(current.id, current);
+				else {
+					await current.session?.dispose();
+					registry.unregister(current.id, current);
+				}
+			}
+		} else {
+			const backend = this.session.coordinationBackend;
+			if (!backend) throw new Error(`Direct Task child is no longer registered: ${selector}`);
+			await backend.interrupt(ref.id, "Deleted through RLM", signal);
+		}
+		this.#admissionMetadata.delete(ref.id);
+		return { ...before, status: "error", lifecycleStatus: "aborted", activeSessionId: undefined };
+	}
+
+	async admit(request: TaskAdmissionRequest): Promise<TaskChildAdmission> {
+		if (request.signal?.aborted) throw new Error(abortMessage(request.signal));
+		const assignment = request.assignment.trim();
+		if (!assignment) throw new Error("RLM prompt must be a nonempty string");
+		const requestedName = request.name?.trim();
+		if (requestedName && requestedName.length > 64) {
+			throw new Error("RLM name must be at most 64 characters");
+		}
+		if (request.model) this.#assertExactModel(request.model);
+		const manager = this.session.asyncJobManager;
+		if (!manager) throw new Error("RLM admission requires the session AsyncJobManager");
+		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const spawnParams: TaskParams = {
+			task: assignment,
+			agent: defaultAgent,
+			...(requestedName ? { name: requestedName } : {}),
+		};
+		const overrides: StructuredSpawnOverrides = {
+			...(request.model ? { model: request.model } : {}),
+			...(request.isolation ? { isolation: request.isolation } : {}),
+			keepAlive: true,
+		};
+		const policy = await this.#resolveSpawnPreflight(spawnParams, overrides);
+		if (request.signal?.aborted) throw new Error(abortMessage(request.signal));
+		if (this.session.coordinationBackend && (policy.isIsolated || policy.claudeCode)) {
+			throw new Error(
+				`unsupported_world_runtime: World Task supports only native, non-isolated workers; selected ${policy.claudeCode ? "claude-code" : "isolated"}`,
+			);
+		}
+		if (requestedName) {
+			if (this.#pendingAdmissionNames.has(requestedName)) {
+				throw new Error(`RLM name ${JSON.stringify(requestedName)} is already in use by a sibling`);
+			}
+			const duplicate = (await this.#directChildren(request.signal)).some(
+				child => (this.#admissionMetadata.get(child.id)?.name ?? child.displayName) === requestedName,
+			);
+			if (duplicate) throw new Error(`RLM name ${JSON.stringify(requestedName)} is already in use by a sibling`);
+			this.#pendingAdmissionNames.add(requestedName);
+		}
+		try {
+			let outputManager = this.session.agentOutputManager;
+			if (!outputManager) {
+				outputManager = new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
+				this.session.agentOutputManager = outputManager;
+			}
+			const requestedId =
+				requestedName && /^[A-Za-z0-9_-]{1,48}$/.test(requestedName) ? requestedName : generateTaskName();
+			const agentId = await outputManager.allocate(requestedId);
+			const progress: AgentProgress = {
+				index: 0,
+				id: agentId,
+				agent: defaultAgent,
+				agentSource: policy.agent.source,
+				modelRole: policy.modelRole,
+				status: "pending",
+				task: renderSubagentUserPrompt(assignment),
+				assignment,
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				requests: 0,
+				tokens: 0,
+				cost: 0,
+				durationMs: 0,
+			};
+			const details = (): TaskToolDetails => ({
+				projectAgentsDir: null,
+				results: [],
+				totalDurationMs: 0,
+				progress: [{ ...progress }],
+				async: { state: "running", jobId: agentId, type: "task" },
+			});
+			const admitted = Promise.withResolvers<TaskChildAdmission>();
+			let settled = false;
+			let jobId = agentId;
+			overrides.onAdmission = runtime => {
+				if (settled) return;
+				settled = true;
+				const metadata = { ...runtime, name: requestedName ?? runtime.name };
+				this.#admissionMetadata.set(runtime.id, metadata);
+				admitted.resolve({ ...metadata, jobId });
+			};
+			jobId = this.#registerSpawnJob({
+				manager,
+				toolCallId: request.sourceId,
+				spawnParams,
+				agentId,
+				progress,
+				ircEnabled: policy.enableIrc,
+				buildDetails: details,
+				structuredOverrides: overrides,
+				onUpdate: update => {
+					const text = update.content.find(part => part.type === "text")?.text;
+					if (text && request.onProgress) {
+						void Promise.resolve(request.onProgress(text)).catch(error =>
+							logger.warn("RLM admission progress callback failed", { error: String(error) }),
+						);
+					}
+				},
+			});
+			const job = manager.getJob(jobId);
+			if (!job) throw new Error(`RLM Task job was not registered: ${jobId}`);
+			void job.promise.then(() => {
+				if (settled) return;
+				settled = true;
+				admitted.reject(new Error(job.errorText || `RLM Task ${agentId} ended before admission`));
+			});
+			const abort = () => {
+				if (settled) return;
+				settled = true;
+				manager.cancel(jobId, { ownerId: this.session.getAgentId?.() ?? MAIN_AGENT_ID });
+				admitted.reject(new Error(request.signal ? abortMessage(request.signal) : "RLM admission was interrupted"));
+			};
+			request.signal?.addEventListener("abort", abort, { once: true });
+			if (request.signal?.aborted) abort();
+			try {
+				return await admitted.promise;
+			} finally {
+				request.signal?.removeEventListener("abort", abort);
+			}
+		} finally {
+			if (requestedName) this.#pendingAdmissionNames.delete(requestedName);
+		}
 	}
 
 	async execute(
@@ -1077,9 +1384,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		buildDetails: () => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
+		structuredOverrides?: StructuredSpawnOverrides;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+			structuredOverrides,
+		} = options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			const candidateRef = AgentRegistry.global().get(agentId);
 			const transcriptAvailable = await hasResolvableTranscript(agentId);
@@ -1177,6 +1495,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						progress.index,
 						true,
 						{ invokedAt: startedAt, acquiredAt },
+						structuredOverrides,
 					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
@@ -1410,8 +1729,19 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		structuredOverrides?: StructuredSpawnOverrides,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId, spawnIndex, detached, launchTiming);
+		return this.#runSpawn(
+			toolCallId,
+			params,
+			signal,
+			onUpdate,
+			preAllocatedId,
+			spawnIndex,
+			detached,
+			launchTiming,
+			structuredOverrides,
+		);
 	}
 
 	/** Spawn a fresh subagent and run it to completion. */
@@ -1424,6 +1754,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnIndex = 0,
 		detached = false,
 		launchTiming?: { invokedAt: number; acquiredAt: number },
+		structuredOverrides?: StructuredSpawnOverrides,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const assignment = (params.task ?? "").trim();
@@ -1436,6 +1767,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
+				model: structuredOverrides?.model,
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				...(params.effort !== undefined ? { effort: params.effort } : {}),
@@ -1443,15 +1775,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				index: spawnIndex,
 				parentToolCallId: toolCallId,
 				detached,
-				keepAlive: this.session.keepAliveSubagents,
+				keepAlive: structuredOverrides?.keepAlive ?? this.session.keepAliveSubagents,
 				invokedAt: launchTiming?.invokedAt,
 				acquiredAt: launchTiming?.acquiredAt,
-				...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
+				...(structuredOverrides?.isolation
+					? { isolation: structuredOverrides.isolation }
+					: "isolated" in params
+						? { isolation: { requested: params.isolated } }
+						: {}),
 				blockedAgent: this.#blockedAgent,
 				enableLsp: (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp"),
 				enableIrc: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 				maxRuntimeMs: this.session.settings.get("task.maxRuntimeMs"),
 				signal,
+				onAdmission: structuredOverrides?.onAdmission,
 				onProgress: progress => {
 					latestProgress = {
 						...progress,

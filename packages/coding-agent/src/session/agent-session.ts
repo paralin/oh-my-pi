@@ -13,6 +13,7 @@
  * Modes use this class and add their own I/O layer on top.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -87,6 +88,7 @@ import {
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
+	getAgentDir,
 	isBunTestRuntime,
 	isEnoent,
 	isInteractiveHost,
@@ -141,10 +143,27 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { normalizeToolEventInput, resolveToolEventInput } from "../extensibility/tool-event-input";
-import { GoalRuntime } from "../goals/runtime";
+import { completionBudgetReport, GoalRuntime, remainingTokens } from "../goals/runtime";
 import type { GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
+import { createAgentFamilyIpythonHostHandlers } from "../ipython/agent-family";
+import type { IpythonCellRequest, IpythonCellResult } from "../ipython/cell";
+import type { IpythonProcessIds } from "../ipython/controller";
+import { OmpHarnessService } from "../ipython/harness-service";
+import { composeIpythonHostHandlers, createFoundationalIpythonHostHandlers } from "../ipython/host-bridge";
+import {
+	createIpythonCellJournalDetail,
+	createIpythonLifecycleJournalDetail,
+	IPYTHON_JOURNAL_MESSAGE_TYPE,
+	type IpythonJournalDetail,
+} from "../ipython/journal";
+import { createRlmIpythonHostHandlers } from "../ipython/rlm-host";
+import {
+	createSessionControlIpythonHostHandlers,
+	OmpSessionControlService,
+	type RlmHeartbeat,
+} from "../ipython/session-controls";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -201,7 +220,7 @@ import {
 	PROPOSE_DEVICE_NAME,
 	writeDeviceDispatch,
 } from "../tools/resolve";
-import type { TodoPhase } from "../tools/todo";
+import { applyOpsToPhases, type TodoOperation, type TodoPhase, USER_TODO_EDIT_CUSTOM_TYPE } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import { parseCommandArgs } from "../utils/command-args";
 import type { EditMode } from "../utils/edit-mode";
@@ -275,6 +294,7 @@ import {
 	TOOL_EXECUTION_START_CUSTOM_TYPE,
 	type ToolExecutionStartData,
 } from "./exit-diagnostics";
+import { formatIpythonRestoreNotice, IPYTHON_STATE_MESSAGE_TYPE, IpythonSessionRuntime } from "./ipython-session";
 import { IrcBridge, type IrcBridgeHost } from "./irc-bridge";
 import {
 	buildLaunchCompletionBatchMessage,
@@ -585,6 +605,8 @@ export class AgentSession {
 	readonly #bash: BashRunner;
 
 	readonly #eval: EvalRunner;
+	readonly #ipython: IpythonSessionRuntime;
+	readonly #ipythonControls: OmpSessionControlService;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -1048,6 +1070,156 @@ export class AgentSession {
 			kernelOwnerId: config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`,
 			parentSessionId: config.parentEvalSessionId,
 		});
+		const harness = new OmpHarnessService({
+			localRoot: () => this.#ipython.sidecarDir ?? null,
+			globalRoot: config.memoryAgentDir ?? getAgentDir(),
+			refresh: async () => await this.refreshBaseSystemPrompt(),
+		});
+		const goalResponse = (includeCompletionReport = false) => {
+			const goal = this.#goalModeState?.goal ?? null;
+			return {
+				goal,
+				remaining_tokens: remainingTokens(goal),
+				completion_budget_report:
+					includeCompletionReport && goal?.status === "complete" ? completionBudgetReport(goal) : null,
+			};
+		};
+		this.#ipythonControls = new OmpSessionControlService({
+			harness,
+			host: {
+				sessionId: () => this.sessionManager.getSessionId(),
+				isDisposed: () => this.#isDisposed,
+				goalGet: () => goalResponse(),
+				goalCreate: async (objective, tokenBudget) => {
+					this.#assertCanStartIpythonGoal();
+					await this.#goalRuntime.createGoal({ objective, tokenBudget }, () => this.#assertCanStartIpythonGoal());
+					return goalResponse();
+				},
+				goalComplete: async () => {
+					await this.#goalRuntime.completeGoalFromTool();
+					return goalResponse(true);
+				},
+				contextUsage: () => {
+					const usage = this.getContextUsage();
+					return {
+						tokens: usage?.tokens ?? null,
+						contextWindow: usage?.contextWindow ?? null,
+						percent: usage?.percent ?? null,
+					};
+				},
+				waitForIdle: async () => {
+					await this.waitForIdle();
+					await this.#ipython.waitForIdle();
+				},
+				runCompaction: async instructions => {
+					await this.compact(instructions);
+				},
+				resumeAfterCompaction: async () => {
+					await this.sendCustomMessage(
+						{
+							customType: "ipython-compaction-resume",
+							content:
+								"IPython-requested compaction completed. Continue the current task from the compacted context.",
+							display: false,
+							attribution: "agent",
+						},
+						{ triggerTurn: true },
+					);
+				},
+				resumeRefinement: async (instructions, global) => {
+					const focus = instructions ? `\nFocus: ${instructions}` : "";
+					await this.sendCustomMessage(
+						{
+							customType: "ipython-refinement",
+							content: [
+								"A continual harness refinement was requested from the previous IPython cell.",
+								"Inspect the evidence, make the smallest justified update through rlm.harness, validate it, and record the outcome.",
+								`Target scope: ${global ? "global" : "local"}.${focus}`,
+							].join("\n"),
+							display: false,
+							attribution: "agent",
+						},
+						{ triggerTurn: true },
+					);
+				},
+				createCheckpoint: async label => await this.#createIpythonNamedCheckpoint(label),
+				hasCheckpoint: () => this.#checkpointState !== undefined,
+				runRewind: async report => {
+					await this.#applyRewind(report);
+					this.#appendIpythonJournalDetail(
+						createIpythonLifecycleJournalDetail("control", "info", "Rewound to the active IPython checkpoint."),
+					);
+					await this.sendCustomMessage(
+						{
+							customType: "ipython-rewind-resume",
+							content: "The IPython checkpoint was restored. Continue from the retained rewind report.",
+							display: false,
+							attribution: "agent",
+						},
+						{ triggerTurn: true },
+					);
+				},
+				applyTodo: async (operation, payload) => this.#applyIpythonTodo(operation, payload),
+				deliverHeartbeat: async heartbeat => await this.#deliverIpythonHeartbeat(heartbeat),
+				reportFailure: message => {
+					this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail("control", "warning", message));
+					this.emitNotice("warning", message, "ipython");
+				},
+			},
+		});
+		this.#ipython = new IpythonSessionRuntime(
+			{
+				currentIdentity: () => ({
+					sessionId: this.sessionManager.getSessionId(),
+					cwd: this.sessionManager.getCwd(),
+					sessionFile: this.sessionManager.getSessionFile(),
+					sessionDir: this.sessionManager.getSessionDir(),
+				}),
+				onRestore: result => {
+					const notice = formatIpythonRestoreNotice(result);
+					this.#appendIpythonJournalDetail(
+						createIpythonLifecycleJournalDetail(
+							"restore",
+							notice.level,
+							notice.message,
+							this.#ipython?.processIds,
+						),
+					);
+					this.emitNotice(notice.level, notice.message, "ipython");
+				},
+				onSnapshotFailure: message => {
+					const notice = `IPython state snapshot failed: ${message}`;
+					this.#appendIpythonJournalDetail(
+						createIpythonLifecycleJournalDetail("snapshot", "warning", notice, this.#ipython?.processIds),
+					);
+					this.emitNotice("warning", notice, "ipython");
+				},
+				onArtifactFailure: message => {
+					const notice = `IPython artifact spill failed: ${message}`;
+					this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail("artifact", "warning", notice));
+					this.emitNotice("warning", notice, "ipython");
+				},
+				onReady: (processIds, status) => {
+					const event = status.restart ? "restart" : "startup";
+					const notice = status.restart
+						? "IPython controller or kernel restarted."
+						: "IPython controller and kernel started.";
+					this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail(event, "info", notice, processIds));
+					this.emitNotice("info", notice, "ipython");
+				},
+			},
+			config.createIpythonSessionGeneration,
+			{
+				pythonPaths: () => this.skills.flatMap(skill => (skill.pythonPath ? [skill.pythonPath] : [])),
+				hostHandlers: () =>
+					composeIpythonHostHandlers(
+						createFoundationalIpythonHostHandlers(),
+						createRlmIpythonHostHandlers(config.taskAdmissionService),
+						createAgentFamilyIpythonHostHandlers(config.agentFamilyService),
+						createSessionControlIpythonHostHandlers(this.#ipythonControls),
+					),
+			},
+		);
 		const ircHost: IrcBridgeHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1605,9 +1777,10 @@ export class AgentSession {
 			resetPlanReference: () => {
 				this.#planReferenceSent = false;
 			},
-			rebaseAfterCompaction: () => {
+			rebaseAfterCompaction: async () => {
 				this.#stats.rebaseAfterCompaction();
 				this.#markPrefixReset();
+				await this.#appendIpythonStateAfterCompaction();
 			},
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
@@ -2859,6 +3032,9 @@ export class AgentSession {
 						startedAt:
 							(semanticDetails && stringProperty(semanticDetails, "startedAt")) ?? new Date().toISOString(),
 					};
+					await this.#ipython
+						.createCheckpoint(this.#ipythonCheckpointKey(this.#checkpointState))
+						.catch(() => undefined);
 					this.#pendingRewindReport = undefined;
 					this.#lastCompletedRewind = undefined;
 				}
@@ -3750,6 +3926,7 @@ export class AgentSession {
 	 */
 	subscribe(listener: AgentSessionEventListener): () => void {
 		this.#eventListeners.push(listener);
+		this.#ipython.prewarm();
 
 		// Return unsubscribe function for this specific listener
 		return () => {
@@ -3978,6 +4155,8 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#advisors.stopRuntime();
 		this.#eval.beginDispose();
+		this.#ipythonControls.dispose();
+		this.#ipython.beginDispose();
 	}
 
 	/**
@@ -4109,6 +4288,7 @@ export class AgentSession {
 		const results = await Promise.allSettled([
 			this.#disposeOwnedAsyncJobs(),
 			this.#eval.disposeKernels(),
+			this.#ipython.dispose(),
 			this.#releaseOwnedBrowserTabs(this.sessionManager.getSessionId()),
 			this.#releaseOwnedComputerSessions(this.#eval.getKernelOwnerId()),
 			shutdownTinyTitleClient(),
@@ -4662,6 +4842,23 @@ export class AgentSession {
 		return this.#maintenance.shake(mode, opts);
 	}
 
+	#appendIpythonJournalDetail(detail: IpythonJournalDetail, attribution: "agent" | "user" = "agent"): void {
+		this.sessionManager.appendCustomMessageEntry(IPYTHON_JOURNAL_MESSAGE_TYPE, "", true, detail, attribution);
+	}
+
+	async #appendIpythonStateAfterCompaction(): Promise<void> {
+		const state = await this.#ipython.stateNotice();
+		if (!state) return;
+		await this.sendCustomMessage(
+			{
+				customType: IPYTHON_STATE_MESSAGE_TYPE,
+				content: state,
+				display: false,
+			},
+			{ deliverAs: "nextTurn" },
+		);
+	}
+
 	/** Compact the active session history. */
 	compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
 		return this.#maintenance.compact(customInstructions, options);
@@ -4957,6 +5154,111 @@ export class AgentSession {
 		this.#lastCompletedRewind = completed;
 	}
 
+	#assertCanStartIpythonGoal(): void {
+		if (this.#planModeState?.enabled || this.isPlanModePaused()) {
+			throw new Error("Exit plan mode before starting a goal.");
+		}
+		if (this.#vibeModeState?.enabled) throw new Error("Exit vibe mode before starting a goal.");
+	}
+
+	async #createIpythonNamedCheckpoint(label?: string): Promise<Record<string, unknown>> {
+		if (this.#checkpointState) throw new Error("Checkpoint already active.");
+		const startedAt = new Date().toISOString();
+		const checkpointName = label ?? `ipython-${Date.now()}-${randomUUID().slice(0, 8)}`;
+		const details = { label: label ?? null, checkpointName, startedAt };
+		const entryId = this.sessionManager.appendCustomMessageEntry(
+			"ipython-checkpoint",
+			label ? `IPython checkpoint: ${label}` : "IPython checkpoint created.",
+			true,
+			details,
+			"agent",
+		);
+		this.#checkpointState = {
+			checkpointMessageCount: this.agent.state.messages.length,
+			checkpointEntryId: entryId,
+			startedAt,
+		};
+		this.#pendingRewindReport = undefined;
+		this.#lastCompletedRewind = undefined;
+		void this.#ipython.createCheckpoint(entryId).catch(error => {
+			const message = `Checkpoint ${entryId} failed: ${error instanceof Error ? error.message : String(error)}`;
+			this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail("control", "warning", message));
+			this.emitNotice("warning", message, "ipython");
+		});
+		return {
+			scheduled: true,
+			label: label ?? null,
+			checkpoint_id: entryId,
+			entry_id: entryId,
+			started_at: startedAt,
+		};
+	}
+
+	#applyIpythonTodo(operation: string, payload: Record<string, unknown>): Record<string, unknown> {
+		const allowed = new Set<TodoOperation>([
+			"init",
+			"start",
+			"done",
+			"rm",
+			"drop",
+			"block",
+			"unblock",
+			"append",
+			"view",
+		]);
+		if (!allowed.has(operation as TodoOperation))
+			throw new Error(`Unknown todo operation ${JSON.stringify(operation)}`);
+		const unknown = Object.keys(payload).filter(key => !["list", "task", "phase", "items", "reason"].includes(key));
+		if (unknown.length > 0) throw new Error(`todo.apply payload has unknown field(s): ${unknown.sort().join(", ")}`);
+		for (const key of ["task", "phase", "reason"] as const) {
+			const value = payload[key];
+			if (value !== undefined && typeof value !== "string")
+				throw new TypeError(`todo.apply ${key} must be a string`);
+		}
+		if (
+			payload.items !== undefined &&
+			(!Array.isArray(payload.items) || !payload.items.every(item => typeof item === "string"))
+		) {
+			throw new TypeError("todo.apply items must be a list of strings");
+		}
+		if (
+			payload.list !== undefined &&
+			(!Array.isArray(payload.list) ||
+				!payload.list.every(
+					item =>
+						isRecord(item) &&
+						typeof item.phase === "string" &&
+						Array.isArray(item.items) &&
+						item.items.every(value => typeof value === "string"),
+				))
+		) {
+			throw new TypeError("todo.apply list must contain {phase, items} records");
+		}
+		const input = { ...payload, op: operation as TodoOperation } as Parameters<typeof applyOpsToPhases>[1][number];
+		const { phases, errors } = applyOpsToPhases(this.#todo.phases, [input]);
+		if (errors.length > 0) throw new Error(errors.join("; "));
+		this.#todo.setPhases(phases);
+		this.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+		if (operation === "init") this.#scheduleReplanTitleRefresh();
+		return { operation, phases, storage: "session" };
+	}
+
+	async #deliverIpythonHeartbeat(heartbeat: RlmHeartbeat): Promise<void> {
+		await this.sendCustomMessage(
+			{
+				customType: "rlm-heartbeat",
+				content: heartbeat.instruction,
+				display: true,
+				details: heartbeat,
+				attribution: "agent",
+			},
+			{
+				triggerTurn: true,
+				deliverAs: heartbeat.delivery_mode === "follow_up" ? "followUp" : "steer",
+			},
+		);
+	}
+
 	getCheckpointState(): CheckpointState | undefined {
 		return this.#checkpointState;
 	}
@@ -4965,10 +5267,15 @@ export class AgentSession {
 		return this.#lastCompletedRewind;
 	}
 
+	#ipythonCheckpointKey(state: CheckpointState): string {
+		return state.checkpointEntryId ?? `started-${state.startedAt}`;
+	}
+
 	setCheckpointState(state: CheckpointState | undefined): void {
 		this.#checkpointState = state;
 		if (state) {
 			this.#lastCompletedRewind = undefined;
+			void this.#ipython.createCheckpoint(this.#ipythonCheckpointKey(state)).catch(() => undefined);
 		} else {
 			this.#pendingRewindReport = undefined;
 		}
@@ -6681,6 +6988,7 @@ export class AgentSession {
 			this.abortHandoff();
 			this.abortBash();
 			this.abortEval();
+			this.abortIpython(options?.reason ?? new Error("AgentSession abort"));
 			const postPromptDrain = this.#cancelPostPromptTasks();
 			this.agent.abort(options?.reason);
 			await postPromptDrain;
@@ -6851,26 +7159,49 @@ export class AgentSession {
 	}
 
 	async #suspendSessionServices(): Promise<boolean> {
-		if (!this.#beginSessionFork) return false;
 		this.#cancelScheduledPromptDeliveriesForTransition();
 		this.#sessionServiceTransitionGeneration++;
-		await this.#beginSessionFork();
-		return true;
+		await this.#ipython.suspend();
+		try {
+			if (!this.#beginSessionFork) return false;
+			await this.#beginSessionFork();
+			return true;
+		} catch (error) {
+			this.#ipython.resume();
+			throw error;
+		}
 	}
 
 	async #resumeSessionServices(suspended: boolean, committed: boolean, transition: string): Promise<void> {
-		if (!suspended) return;
 		try {
-			await this.#completeSessionFork?.(undefined);
-		} catch (error) {
-			if (!committed) throw error;
-			logger.warn(`Failed to resume session services after committed ${transition}`, {
-				sessionFile: this.sessionFile,
-				error: error instanceof Error ? error.message : String(error),
-			});
-			this.#scheduleSessionServiceRecovery(undefined);
+			if (!suspended) return;
+			try {
+				await this.#completeSessionFork?.(undefined);
+			} catch (error) {
+				if (!committed) throw error;
+				logger.warn(`Failed to resume session services after committed ${transition}`, {
+					sessionFile: this.sessionFile,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				this.#scheduleSessionServiceRecovery(undefined);
+			}
+		} finally {
+			this.#ipython.resume();
 		}
 	}
+	async #resumeHistoricalSessionServices(suspended: boolean, committed: boolean, transition: string): Promise<void> {
+		try {
+			if (committed) {
+				await this.#ipython.abandonHistoricalState();
+				const message = "Historical session navigation started a fresh IPython heap.";
+				this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail("history", "info", message));
+				this.emitNotice("info", message, "ipython");
+			}
+		} finally {
+			await this.#resumeSessionServices(suspended, committed, transition);
+		}
+	}
+
 	async #beforeCoordinationTransition(): Promise<CoordinationTransitionToken | undefined> {
 		return this.#coordinationLifecycle?.beforeRootTransition();
 	}
@@ -7038,8 +7369,12 @@ export class AgentSession {
 			await this.#abortCoordinationTransition(coordinationToken, error).catch(() => {});
 			throw error;
 		} finally {
-			if (sessionForkStarted) await this.#completeSessionFork?.(forkResult);
-			if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
+			try {
+				if (sessionForkStarted) await this.#completeSessionFork?.(forkResult);
+				if (advisorRecordersDetached) this.#advisors.reattachRecorderFeeds();
+			} finally {
+				this.#ipython.resume();
+			}
 		}
 	}
 
@@ -7057,20 +7392,10 @@ export class AgentSession {
 		} catch (error) {
 			failure = error;
 		}
-		if (sessionServicesSuspended) {
-			try {
-				await this.#completeSessionFork?.(undefined);
-			} catch (error) {
-				if (!moveCommitted) {
-					failure ??= error;
-				} else {
-					logger.warn("Failed to resume session services after committed move", {
-						sessionFile: this.sessionFile,
-						error: error instanceof Error ? error.message : String(error),
-					});
-					this.#scheduleSessionServiceRecovery(undefined);
-				}
-			}
+		try {
+			await this.#resumeSessionServices(sessionServicesSuspended, moveCommitted, "session move");
+		} catch (error) {
+			failure ??= error;
 		}
 		if (failure !== undefined) throw failure;
 	}
@@ -7326,6 +7651,7 @@ export class AgentSession {
 		if (!checkpointState) {
 			return;
 		}
+		await this.#ipython.rewindCheckpoint(this.#ipythonCheckpointKey(checkpointState));
 		this.#bash.withBranchTransition(() => {
 			try {
 				this.sessionManager.branchWithSummary(checkpointState.checkpointEntryId, report, {
@@ -7664,7 +7990,35 @@ export class AgentSession {
 	}
 
 	// =========================================================================
-	// User-Initiated Python Execution
+	// Session IPython Cell Execution
+	// =========================================================================
+
+	/** Execute a model or direct-user cell in this session's one persistent kernel. */
+	async executeIpythonCell(request: IpythonCellRequest): Promise<IpythonCellResult> {
+		const result = await this.#ipython.execute(request);
+		if (request.origin === "direct") {
+			this.#appendIpythonJournalDetail(createIpythonCellJournalDetail(result), "user");
+		}
+		return result;
+	}
+
+	/** Cancel the active and queued cells without disposing the session kernel. */
+	abortIpython(reason?: unknown): void {
+		this.#ipython.abort(reason);
+	}
+
+	/** Public process identities used by lifecycle diagnostics and leak checks. */
+	get ipythonProcessIds(): IpythonProcessIds | undefined {
+		return this.#ipython.processIds;
+	}
+
+	/** Session identity currently bound to a materialized IPython generation. */
+	get ipythonSessionId(): string | undefined {
+		return this.#ipython.sessionId;
+	}
+
+	// =========================================================================
+	// Legacy User-Initiated Python Execution
 	// =========================================================================
 
 	/**
@@ -7726,7 +8080,17 @@ export class AgentSession {
 	// =========================================================================
 
 	/** Surfaces and consumes pending IRC records before automatic injection. */
-	drainPendingIrcInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
+	drainPendingIrcInboxMessages(
+		agentId: string,
+		opts?: {
+			from?: string;
+			fromAny?: ReadonlySet<string>;
+			replyTo?: string;
+			limit?: number;
+			peek?: boolean;
+			ids?: ReadonlySet<string>;
+		},
+	): IrcMessage[] {
 		return this.#irc.drainInboxMessages(agentId, opts);
 	}
 
@@ -8413,7 +8777,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
-			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
+			await this.#resumeHistoricalSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
 		}
 	}
 
@@ -8553,7 +8917,7 @@ export class AgentSession {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
-			await this.#resumeSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
+			await this.#resumeHistoricalSessionServices(sessionServicesSuspended, sessionTransitioned, "session branch");
 		}
 	}
 
@@ -8677,7 +9041,11 @@ export class AgentSession {
 		let branchTransitioned = false;
 		await using _sessionServices = {
 			[Symbol.asyncDispose]: async () => {
-				await this.#resumeSessionServices(sessionServicesSuspended, branchTransitioned, "tree navigation");
+				await this.#resumeHistoricalSessionServices(
+					sessionServicesSuspended,
+					branchTransitioned,
+					"tree navigation",
+				);
 			},
 		};
 		if (this.isStreaming) await this.abort({ goalReason: "internal" });

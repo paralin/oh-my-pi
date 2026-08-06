@@ -137,6 +137,38 @@ describe("skills", () => {
 			expect(names).toEqual(expectedFixtureSkillOrder);
 		});
 
+		it("retains explicit Python import metadata without changing skill precedence", async () => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-python-skill-"));
+			const dir = path.join(root, "typed-edit");
+			try {
+				await fs.mkdir(path.join(dir, "src", "typed_edit"), { recursive: true });
+				await fs.writeFile(
+					path.join(dir, "SKILL.md"),
+					[
+						"---",
+						"name: typed-edit",
+						"description: Typed edit callable",
+						"type: python",
+						"python_import: typed_edit",
+						"python_callable: run",
+						"---",
+						"",
+						"# Typed edit",
+					].join("\n"),
+				);
+				const { skills } = await loadSkillsFromDir({ dir: root, source: "test" });
+				expect(skills).toHaveLength(1);
+				expect(skills[0]).toMatchObject({
+					name: "typed-edit",
+					pythonImport: "typed_edit",
+					pythonCallable: "run",
+					pythonPath: path.join(dir, "src"),
+				});
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		});
+
 		it("should return empty for non-existent directory", async () => {
 			const { skills, warnings } = await loadSkillsFromDir({
 				dir: "/non/existent/path",

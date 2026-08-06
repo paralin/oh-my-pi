@@ -59,6 +59,7 @@ import type { EventBus } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
+import type { SubagentRuntimeAdmission } from "./admission";
 import { generateTaskLabel } from "./label";
 import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
@@ -475,6 +476,8 @@ export interface ExecutorOptions {
 	 * set this false so disposal unregisters them instead of leaving idle peers.
 	 */
 	keepAlive?: boolean;
+	/** Called once after the child session is registered and before its first prompt is dispatched. */
+	onAdmission?: (admission: SubagentRuntimeAdmission) => void;
 	/** Internal ownership handoff for cleanup that outlives the visible Task result. */
 	onCleanupDeferred?: (completion: Promise<void>) => void;
 }
@@ -3148,7 +3151,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				parentTaskPrefix: id,
 				parentAgentId: options.parentAgentId,
 				agentId: id,
-				agentDisplayName: agent.name,
+				agentDisplayName: options.description ?? agent.name,
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
@@ -3185,6 +3188,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			monitor.setActiveSession(session);
 			installRegistryStatusSync(session);
+			if (options.onAdmission) {
+				const admittedSessionFile = session.sessionManager.getSessionFile();
+				const admittedModel =
+					progress.resolvedModel ??
+					(session.model ? formatModelStringWithRouting(session.model) : undefined) ??
+					(typeof options.modelOverride === "string" ? options.modelOverride : options.modelOverride?.[0]);
+				if (!admittedModel) throw new Error(`Subagent ${id} started without a resolved model.`);
+				options.onAdmission({
+					id,
+					name: id,
+					sessionId: session.sessionManager.getSessionId(),
+					sessionDir: admittedSessionFile
+						? path.dirname(admittedSessionFile)
+						: session.sessionManager.getSessionDir(),
+					...(admittedSessionFile ? { sessionFile: admittedSessionFile } : {}),
+					model: admittedModel,
+					cwd: worktree ?? options.cwd,
+				});
+			}
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history

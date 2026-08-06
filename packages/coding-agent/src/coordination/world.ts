@@ -901,7 +901,13 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 			replayed: result.replayed,
 		};
 	}
-	inbox(options?: { peek?: boolean; from?: string; replyTo?: string; limit?: number }): IrcMessage[] {
+	inbox(options?: {
+		peek?: boolean;
+		from?: string;
+		fromAny?: ReadonlySet<string>;
+		replyTo?: string;
+		limit?: number;
+	}): IrcMessage[] {
 		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("World mailbox inbox");
 		if (!this.#mailboxRouter) throw unavailable("mailbox inbox");
 		return this.#mailboxRouter.inbox(options);

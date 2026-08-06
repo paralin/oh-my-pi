@@ -118,4 +118,22 @@ describe("native file-lock ownership", () => {
 		const final = JSON.parse(text) as { counter: number };
 		expect(final.counter).toBe(N);
 	}, 30_000);
+	test("an abort signal ends a contended acquisition", async () => {
+		const root = await mkRoot();
+		const target = path.join(root, "cancelled.json");
+		const owner = tryAcquireLock(getLockPath(target));
+		if (!owner) throw new Error("owner failed to acquire");
+		const abort = new AbortController();
+		try {
+			const waiting = withFileLock(target, async () => undefined, {
+				retries: 10_000,
+				retryDelayMs: 1_000,
+				signal: abort.signal,
+			});
+			abort.abort(new Error("cancelled lock wait"));
+			await expect(waiting).rejects.toThrow("cancelled lock wait");
+		} finally {
+			owner.release();
+		}
+	});
 });

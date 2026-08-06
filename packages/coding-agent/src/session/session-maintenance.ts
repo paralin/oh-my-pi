@@ -295,7 +295,7 @@ export interface SessionMaintenanceHost {
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
 	resetAdvisorRuntimes(): void;
-	rebaseAfterCompaction(): void;
+	rebaseAfterCompaction(): void | Promise<void>;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -1086,7 +1086,7 @@ export class SessionMaintenance {
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.rebaseAfterCompaction();
+			await this.#host.rebaseAfterCompaction();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
@@ -2186,7 +2186,7 @@ export class SessionMaintenance {
 					// The elide pass rewrote history; re-anchor the in-flight snapshot
 					// so the caller's headroom/retry-fit re-test measures the shaken
 					// context.
-					this.#host.rebaseAfterCompaction();
+					await this.#host.rebaseAfterCompaction();
 				}
 			} catch (error) {
 				logger.warn("Dead-end shake rescue failed", {
@@ -2206,7 +2206,7 @@ export class SessionMaintenance {
 		let imagesDropped = 0;
 		try {
 			imagesDropped = (await this.#host.dropImages()).removed;
-			if (imagesDropped > 0) this.#host.rebaseAfterCompaction();
+			if (imagesDropped > 0) await this.#host.rebaseAfterCompaction();
 		} catch (error) {
 			logger.warn("Dead-end image-drop rescue failed", {
 				error: error instanceof Error ? error.message : String(error),
@@ -2373,7 +2373,7 @@ export class SessionMaintenance {
 		);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.rebaseAfterCompaction();
+		await this.#host.rebaseAfterCompaction();
 		// Same post-rewrite bookkeeping as the regular compaction append: the
 		// rebuilt context no longer carries the transient plan reference (#1246),
 		// and advisor cursors / todo phases were derived from the replaced
@@ -3184,7 +3184,7 @@ export class SessionMaintenance {
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.rebaseAfterCompaction();
+			await this.#host.rebaseAfterCompaction();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
@@ -3257,7 +3257,7 @@ export class SessionMaintenance {
 						(reason === "incomplete" && lastAssistant.stopReason === "length");
 					if (shouldDrop) {
 						this.#host.agent.replaceMessages(messages.slice(0, -1));
-						this.#host.rebaseAfterCompaction();
+						await this.#host.rebaseAfterCompaction();
 					}
 				}
 

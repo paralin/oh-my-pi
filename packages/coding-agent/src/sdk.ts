@@ -67,6 +67,7 @@ import type { CoordinationBackend, CoordinationLifecycle } from "./coordination/
 import { CronManager } from "./cron";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
+import { OmpAgentFamilyService } from "./ipython/agent-family";
 import type { WorldClient } from "./world/client.js";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
@@ -172,6 +173,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
+import { isTaskAdmissionService } from "./task/admission";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { isScoutSpawnable } from "./task/spawn-policy";
@@ -2745,6 +2747,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		for (const [name, tool] of toolRegistry) {
 			nativeToolsByName.set(name, tool);
 		}
+		const existingTaskOwner = nativeToolsByName.get("task");
+		const taskAdmissionCandidate = isTaskAdmissionService(existingTaskOwner)
+			? existingTaskOwner
+			: await BUILTIN_TOOLS.task(toolSession);
+		const taskAdmissionService = isTaskAdmissionService(taskAdmissionCandidate) ? taskAdmissionCandidate : undefined;
+		const agentFamilyService = new OmpAgentFamilyService({
+			registry: agentRegistry,
+			currentAgentId: () => resolvedAgentId,
+			currentSessionId: () => sessionManager.getSessionId(),
+			currentCwd: () => sessionManager.getCwd(),
+			currentSessionFile: () => sessionManager.getSessionFile() ?? null,
+			coordinationBackend: options.coordinationBackend,
+		});
 		if (!restrictToolNames && !toolRegistry.has("goal") && settings.get("goal.enabled")) {
 			const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
 			if (goalTool) {
@@ -3517,6 +3532,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,
+			taskAdmissionService,
+			agentFamilyService,
 			memoryAgentDir: agentDir,
 			memoryTaskDepth: taskDepth,
 			createMemoryTools: restrictToolNames

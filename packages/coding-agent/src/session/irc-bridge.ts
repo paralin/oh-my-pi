@@ -74,8 +74,18 @@ export class IrcBridge {
 		return records;
 	}
 
-	/** Surfaces and consumes queued incoming records before automatic injection. */
-	drainInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
+	/** Surfaces or consumes queued incoming records before automatic injection. */
+	drainInboxMessages(
+		agentId: string,
+		opts?: {
+			from?: string;
+			fromAny?: ReadonlySet<string>;
+			replyTo?: string;
+			limit?: number;
+			peek?: boolean;
+			ids?: ReadonlySet<string>;
+		},
+	): IrcMessage[] {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: CustomMessage[] = [];
 		const remainingAsides: CustomMessage[] = [];
@@ -102,11 +112,13 @@ export class IrcBridge {
 					queue.remaining.push(record);
 					continue;
 				}
-				if (opts?.from !== undefined && from !== opts.from) {
-					queue.remaining.push(record);
-					continue;
-				}
-				if (opts?.limit !== undefined && messages.length >= opts.limit) {
+				if (
+					(opts?.from !== undefined && from !== opts.from) ||
+					(opts?.fromAny !== undefined && !opts.fromAny.has(from)) ||
+					(opts?.replyTo !== undefined && replyTo !== opts.replyTo) ||
+					(opts?.ids !== undefined && !opts.ids.has(id)) ||
+					(opts?.limit !== undefined && messages.length >= opts.limit)
+				) {
 					queue.remaining.push(record);
 					continue;
 				}
@@ -118,6 +130,7 @@ export class IrcBridge {
 					ts: record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 				});
+				if (opts?.peek) queue.remaining.push(record);
 			}
 		}
 		this.#interrupts = remainingInterrupts;

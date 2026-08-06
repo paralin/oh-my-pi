@@ -485,6 +485,8 @@ export interface BuildSystemPromptOptions {
 	customPrompt?: string;
 	/** Already-loaded custom system prompt text; bypasses path resolution. */
 	resolvedCustomPrompt?: string;
+	/** Already-loaded SYSTEM.md customization; null bypasses discovery with no customization. */
+	resolvedSystemPromptCustomization?: string | null;
 	/** Tools to include in prompt. */
 	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
@@ -557,6 +559,12 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
+	/** Pre-resolved workstation entries for deterministic provider-payload capture. */
+	environmentInfo?: ReadonlyArray<{ label: string; value: string }>;
+	/** Pre-resolved local calendar date for deterministic provider-payload capture. */
+	calendarDate?: string;
+	/** Pre-resolved Obsidian capability for deterministic provider-payload capture. */
+	obsidianAvailable?: boolean;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -582,6 +590,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const {
 		customPrompt,
 		resolvedCustomPrompt: providedResolvedCustomPrompt,
+		resolvedSystemPromptCustomization: providedSystemPromptCustomization,
 		tools,
 		appendSystemPrompt,
 		inlineToolDescriptors: providedInlineToolDescriptors,
@@ -615,6 +624,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		activeRepoContext: providedActiveRepoContext,
+		environmentInfo: providedEnvironmentInfo,
+		calendarDate: providedCalendarDate,
+		obsidianAvailable: providedObsidianAvailable,
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -674,9 +686,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const callerControlsCustomPrompt =
 		(typeof providedResolvedCustomPrompt === "string" && providedResolvedCustomPrompt.length > 0) ||
 		(typeof customPrompt === "string" && customPrompt.length > 0);
-	const systemPromptCustomizationPromise: Promise<string | null> = callerControlsCustomPrompt
-		? Promise.resolve(null)
-		: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
+	const systemPromptCustomizationPromise: Promise<string | null> =
+		providedSystemPromptCustomization !== undefined
+			? Promise.resolve(providedSystemPromptCustomization)
+			: callerControlsCustomPrompt
+				? Promise.resolve(null)
+				: logger.time("loadSystemPromptFiles", loadSystemPromptFiles, { cwd: resolvedCwd });
 	const contextFilesPromise = (async () => {
 		const primary = providedContextFiles
 			? providedContextFiles
@@ -723,8 +738,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		providedActiveRepoContext !== undefined
 			? Promise.resolve(providedActiveRepoContext)
 			: logger.time("resolveActiveRepoContext", () => resolveActiveRepoContext(resolvedCwd));
-	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
-	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
+	const cpuModelPromise = providedEnvironmentInfo
+		? Promise.resolve(undefined)
+		: logger.time("getCpuModel", getCpuModel);
+	const gpuPromise = providedEnvironmentInfo ? Promise.resolve(undefined) : logger.time("getCachedGpu", getCachedGpu);
 
 	const [
 		resolvedCustomPrompt,
@@ -784,7 +801,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		}
 	}
 
-	const date = formatLocalCalendarDate();
+	const date = providedCalendarDate ?? formatLocalCalendarDate();
 	const dateTime = date;
 	const promptCwd = normalizePromptPath(resolvedCwd);
 	const activeRepoContextPrompt = renderActiveRepoContextPrompt(activeRepoContext);
@@ -852,7 +869,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(cpuModel, gpu);
+	const environment = providedEnvironmentInfo ? [...providedEnvironmentInfo] : getEnvironmentInfo(cpuModel, gpu);
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
@@ -888,7 +905,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
 		securityEnabled,
-		hasObsidian: hasObsidian(),
+		hasObsidian: providedObsidianAvailable ?? hasObsidian(),
 		includeWorkspaceTree,
 		renderMermaid,
 		xdevTools,

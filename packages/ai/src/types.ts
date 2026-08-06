@@ -1,7 +1,6 @@
 export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
-import type { Type } from "@oh-my-pi/omptype";
 import type {
 	DeleteArgs,
 	DeleteResult,
@@ -1139,18 +1138,23 @@ export interface CursorExecHandlers {
  */
 export type TJsonSchema = Record<string, unknown>;
 
+/** Minimal structural surface shared by ArkType and the legacy TypeBox facade. */
+export interface TInferSchema {
+	readonly infer: unknown;
+}
+
 /**
  * Schema type accepted by the {@link Tool} interface.
  *
  * Canonical authoring uses Zod or ArkType. Extension compat may supply a JSON
  * Schema object (including TypeBox static schema objects).
  */
-export type TSchema = ZodType | Type | TJsonSchema;
+export type TSchema = ZodType | TInferSchema | TJsonSchema;
 
 /** Resolve parameter types for tool execution / handlers. */
 export type Static<S> = S extends ZodType
 	? z.infer<S>
-	: S extends Type
+	: S extends TInferSchema
 		? S["infer"]
 		: S extends { static: infer T }
 			? T

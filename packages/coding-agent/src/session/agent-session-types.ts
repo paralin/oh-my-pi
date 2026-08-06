@@ -34,11 +34,14 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { AgentFamilyService } from "../ipython/agent-family";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { TaskAdmissionService } from "../task/admission";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { IpythonSessionGenerationFactory } from "./ipython-session";
 import type { SessionManager } from "./session-manager";
 import type { EffectiveIdleThreshold } from "./session-metadata";
 
@@ -236,6 +239,12 @@ export interface AgentSessionConfig {
 	parentEvalSessionId?: string;
 	/** Logical owner for retained eval kernels created by this session. */
 	evalKernelOwnerId?: string;
+	/** Test and embedding seam for the session-owned IPython process generation. */
+	createIpythonSessionGeneration?: IpythonSessionGenerationFactory;
+	/** Existing Task lifecycle owner exposed to the Python RLM admission bridge. */
+	taskAdmissionService?: TaskAdmissionService;
+	/** Existing registry, IRC, transcript, and observer services exposed to focused Python skills. */
+	agentFamilyService?: AgentFamilyService;
 	/** Async job manager owned and disposed by this session. */
 	ownedAsyncJobManager?: AsyncJobManager;
 	/** Async job manager visible to this session. */

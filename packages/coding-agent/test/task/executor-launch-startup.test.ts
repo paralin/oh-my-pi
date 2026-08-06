@@ -6,6 +6,7 @@ import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { SubagentRuntimeAdmission } from "@oh-my-pi/pi-coding-agent/task/admission";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -39,12 +40,18 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 	const sessionCreationStarted = Promise.withResolvers<void>();
 	let sessionCreated = false;
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
+	const childSessionFile = tempDir.join("child.jsonl");
 	const session = {
 		state: { messages: [] },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
 		extensionRunner: undefined,
-		sessionManager: { appendSessionInit: () => {} },
+		sessionManager: {
+			appendSessionInit: () => {},
+			getSessionFile: () => childSessionFile,
+			getSessionId: () => "child-session",
+			getSessionDir: () => tempDir.path(),
+		},
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
 		setActiveToolsByName: async () => {},
@@ -81,6 +88,7 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 		return result;
 	});
 
+	const admission = Promise.withResolvers<SubagentRuntimeAdmission>();
 	const run = runSubprocess({
 		cwd: tempDir.path(),
 		artifactsDir: tempDir.path(),
@@ -88,6 +96,8 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 		task: "test",
 		index: 0,
 		id: "task-launch-overlap",
+		modelOverride: "provider/model",
+		onAdmission: admission.resolve,
 		authStorage,
 		enableLsp: false,
 		enableIrc: false,
@@ -103,4 +113,13 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 
 	refreshGate.resolve();
 	expect((await run).exitCode).toBe(0);
+	expect(await admission.promise).toEqual({
+		id: "task-launch-overlap",
+		name: "task-launch-overlap",
+		sessionId: "child-session",
+		sessionDir: tempDir.path(),
+		sessionFile: childSessionFile,
+		model: "provider/model",
+		cwd: tempDir.path(),
+	});
 });

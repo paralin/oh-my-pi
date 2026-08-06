@@ -22,6 +22,7 @@ import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import type { SubagentRuntimeAdmission } from "./admission";
 import { runClaudeCodeSubprocess } from "./claude-code-runtime";
 import { type ClaudeCodeSelection, resolveClaudeCodeSelection } from "./claude-code-selector";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
@@ -117,6 +118,8 @@ export interface StructuredSubagentRequest {
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	/** Called once the existing Task runtime has published the child identity. */
+	onAdmission?: (admission: SubagentRuntimeAdmission) => void;
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -485,6 +488,7 @@ function buildExecutorOptions(
 		signal: request.signal,
 		eventBus: session.eventBus,
 		onProgress: request.onProgress,
+		onAdmission: request.onAdmission,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
@@ -634,6 +638,21 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				},
 				request.signal,
 			);
+			if (request.onAdmission) {
+				const model =
+					(typeof request.model === "string" ? request.model : request.model?.[0]) ??
+					(typeof policy.modelOverride === "string" ? policy.modelOverride : policy.modelOverride?.[0]) ??
+					request.session.getActiveModelString?.() ??
+					request.session.getModelString?.();
+				if (!model) throw new Error(`World subagent ${id} started without a resolved model.`);
+				request.onAdmission({
+					id,
+					name: id,
+					sessionDir: lease.artifactsDir,
+					model,
+					cwd: request.session.cwd,
+				});
+			}
 			const result = await handle.wait(request.signal, request.onProgress);
 			completedSuccessfully = result.result.exitCode === 0 && !result.result.error && !result.result.aborted;
 			return result;
