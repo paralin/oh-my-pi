@@ -31,6 +31,7 @@ _CAPABILITIES = (
     Capability("omp.files", "omp.files", "Read, write, and glob bounded workspace files through OMP owners."),
     Capability("omp.code", "omp.code", "Search and rewrite syntax trees and query language intelligence."),
     Capability("omp.debug", "omp.debug", "Control one session-private Debug Adapter Protocol lifecycle."),
+    Capability("omp.web", "omp.web", "Search and extract web resources through host-owned providers."),
     Capability("omp.workspace", "omp.workspace", "Use validated OMP workspace search and edit services."),
     Capability("omp.harness", "omp.harness", "Access continual harness, todo, and checkpoint services."),
     Capability("omp.memory", "omp.memory", "Manage host-owned OMP memory records."),
@@ -53,7 +54,7 @@ def skill_path(name: str) -> Path:
     raise KeyError(name)
 
 
-from . import code, debug, files, harness, mcp, memory, rules, session, skills, workspace
+from . import code, debug, files, harness, mcp, memory, rules, session, skills, web, workspace
 
 __all__ = [
     "Capability",
@@ -69,5 +70,6 @@ __all__ = [
     "session",
     "skill_path",
     "skills",
+    "web",
     "workspace",
 ]

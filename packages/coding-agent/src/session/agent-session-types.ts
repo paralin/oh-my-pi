@@ -35,6 +35,7 @@ import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
 import type { AgentFamilyService } from "../ipython/agent-family";
+import type { IpythonWebService } from "../ipython/web-service";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { MCPManager } from "../mcp/manager";
 import type { SecretObfuscator } from "../secrets/obfuscator";
@@ -172,6 +173,8 @@ export interface AgentSessionConfig {
 	createComputerTool?: () => Promise<AgentTool | null>;
 	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
 	createInspectImageTool?: () => Promise<AgentTool | null>;
+	/** Binds web search and fetch owners to this session's tool context. */
+	createIpythonWebService?: () => IpythonWebService;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings. */

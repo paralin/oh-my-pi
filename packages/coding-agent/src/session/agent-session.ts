@@ -167,6 +167,7 @@ import {
 	OmpSessionControlService,
 	type RlmHeartbeat,
 } from "../ipython/session-controls";
+import type { IpythonWebService } from "../ipython/web-service";
 import type { IrcMessage } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
@@ -611,6 +612,7 @@ export class AgentSession {
 	readonly #ipython: IpythonSessionRuntime;
 	readonly #ipythonControls: OmpSessionControlService;
 	readonly #ipythonDebug: IpythonDebugService;
+	readonly #ipythonWeb?: IpythonWebService;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -1080,6 +1082,7 @@ export class AgentSession {
 			refresh: async () => await this.refreshBaseSystemPrompt(),
 		});
 		this.#ipythonDebug = new IpythonDebugService({ cwd: () => this.sessionManager.getCwd() });
+		this.#ipythonWeb = config.createIpythonWebService?.();
 		const goalResponse = (includeCompletionReport = false) => {
 			const goal = this.#goalModeState?.goal ?? null;
 			return {
@@ -1220,6 +1223,7 @@ export class AgentSession {
 					composeIpythonHostHandlers(
 						createFoundationalIpythonHostHandlers(),
 						this.#ipythonDebug.handlers,
+						this.#ipythonWeb?.handlers,
 						createIpythonCodeHostHandlers({
 							cwd: this.sessionManager.getCwd(),
 							snapshotOwner: this,

@@ -68,6 +68,7 @@ import { CronManager } from "./cron";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import { OmpAgentFamilyService } from "./ipython/agent-family";
+import { createIpythonWebService } from "./ipython/web-service";
 import type { WorldClient } from "./world/client.js";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
@@ -3550,6 +3551,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createInspectImageTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
+			createIpythonWebService: () => createIpythonWebService(toolSession),
 			createVibeTools:
 				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)

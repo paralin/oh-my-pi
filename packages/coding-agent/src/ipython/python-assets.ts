@@ -10,6 +10,7 @@ import asset37 from "./python/omp/memory.py" with { type: "text" };
 import asset38 from "./python/omp/rules.py" with { type: "text" };
 import asset7 from "./python/omp/session.py" with { type: "text" };
 import asset39 from "./python/omp/skills.py" with { type: "text" };
+import asset43 from "./python/omp/web.py" with { type: "text" };
 import asset8 from "./python/omp/workspace.py" with { type: "text" };
 import asset35 from "./python/pyproject.toml" with { type: "text" };
 import asset0 from "./python/rlm/__init__.py" with { type: "text" };
@@ -59,6 +60,7 @@ export const IPYTHON_PYTHON_ASSETS: readonly IpythonPythonAsset[] = [
 	{ path: "omp/harness.py", content: asset5 },
 	{ path: "omp/mcp.py", content: asset6 },
 	{ path: "omp/session.py", content: asset7 },
+	{ path: "omp/web.py", content: asset43 },
 	{ path: "omp/workspace.py", content: asset8 },
 	{ path: "omp/_managed.py", content: asset36 },
 	{ path: "omp/memory.py", content: asset37 },
