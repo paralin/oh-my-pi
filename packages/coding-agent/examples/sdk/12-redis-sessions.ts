@@ -6,7 +6,7 @@
  * balancer, or anywhere a shared session store beats per-host disk state.
  *
  * The storage substrate is the only thing that changes — every other SDK
- * surface (extensions, hooks, custom tools, slash commands, branching,
+ * surface (extensions, hooks, slash commands, branching,
  * `SessionManager.list`, …) continues to work unmodified.
  *
  * Tool artifacts and image blobs are out of scope: `ArtifactManager` /

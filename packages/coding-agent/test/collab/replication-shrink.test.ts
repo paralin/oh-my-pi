@@ -332,3 +332,60 @@ describe("shrinkForReplication (#3740 review)", () => {
 		expect(JSON.stringify(shrunk).length).toBeLessThanOrEqual(MAX_REPLICATED_PAYLOAD_BYTES);
 	});
 });
+
+describe("IPython event replication shrink", () => {
+	it("keeps the typed event, safe-text fallback, MIME data, and first artifact under the cap", () => {
+		const event = {
+			type: "ipython_cell_update" as const,
+			presentation: {
+				kind: "cell" as const,
+				phase: "live" as const,
+				cellId: "cell-rich",
+				origin: "model" as const,
+				status: "running" as const,
+				code: "display(data)",
+				events: [
+					{
+						kind: "display" as const,
+						data: { "image/png": "encoded-image", "text/plain": "fallback" },
+						metadata: {},
+						transient: {},
+						update: false,
+						text: "fallback",
+					},
+				],
+				errors: [],
+				updates: [
+					{
+						kind: "execution" as const,
+						cellId: "cell-rich",
+						origin: "model" as const,
+						event: {
+							kind: "display" as const,
+							data: { "image/png": "encoded-image" },
+							metadata: {},
+							transient: {},
+							update: false,
+							text: "fallback",
+						},
+					},
+				],
+				startupProgress: [],
+				safeText: {
+					text: "x".repeat(5 * 1024 * 1024),
+					truncated: true,
+					totalBytes: 5 * 1024 * 1024,
+					outputBytes: 1024,
+				},
+				artifacts: [{ path: "/tmp/chart.png", mimeType: "image/png", bytes: 42, label: "chart" }],
+			},
+		};
+		const shrunk = shrinkForReplication(event);
+		expect(JSON.stringify(shrunk).length).toBeLessThanOrEqual(MAX_REPLICATED_PAYLOAD_BYTES);
+		expect(shrunk.type).toBe("ipython_cell_update");
+		expect(shrunk.presentation.phase).toBe("live");
+		expect(shrunk.presentation.safeText.text).toContain("collab session");
+		expect(shrunk.presentation.events[0]?.data["image/png"]).toBe("encoded-image");
+		expect(shrunk.presentation.artifacts[0]?.path).toBe("/tmp/chart.png");
+	});
+});

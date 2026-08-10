@@ -230,12 +230,11 @@ Reasoning fields are not interchangeable.
 - Synthetic `"."` placeholders are acceptable for Kimi/OpenRouter-style compat,
   but not DeepSeek V4 exact replay.
 
-### Reasoning plus tool choice
+### Reasoning and fixed IPython calls
 
-- DeepSeek reasoning models can reject `tool_choice` while thinking is enabled.
-- Kimi can reject forced tool choice while thinking is enabled.
-- Compat needs both policies: disable reasoning for any tool choice, and disable
-  reasoning only for forced tool choice.
+Provider adapters keep reasoning configuration independent from the fixed
+`ipython` call definition. There is no provider-side named capability selector
+to negotiate with a reasoning mode.
 
 ### xAI Grok through Responses/SuperGrok
 
@@ -248,65 +247,16 @@ Keep these independent:
 Some models reject only one of those fields; do not collapse them into one
 "Grok mode" branch.
 
-## 5. Normalize tools and schemas per endpoint
+## 5. Fixed provider interface
 
-### Strict tools
+Every provider request uses the same single `ipython` function definition. OMP
+does not build an endpoint-specific catalog, accept a named function selection,
+or translate custom grammar functions. Provider adapters may normalize the fixed
+schema and its paired result history for their wire protocol, but that
+normalization must preserve the `ipython` call/result pairing.
 
-Strict schemas are not a universal capability:
-
-- some providers support strict tools
-- some reject mixed strict/non-strict tools
-- some reject strictified schemas
-- OpenRouter Anthropic models can fail with “compiled grammar too large”
-
-Retry-without-strict should be a compat recovery policy scoped to the current
-session/provider path.
-
-### Responses and Codex custom tools
-
-Responses and Codex both support freeform custom grammar tools for `apply_patch`.
-Custom grammar tools do not force request-level `parallel_tool_calls`; Codex
-`responsesLite` separately disables request-level parallel tool calls whenever
-tools are present. Responses additionally:
-
-- sanitizes schemas differently
-- quarantines invalid enum/const schema contradictions
-- repairs orphan tool outputs into assistant notes
-- synthesizes placeholder outputs for orphan tool calls
-
-Codex applies its own request transformation before sending.
-
-### Tool choice
-
-Before emitting `tool_choice`:
-
-- confirm the endpoint supports it
-- downgrade forced choice to `auto` if forced choice is unsupported
-- drop `tool_choice: "none"` when no tools are emitted
-- drop forced named tool choice if that named tool was filtered out
-
-### Anthropic through LiteLLM/Bedrock
-
-- If history contains tool calls/results and `context.tools` is undefined, send
-  `tools: []` as a sentinel.
-- If `context.tools = []`, treat it as explicit opt-out and do not emit the
-  sentinel.
-
-### Mistral / Devstral
-
-- Tool-call ids must be exactly 9 alphanumeric characters.
-- Some flows need a synthetic assistant bridge after tool results before the next
-  user message.
-
-### Custom tool outputs
-
-Responses/Codex must remember whether a call was `custom_tool_call`; the paired
-output must then be `custom_tool_call_output`, not `function_call_output`.
-
-### MiniMax-compatible streaming arguments
-
-Tool arguments can stream as objects instead of JSON strings. Deep-merge object
-deltas, then emit one final concat-safe JSON delta.
+Host capabilities are not provider functions. They are typed Python calls from
+the active cell into host handlers; see [Persistent IPython runtime](./ipython.md).
 
 ## 6. Convert messages and replay history safely
 

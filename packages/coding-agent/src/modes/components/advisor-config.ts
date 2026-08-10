@@ -6,10 +6,10 @@
  * directly into the rendered frame) using the shared {@link ./overlay-box} chrome.
  * The list screen is a two-pane split (the `/extensions` idiom): a clickable
  * advisor/action sidebar on the left, and a scrollable preview of the highlighted
- * advisor's model / tools / instructions on the right, filling the free space.
+ * advisor's model / instructions on the right, filling the free space.
  *
  * Each screen is backed by a proven primitive — {@link SelectList} (list / detail
- * / tools / thinking), {@link Input} (name), {@link ModelSelectorComponent} (the
+ * / thinking), {@link Input} (name), {@link ModelSelectorComponent} (the
  * same rich `/model` picker, in direct-select mode), and {@link HookEditorComponent}
  * (multiline instructions; Ctrl+G opens `$EDITOR`). The overlay edits an in-memory
  * {@link WatchdogConfigDoc} and only touches disk + the live advisors via the host
@@ -29,12 +29,7 @@ import {
 	type TUI,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import {
-	ADVISOR_DEFAULT_TOOL_NAMES,
-	type AdvisorConfig,
-	type AdvisorConfigScope,
-	type WatchdogConfigDoc,
-} from "../../advisor";
+import type { AdvisorConfig, AdvisorConfigScope, WatchdogConfigDoc } from "../../advisor";
 import type { ModelRegistry } from "../../config/model-registry";
 import { formatModelSelectorValue } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
@@ -77,7 +72,6 @@ export interface AdvisorConfigDeps {
 	modelRegistry: ModelRegistry;
 	settings: Settings;
 	scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	availableToolNames: string[];
 	/** Formatted advisor-role model shown on the seeded default row (e.g. "anthropic/claude-..."). */
 	defaultModelLabel?: string;
 }
@@ -90,34 +84,13 @@ function previewLine(text: string | undefined): string {
 	return first.length > PREVIEW_WIDTH ? `${first.slice(0, PREVIEW_WIDTH - 1)}…` : first;
 }
 
-/** Omitted means default read/grep/glob; an explicit empty set means no tools. */
-function commitTools(selected: ReadonlySet<string>, all: readonly string[]): string[] | undefined {
-	if (selected.size === 0) return [];
-	if (selected.size === ADVISOR_DEFAULT_TOOL_NAMES.size) {
-		let matchesDefault = true;
-		for (const name of ADVISOR_DEFAULT_TOOL_NAMES) {
-			if (!selected.has(name)) {
-				matchesDefault = false;
-				break;
-			}
-		}
-		if (matchesDefault) return undefined;
-	}
-	return all.filter(name => selected.has(name));
-}
-
-function formatAdvisorTools(tools: readonly string[] | undefined, emptyLabel: string): string {
-	if (tools === undefined) return "read, grep, glob (default)";
-	return tools.length > 0 ? tools.join(", ") : emptyLabel;
-}
-
 /** Soft-wrap plain text to `width`, returning at least one (possibly empty) line. */
 function wrap(text: string, width: number): string[] {
 	if (!text) return [""];
 	return Bun.wrapAnsi(text, Math.max(1, width), { trim: false }).split("\n");
 }
 
-type Screen = "list" | "detail" | "name" | "model" | "tools" | "thinking" | "instructions";
+type Screen = "list" | "detail" | "name" | "model" | "thinking" | "instructions";
 
 /**
  * Fullscreen advisor-configuration overlay. Implements {@link Component} directly
@@ -129,7 +102,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#modelRegistry: ModelRegistry;
 	#settings: Settings;
 	#scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
-	#availableToolNames: readonly string[];
 	#defaultModelLabel: string | undefined;
 	#cb: AdvisorConfigCallbacks;
 	#scope: AdvisorConfigScope;
@@ -160,7 +132,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#modelRegistry = deps.modelRegistry;
 		this.#settings = deps.settings;
 		this.#scopedModels = deps.scopedModels;
-		this.#availableToolNames = deps.availableToolNames;
 		this.#defaultModelLabel = deps.defaultModelLabel;
 		this.#cb = callbacks;
 		this.#scope = scope;
@@ -278,7 +249,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		}
 		const help =
 			value === "add"
-				? "Create a new advisor entry, then edit its model, tools, and instructions."
+				? "Create a new advisor entry, then edit its model and instructions."
 				: value === "scope"
 					? `Switch between the project and user WATCHDOG.yml. Currently editing the ${this.#scope}-level file.`
 					: value === "save"
@@ -291,13 +262,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		const lines = [
 			theme.bold(advisor.name || "(unnamed)"),
 			"",
 			`${theme.fg("dim", "Enabled:")} ${advisor.enabled === false ? "○ off" : "● on"}`,
 			`${theme.fg("dim", "Model:")} ${model}`,
-			`${theme.fg("dim", "Tools:")} ${tools}`,
 			"",
 			theme.fg("dim", "Instructions:"),
 		];
@@ -359,7 +328,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 		return (
 			advisor.name === "default" &&
 			!advisor.model?.trim() &&
-			advisor.tools === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false
 		);
@@ -367,8 +335,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	#advisorSummary(advisor: AdvisorConfig): string {
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const tools = formatAdvisorTools(advisor.tools, "no tools");
-		return `${model} · ${tools}`;
+		return model;
 	}
 
 	#showList(): void {
@@ -442,7 +409,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 			return;
 		}
 		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
-		const toolsDescription = formatAdvisorTools(advisor.tools, "no tools");
 		const items: SelectItem[] = [
 			{ value: "name", label: "Name", description: advisor.name },
 			{
@@ -456,7 +422,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 			items.push({ value: "resetModel", label: "Reset model to advisor-role default" });
 		}
 		items.push(
-			{ value: "tools", label: "Tools", description: toolsDescription },
 			{ value: "instructions", label: "Instructions", description: previewLine(advisor.instructions) },
 			{ value: "delete", label: "Delete this advisor" },
 			{ value: "back", label: "Back" },
@@ -481,13 +446,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 				return;
 			case "model":
 				this.#showModelPicker(index);
-				return;
-			case "tools":
-				this.#showToolsEditor(
-					index,
-					new Set(this.#doc.advisors[index].tools ?? [...ADVISOR_DEFAULT_TOOL_NAMES]),
-					0,
-				);
 				return;
 			case "resetModel":
 				this.#doc.advisors[index].model = undefined;
@@ -570,42 +528,6 @@ export class AdvisorConfigOverlayComponent implements Component {
 		};
 		list.onCancel = () => this.#showModelPicker(index);
 		this.#setScreen("thinking", list, `Thinking effort for ${selector} · Enter / click pick · Esc back`);
-	}
-
-	#showToolsEditor(index: number, selected: Set<string>, cursor: number): void {
-		const all = this.#availableToolNames;
-		const items: SelectItem[] = all.map(name => ({
-			value: name,
-			label: `${selected.has(name) ? "[x]" : "[ ]"} ${name}`,
-		}));
-		items.push({ value: "__done", label: "Done" });
-		const list = new SelectList(items, Math.max(1, items.length), getSelectListTheme());
-		list.setSelectedIndex(cursor);
-		let cursorIndex = cursor;
-		list.onSelectionChange = item => {
-			cursorIndex = items.findIndex(i => i.value === item.value);
-		};
-		list.onSelect = item => {
-			if (item.value === "__done") {
-				this.#doc.advisors[index].tools = commitTools(selected, all);
-				this.#dirty = true;
-				this.#showDetail(index);
-				return;
-			}
-			if (selected.has(item.value)) selected.delete(item.value);
-			else selected.add(item.value);
-			this.#showToolsEditor(index, selected, cursorIndex);
-		};
-		list.onCancel = () => {
-			this.#doc.advisors[index].tools = commitTools(selected, all);
-			this.#dirty = true;
-			this.#showDetail(index);
-		};
-		this.#setScreen(
-			"tools",
-			list,
-			"Enter / click toggle · select Done or Esc to apply (empty = no tools; read/grep/glob = default)",
-		);
 	}
 
 	/** `index === -1` edits the shared top-level instructions; otherwise advisor[index]. */

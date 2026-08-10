@@ -16,7 +16,7 @@ import type {
 import { createDesktopSession } from "@oh-my-pi/pi-natives/desktop";
 import * as postmortem from "@oh-my-pi/pi-utils/postmortem";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
-import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
+import { JsRuntime, type RuntimeHooks } from "../../javascript-runtime/runtime";
 import { copyToClipboard, readTextFromClipboard } from "../../utils/clipboard";
 import { cloneSafe, RunOutput } from "../browser/run-output";
 import {
@@ -33,7 +33,6 @@ import type {
 	ComputerWorkerInbound,
 	ComputerWorkerTransport,
 	RunErrorPayload,
-	ToolReply,
 } from "./protocol";
 
 /** Native desktop operations consumed by the script runtime. */
@@ -85,12 +84,10 @@ type DragOptions = DeliveryOptions & { modifiers?: string[] };
 type ScrollOptions = DeliveryOptions & { dx?: number; dy?: number };
 type AxOptions = Pick<AxSnapshotOptions, "all" | "maxDepth">;
 
-type PendingTool = { resolve(value: unknown): void; reject(reason?: unknown): void };
 interface ActiveRun {
 	id: string;
 	ac: AbortController;
 	signal: AbortSignal;
-	pendingTools: Map<string, PendingTool>;
 }
 
 interface ComputerRunContext {
@@ -114,19 +111,6 @@ function errorPayload(error: unknown): RunErrorPayload {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
-}
-
-function replyError(payload: RunErrorPayload): Error {
-	if (payload.isAbort) {
-		const error = new ToolAbortError(payload.message || "Tool call aborted");
-		if (payload.stack) error.stack = payload.stack;
-		return error;
-	}
-	const ErrorType = payload.isToolError ? ToolError : Error;
-	const error = new ErrorType(payload.message);
-	if (payload.name) error.name = payload.name;
-	if (payload.stack) error.stack = payload.stack;
-	return error;
 }
 
 function nativeError(error: unknown): ToolError {
@@ -449,9 +433,6 @@ export class ComputerWorkerCore {
 			case "abort":
 				if (this.#active?.id === message.id) this.#active.ac.abort(new ToolAbortError());
 				return;
-			case "tool-reply":
-				this.#deliverToolReply(message.id, message.reply);
-				return;
 			case "close":
 				void this.#close();
 		}
@@ -496,7 +477,7 @@ export class ComputerWorkerCore {
 		const ac = new AbortController();
 		const runAc = new AbortController();
 		const signal = AbortSignal.any([timeoutSignal, ac.signal, runAc.signal]);
-		const active: ActiveRun = { id: message.id, ac, signal, pendingTools: new Map() };
+		const active: ActiveRun = { id: message.id, ac, signal };
 		this.#active = active;
 		const output = new RunOutput();
 		const screenshots: ComputerScreenshot[] = [];
@@ -543,11 +524,6 @@ export class ComputerWorkerCore {
 						? new ToolError(`Computer code execution timed out after ${message.timeoutMs}ms`)
 						: abortError,
 				);
-				const toolAbort = timeoutSignal.aborted
-					? postmortem.markExpectedCleanupError(new ToolAbortError(undefined, { cause: timeoutSignal.reason }))
-					: abortError;
-				for (const pending of active.pendingTools.values()) pending.reject(toolAbort);
-				active.pendingTools.clear();
 			};
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
@@ -607,27 +583,7 @@ export class ComputerWorkerCore {
 				throwIfAborted(active.signal);
 				output.pushDisplay(display);
 			},
-			callTool: (name, args) => {
-				throwIfAborted(active.signal);
-				return this.#callTool(active, name, args);
-			},
 		};
-	}
-
-	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
-		const id = `computer-tc-${active.id}-${crypto.randomUUID()}`;
-		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-		active.pendingTools.set(id, { resolve, reject });
-		this.#transport.send({ type: "tool-call", id, runId: active.id, name, args });
-		return await promise;
-	}
-
-	#deliverToolReply(id: string, reply: ToolReply): void {
-		const pending = this.#active?.pendingTools.get(id);
-		if (!pending) return;
-		this.#active?.pendingTools.delete(id);
-		if (reply.ok) pending.resolve(reply.value);
-		else pending.reject(replyError(reply.error));
 	}
 
 	#currentRunContext = (): ComputerRunContext => {

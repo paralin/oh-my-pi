@@ -166,7 +166,7 @@ function renderCollapsedLine(runtime: AutoresearchRuntime, state: ExperimentStat
 				),
 			);
 		}
-		parts.push(theme.fg("warning", " | log_experiment required"));
+		parts.push(theme.fg("warning", " | omp.autoresearch.log required"));
 		if (!runtime.autoresearchMode) {
 			parts.push(theme.fg("dim", " | mode off"));
 		}
@@ -235,7 +235,7 @@ export function renderDashboardLines(
 					`Result: ${runtime.lastRunSummary.passed ? "passed" : "failed"}${runtime.lastRunSummary.parsedPrimary !== null ? `  ${state.metricName} ${formatNum(runtime.lastRunSummary.parsedPrimary, state.metricUnit)}` : ""}`,
 					width,
 				),
-				truncateToWidth("Next action: finish log_experiment before starting another run.", width),
+				truncateToWidth("Next action: finish omp.autoresearch.log before starting another run.", width),
 			];
 			if (!runtime.autoresearchMode) {
 				lines.push(truncateToWidth("Mode: off", width));
@@ -279,7 +279,7 @@ export function renderDashboardLines(
 	if (runtime.lastRunSummary) {
 		lines.push(
 			truncateToWidth(
-				`Pending run: #${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? "passed" : "failed"}) — log_experiment required`,
+				`Pending run: #${runtime.lastRunSummary.runNumber} (${runtime.lastRunSummary.passed ? "passed" : "failed"}) — omp.autoresearch.log required`,
 				width,
 			),
 		);

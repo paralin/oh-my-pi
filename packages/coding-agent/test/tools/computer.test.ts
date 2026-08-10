@@ -1,16 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { type as arkType } from "@oh-my-pi/omptype";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ComputerTool, computerApproval } from "@oh-my-pi/pi-coding-agent/tools/computer";
-import type {
-	ComputerSessionSnapshot,
-	ComputerWorkerInbound,
-	ComputerWorkerOutbound,
-	ComputerWorkerTransport,
-} from "@oh-my-pi/pi-coding-agent/tools/computer/protocol";
-import { ComputerSupervisor, type ComputerWorkerHandle } from "@oh-my-pi/pi-coding-agent/tools/computer/supervisor";
-import { ComputerWorkerCore, type NativeDesktopSession } from "@oh-my-pi/pi-coding-agent/tools/computer/worker";
 import type {
 	AxNode,
 	AxQuery,
@@ -21,6 +9,14 @@ import type {
 	DesktopWindow,
 	PointerOptions,
 } from "@oh-my-pi/pi-natives";
+import type {
+	ComputerSessionSnapshot,
+	ComputerWorkerInbound,
+	ComputerWorkerOutbound,
+	ComputerWorkerTransport,
+} from "../../src/tools/computer/protocol.js";
+import { ComputerSupervisor, type ComputerWorkerHandle } from "../../src/tools/computer/supervisor.js";
+import { ComputerWorkerCore, type NativeDesktopSession } from "../../src/tools/computer/worker.js";
 
 const capabilities: DesktopCapabilities = {
 	backend: "fake",
@@ -214,49 +210,6 @@ async function runWorker(
 	)) as Extract<ComputerWorkerOutbound, { type: "result" }>;
 }
 
-function toolSession(): ToolSession {
-	return {
-		cwd: import.meta.dir,
-		hasUI: false,
-		settings: Settings.isolated({ "computer.enabled": true }),
-		getSessionFile: () => null,
-		getSessionSpawns: () => null,
-	} as ToolSession;
-}
-
-const noOpController = {
-	async run() {
-		return { displays: [], returnValue: undefined, screenshots: [] };
-	},
-	async capabilities() {
-		return undefined;
-	},
-	async close() {},
-};
-
-describe("computer schema and approval", () => {
-	it("requires code, rejects unknown keys, and shares its lazily-created schema", async () => {
-		const first = new ComputerTool(toolSession(), () => noOpController);
-		const second = new ComputerTool(toolSession(), () => noOpController);
-		const schema = first.parameters;
-
-		expect(schema({ code: "await desktop.windows()" }) instanceof arkType.errors).toBe(false);
-		expect(schema({}) instanceof arkType.errors).toBe(true);
-		expect(schema({ code: "1", unexpected: true }) instanceof arkType.errors).toBe(true);
-		expect(first.parameters).toBe(schema);
-		expect(second.parameters).toBe(schema);
-		await Promise.all([first.close(), second.close()]);
-	});
-
-	it("maps only literal read_only true to read approval", () => {
-		expect(computerApproval({ read_only: true })).toBe("read");
-		expect(computerApproval({})).toBe("exec");
-		expect(computerApproval({ read_only: false })).toBe("exec");
-		expect(computerApproval({ read_only: "yes" })).toBe("exec");
-		expect(computerApproval("garbage")).toBe("exec");
-	});
-});
-
 describe("computer worker round trips", () => {
 	it("lists windows and returns screenshot caption, image, and detail through a fake native session", async () => {
 		const transport = new MemoryTransport();
@@ -350,19 +303,6 @@ describe("computer worker round trips", () => {
 			isToolError: true,
 			message: "Computer code execution timed out after 10ms",
 		});
-	});
-
-	it("round-trips tool calls and resolves the in-script promise", async () => {
-		const transport = new MemoryTransport();
-		new ComputerWorkerCore(transport, () => new FakeNativeSession());
-		const resultPromise = runWorker(transport, "bridge", "await tool.echo({ value: 7 })");
-		const call = await transport.waitFor(message => message.type === "tool-call" && message.runId === "bridge");
-		expect(call).toMatchObject({ type: "tool-call", runId: "bridge", name: "echo", args: { value: 7 } });
-		if (call.type !== "tool-call") return;
-		transport.inbound({ type: "tool-reply", id: call.id, reply: { ok: true, value: { echoed: 7 } } });
-		const result = await resultPromise;
-		expect(result.ok).toBe(true);
-		if (result.ok) expect(result.payload.returnValue).toEqual({ echoed: 7 });
 	});
 
 	it("uses a retained window screenshot in the current run payload", async () => {
@@ -538,7 +478,7 @@ class SupervisorWorker implements ComputerWorkerHandle {
 describe("computer supervisor recovery", () => {
 	it("surfaces a timeout ToolError and creates a fresh worker for the next run", async () => {
 		let workers = 0;
-		const supervisor = new ComputerSupervisor(toolSession(), () => new SupervisorWorker(++workers > 1), {
+		const supervisor = new ComputerSupervisor(() => new SupervisorWorker(++workers > 1), {
 			startMs: 200,
 			closeMs: 200,
 		});

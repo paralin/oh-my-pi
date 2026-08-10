@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
-import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
+import type * as BrowsersNs from "@puppeteer/browsers";
 import type { Browser, CDPSession, Page, default as Puppeteer, Target } from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
@@ -24,7 +24,7 @@ export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1
 
 /**
  * Per-CDP-message timeout applied to every puppeteer launch/connect. Set above
- * `TOOL_TIMEOUTS.browser.max` (30s) so the agent-side wall-clock is the canonical
+ * the browser operation timeout so the host-side wall-clock is the canonical
  * limit; this constant only catches genuinely stuck CDP sockets (renderer wedged,
  * connection dropped, etc.).
  */
@@ -115,7 +115,7 @@ export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Pup
 let browsersModule: typeof BrowsersNs | undefined;
 async function loadBrowsers(): Promise<typeof BrowsersNs> {
 	if (!browsersModule) {
-		browsersModule = await import("@oh-my-pi/pi-utils/browsers");
+		browsersModule = await import("@puppeteer/browsers");
 	}
 	return browsersModule;
 }
@@ -133,7 +133,7 @@ let chromiumExecutablePromise: Promise<string | undefined> | undefined;
 export async function ensureChromiumExecutable(): Promise<string | undefined> {
 	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
 	if (envPath) return envPath;
-	const sysChrome = await resolveSystemChromium();
+	const sysChrome = resolveSystemChromium();
 	if (sysChrome) return sysChrome;
 	if (chromiumExecutablePromise) return chromiumExecutablePromise;
 
@@ -166,13 +166,13 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 			buildId,
 			cacheDir,
 			platform,
-			downloadProgressCallback: ({ downloadedBytes, totalBytes }) => {
-				if (totalBytes <= 0) return;
-				const pct = Math.floor((downloadedBytes / totalBytes) * 100);
-				if (pct >= lastReportedPercent + 10 || downloadedBytes === totalBytes) {
+			downloadProgressCallback: (downloaded, total) => {
+				if (total <= 0) return;
+				const pct = Math.floor((downloaded / total) * 100);
+				if (pct >= lastReportedPercent + 10 || downloaded === total) {
 					lastReportedPercent = pct;
 					logger.debug(
-						`Chromium download: ${pct}% (${Math.round(downloadedBytes / 1_000_000)} / ${Math.round(totalBytes / 1_000_000)} MB)`,
+						`Chromium download: ${pct}% (${Math.round(downloaded / 1_000_000)} / ${Math.round(total / 1_000_000)} MB)`,
 					);
 				}
 			},
@@ -193,41 +193,7 @@ let resolvedChromium: string | null | undefined; // undefined = unchecked; null 
 function isExecutableFile(p: string): boolean {
 	try {
 		const st = fs.statSync(p);
-		if (!st.isFile()) return false;
-		if (process.platform === "win32") return true;
-		fs.accessSync(p, fs.constants.X_OK);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-async function isChromiumExecutable(p: string): Promise<boolean> {
-	if (!isExecutableFile(p)) return false;
-	// The version probe below launches the candidate. It exists to reject
-	// non-Chromium `chrome`/`chromium` wrapper scripts that appear on a Linux
-	// PATH (ecb22957, "validate Linux browser executables"). On Windows and
-	// macOS the candidates are fixed GUI application paths, not PATH wrappers,
-	// and executing them is harmful: a GUI `chrome.exe --version` does not print
-	// to a detached stdout and can hand off to the user's running instance,
-	// opening/activating a normal browser window (#8445). Confine the probe to
-	// Linux and trust the executable-file check elsewhere.
-	if (process.platform !== "linux") return true;
-	try {
-		const probeTimeoutMs = 3000;
-		const proc = Bun.spawn([p, "--version"], {
-			stdout: "pipe",
-			stderr: "ignore",
-			signal: AbortSignal.timeout(probeTimeoutMs),
-			killSignal: "SIGKILL",
-		});
-		const stdout = await Promise.race([
-			new Response(proc.stdout).text(),
-			Bun.sleep(probeTimeoutMs + 500).then(() => null),
-		]);
-		if (stdout === null) return false;
-		await proc.exited;
-		return proc.exitCode === 0 && /Chrom|Edg/i.test(stdout);
+		return st.isFile();
 	} catch {
 		return false;
 	}
@@ -312,13 +278,13 @@ function systemChromiumCandidates(
 	return candidates;
 }
 
-async function resolveSystemChromium(): Promise<string | undefined> {
+function resolveSystemChromium(): string | undefined {
 	if (resolvedChromium !== undefined) return resolvedChromium ?? undefined;
 	const seen = new Set<string>();
 	for (const candidate of systemChromiumCandidates()) {
 		if (!candidate || seen.has(candidate)) continue;
 		seen.add(candidate);
-		if (await isChromiumExecutable(candidate)) {
+		if (isExecutableFile(candidate)) {
 			resolvedChromium = candidate;
 			logger.debug("Using system Chrome/Chromium", { path: candidate });
 			return candidate;
@@ -926,10 +892,6 @@ export function systemChromiumCandidatesForTest(
 	which?: (name: string) => string | null | undefined,
 ): string[] {
 	return systemChromiumCandidates(platform, home, which);
-}
-
-export async function chromiumExecutableProbeForTest(executablePath: string): Promise<boolean> {
-	return isChromiumExecutable(executablePath);
 }
 
 export function stealthIgnoreDefaultArgsForTest(executablePath: string | undefined): string[] {

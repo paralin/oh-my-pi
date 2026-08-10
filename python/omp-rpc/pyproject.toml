@@ -22,6 +22,12 @@ classifiers = [
     "Topic :: Software Development :: Libraries",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "ipython>=9.0",
+    "pytest>=8.0",
+]
+
 [project.urls]
 Homepage = "https://omp.sh/"
 Repository = "https://github.com/can1357/oh-my-pi"

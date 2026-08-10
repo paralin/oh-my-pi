@@ -440,8 +440,8 @@ describe("AgentSession owner-routed async delivery", () => {
 		// The manager has fully handed off — no running jobs, no queued or
 		// in-flight deliveries — but the async-result follow-up still sits on
 		// the session's yield queue awaiting the (delayed) idle flush / next
-		// step boundary. A terminal yield observed in this window MUST still
-		// count as pending async work, or the run driver terminates and the
+		// step boundary. Completion observed in this window MUST still count as
+		// pending async work, or the run driver terminates and the
 		// delivered result is silently dropped from the final report.
 		expect(session.hasPendingAsyncWork()).toBe(true);
 

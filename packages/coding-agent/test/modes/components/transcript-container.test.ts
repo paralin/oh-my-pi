@@ -920,7 +920,7 @@ describe("TranscriptContainer renderViewportTail", () => {
 });
 
 // A displaceable snapshot (todo/poll card): kept unfinalized only so a matching
-// follow-up call can retract it. Mirrors ToolExecutionComponent.seal — sealing
+// follow-up call can retract it. Sealing
 // finalizes the block in place and it stops reporting displaceable. A pending
 // tool starts non-displaceable and becomes a displaceable snapshot only when
 // its successful result arrives (`makeDisplaceable`).

@@ -211,8 +211,10 @@ describe("AgentSession concurrent disposal", () => {
 		current.trackPostPromptTaskForTests(hangingTask.promise);
 
 		const dispose = current.dispose();
-		await flushMicrotasks();
-		vi.advanceTimersByTime(5_000);
+		for (let i = 0; i < 10; i++) {
+			await flushMicrotasks();
+			vi.advanceTimersByTime(1_000);
+		}
 		await flushMicrotasks();
 		await dispose;
 		session = undefined;

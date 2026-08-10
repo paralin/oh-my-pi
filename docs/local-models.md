@@ -21,7 +21,7 @@ fallback is used when that role is unset.
     `webnn`, `webnn-gpu`, `webnn-cpu`, and `webnn-npu`.
   - Direct `coreml` remains opt-in via `PI_TINY_DEVICE=coreml`; it is not part of the default because
     cached decoder-LLM ONNX loads can fail during session initialization.
-  - WebGPU/Metal works for the single-process eval harness, but the production worker forces
+  - WebGPU/Metal works for the single-process benchmark harness, but the production worker forces
     Darwin `gpu`/`webgpu`/`auto` requests back to CPU because ONNX Runtime/Bun currently
     hard-crashes on worker teardown after WebGPU inference.
   - Use `providers.tinyModelDevice` or `PI_TINY_DEVICE` only when explicitly opting out of the CPU

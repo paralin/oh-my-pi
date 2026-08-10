@@ -24,14 +24,14 @@ omp plugin <npm/link action> ...
   -> PluginManager method (install/list/uninstall/link/...)
   -> mutate user plugins data root {package.json,node_modules,omp-plugins.lock.json}
   -> enabled-plugin enumeration discovers user and nearest project plugin roots
-  -> direct loaders resolve manifest-declared tool/extension entries
-  -> `omp-plugins` capability discovery scans conventional skills/hooks/tools/commands/rules/prompts/MCP content; task discovery scans `agents/`
+  -> direct loader resolves manifest-declared extension entries
+  -> `omp-plugins` capability discovery scans conventional skills/hooks/commands/rules/prompts/MCP content; task discovery scans `agents/`
 
 omp plugin install name@marketplace / omp install name@marketplace
   -> MarketplaceManager
   -> mutate scope registry and shared cache
   -> symlink the cached package into the scope's node_modules and update omp-plugins.lock.json
-  -> `claude-plugins` discovery loads marketplace skills/commands/hooks/tools/MCP; task discovery loads `agents/`; extension loader imports `package.json#omp.extensions`
+  -> `claude-plugins` discovery loads marketplace skills/commands/hooks/MCP; task discovery loads `agents/`; extension loader imports `package.json#omp.extensions`
 ```
 
 ### Command entrypoints
@@ -63,7 +63,7 @@ Marketplace installs add registry and cache state alongside those runtime entrie
 - user plugins data root `installed_plugins.json` (`~/.omp/plugins/installed_plugins.json` by default) — user-scoped marketplace installs
 - `<anchor>/.omp/plugins/installed_plugins.json` — project-scoped marketplace installs
 - user plugins data root `cache/{marketplaces,plugins}/` — cached catalogs and plugin directories
-- `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its `package.json` `omp.extensions` and tools to load
+- `<scope>/plugins/node_modules/<package>` — symlink to the cached plugin, allowing its manifest extensions and conventional plugin content to load
 - `<scope>/plugins/omp-plugins.lock.json` — enablement and feature state shared with the runtime plugin loader
 
 ## Plugin spec parsing and metadata interpretation
@@ -183,7 +183,6 @@ Filtering:
 For each enabled plugin:
 
 - `resolvePluginExtensionPaths(plugin)`
-- `resolvePluginToolPaths(plugin)`
 - `resolvePluginHookPaths(plugin)`
 - `resolvePluginCommandPaths(plugin)`
 
@@ -197,11 +196,10 @@ Manifest entries may point to a file or to a directory containing `index.ts`, `i
 
 ## Current runtime wiring
 
-- Manifest-declared **tools** feed `discoverAndLoadCustomTools` through `getAllPluginToolPaths(cwd)`.
 - Manifest-declared **extensions** feed `discoverAndLoadExtensions` through `getAllPluginExtensionPaths(cwd)`.
-- The `omp-plugins` capability provider separately scans conventional `skills/`, `hooks/pre|post/`, `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` under enabled npm/link plugin roots. Task-agent discovery scans the same roots' `agents/`. Marketplace roots are excluded there and handled through `claude-plugins` plus marketplace task-agent discovery instead.
+- The `omp-plugins` capability provider separately scans conventional `skills/`, `hooks/pre|post/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` under enabled npm/link plugin roots. Task-agent discovery scans the same roots' `agents/`. Marketplace roots are excluded there and handled through `claude-plugins` plus marketplace task-agent discovery instead.
 - Manifest hook/command path resolvers remain exported, but runtime hook/slash discovery uses the conventional capability-provider scans rather than `getAllPluginHookPaths()` or `getAllPluginCommandPaths()`.
-- Direct custom-tool and extension path lists are de-duplicated by resolved absolute path (`seen`, first path wins).
+- Direct extension path lists are de-duplicated by resolved absolute path (`seen`, first path wins).
 
 ## Lock/state management details
 
@@ -234,7 +232,7 @@ This limits command-injection risk when invoking `bun install/uninstall`.
 
 ## Filesystem trust boundary
 
-- Plugin code executes in-process when custom tool modules are imported; no sandboxing.
+- Plugin code executes in-process when extension modules are imported; no sandboxing.
 - Manifest relative paths are joined against plugin package directory and only existence-checked.
 - The plugin package itself is trusted code once installed.
 
@@ -268,7 +266,7 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
   - runtime enabled-plugin discovery: skipped as non-plugin
 - Missing feature referenced by install spec or `features --set/--enable`: hard error with available feature list
 - Invalid `plugin-overrides.json`: ignored with fallback to `{}` in both manager and loader paths
-- Missing tool/hook/command file paths referenced by manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`
+- Missing hook/command file paths referenced by a manifest: silently ignored during resolver expansion; flagged as errors only by `doctor`
 
 ## Mode differences and precedence
 
@@ -283,11 +281,10 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 - [`src/cli/plugin-cli.ts`](../packages/coding-agent/src/cli/plugin-cli.ts) — action dispatch, user-facing command handlers
 - [`src/extensibility/plugins/manager.ts`](../packages/coding-agent/src/extensibility/plugins/manager.ts) — active install/remove/list/link/state/doctor implementation
 - [`src/extensibility/plugins/installer.ts`](../packages/coding-agent/src/extensibility/plugins/installer.ts) — legacy installer helpers and additional link safety checks
-- [`src/extensibility/plugins/loader.ts`](../packages/coding-agent/src/extensibility/plugins/loader.ts) — enabled-plugin discovery and manifest tool/hook/command/extension path resolution
+- [`src/extensibility/plugins/loader.ts`](../packages/coding-agent/src/extensibility/plugins/loader.ts) — enabled-plugin discovery and manifest hook/command/extension path resolution
 - [`src/extensibility/plugins/parser.ts`](../packages/coding-agent/src/extensibility/plugins/parser.ts) — install spec and package-name parsing helpers
 - [`src/extensibility/plugins/types.ts`](../packages/coding-agent/src/extensibility/plugins/types.ts) — manifest/runtime/override type contracts
 - [`src/discovery/omp-plugins.ts`](../packages/coding-agent/src/discovery/omp-plugins.ts) — conventional capability discovery for npm/link extension packages
 - [`src/task/discovery.ts`](../packages/coding-agent/src/task/discovery.ts) — conventional `agents/` discovery for extension and marketplace plugin roots
 - [`src/discovery/claude-plugins.ts`](../packages/coding-agent/src/discovery/claude-plugins.ts) — marketplace-plugin capability discovery
-- [`src/extensibility/custom-tools/loader.ts`](../packages/coding-agent/src/extensibility/custom-tools/loader.ts) — runtime wiring for manifest-declared plugin tool modules
 - [`src/extensibility/extensions/loader.ts`](../packages/coding-agent/src/extensibility/extensions/loader.ts) — runtime wiring for plugin extension modules

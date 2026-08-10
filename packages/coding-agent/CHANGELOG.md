@@ -2184,7 +2184,6 @@
 - Fixed git clone and fetch operations being killed prematurely by applying a separate 30-minute deadline for network transfers instead of the standard 5-minute local-command timeout.
 - Fixed git index corruption issues in `mergeTaskBranches` and `applyNestedPatches` when post-merge stash pops conflicted with the cherry-picked HEAD.
 - Fixed collaboration (`/collab`) issues, including preventing teardowns from cancelling active host dialogs, sanitizing host-delivered errors for guests, and ensuring guest UI requests are correctly routed and rendered.
-- Fixed RPC mode deferred shutdown (`pi.shutdown()`) and `abort_bash` commands from being blocked by active background bash processes.
 - Fixed model discovery ignoring `NODE_EXTRA_CA_CERTS` and resolved a rare Bun garbage collection segfault during discovery.
 - Fixed `task.maxConcurrency` and `task.maxRecursionDepth` limits being bypassed by sub-spawn paths or when queued spawns were cancelled.
 - Fixed various TUI and rendering issues, including macOS Ghostty `Command+V` image pasting, CJK history rendering across compactions, status-line redraw crashes with BigInt values, and overlapping rows in the subagent progress tree.
@@ -3737,7 +3736,6 @@
 - Collapsed task tool blocks now cap the per-agent list at 4 rows: the live progress view keeps the running/pending tail visible behind a `… N more agents (…)` summary line with per-status counts, finalized batches keep failed/aborted rows visible while folding the slowest successes, and the streaming call preview caps at the same 4 (expand shows the full list)
 - The anchored Subagents HUD above the editor now lists only detached background spawns: sync task calls (the parent turn is blocked and the inline tool block already renders live progress) and eval `agent()` helpers (rendered by their eval cell's own progress tree) no longer appear in the list
 - Completed rows in the `job` tool output now show the standard done checkmark instead of the watch glyph that replaced the spinner
-- HTML session exports render tool calls through the same React tool renderers the collab web client uses: per-tool views for all built-in tools (bash, edit diffs, todo boards, eval cells, task batches, LSP, search, browser screenshots, …) are bundled as an `<omp-tool-view>` web component into the export instead of the previous string-built dummy renderers
 - Modernized the HTML export page chrome to match the tool-card design language: hairline borders, dense mono typography, compact role-tinted message cards, refined tree sidebar and filter controls, themed scrollbars, collapsed-by-default thinking blocks, and mobile sidebar drawer — derived from the active theme's variables so light and dark themes both render correctly
 - Agent Hub's embedded chat overlay is now reserved for collab guest viewing; local agents open in the main session renderer instead.
 
@@ -5964,7 +5962,7 @@
 - Treat keyless-by-design providers (llama.cpp, ollama, lm-studio) as authenticated in subagent model resolution; fixes silent fallback to parent remote model when a local model is configured. ([#1008](https://github.com/can1357/oh-my-pi/issues/1008))
 - Fixed subagent disposal and session transitions that previously canceled all running async jobs, preventing inadvertent termination of a parent agent’s background work
 - Fixed multi-entry edits silently rendering a fake success when every entry failed (e.g. all hit the auto-generated guard), by surfacing `isError: true` from the single-path edit orchestrator so the renderer takes the error branch instead of falling through to the streaming-preview fallback that displays the *proposed* diff
-- Fixed the auto-generated streaming guard being gated behind `edit.streamingAbort` (default false), so it now pre-empts streaming edit tool calls targeting auto-generated files regardless of that setting
+- Removed the obsolete streamed legacy edit guard at the one-tool IPython cutover
 - Fixed subagents launched in the same parallel batch not seeing each other in their initial `# IRC Peers` system-prompt block by pre-registering the agent in the global `AgentRegistry` before `rebuildSystemPrompt` runs and attaching the live session afterwards
 - Fixed plugin manifest extensions whose entry points at a directory (e.g. `pi-goal`'s `"pi": { "extensions": [".pi/extensions/pi-goal"] }`) failing to load with `Failed to load extension: Directories cannot be read like files`. The plugin path resolver now resolves directory entries to their `index.{ts,js,mjs,cjs}` file, matching the behavior of native auto-discovery via `resolveExtensionEntries`.
 - Fixed the SSH tool on native Windows by avoiding OpenSSH ControlMaster multiplexing, which Win32-OpenSSH does not support and reports as `getsockname failed` ([#154](https://github.com/can1357/oh-my-pi/issues/154)).
@@ -7174,11 +7172,7 @@
 - Exported ACP mode via `./modes/acp` and `./modes/acp/*` package paths
 - Exported web utilities via `./web/*` package path
 - Exported line-hash utilities from edit module via `./edit/line-hash`
-- Host-owned custom tools support: RPC clients can now register custom tools via `setCustomTools()` and the RPC server will invoke them over the transport with `host_tool_call` requests
-- RPC host tool framework: `RpcHostToolBridge` for managing host tool execution, `RpcHostToolDefinition` for tool metadata, and bidirectional `host_tool_call`, `host_tool_cancel`, `host_tool_update`, and `host_tool_result` frames
 - RPC client tool API: `defineRpcClientTool()` helper, `RpcClientCustomTool` interface, and `RpcClientToolContext` for implementing host-side tool execution with update streaming and abort support
-- `set_host_tools` RPC command to replace the active set of host-owned tools before the next model call
-- `refreshRpcHostTools()` method on `AgentSession` to integrate host tools into the active tool registry with conflict detection and auto-activation of non-hidden tools
 - Instruction breakpoints support: `set_instruction_breakpoint` and `remove_instruction_breakpoint` debug actions for setting breakpoints at specific instruction addresses
 - Data breakpoints support: `data_breakpoint_info`, `set_data_breakpoint`, and `remove_data_breakpoint` debug actions for monitoring variable/memory access
 - Memory introspection: `read_memory` and `write_memory` debug actions for inspecting and modifying debugger memory

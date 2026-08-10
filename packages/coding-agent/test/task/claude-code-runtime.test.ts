@@ -49,8 +49,8 @@ import {
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
 } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const AGENT: AgentDefinition = {
 	name: "worker",
@@ -326,7 +326,6 @@ function session(
 function request(overrides: Partial<StructuredSubagentRequest> = {}): StructuredSubagentRequest {
 	return {
 		session: session(),
-		invocationKind: "task",
 		assignment: "Inspect the target.",
 		agent: "worker",
 		...overrides,

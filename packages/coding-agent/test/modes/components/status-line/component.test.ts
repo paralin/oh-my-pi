@@ -6,7 +6,6 @@ import type { AgentSession } from "../../../../src/session/agent-session";
 
 function makeSessionWithLastMessage(
 	lastMessage: unknown,
-	prewalkArmed: boolean = false,
 	{
 		cost = 0,
 		advisorCost = 0,
@@ -41,7 +40,6 @@ function makeSessionWithLastMessage(
 			}),
 			getSessionName: () => "test-session",
 		},
-		getPrewalkState: () => (prewalkArmed ? { target: { id: "cheap-model", provider: "openai" } } : undefined),
 		getAsyncJobSnapshot: () => undefined,
 		isAdvisorActive: () => false,
 		getAdvisorStatusOverview: () => ({
@@ -83,19 +81,9 @@ describe("StatusLineComponent", () => {
 		expect(statusLine.getCachedContextBreakdown()).toEqual({ usedTokens: 42, contextWindow: 128000 });
 	});
 
-	it("renders Prewalk annotation when prewalk is armed", () => {
-		const statusLine = new StatusLineComponent(makeSessionWithLastMessage(null, true) as unknown as AgentSession);
-
-		// By default preset, 'mode' segment is included in left/right segments.
-		// Let's get the border and see if Prewalk is rendered.
-		const border = statusLine.getTopBorder(100);
-		// SGR codes might be included, so we check if the stripped content contains "Prewalk"
-		const stripped = border.content.replace(/\x1b\[[0-9;]*m/g, "");
-		expect(stripped).toContain("Prewalk");
-	});
 	it("renders primary and advisor costs separately", () => {
 		const statusLine = new StatusLineComponent(
-			makeSessionWithLastMessage(null, false, {
+			makeSessionWithLastMessage(null, {
 				cost: 2.67,
 				advisorCost: 0.41,
 				usingSubscription: true,
@@ -108,7 +96,7 @@ describe("StatusLineComponent", () => {
 
 	it("omits advisor cost when the advisor has never been active", () => {
 		const statusLine = new StatusLineComponent(
-			makeSessionWithLastMessage(null, false, {
+			makeSessionWithLastMessage(null, {
 				cost: 2.67,
 				usingSubscription: true,
 			}) as unknown as AgentSession,

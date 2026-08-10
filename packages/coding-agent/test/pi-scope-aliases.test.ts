@@ -55,14 +55,14 @@ const CASES: readonly AliasCase[] = [
 		id: "ohmypi-coding-agent",
 		aliasSpecifier: "@oh-my-pi/pi-coding-agent",
 		canonicalPath: canonicalCodingAgent,
-		symbol: "isToolCallEventType",
+		symbol: "ExtensionRuntimeNotInitializedError",
 	},
 	// @mariozechner — defends the original remap (regression: issue #973).
 	{
 		id: "mariozechner-extensions",
 		aliasSpecifier: "@mariozechner/pi-coding-agent/extensibility/extensions",
 		canonicalPath: canonicalCodingAgentExtensions,
-		symbol: "isToolCallEventType",
+		symbol: "ExtensionRuntimeNotInitializedError",
 	},
 	// Subpath: legacy `pi-ai/oauth` resolves to the real `@oh-my-pi/pi-ai/oauth`.
 	{

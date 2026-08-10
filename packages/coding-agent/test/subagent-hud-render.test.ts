@@ -133,21 +133,6 @@ describe("subagent HUD lines", () => {
 		expect(fromTask).toContain("Worker Investigate flaky CI on macOS");
 	});
 
-	it("hides non-detached spawns: sync task calls and eval agent() helpers", () => {
-		// Sync task spawn (parent blocked on the call) and eval `agent()` spawn
-		// (no detached flag at all) both stay off the HUD.
-		const sessions = [
-			makeSession({ id: "SyncSpawn", description: "inline task work", detached: false }),
-			makeSession({ id: "EvalSpawn", description: "eval cell work", detached: undefined }),
-		];
-		expect(renderSubagentHudLines(sessions, 120)).toEqual([]);
-
-		const out = render([...sessions, makeSession({ id: "BackgroundSpawn", description: "detached work" })]);
-		expect(out).toContain("BackgroundSpawn: detached work");
-		expect(out).not.toContain("SyncSpawn");
-		expect(out).not.toContain("EvalSpawn");
-	});
-
 	it("threads the detached flag from lifecycle and progress payloads", () => {
 		const eventBus = new EventBus();
 		const registry = new SessionObserverRegistry();

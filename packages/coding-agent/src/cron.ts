@@ -122,6 +122,12 @@ async function releaseDeliveryClaim(claim: CronDeliveryClaim): Promise<void> {
 	}
 }
 
+export interface CronUpdatePatch {
+	expression?: string;
+	prompt?: string;
+	recurring?: boolean;
+}
+
 export interface CronSchedule {
 	minutes: Set<number>;
 	hours: Set<number>;
@@ -513,6 +519,76 @@ export class CronManager {
 	list(): CronJob[] {
 		this.#refreshSession();
 		return [...this.#jobs.values()].sort((a, b) => a.nextFireAt - b.nextFireAt);
+	}
+
+	update(id: string, patch: CronUpdatePatch): Promise<CronJob | undefined> {
+		return this.#serializeMutation(async () => {
+			this.#refreshSession();
+			const fields = Object.keys(patch);
+			const unknown = fields.find(field => field !== "expression" && field !== "prompt" && field !== "recurring");
+			if (unknown) throw new Error(`Cron update field is not supported: ${unknown}.`);
+			if (fields.length === 0 || fields.every(field => patch[field as keyof CronUpdatePatch] === undefined)) {
+				throw new Error("Cron update requires at least one field.");
+			}
+			if (patch.expression !== undefined) {
+				if (!patch.expression.trim()) throw new Error("Cron expression cannot be empty.");
+				parseCronExpression(patch.expression);
+			}
+			if (patch.prompt !== undefined && !patch.prompt.trim()) throw new Error("Cron prompt cannot be empty.");
+
+			const cached = this.#jobs.get(id);
+			if (cached && !cached.durable) {
+				const updated = this.#updatedJob(cached, patch);
+				this.#jobs.set(id, updated);
+				this.#armTimer();
+				return updated;
+			}
+			await this.#loadCurrentSession();
+			const loaded = this.#jobs.get(id);
+			if (!this.#sessionFile || (loaded && !loaded.durable)) {
+				if (!loaded) return undefined;
+				const updated = this.#updatedJob(loaded, patch);
+				this.#jobs.set(id, updated);
+				this.#armTimer();
+				return updated;
+			}
+
+			let previous: CronJob | undefined;
+			let updated: CronJob | undefined;
+			try {
+				updated = await this.#withDurableMutation(() => {
+					previous = this.#jobs.get(id);
+					if (!previous) return undefined;
+					updated = this.#updatedJob(previous, patch);
+					this.#jobs.set(id, updated);
+					return updated;
+				});
+				this.#armTimer();
+				return updated;
+			} catch (error) {
+				if (previous) this.#jobs.set(id, previous);
+				this.#armTimer();
+				throw error;
+			}
+		});
+	}
+
+	#updatedJob(job: CronJob, patch: CronUpdatePatch): CronJob {
+		const expressionChanged = patch.expression !== undefined && patch.expression.trim() !== job.expression;
+		const expression = patch.expression?.trim() ?? job.expression;
+		return {
+			...job,
+			expression,
+			prompt: patch.prompt ?? job.prompt,
+			recurring: patch.recurring ?? job.recurring,
+			expiresAt:
+				patch.recurring === undefined
+					? job.expiresAt
+					: patch.recurring
+						? job.createdAt + RECURRING_LIFETIME_MS
+						: undefined,
+			nextFireAt: expressionChanged ? nextCronFire(expression, new Date(this.#now())).getTime() : job.nextFireAt,
+		};
 	}
 
 	delete(id: string): Promise<boolean> {

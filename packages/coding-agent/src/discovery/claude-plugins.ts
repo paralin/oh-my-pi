@@ -13,9 +13,7 @@ import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
 	type ClaudePluginRoot,
 	createSourceMeta,
@@ -30,21 +28,6 @@ import { resolvePluginStdioPaths, substitutePluginRoot } from "./substitute-plug
 const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
 const PRIORITY = 70; // Below claude.ts (80) so user .claude/ overrides win
-
-/**
- * Plugin roots this legacy provider may process for a given surface. Roots
- * whose root `plugin.json` targets the Agent Plugins standard keep their
- * portable components (skills, MCP) exclusive to the `agent-plugins` provider;
- * fatally invalid Agent Plugins packages are skipped entirely.
- */
-async function allowedRoots(
-	ctx: LoadContext,
-	surface: "skills" | "mcp" | "other",
-): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	const flags = await Promise.all(roots.map(root => legacyProviderAllowed(root.path, surface)));
-	return { roots: roots.filter((_, i) => flags[i]), warnings };
-}
 
 interface ClaudePluginManifest {
 	skills?: string | string[];
@@ -204,7 +187,7 @@ async function resolvePluginDir(
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
-	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "skills");
+	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 	const results = await Promise.all(
 		roots.map(async root => {
@@ -251,7 +234,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const items: SlashCommand[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
+	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -325,7 +308,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 	const items: Hook[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
+	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	const hookTypes = ["pre", "post"] as const;
@@ -348,43 +331,6 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 						path: filePath,
 						type: hookType,
 						tool: toolName,
-						level: root.scope,
-						_source: source,
-					};
-				},
-			});
-		}),
-	);
-
-	for (const result of results) {
-		items.push(...result.items);
-		if (result.warnings) warnings.push(...result.warnings);
-	}
-
-	return { items, warnings };
-}
-
-// =============================================================================
-// Custom Tools
-// =============================================================================
-
-async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const items: CustomTool[] = [];
-	const warnings: string[] = [];
-
-	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "other");
-	warnings.push(...rootWarnings);
-
-	const results = await Promise.all(
-		roots.map(async root => {
-			const toolsDir = path.join(root.path, "tools");
-			return loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, root.scope, {
-				transform: (name, _content, filePath, source) => {
-					const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
-					return {
-						name: toolName,
-						path: filePath,
-						description: `${toolName} custom tool`,
 						level: root.scope,
 						_source: source,
 					};
@@ -498,7 +444,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await allowedRoots(ctx, "mcp");
+	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	for (const root of roots) {
@@ -621,14 +567,6 @@ registerProvider<Hook>(hookCapability.id, {
 	description: "Load hooks from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadHooks,
-});
-
-registerProvider<CustomTool>(toolCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load custom tools from Claude Code marketplace plugins",
-	priority: PRIORITY,
-	load: loadTools,
 });
 
 registerProvider<MCPServer>(mcpCapability.id, {

@@ -45,9 +45,9 @@ function messageText(message: Message): string {
 /**
  * First-call stream: a genuinely-distinct planning runaway — each thought summary
  * has a fresh title + a paragraph naming new code anchors, so the similarity loop
- * guard never fires; only the header-count guard catches it. Mirrors
- * `streaming-edit-abort`: an abort listener pushes the terminal `aborted` event,
- * and deltas are spaced with `Bun.sleep(0)` so the interceptor's `agent.abort()`
+ * guard never fires; only the header-count guard catches it. Its abort listener
+ * pushes the terminal `aborted` event, and deltas are spaced with `Bun.sleep(0)`
+ * so the interceptor's `agent.abort()`
  * lands before the turn would otherwise finish `stop`.
  *
  * When `finalText` is provided, a non-interrupted run ends with visible prose so

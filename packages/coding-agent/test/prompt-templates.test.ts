@@ -345,49 +345,46 @@ describe("template expansion fallback", () => {
 });
 
 // ============================================================================
-// renderYieldSchema helper + subagent-system-prompt.md
+// Native subagent completion prompt
 // ============================================================================
 
-describe("renderYieldSchema", () => {
-	// prompt-templates is imported for its Handlebars helper registration side-effect
-	// (jtdToTypeScript + renderYieldSchema); the render calls below rely on it.
+describe("subagent-system-prompt.md", () => {
 	const templatePath = path.resolve(import.meta.dir, "../src/prompts/system/subagent-system-prompt.md");
 
-	async function renderSubagentPrompt(outputSchema: unknown): Promise<string> {
+	async function renderSubagentPrompt(outputSchema: unknown, ircPeers?: string): Promise<string> {
 		const templateSource = await fs.readFile(templatePath, "utf-8");
-		return prompt.render(templateSource, { agent: "test-agent", outputSchema });
+		return prompt.render(templateSource, {
+			agent: "test-agent",
+			outputSchema,
+			ircPeers,
+			ircSelfId: "worker",
+		});
 	}
 
-	test("wraps a JTD properties schema inside result.data so the model matches the yield envelope", async () => {
+	test("instructs native children to complete with the final assistant response", async () => {
+		const rendered = await renderSubagentPrompt(undefined);
+		expect(rendered).toContain("Your final assistant response completes this Task run.");
+		expect(rendered).not.toContain("`yield`");
+		expect(rendered).not.toContain("`hub`");
+	});
+
+	test("renders a caller schema as the terminal JSON shape", async () => {
 		const rendered = await renderSubagentPrompt({
 			properties: {
 				status: { enum: ["goal_complete", "plan_created"] },
-				plan_path: { type: "string" },
 				summary: { type: "string" },
 			},
 		});
-		expect(rendered).toContain('```ts\nresult: {\n  data: {\n    status: "goal_complete" | "plan_created";');
-		expect(rendered).toContain("    summary: string;\n  };\n}\n```");
-		// The old rendering advertised a bare interface with no `result.data` context.
-		// Guard against regressing to it — that phrasing is what caused the reported bug.
-		expect(rendered).not.toContain("Your result MUST match this TypeScript interface");
-	});
-
-	test("wraps a scalar schema on the same line as data so the model matches the yield envelope", async () => {
-		const rendered = await renderSubagentPrompt({ type: "string" });
-		expect(rendered).toContain("```ts\nresult: {\n  data: string;\n}\n```");
-	});
-
-	test("wraps an array-of-object schema without breaking the result.data envelope", async () => {
-		const rendered = await renderSubagentPrompt({
-			elements: { properties: { title: { type: "string" }, count: { type: "int32" } } },
-		});
-		expect(rendered).toContain("```ts\nresult: {\n  data: { title: string; count: number; }[];\n}\n```");
-	});
-
-	test("omits the schema section entirely when outputSchema is absent", async () => {
-		const rendered = await renderSubagentPrompt(undefined);
+		expect(rendered).toContain("Return only JSON matching this TypeScript shape:");
+		expect(rendered).toContain('status: "goal_complete" | "plan_created";');
+		expect(rendered).toContain("summary: string;");
 		expect(rendered).not.toContain("result: {");
-		expect(rendered).not.toContain("Your terminal `yield` MUST use exactly this shape");
+	});
+
+	test("instructs native peers to use agent_message rather than MCP hub", async () => {
+		const rendered = await renderSubagentPrompt(undefined, "- sibling: reviewer");
+		expect(rendered).toContain("preimported `agent_message` Python module");
+		expect(rendered).toContain('await agent_message.send(message, receiver_role="parent")');
+		expect(rendered).not.toContain("`hub`");
 	});
 });

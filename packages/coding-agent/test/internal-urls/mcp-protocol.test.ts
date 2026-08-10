@@ -4,8 +4,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function createMockManager(opts: {
 	servers?: string[];
@@ -106,31 +106,6 @@ describe("McpProtocolHandler", () => {
 		expect(resource.notes).toEqual(["MCP server: my-server"]);
 	});
 
-	it("preserves a literal semicolon in an exact MCP resource URI", async () => {
-		const uri = "catalog://items;active";
-		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
-		resources.set("catalog", {
-			resources: [{ uri, name: "active-items" }],
-			templates: [],
-		});
-		const manager = createMockManager({
-			servers: ["catalog"],
-			resources,
-			readResult: { contents: [{ uri, text: "active items" }] },
-		});
-		MCPManager.setInstance(manager);
-
-		const result = await new ReadTool(createToolSession()).execute("read-semicolon-resource", {
-			path: `mcp://${uri}`,
-		});
-		const output = result.content.find(block => block.type === "text");
-
-		expect(output?.type).toBe("text");
-		if (output?.type !== "text") throw new Error("Expected text output");
-		expect(output.text).toContain("active items");
-		expect(output.text).not.toContain("interpreted as");
-	});
-
 	it("lets read consume a native URI advertised by an MCP server", async () => {
 		const resources = new Map<string, { resources: MCPResource[]; templates: MCPResourceTemplate[] }>();
 		resources.set("ags", {
@@ -146,9 +121,7 @@ describe("McpProtocolHandler", () => {
 		});
 		MCPManager.setInstance(manager);
 
-		const result = await new ReadTool(createToolSession()).execute("read-ags-resource", {
-			path: "ags://capabilities/current-host",
-		});
+		const result = await new ReadService(createToolSession()).read("ags://capabilities/current-host");
 		const output = result.content.find(block => block.type === "text");
 
 		expect(output?.type).toBe("text");
@@ -175,9 +148,7 @@ describe("McpProtocolHandler", () => {
 		});
 		MCPManager.setInstance(manager);
 
-		const result = await new ReadTool(createToolSession()).execute("read-delayed-ags-resource", {
-			path: "ags://capabilities/current-host",
-		});
+		const result = await new ReadService(createToolSession()).read("ags://capabilities/current-host");
 		const output = result.content.find(block => block.type === "text");
 
 		expect(ensureCalls).toBe(1);
@@ -218,9 +189,7 @@ describe("McpProtocolHandler", () => {
 		});
 		MCPManager.setInstance(manager);
 
-		const result = await new ReadTool(createToolSession()).execute("read-opaque-resource", {
-			path: "urn:example:document",
-		});
+		const result = await new ReadService(createToolSession()).read("urn:example:document");
 		const output = result.content.find(block => block.type === "text");
 
 		expect(output?.type).toBe("text");

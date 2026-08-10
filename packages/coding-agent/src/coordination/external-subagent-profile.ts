@@ -1,6 +1,5 @@
 import { canonicalJsonStringify } from "@oh-my-pi/pi-utils";
 import { resolveConfiguredModelPatterns } from "../config/model-resolver";
-import type { OverallPlanReference } from "../plan-mode/plan-handoff";
 import type { EffectiveSubagentPolicy, StructuredSubagentRequest } from "../task/structured-subagent";
 import type { AgentSource, StructuredSubagentSchemaMode, StructuredSubagentSchemaSource } from "../task/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel, type TaskEffort } from "../thinking";
@@ -8,8 +7,8 @@ import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel, type TaskEf
 export const EXTERNAL_SUBAGENT_PROFILE_MAX_BYTES = 1 << 20;
 
 /** Frozen policy for one native, non-isolated external Task worker. */
-export interface ExternalSubagentProfileV1 {
-	schemaVersion: 1;
+export interface ExternalSubagentProfileV2 {
+	schemaVersion: 2;
 	runtime: "native";
 	isolated: false;
 	peerId: string;
@@ -25,7 +24,6 @@ export interface ExternalSubagentProfileV1 {
 		tools: string[];
 		spawns: string[] | "*";
 		skills: string[];
-		readMode: "summary" | "raw";
 	};
 	effort: TaskEffort | null;
 	enableIrc: boolean;
@@ -37,7 +35,6 @@ export interface ExternalSubagentProfileV1 {
 		source: Exclude<StructuredSubagentSchemaSource, "none">;
 		mode: StructuredSubagentSchemaMode;
 	} | null;
-	planReference: { path: string; content: string } | null;
 	workspaceRoots: string[];
 }
 
@@ -51,7 +48,6 @@ export interface BuildExternalSubagentProfileArgs {
 	label: string;
 	request: StructuredSubagentRequest;
 	policy: EffectiveSubagentPolicy;
-	planReference?: OverallPlanReference;
 }
 
 const PROFILE_KEYS = [
@@ -67,16 +63,14 @@ const PROFILE_KEYS = [
 	"outputSchema",
 	"parentToolCallId",
 	"peerId",
-	"planReference",
 	"runtime",
 	"schemaVersion",
 	"taskDepth",
 	"thinkingLevel",
 	"workspaceRoots",
 ] as const;
-const AGENT_KEYS = ["name", "readMode", "skills", "source", "spawns", "systemPrompt", "tools"] as const;
+const AGENT_KEYS = ["name", "skills", "source", "spawns", "systemPrompt", "tools"] as const;
 const OUTPUT_SCHEMA_KEYS = ["mode", "schema", "source"] as const;
-const PLAN_REFERENCE_KEYS = ["content", "path"] as const;
 
 function requireRecord(value: unknown, name: string): Record<string, unknown> {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -108,10 +102,10 @@ function requireStringArray(value: unknown, name: string): asserts value is stri
 	}
 }
 
-function validateProfile(value: unknown): asserts value is ExternalSubagentProfileV1 {
+function validateProfile(value: unknown): asserts value is ExternalSubagentProfileV2 {
 	const profile = requireRecord(value, "external subagent profile");
 	requireExactKeys(profile, PROFILE_KEYS, "external subagent profile");
-	if (profile.schemaVersion !== 1) throw new Error("external subagent profile schemaVersion must be 1");
+	if (profile.schemaVersion !== 2) throw new Error("external subagent profile schemaVersion must be 2");
 	if (profile.runtime !== "native" || profile.isolated !== false) {
 		throw new Error("external subagent profile requires runtime=native and isolated=false");
 	}
@@ -155,9 +149,6 @@ function validateProfile(value: unknown): asserts value is ExternalSubagentProfi
 	requireStringArray(agent.tools, "agent.tools");
 	if (agent.spawns !== "*") requireStringArray(agent.spawns, "agent.spawns");
 	requireStringArray(agent.skills, "agent.skills");
-	if (agent.readMode !== "summary" && agent.readMode !== "raw") {
-		throw new Error("agent.readMode must be summary or raw");
-	}
 
 	if (profile.outputSchema !== null) {
 		const outputSchema = requireRecord(profile.outputSchema, "outputSchema");
@@ -169,12 +160,6 @@ function validateProfile(value: unknown): asserts value is ExternalSubagentProfi
 			throw new Error("outputSchema.mode is invalid");
 		}
 	}
-	if (profile.planReference !== null) {
-		const planReference = requireRecord(profile.planReference, "planReference");
-		requireExactKeys(planReference, PLAN_REFERENCE_KEYS, "planReference");
-		requireString(planReference.path, "planReference.path");
-		requireString(planReference.content, "planReference.content");
-	}
 }
 
 function profileDigest(bytes: Uint8Array): string {
@@ -182,7 +167,7 @@ function profileDigest(bytes: Uint8Array): string {
 }
 
 /** Builds the complete frozen profile from one already-resolved Task policy. */
-export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileArgs): ExternalSubagentProfileV1 {
+export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileArgs): ExternalSubagentProfileV2 {
 	const { request, policy } = args;
 	if (policy.claudeCode || policy.isIsolated) {
 		throw new Error("unsupported_parent_runtime: external Task requires a native, non-isolated policy");
@@ -190,7 +175,7 @@ export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileA
 	const rawSelector = policy.modelOverride ?? policy.parentActiveModelPattern;
 	const modelSelector = resolveConfiguredModelPatterns(rawSelector, request.session.settings);
 	if (modelSelector.length === 0) throw new Error("external Task policy has no resolved model selector");
-	const tools = policy.effectiveAgent.tools ?? [...(request.session.toolRegistry?.keys() ?? [])];
+	const tools = policy.effectiveAgent.tools ?? ["ipython"];
 	if (tools.length === 0) throw new Error("external Task policy has no resolved tool list");
 	const schema =
 		policy.schema.source === "none"
@@ -201,7 +186,7 @@ export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileA
 					mode: policy.schema.mode,
 				};
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runtime: "native",
 		isolated: false,
 		peerId: args.peerId,
@@ -217,7 +202,6 @@ export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileA
 			tools: [...tools],
 			spawns: policy.effectiveAgent.spawns === "*" ? "*" : [...(policy.effectiveAgent.spawns ?? [])],
 			skills: [...(policy.effectiveAgent.autoloadSkills ?? [])],
-			readMode: policy.effectiveAgent.readSummarize === false ? "raw" : "summary",
 		},
 		effort: request.effort ?? null,
 		enableIrc: policy.enableIrc,
@@ -225,13 +209,12 @@ export function buildExternalSubagentProfile(args: BuildExternalSubagentProfileA
 		thinkingLevel: policy.effectiveAgent.thinkingLevel ?? null,
 		maxRuntimeMs: request.maxRuntimeMs ?? request.session.settings.get("task.maxRuntimeMs"),
 		outputSchema: schema,
-		planReference: args.planReference ?? null,
 		workspaceRoots: [request.session.cwd, ...(request.session.additionalDirectories ?? [])],
 	};
 }
 
 /** Encodes and hashes one canonical external worker profile. */
-export function encodeExternalSubagentProfile(profile: ExternalSubagentProfileV1): EncodedExternalSubagentProfile {
+export function encodeExternalSubagentProfile(profile: ExternalSubagentProfileV2): EncodedExternalSubagentProfile {
 	validateProfile(profile);
 	const bytes = new TextEncoder().encode(canonicalJsonStringify(profile));
 	if (bytes.byteLength > EXTERNAL_SUBAGENT_PROFILE_MAX_BYTES) {
@@ -241,7 +224,7 @@ export function encodeExternalSubagentProfile(profile: ExternalSubagentProfileV1
 }
 
 /** Validates canonical bytes and their lowercase SHA-256 receipt. */
-export function decodeExternalSubagentProfile(bytes: Uint8Array, digest: string): ExternalSubagentProfileV1 {
+export function decodeExternalSubagentProfile(bytes: Uint8Array, digest: string): ExternalSubagentProfileV2 {
 	if (bytes.byteLength === 0 || bytes.byteLength > EXTERNAL_SUBAGENT_PROFILE_MAX_BYTES) {
 		throw new Error(`external subagent profile must contain 1-${EXTERNAL_SUBAGENT_PROFILE_MAX_BYTES} bytes`);
 	}

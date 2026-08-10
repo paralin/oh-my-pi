@@ -15,7 +15,7 @@ import { sessionSidecarDir } from "../session/session-paths";
 import type { EventBus } from "../utils/event-bus";
 import { createClaudeCodePeerReviver } from "./claude-code-runtime";
 import type { StartClaudeCodeQuery } from "./claude-code-sdk";
-import { attachIrcWakeTurnMonitor, createMCPProxyTools, createSubagentSettings } from "./executor";
+import { attachIrcWakeTurnMonitor, createSubagentSettings } from "./executor";
 import type { AgentDefinition } from "./types";
 
 /**
@@ -54,7 +54,7 @@ export interface PersistedSubagentReviveContext {
  * (tools / system prompt / output schema / kind) is built from options, so a
  * bare reopen would resurrect a wrong (top-level) session. We source that
  * contract from the persisted `session_init` entry instead, and mirror the
- * executor's subagent wiring (MCP proxy tools, depth-derived gating,
+ * executor's subagent wiring (MCP manager inheritance, depth-derived gating,
  * yield-required, active-tool clamp, registry status sync).
  */
 export function createPersistedSubagentReviverFactory(
@@ -93,7 +93,6 @@ export function createPersistedSubagentReviverFactory(
 				systemPrompt: init.systemPrompt,
 				tools: init.tools,
 				spawns,
-				readSummarize: init.readSummarize,
 				source: "user",
 			};
 			return createClaudeCodePeerReviver({
@@ -137,21 +136,7 @@ export function createPersistedSubagentReviverFactory(
 		} catch {
 			return undefined;
 		}
-		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-		// advisor-role model, anything else = the explicit pattern stamped onto
-		// this session's `modelRoles.advisor`. Absent = unadvised (the
-		// createSubagentSettings default).
-		const subagentSettings = createSubagentSettings(ctx.settings, {
-			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
-			...(init.advisor
-				? {
-						"advisor.enabled": true,
-						...(init.advisor !== "on"
-							? { modelRoles: { ...ctx.settings.getModelRoles(), advisor: init.advisor } }
-							: undefined),
-					}
-				: undefined),
-		});
+		const subagentSettings = createSubagentSettings(ctx.settings);
 		const persistedModelPattern =
 			init.modelRole && init.modelRole !== "default"
 				? [formatModelRoleAlias(init.modelRole), ...(init.resolvedModel ? [init.resolvedModel] : [])]
@@ -164,11 +149,7 @@ export function createPersistedSubagentReviverFactory(
 			});
 			const artifactManager = ctx.session.sessionManager.getArtifactManager();
 			if (artifactManager) reopened.adoptArtifactManager(artifactManager);
-			// A restricted persisted contract must not consult process-global MCP
-			// state: same-name MCP tools are untrusted capability sources.
-			const restrictToolNames = init.restrictToolNames === true;
-			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
-			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const mcpManager = MCPManager.instance();
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
 				authStorage: ctx.authStorage,
@@ -183,34 +164,18 @@ export function createPersistedSubagentReviverFactory(
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
-				toolNames: init.tools,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				requireYieldTool: true,
 				systemPrompt: () => [init.systemPrompt],
 				// Old files predate persisted spawns: deny re-spawning rather than let
 				// createAgentSession default to wildcard ("*").
 				spawns: init.spawns ?? "",
 				hasUI: false,
-				enableLsp: restrictToolNames ? false : ctx.enableLsp,
-				...(restrictToolNames
-					? {
-							enableIrc: false,
-							enableMCP: false,
-							preloadedExtensionPaths: [],
-							preloadedCustomToolPaths: [],
-						}
-					: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
+				enableLsp: ctx.enableLsp,
+				enableMCP: !mcpManager,
+				mcpManager,
 			});
-			// Clamp the active set to the persisted list: createAgentSession's
-			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
-			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+
 			// Cold revives must drive registry status themselves — createAgentSession
 			// doesn't wire this generically (the live path does it in the executor).
 			// Without it the idle-TTL timer never clears on a turn and the lifecycle

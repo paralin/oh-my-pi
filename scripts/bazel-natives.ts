@@ -128,6 +128,41 @@ export function parseBazelFilesOutput(output: string): string[] {
 	return files;
 }
 
+const MACOS_SDK27_DEFINE = "--define=omp_macos_sdk27=1";
+
+export type MacosSdkVersionProbe = () => string | null;
+
+function probeMacosSdkVersion(): string | null {
+	try {
+		const result = Bun.spawnSync(["xcrun", "--show-sdk-version"], { stdout: "pipe", stderr: "pipe" });
+		return result.exitCode === 0 ? result.stdout.toString("utf-8").trim() : null;
+	} catch {
+		return null;
+	}
+}
+
+function hasBazelDefine(bazelArgs: readonly string[], name: string): boolean {
+	const prefix = `${name}=`;
+	for (let index = 0; index < bazelArgs.length; index++) {
+		const arg = bazelArgs[index];
+		const value = arg === "--define" ? bazelArgs[index + 1] : arg.startsWith("--define=") ? arg.slice(9) : null;
+		if (value?.startsWith(prefix)) return true;
+	}
+	return false;
+}
+
+/** Adds the dyld compatibility define only for Darwin addon builds against SDK 27 or newer. */
+export function darwinSdk27BazelArgs(
+	labels: readonly string[],
+	bazelArgs: readonly string[],
+	probeSdkVersion: MacosSdkVersionProbe = probeMacosSdkVersion,
+): string[] {
+	if (!labels.some(label => label.startsWith("//:natives-darwin"))) return [];
+	if (hasBazelDefine(bazelArgs, "omp_macos_sdk27")) return [];
+	const major = Number.parseInt(probeSdkVersion()?.split(".", 1)[0] ?? "", 10);
+	return major >= 27 ? [MACOS_SDK27_DEFINE] : [];
+}
+
 /** Parsed options for the native addon build and artifact install modes. */
 export interface CliOptions {
 	targets: string[];
@@ -279,7 +314,8 @@ async function main(): Promise<void> {
 		const rcPath = Bun.env.OMP_BAZEL_RC?.trim();
 		const startupArgs = rcPath ? [`--bazelrc=${rcPath}`] : [];
 
-		const buildArgs = [...startupArgs, "build", ...options.bazelArgs, "--", ...labels];
+		const sdkArgs = darwinSdk27BazelArgs(labels, options.bazelArgs);
+		const buildArgs = [...startupArgs, "build", ...options.bazelArgs, ...sdkArgs, "--", ...labels];
 		console.log(`$ ${path.basename(bazel)} ${buildArgs.join(" ")}`);
 		const build = await runBazel(bazel, buildArgs, "inherit");
 		if (build.exitCode !== 0) {
@@ -292,7 +328,7 @@ async function main(): Promise<void> {
 		// into a single union rather than positional args.
 		const cquery = await runBazel(
 			bazel,
-			[...startupArgs, "cquery", ...options.bazelArgs, "--output=files", labels.join(" + ")],
+			[...startupArgs, "cquery", ...options.bazelArgs, ...sdkArgs, "--output=files", labels.join(" + ")],
 			"pipe",
 		);
 		if (cquery.exitCode === 0) {

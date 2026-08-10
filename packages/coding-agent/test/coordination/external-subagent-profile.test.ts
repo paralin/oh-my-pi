@@ -1,23 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
-	buildExternalSubagentProfile,
 	decodeExternalSubagentProfile,
 	EXTERNAL_SUBAGENT_PROFILE_MAX_BYTES,
-	type ExternalSubagentProfileV1,
+	type ExternalSubagentProfileV2,
 	encodeExternalSubagentProfile,
 } from "@oh-my-pi/pi-coding-agent/coordination/external-subagent-profile";
-import type {
-	EffectiveSubagentPolicy,
-	StructuredSubagentRequest,
-} from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
-function profile(): ExternalSubagentProfileV1 {
+function profile(): ExternalSubagentProfileV2 {
 	return {
-		schemaVersion: 1,
+		schemaVersion: 2,
 		runtime: "native",
 		isolated: false,
 		peerId: "reviewer-2",
@@ -33,7 +25,6 @@ function profile(): ExternalSubagentProfileV1 {
 			tools: ["read", "grep"],
 			spawns: [],
 			skills: ["post-work-review"],
-			readMode: "summary",
 		},
 		effort: "hi",
 		enableIrc: true,
@@ -45,7 +36,6 @@ function profile(): ExternalSubagentProfileV1 {
 			source: "caller",
 			mode: "strict",
 		},
-		planReference: { path: "local://PLAN.md", content: "# Plan\n" },
 		workspaceRoots: ["/workspace", "/shared"],
 	};
 }
@@ -78,76 +68,14 @@ describe("external subagent profile", () => {
 		for (const invalid of [
 			{ ...base, unknown: true },
 			Object.fromEntries(Object.entries(base).filter(([key]) => key !== "peerId")),
-			{ ...base, schemaVersion: 2 },
+			{ ...base, schemaVersion: 1 },
+			{ ...base, agent: { ...base.agent, readMode: "summary" } },
 			{ ...base, runtime: "claude-code" },
 			{ ...base, isolated: true },
 		]) {
 			const raw = bytes(JSON.stringify(invalid, Object.keys(invalid).sort()));
 			expect(() => decodeExternalSubagentProfile(raw, Bun.SHA256.hash(raw, "hex"))).toThrow();
 		}
-	});
-
-	test("builds every field from the resolved request and policy", () => {
-		const session: ToolSession = {
-			cwd: "/workspace",
-			additionalDirectories: ["/shared"],
-			hasUI: false,
-			taskDepth: 1,
-			settings: Settings.isolated({
-				"task.maxRuntimeMs": 60_000,
-				modelRoles: { reviewer: "openai-codex/gpt-5.6-sol:high" },
-			}),
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-		};
-		const request: StructuredSubagentRequest = {
-			session,
-			invocationKind: "task",
-			assignment: " Review the durable mailbox. ",
-			context: " Inspect the same backend contract. ",
-			parentToolCallId: "call-1",
-			effort: "hi",
-		};
-		const agent: AgentDefinition = {
-			name: "reviewer",
-			description: "Reviewer",
-			source: "bundled",
-			systemPrompt: "Review for correctness.",
-			tools: ["read", "grep"],
-			spawns: [],
-			autoloadSkills: ["post-work-review"],
-			readSummarize: true,
-			thinkingLevel: parseConfiguredThinkingLevel("high"),
-		};
-		const policy: EffectiveSubagentPolicy = {
-			discovery: { agents: [agent], projectAgentsDir: null },
-			agentName: agent.name,
-			agent,
-			effectiveAgent: agent,
-			modelOverride: "@reviewer",
-			schema: {
-				schema: { type: "object" },
-				source: "caller",
-				mode: "strict",
-				outputSchemaOverridesAgent: true,
-			},
-			planMode: false,
-			isIsolated: false,
-			mergeMode: "patch",
-			applyChanges: false,
-			enableLsp: false,
-			enableIrc: true,
-		};
-
-		expect(
-			buildExternalSubagentProfile({
-				peerId: "reviewer-2",
-				label: "Reviewer 2",
-				request,
-				policy,
-				planReference: { path: "local://PLAN.md", content: "# Plan\n" },
-			}),
-		).toEqual(profile());
 	});
 
 	test("enforces the one MiB bound", () => {

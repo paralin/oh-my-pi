@@ -961,18 +961,6 @@ export class PluginManager {
 					: `v${pluginPkg.version} - No omp/pi manifest (not an omp plugin)`,
 			});
 
-			// Check tools path exists if specified
-			if (manifest?.tools) {
-				const toolsPath = path.join(pluginPath, manifest.tools);
-				if (!fs.existsSync(toolsPath)) {
-					checks.push({
-						name: `plugin:${name}:tools`,
-						status: "error",
-						message: `Tools entry "${manifest.tools}" not found`,
-					});
-				}
-			}
-
 			// Check hooks path exists if specified
 			if (manifest?.hooks) {
 				const hooksPath = path.join(pluginPath, manifest.hooks);

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { applyProviderGlobalsFromSettings } from "@oh-my-pi/pi-coding-agent/config/provider-globals";
-import * as imageGen from "@oh-my-pi/pi-coding-agent/tools/image-gen";
 import * as webSearch from "@oh-my-pi/pi-coding-agent/web/search";
+import * as imageGen from "../../src/tools/image-gen.js";
 
 describe("applyProviderGlobalsFromSettings", () => {
 	afterEach(() => {

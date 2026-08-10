@@ -44,7 +44,7 @@ function userNode(id: string, parentId: string | null, text: string): SessionTre
 
 type NavigateTree = (
 	entryId: string,
-	options: { summarize: boolean; customInstructions: string | undefined; allowAskReopen: boolean },
+	options: { summarize: boolean; customInstructions: string | undefined },
 ) => Promise<{ cancelled: boolean }>;
 type ShowHookSelector = (title: string, options: string[]) => Promise<string | undefined>;
 
@@ -131,7 +131,6 @@ describe("SelectorController tree branch summaries", () => {
 		expect(harness.navigateTree).toHaveBeenCalledWith("root", {
 			summarize: false,
 			customInstructions: undefined,
-			allowAskReopen: true,
 		});
 	});
 
@@ -146,7 +145,6 @@ describe("SelectorController tree branch summaries", () => {
 		expect(harness.navigateTree).toHaveBeenCalledWith("root", {
 			summarize: true,
 			customInstructions: undefined,
-			allowAskReopen: true,
 		});
 	});
 
@@ -162,7 +160,6 @@ describe("SelectorController tree branch summaries", () => {
 		expect(harness.navigateTree).toHaveBeenCalledWith("root", {
 			summarize: true,
 			customInstructions: undefined,
-			allowAskReopen: true,
 		});
 	});
 
@@ -182,7 +179,6 @@ describe("SelectorController tree branch summaries", () => {
 		expect(harness.navigateTree).toHaveBeenCalledWith("root", {
 			summarize: true,
 			customInstructions: undefined,
-			allowAskReopen: true,
 		});
 	});
 });

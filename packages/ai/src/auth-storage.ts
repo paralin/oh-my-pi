@@ -4797,7 +4797,13 @@ export class AuthStorage {
 					}
 					const resetAtMs = this.#getUsageResetAtMs(scopedLimits, now);
 					if (resetAtMs && resetAtMs > candidateBlockedUntil) {
-						this.#markCredentialBlocked(provider, routing.providerKey, candidate.index, resetAtMs, routing.blockScope);
+						this.#markCredentialBlocked(
+							provider,
+							routing.providerKey,
+							candidate.index,
+							resetAtMs,
+							routing.blockScope,
+						);
 						candidateBlockedUntil = resetAtMs;
 					}
 				}

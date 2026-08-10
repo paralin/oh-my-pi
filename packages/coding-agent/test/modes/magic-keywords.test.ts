@@ -9,31 +9,31 @@ beforeAll(async () => {
 
 describe("highlightMagicKeywords", () => {
 	it("paints every magic keyword in a single prose pass, preserving visible text", () => {
-		const input = "first ultrathink then orchestrate the workflowz";
+		const input = "first ultrathink then orchestrate";
 		const decorated = highlightMagicKeywords(input);
 		expect(decorated).not.toBe(input);
 		expect(decorated).toContain("\x1b[38");
 		expect(Bun.stripANSI(decorated)).toBe(input);
 		// Each keyword is gradient-painted character-by-character, so none survives as a
 		// contiguous run in the decorated output.
-		for (const keyword of ["ultrathink", "orchestrate", "workflowz"]) {
+		for (const keyword of ["ultrathink", "orchestrate"]) {
 			expect(decorated).not.toContain(keyword);
 			expect(Bun.stripANSI(decorated)).toContain(keyword);
 		}
 	});
 
 	it("paints punctuation-adjacent prose keywords without changing visible text", () => {
-		const input = 'first "ultrathink," then orchestrate. Finally workflowz!';
+		const input = 'first "ultrathink," then orchestrate.';
 		const decorated = highlightMagicKeywords(input);
 		expect(decorated).not.toBe(input);
 		expect(Bun.stripANSI(decorated)).toBe(input);
-		for (const keyword of ["ultrathink", "orchestrate", "workflowz"]) {
+		for (const keyword of ["ultrathink", "orchestrate"]) {
 			expect(decorated).not.toContain(keyword);
 		}
 	});
 
 	it("never paints keywords inside code spans, fenced blocks, or XML sections", () => {
-		const input = "`ultrathink`\n```\norchestrate\n```\n<x>workflowz</x>";
+		const input = "`ultrathink`\n```\norchestrate\n```\n<x>ultrathink</x>";
 		expect(highlightMagicKeywords(input)).toBe(input);
 	});
 
@@ -78,24 +78,17 @@ describe("hasMagicKeyword", () => {
 	it("detects every standalone keyword in prose", () => {
 		expect(hasMagicKeyword("please ultrathink this")).toBe(true);
 		expect(hasMagicKeyword("now orchestrate everything")).toBe(true);
-		expect(hasMagicKeyword("just workflowz the steps")).toBe(true);
+		expect(hasMagicKeyword("just orchestrate the steps")).toBe(true);
 	});
 
 	it("detects standalone keywords beside prose punctuation and quotes", () => {
-		for (const text of ["please ultrathink.", 'say "orchestrate" now', "then workflowz, please"]) {
+		for (const text of ["please ultrathink.", 'say "orchestrate" now']) {
 			expect(hasMagicKeyword(text)).toBe(true);
 		}
 	});
 
 	it("rejects keywords used as code symbols or calls", () => {
-		for (const text of [
-			"ultrathink()",
-			"orchestrate()",
-			"workflowz()",
-			"foo::ultrathink",
-			"foo::orchestrate",
-			"foo::workflowz",
-		]) {
+		for (const text of ["ultrathink()", "orchestrate()", "foo::ultrathink", "foo::orchestrate"]) {
 			expect(hasMagicKeyword(text)).toBe(false);
 			expect(highlightMagicKeywords(text)).toBe(text);
 		}
@@ -107,16 +100,13 @@ describe("hasMagicKeyword", () => {
 		expect(hasMagicKeyword("workflow")).toBe(false);
 		expect(hasMagicKeyword("workflows")).toBe(false);
 		expect(hasMagicKeyword("ultrathinking is fun")).toBe(false);
-		expect(hasMagicKeyword("workflowzed already")).toBe(false);
 		expect(hasMagicKeyword("src/modes/ultrathink.ts")).toBe(false);
 		expect(hasMagicKeyword("orchestrate.ts is a file")).toBe(false);
-		expect(hasMagicKeyword("packages/coding-agent/test/modes/workflowz.test.ts")).toBe(false);
 	});
 
 	it("rejects keywords inside code spans, fences, and xml sections", () => {
 		expect(hasMagicKeyword("`ultrathink`")).toBe(false);
 		expect(hasMagicKeyword("```\norchestrate\n```")).toBe(false);
-		expect(hasMagicKeyword("<x>workflowz</x>")).toBe(false);
 	});
 
 	it("returns false for empty / keyword-free text", () => {

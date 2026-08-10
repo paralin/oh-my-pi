@@ -37,6 +37,7 @@ import {
 	getBundledProviders,
 	modelsAreEqual,
 } from "@oh-my-pi/pi-catalog/models";
+import { z } from "zod";
 import { type TSchema, Type } from "./legacy-typebox";
 
 export interface StringEnumOptions<T extends string> {
@@ -125,7 +126,7 @@ export * from "@oh-my-pi/pi-ai";
  * pi-ai names for `getBundledModel`/`getBundledModels`; the remaining symbols
  * kept their names across the move.
  */
-export { calculateCost, getBundledModel, getBundledModels, getBundledProviders, modelsAreEqual, Type };
+export { calculateCost, getBundledModel, getBundledModels, getBundledProviders, modelsAreEqual, Type, z };
 export const getModel = getBundledModel;
 export const getModels = getBundledModels;
 

@@ -43,7 +43,7 @@ export interface ParsedSlashCommand {
  *   coerce `() => void` to `() => T | undefined`) as well as 6.x / tsgo.
  * - `{ consumed: true }` — explicit equivalent of the above (ACP shape).
  * - `{ prompt: string }` — command handled, pass `prompt` through as the new
- *   user input (e.g. `/force <tool> <prompt>` keeps `<prompt>` as the message).
+ *   user input.
  */
 export type SlashCommandResult = undefined | { consumed: true } | { prompt: string };
 

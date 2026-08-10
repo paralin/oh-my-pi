@@ -1,11 +1,11 @@
 /**
  * Reusable isolation lifecycle for subagent execution.
  *
- * Both `TaskTool` and the eval `agent()` bridge spawn subagents that can run
+ * Task subagents can run
  * inside a copy-on-write worktree, capture their changes, and (optionally)
  * apply those changes back to the parent repo. The orchestration is identical
- * for both callers; this module hosts the shared lifecycle so eval `agent()`
- * does not need to round-trip through `TaskTool.#runSpawn`.
+ * for task callers; this module hosts the lifecycle so execution
+ * does not need to round-trip through `TaskService.#runSpawn`.
  *
  * Shape:
  *   1. {@link prepareIsolationContext} — resolve git root + capture baseline.
@@ -21,7 +21,7 @@
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import { AgentRegistry } from "../registry/agent-registry";
-import type { ToolSession } from "../tools";
+import type { ToolSession } from "../session/tool-session";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
 import { trackLateCleanup } from "../utils/late-cleanup";
@@ -62,7 +62,7 @@ export interface IsolationContext {
 /**
  * Resolve the git repo root and capture the worktree baseline used to diff
  * each isolated spawn against. Throws when the cwd is not inside a git
- * repository; callers surface the error as a task-tool failure.
+ * repository; callers surface the error as a subagent failure.
  */
 export async function prepareIsolationContext(cwd: string): Promise<IsolationContext> {
 	const repoRoot = await getRepoRoot(cwd);
@@ -80,7 +80,7 @@ export type BuildCommitMessage = () => undefined | ((diff: string) => Promise<st
  * `task.isolation.commits === "ai"` and a model registry is available) or
  * `undefined` so the caller falls back to a generic commit message.
  *
- * Centralized so `TaskTool` and the eval `agent()` bridge share one wiring;
+ * Centralized so task callers share one wiring;
  * a drift here previously meant the two callers built subtly different
  * generators for the same setting.
  */
@@ -98,7 +98,7 @@ export function makeIsolationCommitMessage(session: ToolSession): BuildCommitMes
 export interface IsolatedRunOptions {
 	/**
 	 * Base run options handed to the selected runtime executor. This helper sets
-	 * `worktree`, clears `preloadedExtensionPaths` / `preloadedCustomToolPaths`
+	 * `worktree` and clears `preloadedExtensionPaths`
 	 * (isolated runs re-discover inside the worktree), and forwards everything
 	 * else unchanged.
 	 */
@@ -167,7 +167,6 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			...opts.baseOptions,
 			worktree: isolationDir,
 			preloadedExtensionPaths: undefined,
-			preloadedCustomToolPaths: undefined,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
@@ -275,7 +274,7 @@ export interface IsolationMergeOutcome {
  * Apply changes captured by {@link runIsolatedSubprocess} back to the parent
  * repo: patch apply (patch mode) or cherry-pick + cleanup (branch mode).
  *
- * The caller decides whether to run this at all — eval `agent()` with
+ * The caller decides whether to run this at all;
  * `apply=False` skips this step and surfaces the patch artifact / branch name
  * instead.
  */
@@ -418,8 +417,8 @@ export interface NestedPatchApplyOptions {
 /**
  * Apply nested-repo patches after the parent merge phase. Centralizes the
  * three-way gate (exitCode/aborted, patch-mode failed parent, branch-mode
- * branch-merged) and the non-fatal failure handling so `TaskTool` and the
- * eval `agent()` bridge use one implementation.
+ * branch-merged) and the non-fatal failure handling so `TaskService` and the
+ * task callers use one implementation.
  *
  * Returns a system-notification suffix to append to the parent merge summary,
  * or an empty string when nothing was applied or the nested apply succeeded.

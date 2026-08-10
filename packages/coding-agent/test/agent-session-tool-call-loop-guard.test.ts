@@ -44,10 +44,10 @@ describe("AgentSession tool-call loop guard", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const contexts: Context[] = [];
 		const bashTool: AgentTool = {
-			name: "bash",
-			label: "Bash",
+			name: "ipython",
+			label: "IPython",
 			description: "Mock bash tool",
-			parameters: type({ "command?": "string" }),
+			parameters: type({ code: "string" }),
 			execute: async () => ({ content: [{ type: "text" as const, text: "1263 passed, 4 skipped" }] }),
 		};
 		let callCount = 0;
@@ -63,7 +63,7 @@ describe("AgentSession tool-call loop guard", () => {
 				const message: AssistantMessage = toolCallTurn
 					? {
 							role: "assistant",
-							content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "pytest -q" } }],
+							content: [{ type: "toolCall", id: toolCallId, name: "ipython", arguments: { code: "pytest -q" } }],
 							api: model.api,
 							provider: model.provider,
 							model: model.id,
@@ -102,7 +102,6 @@ describe("AgentSession tool-call loop guard", () => {
 			sessionManager: SessionManager.inMemory(tempDir.path()),
 			settings,
 			modelRegistry,
-			toolRegistry: new Map([[bashTool.name, bashTool]]),
 		});
 
 		await session.prompt("run checks");

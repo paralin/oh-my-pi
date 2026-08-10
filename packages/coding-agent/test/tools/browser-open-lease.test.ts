@@ -1,5 +1,5 @@
 /**
- * Regression tests for issue #6365: `BrowserTool.#open` must apply the
+ * Regression tests for issue #6365: `openBrowserTab` must apply the
  * requested `timeout` to the *entire* open lifecycle (browser acquisition +
  * tab acquisition), and must hold one explicit browser lease across tab
  * acquisition so a refCount:0 browser is never orphaned by an abort/timeout
@@ -10,12 +10,13 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
-import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { CmuxSocketClient } from "@oh-my-pi/pi-coding-agent/tools/browser/cmux/socket-client";
-import { getBrowsersMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { getTabsMapForTest, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
-import { ToolAbortError, ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { CmuxSocketClient } from "../../src/tools/browser/cmux/socket-client.js";
+import { getBrowsersMapForTest } from "../../src/tools/browser/registry.js";
+import { getTabsMapForTest, releaseTab } from "../../src/tools/browser/tab-supervisor.js";
+import { openBrowserTab } from "../../src/tools/browser.js";
+import { clampTimeout } from "../../src/tools/operation-timeouts.js";
+import { ToolAbortError, ToolError } from "../../src/tools/tool-errors.js";
 
 function makeSession(): ToolSession {
 	return {
@@ -32,6 +33,20 @@ async function drainAllTabs(): Promise<void> {
 	for (const name of [...getTabsMapForTest().keys()]) {
 		await releaseTab(name, { kill: false }).catch(() => undefined);
 	}
+}
+
+function browser(session: ToolSession) {
+	return {
+		execute: async (
+			_callId: string,
+			params: import("../../src/tools/browser.js").BrowserParams,
+			signal?: AbortSignal,
+		) => {
+			if (params.action !== "open") throw new Error("only open is exercised here");
+			const timeoutMs = clampTimeout("browser", params.timeout, session.settings.get("tools.maxTimeout")) * 1_000;
+			return await openBrowserTab(session, params.name ?? "main", params, timeoutMs, signal);
+		},
+	};
 }
 
 let prevSocketPath: string | undefined;
@@ -60,7 +75,7 @@ describe("browser open — requested timeout bounds the whole acquisition (#6365
 		});
 		const closeSpy = spyOn(CmuxSocketClient.prototype, "close").mockImplementation(() => undefined);
 
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const open = tool.execute("call-timeout", { action: "open", name: "late", timeout: 1 });
 		const settled = open.then(
 			() => ({ ok: true as const }),
@@ -111,7 +126,7 @@ describe("browser open — caller cancellation rolls back the fresh browser (#63
 			},
 		);
 
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const controller = new AbortController();
 		const open = tool.execute("call-abort", { action: "open", name: "fresh", timeout: 30 }, controller.signal);
 		const settled = open.then(
@@ -166,7 +181,7 @@ describe("browser open — concurrent different-name acquisitions each own a lea
 			},
 		);
 
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 
 		// Open A first and wait until it is parked inside `open_split` — proof it
 		// acquired the shared browser and took its open-acquisition lease.
@@ -195,9 +210,7 @@ describe("browser open — concurrent different-name acquisitions each own a lea
 		// Release the gate so B publishes its tab.
 		openGate.resolve();
 		const resultB = await openB;
-		expect(resultB.content.some(part => part.type === "text" && /Opened tab "tab-b"/.test(part.text ?? ""))).toBe(
-			true,
-		);
+		expect(resultB.created).toBe(true);
 
 		// B's browser survived A's rollback: still present, never closed, exactly
 		// one published tab. A's rollback closed only its own orphan surface.

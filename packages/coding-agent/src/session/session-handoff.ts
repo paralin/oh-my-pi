@@ -14,11 +14,9 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeSwitchResult } from "../extensibility/extensions";
-import { copyLocalArtifacts, resolveLocalUrlToPath } from "../internal-urls";
-import { obfuscateProviderContext } from "../secrets/message-transform";
-import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { BashSessionTransition } from "./bash-runner";
+import { projectIpythonJournalSummaryMessages } from "./ipython-summary";
 import type { SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
 import { overrideSessionMetadataCompactionStrategy } from "./session-metadata";
@@ -32,17 +30,6 @@ function createHandoffFileName(date = new Date()): string {
 	return `handoff-${fileTimestamp}.md`;
 }
 
-function throwIfHandoffAborted(signal: AbortSignal): void {
-	if (!signal.aborted) return;
-	const reason = signal.reason;
-	if (reason instanceof DOMException && reason.name === "AbortError") {
-		throw new Error("Handoff cancelled");
-	}
-	if (reason instanceof Error) throw reason;
-	if (typeof reason === "string" && reason.length > 0) throw new Error(reason);
-	throw new Error("Handoff aborted by session");
-}
-
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionHandoffHost {
 	agent: Agent;
@@ -51,7 +38,6 @@ export interface SessionHandoffHost {
 	modelRegistry: ModelRegistry;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
-	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
@@ -59,8 +45,6 @@ export interface SessionHandoffHost {
 	baseSystemPrompt(): string[];
 	assertVibeSessionTransitionAllowed(action: string): void;
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
-	obfuscateTextForProvider(text: string | undefined): string | undefined;
-	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
 	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
@@ -94,10 +78,10 @@ export class SessionHandoff {
 		this.#host = host;
 	}
 	/**
-	 * Cancel in-progress handoff generation, preserving a harness-provided reason.
+	 * Cancel in-progress handoff generation.
 	 */
-	abortHandoff(reason?: Error): void {
-		this.#handoffAbortController?.abort(reason);
+	abortHandoff(): void {
+		this.#handoffAbortController?.abort();
 	}
 
 	/**
@@ -131,7 +115,7 @@ export class SessionHandoff {
 		const sourceSignal = options?.signal;
 		const onSourceAbort = () => {
 			if (!handoffSignal.aborted) {
-				handoffAbortController.abort(sourceSignal?.reason);
+				handoffAbortController.abort();
 			}
 		};
 		if (sourceSignal) {
@@ -144,7 +128,9 @@ export class SessionHandoff {
 		let advisorRecordersDetached = false;
 		let sessionTransitioned = false;
 		try {
-			throwIfHandoffAborted(handoffSignal);
+			if (handoffSignal.aborted) {
+				throw new Error("Handoff cancelled");
+			}
 
 			const model = this.#host.model();
 			if (!model) {
@@ -159,8 +145,8 @@ export class SessionHandoff {
 			// (`runEphemeralTurn` / `/btw` share it) so the oneshot reads the
 			// provider prompt cache the main turn populated instead of cold-missing
 			// the whole prefix: identical system prompt, normalized tools, and
-			// transform-/obfuscation-matched message history via
-			// `convertMessagesToLlm` + `buildSideRequestContext`, plus the live turn's
+			// transformed message history via `convertMessagesToLlm` + `buildSideRequestContext`,
+			// plus the live turn's
 			// effective provider cache key with a unique side `sessionId` so
 			// OpenAI/Codex append-only state never mixes with the live turn.
 			const cacheSessionId = this.#host.sessionId();
@@ -169,9 +155,9 @@ export class SessionHandoff {
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
 			const handoffPromptCacheKey = this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId;
-			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
+			const handoffPromptText = renderHandoffPrompt(customInstructions);
 			const handoffSnapshot: AgentMessage[] = [
-				...this.#host.agent.state.messages,
+				...projectIpythonJournalSummaryMessages(this.#host.buildDisplaySessionContext().messages),
 				{
 					role: "user",
 					content: [{ type: "text", text: handoffPromptText }],
@@ -205,42 +191,25 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
-			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator, handoffContext),
-				model,
-				{
-					streamOptions: handoffStreamOptions,
-					completeImpl: async (requestModel, requestContext, requestOptions) => {
-						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-						return stream.result();
-					},
-					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
-					// Honor the user's /model thinking selection on the handoff path.
-					// Clamped per-model inside generateHandoffFromContext via
-					// resolveCompactionEffort so unsupported-effort models don't trip
-					// requireSupportedEffort.
-					thinkingLevel: this.#host.thinkingLevel(),
+			const handoffText = await generateHandoffFromContext(handoffContext, model, {
+				streamOptions: handoffStreamOptions,
+				completeImpl: async (requestModel, requestContext, requestOptions) => {
+					const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+					return stream.result();
 				},
-			);
-			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
+				telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
+				// Honor the user's /model thinking selection on the handoff path.
+				// Clamped per-model inside generateHandoffFromContext via
+				// resolveCompactionEffort so unsupported-effort models don't trip
+				// requireSupportedEffort.
+				thinkingLevel: this.#host.thinkingLevel(),
+			});
 
-			throwIfHandoffAborted(handoffSignal);
-			if (!handoffText || handoffText.trim().length === 0) {
-				// Empty/whitespace-only generation is a real failure, not a user
-				// cancellation. #7904 stopped masking provider errors as "Handoff
-				// cancelled"; an empty document is the remaining path that produced the
-				// same misleading, undebuggable message (#7993).
-				logger.warn("Handoff generation produced no content", {
-					sessionId: this.#host.sessionId(),
-					autoTriggered: options?.autoTriggered ?? false,
-				});
-				// Auto-handoff is best-effort: returning undefined lets maintenance fall
-				// back to context-full compaction. A user-initiated handoff must surface
-				// the failure instead of a silent, misleading "cancelled".
-				if (options?.autoTriggered) {
-					return undefined;
-				}
-				throw new Error("Handoff generation produced no content");
+			if (handoffSignal.aborted) {
+				throw new Error("Handoff cancelled");
+			}
+			if (!handoffText) {
+				return undefined;
 			}
 
 			// Start a new session
@@ -262,15 +231,6 @@ export class SessionHandoff {
 			// Stop and settle in-flight advisors while the old-session feeds can still
 			// observe message_end, then mute before opening the replacement session.
 			await this.#host.drainAndDetachAdvisorRecorders();
-			// Snapshot the outgoing session's local:// root BEFORE newSession() mints a
-			// fresh session id (and therefore a fresh, empty local root). The handoff
-			// document routinely references plans/scratch files under local://, so those
-			// artifacts must follow the session switch or every reference dangles.
-			const localProtocolOptions = {
-				getArtifactsDir: () => this.#host.sessionManager.getArtifactsDir(),
-				getSessionId: () => this.#host.sessionManager.getSessionId(),
-			};
-			const previousLocalRoot = resolveLocalUrlToPath("local://", localProtocolOptions);
 			const bashTransition = this.#host.beginBashSessionTransition();
 			this.#host.cancelOwnAsyncJobs();
 			try {
@@ -307,17 +267,6 @@ export class SessionHandoff {
 			await this.#host.resetMemoryContextForNewTranscript();
 			this.#host.clearPendingNextTurnMessages();
 			this.#host.resetTodoCycle();
-
-			// Carry local:// artifacts into the replacement session (best-effort: the
-			// switch is already committed, so a copy failure must not fail the handoff).
-			try {
-				const newLocalRoot = resolveLocalUrlToPath("local://", localProtocolOptions);
-				await copyLocalArtifacts(previousLocalRoot, newLocalRoot);
-			} catch (error) {
-				logger.warn("Failed to copy local artifacts into handoff session", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			}
 
 			// Inject the handoff document as a custom message
 			const handoffContent = createHandoffContext(handoffText);
@@ -358,10 +307,9 @@ export class SessionHandoff {
 
 			return { document: handoffText, savedPath };
 		} catch (error) {
-			// Only a genuine cancellation (user Esc or an unreasoned source-signal
-			// abort) maps to "Handoff cancelled". A harness-provided abort reason and
-			// provider failures surface verbatim.
-			throwIfHandoffAborted(handoffSignal);
+			if (handoffSignal.aborted || (error instanceof Error && error.name === "AbortError")) {
+				throw new Error("Handoff cancelled");
+			}
 			throw error;
 		} finally {
 			if (advisorRecordersDetached) {

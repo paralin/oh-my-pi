@@ -41,11 +41,9 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
-	pruneSupersededToolResults,
 	pruneToolOutputs,
-	readToolSupersedeKey,
+	pruneUselessToolResults,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
-import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
@@ -72,12 +70,12 @@ import { resolveMemoryBackend } from "../memory-backend/resolve";
 import type { MemoryBackendOperationContext } from "../memory-backend/types";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
-import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ContextUsageBreakdown, HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import { findCompactMode } from "./compact-modes";
 import { resolveCompactionStrategy, shouldRunScratchHandoffMaintenance } from "./compaction-strategy";
+import { projectIpythonJournalSummaryMessages } from "./ipython-summary";
 import { buildCompactionMeasurement } from "./measurement-events";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
@@ -101,6 +99,17 @@ import {
 	overrideSessionMetadataCompactionStrategy,
 } from "./session-metadata";
 import type { ShakeMode, ShakeResult } from "./shake-types";
+
+function projectIpythonCompactionPreparation(
+	preparation: CompactionPreparation | undefined,
+): CompactionPreparation | undefined {
+	if (!preparation) return undefined;
+	return {
+		...preparation,
+		messagesToSummarize: projectIpythonJournalSummaryMessages(preparation.messagesToSummarize),
+		turnPrefixMessages: projectIpythonJournalSummaryMessages(preparation.turnPrefixMessages),
+	};
+}
 
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
@@ -249,7 +258,6 @@ export interface SessionMaintenanceHost {
 	messages(): AgentMessage[];
 	baseSystemPrompt(): string[];
 	goalModeState(): GoalModeState | undefined;
-	planReferencePath(): string;
 	nonMessageTokenSource(): NonMessageTokenSource;
 	memoryBackendSession(): MemoryBackendOperationContext["session"];
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
@@ -288,14 +296,11 @@ export interface SessionMaintenanceHost {
 	drainStrandedQueuedMessages(): void;
 	buildDisplaySessionContext(): SessionContext;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
-	obfuscateTextForProvider(text: string | undefined): string | undefined;
-	obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
-	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
-	resetAdvisorRuntimes(reason?: string): void;
-	rebaseAfterCompaction(): void;
+	resetAdvisorRuntimes(): void;
+	rebaseAfterCompaction(): void | Promise<void>;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -494,31 +499,18 @@ export class SessionMaintenance {
 	set skipPostTurnMaintenanceAssistantTimestamp(timestamp: number | undefined) {
 		this.#skipPostTurnMaintenanceAssistantTimestamp = timestamp;
 	}
-	/**
-	 * Append plan-read protection to a prune/shake config so the active plan
-	 * file survives compaction alongside skill reads (the config defaults
-	 * already carry skill protection). The matcher reads the current plan
-	 * reference path at match time, so retitled plans are covered.
-	 */
-	withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
-		const planMatcher = createPlanReadMatcher(() => this.#host.planReferencePath());
-		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
-	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneToolOutputs(
-			branchEntries,
-			this.withPlanProtection({
-				...DEFAULT_PRUNE_CONFIG,
-				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
-				// Cache-stable boundary: never re-write the warm, already-sent prefix
-				// (deep stale/age victims) or summarized-away entries every turn.
-				keepBoundaryId,
-				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
-			}),
-		);
+		const result = pruneToolOutputs(branchEntries, {
+			...DEFAULT_PRUNE_CONFIG,
+			pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
+			// Cache-stable boundary: never re-write the warm, already-sent prefix
+			// (deep stale/age victims) or summarized-away entries every turn.
+			keepBoundaryId,
+			cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+		});
 		if (result.prunedCount === 0) {
 			return undefined;
 		}
@@ -526,67 +518,36 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
+		this.#host.resetAdvisorRuntimes();
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
 
 	/**
-	 * Per-turn stale-result pass: prune older `read` results that a newer read
-	 * of the same file has made stale, plus results their tool flagged
-	 * contextually useless. Cache-aware (only fires when the suffix after a
-	 * candidate is small or the session has been idle long enough that the
-	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
-	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
-	 *
-	 * Persists via `rewriteEntries` like every other history rewrite — the
-	 * session file must match the live (pruned) context or file-based forks
-	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
-	 * provider prompt cache.
+	 * Per-turn useless-result pass. It runs only for results a tool marked
+	 * uninformative and only when rewriting the live tail is cache-safe.
 	 */
-	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
-		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
-		if (!supersedeReads && !dropUseless) return undefined;
+	async #pruneUselessToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		if (!this.#host.settings.getGroup("compaction").dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
-		const result = pruneSupersededToolResults(
-			branchEntries,
-			this.withPlanProtection({
-				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
-				pruneUseless: dropUseless,
-				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
-				// Never re-write summarized-away entries; only flush the whole sent
-				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
-				keepBoundaryId,
-				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
-			}),
-		);
-		if (result.prunedCount === 0) {
-			return undefined;
-		}
+		const result = pruneUselessToolResults(branchEntries, {
+			protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
+			keepBoundaryId,
+			idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+		});
+		if (result.prunedCount === 0) return undefined;
 
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
+		this.#host.resetAdvisorRuntimes();
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
 	}
 
-	/**
-	 * Strip image content blocks from every message on the current branch and
-	 * persist the rewrite. Walks `SessionManager.getBranch()` in place — both
-	 * `SessionMessageEntry.message` and `CustomMessageEntry.content` arrays
-	 * are mutated, then `rewriteEntries` durably commits the new shape. The
-	 * agent's runtime view is rebuilt from the freshly-mutated entries so any
-	 * provider sessions caching message identity (Codex Responses) are torn
-	 * down to force a clean replay on the next turn.
-	 *
-	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
-	 * skips the disk rewrite.
-	 */
 	async dropImages(): Promise<{ removed: number }> {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		let removed = 0;
@@ -620,7 +581,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("drop-images");
+		this.#host.resetAdvisorRuntimes();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
 	}
@@ -646,12 +607,12 @@ export class SessionMaintenance {
 
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
-		const config = this.withPlanProtection({
+		const config = {
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
 			// Skip entries summarized away by the latest compaction — shaking them
 			// only churns persisted history with no prompt/cache effect.
 			keepBoundaryId: latestCompaction?.firstKeptEntryId,
-		});
+		};
 		return await this.applyShakeRegions(mode, collectShakeRegions(branchEntries, config));
 	}
 
@@ -727,7 +688,7 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("shake");
+		this.#host.resetAdvisorRuntimes();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
 		return {
@@ -781,11 +742,7 @@ export class SessionMaintenance {
 		// Modes that produce no LLM summary (snapcompact) have nothing to focus.
 		// Reject focus text loudly so programmatic callers don't silently lose
 		// instructions (the slash path pre-validates via parseCompactArgs).
-		// `internalGuidance` counts the same way — plan-mode approval never
-		// combines with a rejects-focus mode, but reject early if a caller ever
-		// wires it up so we don't silently drop the directive on the snapcompact
-		// fallback (issue #4359).
-		if (compactMode?.rejectsFocus && (customInstructions || options?.internalGuidance)) {
+		if (compactMode?.rejectsFocus && customInstructions) {
 			throw new Error(`/compact ${compactMode.name} does not take focus instructions.`);
 		}
 		// Bare `/compact` (no explicit native mode) on a session with scratch handoff
@@ -839,7 +796,9 @@ export class SessionMaintenance {
 				compactionCandidates = this.#getCompactionModelCandidates(availableModels);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, this.#model);
+			const preparation = projectIpythonCompactionPreparation(
+				prepareCompaction(pathEntries, effectiveSettings, this.#model),
+			);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -875,13 +834,10 @@ export class SessionMaintenance {
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
 
 			// Strategy honored on manual /compact too. Custom instructions (public
-			// user focus OR internal plan-mode guidance) imply a directed LLM
+			// user focus OR internal guidance) imply a directed LLM
 			// summary; a text-only model cannot read snapcompact frames.
 			const wantsSnapcompact =
-				compactionPrep.kind !== "fromHook" &&
-				effectiveSettings.strategy === "snapcompact" &&
-				!customInstructions &&
-				!options?.internalGuidance;
+				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
 			// `/compact snapcompact` is an explicit no-LLM archive request: honor
 			// its contract by failing locally rather than silently shipping the
 			// transcript to a provider. The default-configured snapcompact
@@ -1042,10 +998,10 @@ export class SessionMaintenance {
 				try {
 					const result = await this.#compactWithFallbackModel(
 						preparation,
-						options?.internalGuidance ?? customInstructions,
+						customInstructions,
 						compactionAbortController.signal,
 						{
-							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
+							promptOverride: compactionPrep.hookPrompt,
 							extraContext: compactionPrep.hookContext,
 							remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
@@ -1086,12 +1042,11 @@ export class SessionMaintenance {
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.rebaseAfterCompaction();
+			await this.#host.rebaseAfterCompaction();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
-			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes("compact");
+			this.#host.resetAdvisorRuntimes();
 			this.#host.syncTodoPhasesFromBranch();
 			if (codexCompaction) {
 				this.#host.resetCodexProviderAfterCompaction(codexCompaction);
@@ -1133,8 +1088,7 @@ export class SessionMaintenance {
 			this.#host.reconnectToAgent();
 			// Compaction disconnected before `await abort()`, so abort's finally drain
 
-			// (and any steer/follow-up that arrived mid-compaction — async IRC, an
-			// `xd://` mount notice, an SDK/RPC steer) was suppressed while disconnected
+			// (and any steer/follow-up that arrived mid-compaction — async IRC or an SDK/RPC steer) was suppressed while disconnected
 			// (issue #5800). Unlike `/new`/switchSession, compaction preserves the agent
 			// queues, so nothing else resumes them: re-drain now that the listener is back
 			// and `isCompacting` is false, or the queued turn hangs until the next prompt.
@@ -1583,10 +1537,9 @@ export class SessionMaintenance {
 			return COMPACTION_CHECK_NONE;
 		}
 
-		// Stale-result pass runs every turn, before any threshold gating: it is
-		// cheap (bails when no candidate) and independent of the compaction
-		// setting.
-		const supersedeResult = await this.#pruneStaleToolResults();
+		// Useless-result pruning runs before threshold maintenance and bails when
+		// no tool has marked a result uninformative.
+		const uselessResult = await this.#pruneUselessToolResults();
 
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
@@ -1598,7 +1551,7 @@ export class SessionMaintenance {
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return COMPACTION_CHECK_NONE;
 		const pruneResult = await this.#pruneToolOutputs();
-		const maintenanceTokensFreed = (supersedeResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
+		const maintenanceTokensFreed = (uselessResult?.tokensSaved ?? 0) + (pruneResult?.tokensSaved ?? 0);
 		// `errorIsFromBeforeCompaction` (computed above) is the general
 		// "this assistant message predates the latest compaction" predicate here,
 		// not just an error-specific one; alias it locally so the threshold intent
@@ -1616,7 +1569,7 @@ export class SessionMaintenance {
 		const storedContextTokens = this.estimateStoredContextTokens();
 		// Pruning frees bytes for the NEXT prompt; it does not change the size of
 		// the prompt the LLM just billed for. Earlier revisions subtracted the
-		// per-turn supersede/prune `tokensSaved` from the threshold input, which
+		// per-turn pruning `tokensSaved` from the threshold input, which
 		// let a long-running `/goal` session sit above `compaction.thresholdTokens`
 		// indefinitely whenever per-turn pruning saved enough to drop the
 		// post-prune estimate below the user-configured trigger — the visible
@@ -1844,10 +1797,10 @@ export class SessionMaintenance {
 
 			try {
 				return await compact(
-					this.#host.obfuscatePreparationForProvider(preparation),
+					preparation,
 					candidate,
 					this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
-					this.#host.obfuscateTextForProvider(customInstructions),
+					customInstructions,
 					signal,
 					{
 						...options,
@@ -2210,7 +2163,7 @@ export class SessionMaintenance {
 					// The elide pass rewrote history; re-anchor the in-flight snapshot
 					// so the caller's headroom/retry-fit re-test measures the shaken
 					// context.
-					this.#host.rebaseAfterCompaction();
+					await this.#host.rebaseAfterCompaction();
 				}
 			} catch (error) {
 				logger.warn("Dead-end shake rescue failed", {
@@ -2230,7 +2183,7 @@ export class SessionMaintenance {
 		let imagesDropped = 0;
 		try {
 			imagesDropped = (await this.#host.dropImages()).removed;
-			if (imagesDropped > 0) this.#host.rebaseAfterCompaction();
+			if (imagesDropped > 0) await this.#host.rebaseAfterCompaction();
 		} catch (error) {
 			logger.warn("Dead-end image-drop rescue failed", {
 				error: error instanceof Error ? error.message : String(error),
@@ -2397,13 +2350,12 @@ export class SessionMaintenance {
 		);
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.rebaseAfterCompaction();
+		await this.#host.rebaseAfterCompaction();
 		// Same post-rewrite bookkeeping as the regular compaction append: the
 		// rebuilt context no longer carries the transient plan reference (#1246),
 		// and advisor cursors / todo phases were derived from the replaced
 		// history.
-		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes("compaction-rescue");
+		this.#host.resetAdvisorRuntimes();
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one
@@ -2726,7 +2678,9 @@ export class SessionMaintenance {
 			const pathEntries = this.#host.sessionManager.getBranch();
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.#model);
+			let preparation = projectIpythonCompactionPreparation(
+				prepareCompaction(pathEntriesForCompaction, compactionSettings, this.#model),
+			);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -2776,7 +2730,9 @@ export class SessionMaintenance {
 								// branch has been rewritten either way.
 								rescueRewroteHistory = true;
 								pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-								preparation = prepareCompaction(pathEntriesForCompaction, compactionSettings, this.#model);
+								preparation = projectIpythonCompactionPreparation(
+									prepareCompaction(pathEntriesForCompaction, compactionSettings, this.#model),
+								);
 								return preparation !== undefined;
 							},
 						});
@@ -3034,13 +2990,13 @@ export class SessionMaintenance {
 					while (true) {
 						try {
 							compactResult = await compact(
-								this.#host.obfuscatePreparationForProvider(preparation),
+								preparation,
 								candidate,
 								this.#host.modelRegistry.resolver(candidate, this.#host.sessionId()),
 								undefined,
 								autoCompactionSignal,
 								{
-									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
+									promptOverride: compactionPrep.hookPrompt,
 									extraContext: compactionPrep.hookContext,
 									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
 									metadata: overrideSessionMetadataCompactionStrategy(
@@ -3211,12 +3167,11 @@ export class SessionMaintenance {
 			const newEntries = this.#host.sessionManager.getEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.rebaseAfterCompaction();
+			await this.#host.rebaseAfterCompaction();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
-			this.#host.resetPlanReference();
-			this.#host.resetAdvisorRuntimes("auto-compaction");
+			this.#host.resetAdvisorRuntimes();
 			if (!composeScratchHandoff) {
 				this.#host.syncTodoPhasesFromBranch();
 			}
@@ -3284,7 +3239,7 @@ export class SessionMaintenance {
 						(reason === "incomplete" && lastAssistant.stopReason === "length");
 					if (shouldDrop) {
 						this.#host.agent.replaceMessages(messages.slice(0, -1));
-						this.#host.rebaseAfterCompaction();
+						await this.#host.rebaseAfterCompaction();
 					}
 				}
 
@@ -3484,7 +3439,7 @@ export class SessionMaintenance {
 			// context figure when supplied, then subtract shake's own savings and add
 			// hysteresis (80% recovery band) so we don't oscillate at the boundary.
 			// Threshold callers pass the provider-billed trigger after accounting for
-			// any supersede/drop-useless pruning that already rewrote the next prompt;
+			// any per-turn pruning that already rewrote the next prompt;
 			// without that pre-shake savings, shake can fall through to context-full
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;

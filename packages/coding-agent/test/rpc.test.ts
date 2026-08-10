@@ -2,8 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentEvent, AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, Effort, type TextContent } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-ai";
 import {
 	type CompactionEntry,
 	type FileEntry,
@@ -11,15 +10,8 @@ import {
 	type SessionMessageEntry,
 } from "@oh-my-pi/pi-coding-agent";
 import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
-import type { BashExecutionMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { e2eApiKey } from "./utilities";
-
-type MessageEndEvent = Extract<AgentEvent, { type: "message_end" }>;
-
-const isMessageEndEvent = (event: AgentEvent): event is MessageEndEvent => event.type === "message_end";
-
-const isAssistantMessage = (message: AgentMessage): message is AssistantMessage => message.role === "assistant";
 
 const isSessionMessageEntry = (entry: FileEntry): entry is SessionMessageEntry => entry.type === "message";
 
@@ -90,7 +82,8 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		const messageEndEvents = events.filter(e => e.type === "message_end");
 		expect(messageEndEvents.length).toBeGreaterThanOrEqual(2); // user + assistant
 
-		// SessionManager appends each JSONL entry synchronously before the RPC response completes.
+		// Wait for file writes
+		await Bun.sleep(200);
 
 		// Verify session file
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -129,7 +122,8 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(result.summary).toBeDefined();
 		expect(result.tokensBefore).toBeGreaterThan(0);
 
-		// Compaction persistence is synchronous with the completed RPC command.
+		// Wait for file writes
+		await Bun.sleep(200);
 
 		// Verify compaction in session file
 		const sessionsPath = path.join(sessionDir, "sessions");
@@ -143,72 +137,6 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("RPC mode", () => {
 		expect(compactionEntries.length).toBe(1);
 		expect(compactionEntries[0].summary).toBeDefined();
 	}, 120000);
-
-	test("should execute bash command", async () => {
-		await client.start();
-
-		const result = await client.bash("echo hello");
-		expect(result.output.trim()).toBe("hello");
-		expect(result.exitCode).toBe(0);
-		expect(result.cancelled).toBe(false);
-	}, 30000);
-
-	test("should add bash output to context", async () => {
-		await client.start();
-
-		// First send a prompt to initialize session
-		await client.promptAndWait("Say hi");
-
-		// Run bash command
-		const uniqueValue = `test-${Snowflake.next()}`;
-		await client.bash(`echo ${uniqueValue}`);
-
-		// Bash context persistence is synchronous with the completed RPC command.
-
-		// Verify bash message in session
-		const sessionsPath = path.join(sessionDir, "sessions");
-		const sessionDirs = fs.readdirSync(sessionsPath);
-		const cwdSessionDir = path.join(sessionsPath, sessionDirs[0]);
-		const sessionFiles = fs.readdirSync(cwdSessionDir).filter(f => f.endsWith(".jsonl"));
-		const sessionContent = await Bun.file(path.join(cwdSessionDir, sessionFiles[0])).text();
-		const entries = parseSessionEntries(sessionContent);
-
-		const bashMessages = entries.filter(
-			(entry): entry is SessionMessageEntry & { message: BashExecutionMessage } =>
-				isSessionMessageEntry(entry) && entry.message.role === "bashExecution",
-		);
-		expect(bashMessages.length).toBe(1);
-		expect(bashMessages[0].message.output).toContain(uniqueValue);
-	}, 90000);
-
-	test("should include bash output in LLM context", async () => {
-		await client.start();
-
-		// Run a bash command with a unique value
-		const uniqueValue = `unique-${Snowflake.next()}`;
-		await client.bash(`echo ${uniqueValue}`);
-
-		// Ask the LLM what the output was
-		const events = await client.promptAndWait(
-			"What was the exact output of the echo command I just ran? Reply with just the value, nothing else.",
-		);
-
-		// Find assistant's response
-		const messageEndEvents = events.filter(isMessageEndEvent);
-		const assistantMessage = messageEndEvents.find(
-			(event): event is MessageEndEvent & { message: AssistantMessage } => isAssistantMessage(event.message),
-		);
-
-		expect(assistantMessage).toBeDefined();
-		if (!assistantMessage) {
-			throw new Error("Expected assistant message_end event");
-		}
-
-		const textContent = assistantMessage.message.content.find(
-			(content): content is TextContent => content.type === "text",
-		);
-		expect(textContent?.text).toContain(uniqueValue);
-	}, 90000);
 
 	test("should set and get thinking level", async () => {
 		await client.start();

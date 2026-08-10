@@ -24,9 +24,12 @@ class _StubGitHub:
 
 
 class _StubSandbox:
-    """Sentinel; queue tests don't touch the workspace pool."""
+    """Workspace collaborator without persistent cache state."""
 
     natives_cache = None
+
+    def reclaim_workspace_caches(self, *, repo: str, number: int) -> bool:
+        return False
 
 
 class _StubGitTransport:

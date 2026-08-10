@@ -30,16 +30,18 @@ With this backend enabled, the coding agent:
 
 Recalled memory is background context, not instructions. Current user messages and tool output take precedence when they conflict.
 
-## Agent tools
+## Provider interface
 
-Selecting Mnemopi makes these discoverable tools available:
+Mnemopi supplies automatic recall and retention context; it does not add provider
+functions. Fixed-IPython sessions expose the typed `omp.long_term_memory` API:
+`retain`, `recall`, `reflect`, `update`, `forget`, and `invalidate` operate on
+the session-owned scoped Mnemopi state. With `autolearn.enabled`, `learn` also
+stores a lesson and can report the independent outcome of an optional managed
+skill update.
 
-- `recall` — search scoped memories. Results are previews and include memory IDs.
-- `retain` — store durable facts explicitly.
-- `reflect` — synthesize an answer across recalled memories.
-- `memory_edit` — `update`, `forget`, or `invalidate` an editable memory by ID. Fact-table rows are read-only.
-
-Read the full content and metadata for a recalled result with `read memory://<memory-id>` before replacing it; clipped recall previews are not safe update payloads. The optional `learn` tool is also able to retain into Mnemopi when `autolearn.enabled: true`.
+Use the `/memory` commands to inspect, diagnose, clear, or enqueue the active
+backend. `omp.memory` and `omp.skills` manage continual-harness records; they
+do not directly search or modify Mnemopi SQLite banks.
 
 ## Settings
 
@@ -172,7 +174,7 @@ new Mnemopi({
 - `/memory enqueue` forces retention of the current session, flushes pending fact extractions, and runs Mnemopi sleep/consolidation.
 - `/memory stats` and `/memory diagnose` render backend-specific bank statistics/diagnostics when the Mnemopi backend is active.
 - Subagents do not own separate Mnemopi retain loops; they alias the parent state when a parent Mnemopi state exists, and otherwise remain inert.
-- Backend startup is best-effort. If database/model initialization fails, the session continues with Mnemopi inert and logs a warning; memory tools then report that the backend is not initialized.
+- Backend startup is best-effort. If database/model initialization fails, the session continues with Mnemopi inert and logs a warning; typed memory requests then report that the backend is not initialized.
 
 ## Shutdown and durability
 

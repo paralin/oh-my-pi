@@ -4,8 +4,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
+import { clampTimeout } from "../tools/operation-timeouts";
 import { outputMeta } from "../tools/output-meta";
-import { clampTimeout } from "../tools/tool-timeouts";
 import type { BashExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 

@@ -821,7 +821,7 @@ describe("AgentSession concurrent prompt guard", () => {
 
 	// Regression: a subscriber that fires the next prompt synchronously from the
 	// agent_end listener (the shape every wire transport ends up in — rpc-mode
-	// stdout subscriber, ACP bridge, Cursor exec) must not collide with the
+	// stdout subscriber, ACP bridge) must not collide with the
 	// outgoing turn's still-unwinding in-flight bookkeeping. Before the wire-level
 	// agent_end was deferred until #promptInFlightCount drops to 0, the
 	// subscriber observed agent_end while Session.isStreaming was still true (the
@@ -1512,8 +1512,8 @@ describe("AgentSession TTSR resume gate", () => {
 		const toolCallContent: ToolCall = {
 			type: "toolCall",
 			id: "call_ttsr_abort_reason",
-			name: "mock_edit",
-			arguments: { snippet: "let val = result.unwrap(" },
+			name: "ipython",
+			arguments: { code: "let val = result.unwrap(" },
 		};
 
 		const makeToolCallMsg = (stopReason: "toolUse" | "aborted" = "toolUse"): AssistantMessage => ({
@@ -1620,14 +1620,14 @@ describe("AgentSession TTSR resume gate", () => {
 		const readToolCallContent: ToolCall = {
 			type: "toolCall",
 			id: "call_innocent_read",
-			name: "read",
-			arguments: { path: "history://Eval1WithSkill" },
+			name: "ipython",
+			arguments: { path: "history://Run1WithSkill" },
 		};
 		const matchedToolCallContent: ToolCall = {
 			type: "toolCall",
 			id: "call_ttsr_abort_reason",
-			name: "mock_edit",
-			arguments: { snippet: "let val = result.unwrap(" },
+			name: "ipython",
+			arguments: { code: "let val = result.unwrap(" },
 		};
 
 		const makeToolCallMsg = (stopReason: "toolUse" | "aborted" = "toolUse"): AssistantMessage => ({
@@ -1938,7 +1938,7 @@ describe("AgentSession TTSR resume gate", () => {
 		ttsrManager.addRule(testRule);
 
 		const mockTool: AgentTool = {
-			name: "mock_edit",
+			name: "ipython",
 			label: "Mock Edit",
 			description: "A mock edit tool",
 			parameters: type({}),
@@ -1951,7 +1951,7 @@ describe("AgentSession TTSR resume gate", () => {
 		const toolCallContent: ToolCall = {
 			type: "toolCall",
 			id: "call_test_001",
-			name: "mock_edit",
+			name: "ipython",
 			arguments: {},
 		};
 
@@ -2044,10 +2044,10 @@ describe("AgentSession TTSR resume gate", () => {
 		ttsrManager.addRule(testRule);
 
 		const mockTool: AgentTool = {
-			name: "mock_edit",
+			name: "ipython",
 			label: "Mock Edit",
 			description: "A mock edit tool",
-			parameters: type({ snippet: "string?" }),
+			parameters: type({ code: "string?" }),
 			execute: async () => {
 				toolExecuted = true;
 				return { content: [{ type: "text" as const, text: "edit applied" }] };
@@ -2057,8 +2057,8 @@ describe("AgentSession TTSR resume gate", () => {
 		const toolCallContent: ToolCall = {
 			type: "toolCall",
 			id: "call_never_001",
-			name: "mock_edit",
-			arguments: { snippet: "let val = result.unwrap()" },
+			name: "ipython",
+			arguments: { code: "let val = result.unwrap()" },
 		};
 
 		const makeToolCallMsg = (): AssistantMessage => ({
@@ -2162,10 +2162,10 @@ describe("AgentSession TTSR resume gate", () => {
 		ttsrManager.addRule(testRule);
 
 		const mockTool: AgentTool = {
-			name: "mock_edit",
+			name: "ipython",
 			label: "Mock Edit",
 			description: "A mock edit tool",
-			parameters: type({ snippet: "string?" }),
+			parameters: type({ code: "string?" }),
 			execute: async () => {
 				executedCount++;
 				return { content: [{ type: "text" as const, text: "edit applied" }] };
@@ -2175,20 +2175,20 @@ describe("AgentSession TTSR resume gate", () => {
 		const toolCallA: ToolCall = {
 			type: "toolCall",
 			id: "call_dup_A",
-			name: "mock_edit",
-			arguments: { snippet: "a.unwrap()" },
+			name: "ipython",
+			arguments: { code: "a.unwrap()" },
 		};
 		const toolCallB: ToolCall = {
 			type: "toolCall",
 			id: "call_dup_B",
-			name: "mock_edit",
-			arguments: { snippet: "b.unwrap()" },
+			name: "ipython",
+			arguments: { code: "b.unwrap()" },
 		};
 		const toolCallC: ToolCall = {
 			type: "toolCall",
 			id: "call_dup_C",
-			name: "mock_edit",
-			arguments: { snippet: "c.unwrap()" },
+			name: "ipython",
+			arguments: { code: "c.unwrap()" },
 		};
 
 		const makeBatchMsg = (): AssistantMessage => ({

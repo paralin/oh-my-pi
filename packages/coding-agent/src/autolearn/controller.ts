@@ -87,7 +87,7 @@ export class AutoLearnController {
 
 	#onAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
 		// Snapshot and reset every turn: the counter describes only the
-		// just-finished turn, so below-threshold, disabled, and plan-mode stops
+		// just-finished turn, so below-threshold and disabled stops
 		// must not let tool calls accumulate into a later turn.
 		const toolCalls = this.#toolCalls;
 		this.#toolCalls = 0;
@@ -113,8 +113,6 @@ export class AutoLearnController {
 		if (!this.#settings.get("autolearn.enabled")) return;
 		const minToolCalls = this.#settings.get("autolearn.minToolCalls") ?? DEFAULT_MIN_TOOL_CALLS;
 		if (toolCalls < minToolCalls) return;
-		// Never interrupt plan-mode review.
-		if (this.#session.getPlanModeState()?.enabled) return;
 		// Never divert a goal loop. Skip when the turn STARTED in goal mode — a
 		// `goal` tool may have completed/dropped the goal before this stop — or is
 		// still in it: a passive nudge would ride the goal continuation, and

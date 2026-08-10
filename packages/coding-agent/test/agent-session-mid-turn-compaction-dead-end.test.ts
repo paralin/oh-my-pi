@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
+import { z } from "@oh-my-pi/omptype/zod";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -15,9 +15,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
-const noopSchema = type({});
+const noopSchema = z.object({ code: z.string() });
 const noopTool: AgentTool<typeof noopSchema, undefined> = {
-	name: "noop",
+	name: "ipython",
 	label: "No-op",
 	description: "Continue the scripted tool loop",
 	parameters: noopSchema,
@@ -30,7 +30,7 @@ const DEAD_END_WARNING = "Compaction freed too little context to make progress";
 
 /** One threshold-tripping tool-call turn. */
 function toolTurn(id: string): MockResponse {
-	return { content: [{ type: "toolCall", id, name: "noop", arguments: {} }], usage: { input: 190_000 } };
+	return { content: [{ type: "toolCall", id, name: "ipython", arguments: {} }], usage: { input: 190_000 } };
 }
 
 describe("AgentSession mid-turn compaction dead-end", () => {
@@ -113,7 +113,6 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			toolRegistry: new Map([[noopTool.name, noopTool]]),
 			extensionRunner,
 		});
 

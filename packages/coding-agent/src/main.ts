@@ -25,7 +25,6 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "./capability";
-import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/args";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyCodexHomeAuthToStorage } from "./cli/codex-home";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -33,12 +32,9 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
-	DEFAULT_PREWALK_TARGET,
-	expandRoleAlias,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -59,11 +55,11 @@ import {
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
-import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import type { LspStartupServerInfo } from "./lsp";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -83,7 +79,6 @@ import {
 	loadSessionExtensions,
 } from "./sdk";
 import type { AgentSession } from "./session/agent-session";
-import { describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
@@ -101,7 +96,6 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prom
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
-import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { withTimeoutSignal } from "./utils/fetch-timeout";
@@ -119,13 +113,33 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
 }
 
+/** Route settings-load warnings without writing into a noninteractive result stream. */
+export function routeSettingsStartupWarnings(warnings: string[], interactive: boolean): InteractiveModeNotify[] {
+	if (interactive) return warnings.map(message => ({ kind: "warn", message }));
+	for (const message of warnings) {
+		process.stderr.write(`${chalk.yellow(`Warning: ${message}`)}\n`);
+	}
+	return [];
+}
+
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
 	}
 	try {
-		const release = await getLatestRelease({ timeoutMs: 5_000 });
-		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
+		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest", {
+			signal: withTimeoutSignal(5_000),
+		});
+		if (!response.ok) return undefined;
+
+		const data = (await response.json()) as { version?: string };
+		const latestVersion = data.version;
+
+		if (latestVersion && Bun.semver.order(latestVersion, currentVersion) > 0) {
+			return latestVersion;
+		}
+
+		return undefined;
 	} catch {
 		return undefined;
 	}
@@ -138,14 +152,11 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.apply",
 	"task.isolation.merge",
 	"task.isolation.commits",
-	"task.eager",
 	"task.batch",
 	"task.maxConcurrency",
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
-	"task.agentPrewalk",
-	"task.agentAdvisor",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",
@@ -154,6 +165,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	// instead of inheriting a user's globally-enabled local preference, and when
 	// they do opt in they get the default tuning rather than the user's local tuning.
 	"advisor.enabled",
+	"advisor.subagents",
 	"advisor.syncBacklog",
 	"advisor.immuneTurns",
 	"tier.advisor",
@@ -364,29 +376,9 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
+	parsedArgs: Pick<Args, "apiKey">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
-}
-
-async function loadTrustedSessionExtensions(
-	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
-	cwd: string,
-	eventBus: EventBus,
-) {
-	const paths = options.additionalExtensionPaths ?? [];
-	for (const trustedPath of paths) {
-		let stat: fsSync.Stats;
-		try {
-			stat = fsSync.statSync(trustedPath);
-		} catch {
-			throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-		}
-		if (!stat.isFile()) {
-			throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-		}
-	}
-	return loadExtensions(paths, cwd, eventBus);
 }
 
 /**
@@ -396,8 +388,8 @@ async function loadTrustedSessionExtensions(
  * supplies them through `session/new.mcpServers` and re-applies them via
  * {@link AcpAgent#configureMcpServers}. We therefore force `enableMCP: false`
  * on every session created here so {@link createAgentSession} skips the on-disk
- * `.mcp.json` discovery path — otherwise host MCP tools land in the session's
- * tool registry and shadow the client-supplied servers (issue #1234).
+ * `.mcp.json` discovery path — otherwise host MCP connections shadow the
+ * client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
 	return async cwd => {
@@ -411,16 +403,6 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		// policy (PR #3736 follow-up).
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
-		const eventBus = new EventBus();
-		const trustedExtensions =
-			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
-				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
-				: undefined;
-		if (trustedExtensions && trustedExtensions.errors.length > 0) {
-			throw new Error(
-				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
-			);
-		}
 		const { session: nextSession } = await args.createSession({
 			...args.baseOptions,
 			cwd,
@@ -430,37 +412,15 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			modelRegistry: args.modelRegistry,
 			agentId,
 			// Preserve reserve-policy confirmation until ACP capabilities are known
-			// without enabling AskTool or other UI-only session behavior.
+			// without enabling interactive session behavior.
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
 			titleSystemPrompt,
-			eventBus,
-			preloadedExtensions: trustedExtensions,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
-		const runner = nextSession.extensionRunner;
-		const reparsedArgs = applyExtensionFlags(
-			runner
-				? {
-						getFlags: () => runner.getFlags(),
-						setFlagValue: (name, value) => {
-							runner.setFlagValue(name, value);
-						},
-					}
-				: undefined,
-			args.rawArgs,
-		);
-		const requestedTools = reparsedArgs?.tools ?? args.parsedArgs.tools;
-		if (requestedTools) {
-			try {
-				validateToolNames(requestedTools, nextSession.getAllToolNames());
-			} catch (error) {
-				await nextSession.dispose();
-				throw error;
-			}
-		}
+		applyExtensionFlags(nextSession.extensionRunner, args.rawArgs);
 		return nextSession;
 	};
 }
@@ -526,23 +486,25 @@ async function runInteractiveMode(
 		await setupWizard.runSetupWizard(mode, setupScenes);
 	}
 
-	// Consume failures immediately, but defer any banner until the transcript is stable.
-	const checkedVersionPromise = versionCheckPromise.catch(() => undefined);
+	versionCheckPromise
+		.then(newVersion => {
+			if (!settings.get("startup.checkUpdate")) {
+				return;
+			}
+			if (newVersion) {
+				mode.showNewVersionNotification(newVersion);
+			}
+		})
+		.catch(() => {});
 
 	// Cold-launch cleanup: the first paint already clears native history, and this
 	// replay replaces the welcome/startup frame with the resumed/new transcript.
 	// Every in-process session load also uses `clearTerminalHistory`; cold launch
 	// follows the same clean-cutover path instead of preserving a previous run's
 	// transcript above the fresh one.
-	await mode.renderInitialMessages({ preserveExistingChat: true, clearTerminalHistory: true });
-	// A resolved version check must not insert its banner into a partial transcript.
-	checkedVersionPromise.then(newVersion => {
-		if (!settings.get("startup.checkUpdate")) {
-			return;
-		}
-		if (newVersion) {
-			mode.showNewVersionNotification(newVersion);
-		}
+	mode.renderInitialMessages({
+		preserveExistingChat: true,
+		clearTerminalHistory: true,
 	});
 
 	for (const notify of notifs) {
@@ -963,9 +925,7 @@ export async function buildSessionOptions(
 			parsed.model !== undefined ||
 			parsed.thinking !== undefined ||
 			parsed.systemPrompt !== undefined ||
-			parsed.appendSystemPrompt !== undefined ||
-			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.appendSystemPrompt !== undefined;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -1057,71 +1017,6 @@ export async function buildSessionOptions(
 		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
 	}
 
-	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
-		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
-	}
-	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
-	const prewalkEnabled = parsed.noPrewalk
-		? false
-		: explicitPrewalk
-			? true
-			: !restoringSession && activeSettings.get("prewalk.enabled");
-	if (prewalkEnabled) {
-		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({
-			cliModel: rolePattern,
-			modelRegistry,
-			preferences: modelMatchPreferences,
-		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
-		} else {
-			options.prewalk = {
-				target: resolved.model,
-				thinkingLevel: resolved.thinkingLevel,
-			};
-		}
-	}
-
-	if (parsed.planYoloInto !== undefined && !parsed.planYolo) {
-		throw new Error("--plan-yolo-into requires --plan-yolo");
-	}
-	if (parsed.planYolo) {
-		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
-		const resolved = resolveCliModel({
-			cliModel: rolePattern,
-			modelRegistry,
-			preferences: modelMatchPreferences,
-		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		if (resolved.error || !resolved.model) {
-			throw new Error(resolved.error ?? `Model "${parsed.planYoloInto ?? "@smol"}" not found`);
-		}
-		if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
-		}
-		options.planYolo = {
-			target: resolved.model,
-			thinkingLevel: resolved.thinkingLevel,
-		};
-	}
-
 	// Thinking level
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
@@ -1165,13 +1060,6 @@ export async function buildSessionOptions(
 		options.titleSystemPrompt = titleSystemPrompt;
 	}
 
-	// Tools
-	if (parsed.noTools) {
-		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
-	} else if (parsed.tools) {
-		options.toolNames = parsed.tools;
-	}
-
 	if (parsed.noLsp) {
 		options.enableLsp = false;
 	}
@@ -1189,38 +1077,18 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
-	// Trusted extension paths are an exact allowlist for extension modules.
-	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
-		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
-			let resolvedPath: string;
-			let stat: fsSync.Stats;
-			try {
-				resolvedPath = fsSync.realpathSync.native(trustedPath);
-				stat = fsSync.statSync(resolvedPath);
-			} catch {
-				throw new Error(`Trusted extension must be an existing module file: ${trustedPath}`);
-			}
-			if (!stat.isFile()) {
-				throw new Error(`Trusted extension must be a module file, not a directory: ${trustedPath}`);
-			}
-			return resolvedPath;
-		});
-		options.disableExtensionDiscovery = true;
-		options.additionalExtensionPaths = trustedPaths;
-	} else {
-		// Explicit extension paths remain active when automatic discovery is disabled.
-		const cliExtensionPaths = [
-			...(parsed.extensions ?? []),
-			...(parsed.hooks ?? []),
-			...(parentExtension ? [parentExtension] : []),
-		];
-		if (cliExtensionPaths.length > 0) {
-			options.additionalExtensionPaths = cliExtensionPaths;
-		}
+	// Explicit extension paths remain active when automatic discovery is disabled.
+	const cliExtensionPaths = [
+		...(parsed.extensions ?? []),
+		...(parsed.hooks ?? []),
+		...(parentExtension ? [parentExtension] : []),
+	];
+	if (cliExtensionPaths.length > 0) {
+		options.additionalExtensionPaths = cliExtensionPaths;
+	}
 
-		if (parsed.noExtensions) {
-			options.disableExtensionDiscovery = true;
-		}
+	if (parsed.noExtensions) {
+		options.disableExtensionDiscovery = true;
 	}
 
 	return options;
@@ -1293,25 +1161,21 @@ export async function runRootCommand(
 	// warning before we reach the await site below.
 	pluginPreloadPromise.catch(() => {});
 
-	// Trusted files load as exact module paths, never as package roots whose
-	// sibling hooks/tools/commands/MCP content could be discovered implicitly.
-	if (!parsedArgs.trustedExtensions?.length) {
-		// Register CLI-provided extension package paths (`--extension`, `--hook`) so
-		// the `omp-plugins` discovery provider can surface their `skills/`, `hooks/`,
-		// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
-		// Explicit roots remain authorized under `--no-extensions`; only ambient
-		// extension discovery is disabled.
-		const parentExtension = resolveParentExtensionPath();
-		const cliExtensions = [
-			...(parsedArgs.extensions ?? []),
-			...(parsedArgs.hooks ?? []),
-			...(parentExtension ? [parentExtension] : []),
-		];
-		injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
-			mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
-			replace: true,
-		});
-	}
+	// Register CLI-provided extension package paths (`--extension`, `--hook`) so
+	// the `omp-plugins` discovery provider can surface their `skills/`, `hooks/`,
+	// `tools/`, `commands/`, `rules/`, `prompts/`, and `.mcp.json` sub-trees.
+	// Explicit roots remain authorized under `--no-extensions`; only ambient
+	// extension discovery is disabled.
+	const parentExtension = resolveParentExtensionPath();
+	const cliExtensions = [
+		...(parsedArgs.extensions ?? []),
+		...(parsedArgs.hooks ?? []),
+		...(parentExtension ? [parentExtension] : []),
+	];
+	injectOmpExtensionCliRoots(cliExtensions, home, getProjectDir(), {
+		mode: parsedArgs.noExtensions ? "explicit-only" : "merge",
+		replace: true,
+	});
 
 	let cwd = getProjectDir();
 	// Classify the host before opening auth or settings storage so every
@@ -1324,20 +1188,10 @@ export async function runRootCommand(
 	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
 	// Only the interactive host renders a focusable Agent Hub / subagent session
 	// tree; declare it so headless subagent optimizations (e.g. skipping replan
-	// title refresh) can tell a focusable process from a print/RPC/eval one.
+	// title refresh) can tell a focusable process from a print/RPC one.
 	setInteractiveHost(isInteractive);
-	// Create AuthStorage and ModelRegistry upfront. A configured-but-unreachable
-	// auth broker throws here; convert it to an actionable stderr message + clean
-	// exit instead of a raw uncaught stack trace (issue #8096).
-	let authStorage: AuthStorage;
-	try {
-		authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
-	} catch (error) {
-		const message = await describeAuthBrokerStartupError(error);
-		if (message === null) throw error;
-		process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
-		process.exit(1);
-	}
+	// Create AuthStorage and ModelRegistry upfront
+	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
 	const modelRegistry = logger.time("modelRegistry:init", () => new ModelRegistry(authStorage));
 
 	const settingsInstance =
@@ -1346,6 +1200,7 @@ export async function runRootCommand(
 			cwd,
 			configFiles: parsedArgs.config,
 		}));
+	notifs.push(...routeSettingsStartupWarnings(settingsInstance.takeStartupWarnings(), isInteractive));
 	const parentSocketPath = resolveParentSocketPath();
 	const parentSessionId = resolveParentSessionId();
 	const parentInteractive = parentSocketPath !== undefined && parentSessionId === undefined && isInteractive;
@@ -1390,12 +1245,10 @@ export async function runRootCommand(
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
-	const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
-	if (smolModel || slowModel || planModel) {
+	if (smolModel || slowModel) {
 		settingsInstance.overrideModelRoles({
 			smol: smolModel,
 			slow: slowModel,
-			plan: planModel,
 		});
 	}
 
@@ -1715,14 +1568,12 @@ export async function runRootCommand(
 		// string-flag value such as `--target @notes.md` is the flag's value, not a
 		// file — and the same result is handed to createAgentSession via
 		// `preloadedExtensions` so the discovery work is not repeated.
-		if (isInteractive && !parsedArgs.trustedExtensions?.length) {
+		if (isInteractive) {
 			sessionOptions.extensions = [...(sessionOptions.extensions ?? []), createWarpEventBridgeExtension()];
 		}
 
 		const eventBus = new EventBus();
-		const extensionsResult = parsedArgs.trustedExtensions?.length
-			? await loadTrustedSessionExtensions(sessionOptions, cwd, eventBus)
-			: await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
+		const extensionsResult = await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
 		const extensionFlagSink: ExtensionFlagSink = {
 			getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
 			setFlagValue: (name, value) => {
@@ -1731,11 +1582,6 @@ export async function runRootCommand(
 		};
 		const initialArgs = applyExtensionFlags(extensionFlagSink, rawArgs) ?? parsedArgs;
 		normalizeContinueSessionArgs(initialArgs, rawArgs);
-		if ((parsedArgs.trustedExtensions?.length ?? 0) > 0 && extensionsResult.errors.length > 0) {
-			throw new Error(
-				`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
-			);
-		}
 		for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 			if (isInteractive) {
 				notifs.push({ kind: "warn", message });
@@ -1795,12 +1641,6 @@ export async function runRootCommand(
 			preloadedExtensions: extensionsResult,
 		});
 
-		try {
-			validateToolNames(initialArgs.tools, session.getAllToolNames());
-		} catch (error) {
-			await session.dispose();
-			throw error;
-		}
 		if (parentClient && interactiveRootSpec) {
 			await parentClient.attachInteractiveRoot({
 				...interactiveRootSpec,
@@ -1913,7 +1753,6 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				printThoughts: initialArgs.printThoughts,
-				planYolo: parsedArgs.planYolo,
 			});
 			if ($env.PI_TIMING) {
 				logger.printTimings();

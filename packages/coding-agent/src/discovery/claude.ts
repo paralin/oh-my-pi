@@ -16,7 +16,6 @@ import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
-import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { settings } from "../config/settings";
@@ -395,55 +394,6 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 }
 
 // =============================================================================
-// Custom Tools
-// =============================================================================
-
-async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const items: CustomTool[] = [];
-	const warnings: string[] = [];
-
-	const userBase = getUserClaude(ctx);
-	const userToolsDir = path.join(userBase, "tools");
-
-	const userResult = await loadFilesFromDir<CustomTool>(ctx, userToolsDir, PROVIDER_ID, "user", {
-		transform: (name, _content, path, source) => {
-			const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
-			return {
-				name: toolName,
-				path,
-				description: `${toolName} custom tool`,
-				level: "user",
-				_source: source,
-			};
-		},
-	});
-
-	items.push(...userResult.items);
-	if (userResult.warnings) warnings.push(...userResult.warnings);
-
-	const projectBase = getProjectClaude(ctx);
-	const projectToolsDir = path.join(projectBase, "tools");
-
-	const projectResult = await loadFilesFromDir<CustomTool>(ctx, projectToolsDir, PROVIDER_ID, "project", {
-		transform: (name, _content, path, source) => {
-			const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
-			return {
-				name: toolName,
-				path,
-				description: `${toolName} custom tool`,
-				level: "project",
-				_source: source,
-			};
-		},
-	});
-
-	items.push(...projectResult.items);
-	if (projectResult.warnings) warnings.push(...projectResult.warnings);
-
-	return { items, warnings };
-}
-
-// =============================================================================
 // System Prompts
 // =============================================================================
 
@@ -563,14 +513,6 @@ registerProvider<Hook>(hookCapability.id, {
 	description: "Load hooks from .claude/hooks/pre/ and .claude/hooks/post/",
 	priority: PRIORITY,
 	load: loadHooks,
-});
-
-registerProvider<CustomTool>(toolCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load custom tools from .claude/tools/",
-	priority: PRIORITY,
-	load: loadTools,
 });
 
 registerProvider<Settings>(settingsCapability.id, {

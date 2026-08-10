@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { postmortem, Snowflake, untilAborted, withTimeout } from "@oh-my-pi/pi-utils";
-import type { HTMLElement } from "@oh-my-pi/pi-utils/dom";
+import type { HTMLElement } from "linkedom";
 import type {
 	Browser,
 	CDPSession,
@@ -16,7 +16,7 @@ import type {
 	SerializedAXNode,
 	Target,
 } from "puppeteer-core";
-import { JsRuntime, type RuntimeHooks } from "../../eval/js/shared/runtime";
+import { JsRuntime, type RuntimeHooks } from "../../javascript-runtime/runtime";
 import { resizeImage } from "../../utils/image-resize";
 import { resolveToCwd } from "../path-utils";
 import { formatScreenshot } from "../render-utils";
@@ -58,7 +58,6 @@ import type {
 	RunErrorPayload,
 	ScreenshotResult,
 	SessionSnapshot,
-	ToolReply,
 	Transport,
 	WorkerInbound,
 	WorkerInitPayload,
@@ -279,7 +278,7 @@ export function normalizeSelector(selector: string): string {
 		PLAYWRIGHT_ONLY_SELECTOR_RE.test(selector)
 	) {
 		throw new ToolError(
-			`Playwright-only selector ${JSON.stringify(selector)} is not supported by the browser tool. ` +
+			`Playwright-only selector ${JSON.stringify(selector)} is not supported by the browser service. ` +
 				`Use a puppeteer text selector ("text/Allow all"), an aria selector ("aria/Name"), CSS, or "xpath/...".`,
 		);
 	}
@@ -485,19 +484,6 @@ function errorPayload(error: unknown): RunErrorPayload {
 		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
 	}
 	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
-}
-
-function replyError(payload: RunErrorPayload): Error {
-	if (payload.isAbort) {
-		const err = new ToolAbortError(payload.message || "Tool call aborted");
-		if (payload.stack) err.stack = payload.stack;
-		return err;
-	}
-	const Ctor = payload.isToolError ? ToolError : Error;
-	const err = new Ctor(payload.message);
-	if (payload.name) err.name = payload.name;
-	if (payload.stack) err.stack = payload.stack;
-	return err;
 }
 
 async function targetIdForTarget(target: Target): Promise<string> {
@@ -706,7 +692,6 @@ interface ActiveRun {
 	signal: AbortSignal;
 	output: RunOutput;
 	screenshots: ScreenshotResult[];
-	pendingTools: Map<string, { resolve(value: unknown): void; reject(error: Error): void }>;
 	rejectionOwner: object;
 	floatingRejections: unknown[];
 	floatingFailure: { promise: Promise<never>; reject(reason?: unknown): void };
@@ -852,9 +837,6 @@ export class WorkerCore {
 						: new ToolAbortError();
 					this.#active.ac.abort(reason);
 				}
-				return;
-			case "tool-reply":
-				this.#deliverToolReply(msg.id, msg.reply);
 				return;
 			case "close":
 				await this.#close();
@@ -1047,7 +1029,6 @@ export class WorkerCore {
 			signal,
 			output,
 			screenshots,
-			pendingTools: new Map(),
 			rejectionOwner: {},
 			floatingRejections: [],
 			floatingFailure,
@@ -1111,14 +1092,6 @@ export class WorkerCore {
 				} else {
 					rejectCancel(abortError);
 				}
-				// Cancel in-flight tool calls so user code's awaited proxies reject promptly.
-				const toolAbort = timeoutSignal.aborted
-					? postmortem.markExpectedCleanupError(new ToolAbortError(undefined, { cause: timeoutSignal.reason }))
-					: abortError;
-				for (const pending of active.pendingTools.values()) {
-					pending.reject(toolAbort);
-				}
-				active.pendingTools.clear();
 			};
 			if (signal.aborted) onCancel();
 			else signal.addEventListener("abort", onCancel, { once: true });
@@ -1192,29 +1165,7 @@ export class WorkerCore {
 				throwIfAborted(active.signal);
 				active.output.pushDisplay(output);
 			},
-			callTool: (name, args) => {
-				throwIfAborted(active.signal);
-				return this.#callTool(active, name, args);
-			},
 		};
-	}
-
-	async #callTool(active: ActiveRun, name: string, args: unknown): Promise<unknown> {
-		const id = `tab-tc-${active.id}-${crypto.randomUUID()}`;
-		const { promise, resolve, reject } = Promise.withResolvers<unknown>();
-		active.pendingTools.set(id, { resolve, reject });
-		this.#transport.send({ type: "tool-call", id, runId: active.id, name, args });
-		return await promise;
-	}
-
-	#deliverToolReply(id: string, reply: ToolReply): void {
-		const active = this.#active;
-		if (!active) return;
-		const pending = active.pendingTools.get(id);
-		if (!pending) return;
-		active.pendingTools.delete(id);
-		if (reply.ok) pending.resolve(reply.value);
-		else pending.reject(replyError(reply.error));
 	}
 
 	/**

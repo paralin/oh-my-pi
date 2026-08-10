@@ -5,11 +5,9 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import type { ToolDefinition } from "../extensibility/extensions";
 import securityReviewerPrompt from "../prompts/agents/security-reviewer.md" with { type: "text" };
 import securityCoordinatorPrompt from "../prompts/security/scan-coordinator.md" with { type: "text" };
 import securityRequestPrompt from "../prompts/security/scan-request.md" with { type: "text" };
-import securityPublishDescription from "../prompts/tools/security-publish.md" with { type: "text" };
 import { createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import type { AuthStorage } from "../session/auth-storage";
@@ -37,15 +35,13 @@ import {
 	createNativeSecurityProvenance,
 	createSecurityWorkflowFingerprint,
 } from "./provenance";
-import { createSecurityPublicationTool } from "./publication";
+import { createSecurityPublisher, type SecurityPublisher } from "./publication";
 import { SecurityStore, writeSecurityBundleToDirectory } from "./store";
 
-const SECURITY_SESSION_TOOLS = ["read", "grep", "glob", "lsp", "ast_grep", "task", "security_publish"];
 const SECURITY_WORKFLOW_FINGERPRINT = createSecurityWorkflowFingerprint([
 	securityCoordinatorPrompt,
 	securityRequestPrompt,
 	securityReviewerPrompt,
-	securityPublishDescription,
 ]);
 
 export type SecurityOperationPhase =
@@ -126,7 +122,7 @@ export interface SecurityScanSessionFactoryInput {
 	executionRoot: string;
 	scanId: string;
 	model: Model;
-	publicationTool: ToolDefinition;
+	publisher: SecurityPublisher;
 	sessionManager: SessionManager;
 }
 
@@ -233,10 +229,6 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		...scanSettings.get("task.agentModelOverrides"),
 		"security-reviewer": modelSelector,
 	});
-	scanSettings.override("task.agentPrewalk", {
-		...scanSettings.get("task.agentPrewalk"),
-		"security-reviewer": "off",
-	});
 	const { session } = await createAgentSession({
 		cwd: input.executionRoot,
 		authStorage: input.host.authStorage,
@@ -249,10 +241,7 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		}),
 		providerSessionId: `security:${input.scanId}`,
 		sessionManager: input.sessionManager,
-		customTools: [input.publicationTool],
-		toolNames: SECURITY_SESSION_TOOLS,
-		restrictToolNames: true,
-		allowRestrictedCustomTools: true,
+		securityPublisher: input.publisher,
 		spawns: "security-reviewer",
 		appendSystemPrompt: securityCoordinatorPrompt.trim(),
 		disableExtensionDiscovery: true,
@@ -262,7 +251,6 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		lspReadOnly: true,
 		hasUI: false,
 		autoApprove: true,
-		skipPythonPreflight: true,
 		agentId: `Security-${input.scanId.slice(-12)}`,
 		agentDisplayName: "security",
 	});
@@ -582,7 +570,7 @@ export class SecurityCoordinator {
 			const sessionsDirectory = path.join(store.projectDirectory, "sessions");
 			await fs.mkdir(sessionsDirectory, { recursive: true, mode: 0o700 });
 			const sessionManager = SessionManager.create(executionTarget.cwd, sessionsDirectory);
-			const publicationTool = createSecurityPublicationTool({
+			const publisher = createSecurityPublisher({
 				plan,
 				scanId: record.snapshot.scanId,
 				store,
@@ -601,9 +589,7 @@ export class SecurityCoordinator {
 				scanId: record.snapshot.scanId,
 				executionRoot: executionTarget.cwd,
 				model,
-				// Bare `ToolDefinition` erases the concrete schema; the sdk.ts
-				// `as unknown as CustomTool` precedent applies to the same variance wall.
-				publicationTool: publicationTool as unknown as ToolDefinition,
+				publisher,
 				sessionManager,
 			});
 			record.snapshot.sessionFile = session.sessionFile;
@@ -660,7 +646,7 @@ export class SecurityCoordinator {
 			await store.putBundle(partial);
 		} catch (error) {
 			if (publishedBundle) {
-				// The canonical bundle is already persisted by security_publish; a late
+				// The canonical bundle is already persisted by security.publish; a late
 				// failure (metrics/output-directory write) degrades, not invalidates it.
 				logger.warn("Security scan post-publication step failed", {
 					scanId: record.snapshot.scanId,

@@ -1,5 +1,5 @@
 /**
- * Shared policy resolution and execution for task and eval subagents.
+ * Shared policy resolution and execution for task subagents.
  *
  * The two public frontends deliberately retain their presentation concerns, but
  * every decision that affects what a child may run lives here.
@@ -8,20 +8,20 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelSelection } from "../config/model-resolver";
+import { resolveAgentModelPatterns, resolveAgentModelSource, resolveExplicitModelRole } from "../config/model-resolver";
+import { serviceTierForAllFamilies } from "../config/service-tier";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
-import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
-import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { sessionSidecarDir } from "../session/session-paths";
+import type { ToolSession } from "../session/tool-session";
 import type { TaskEffort } from "../thinking";
-import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
 import { trackLateCleanup } from "../utils/late-cleanup";
+import type { SubagentRuntimeAdmission } from "./admission";
 import { runClaudeCodeSubprocess } from "./claude-code-runtime";
 import { type ClaudeCodeSelection, resolveClaudeCodeSelection } from "./claude-code-selector";
 import { type DiscoveryResult, discoverAgents, getAgent } from "./discovery";
@@ -66,7 +66,7 @@ export interface StructuredSubagentSchemaResolution {
 	outputSchemaOverridesAgent: boolean;
 }
 
-/** Isolation controls shared by the task and eval surfaces. */
+/** Isolation controls for task subagents. */
 export interface StructuredSubagentIsolationControls {
 	requested?: boolean;
 	merge?: "patch" | "branch";
@@ -84,11 +84,11 @@ export interface StructuredSubagentIdentity {
 /** One normalized child invocation. */
 export interface StructuredSubagentRequest {
 	session: ToolSession;
-	invocationKind: "task" | "eval";
 	assignment: string;
 	context?: string;
 	agent?: string;
 	model?: string | string[];
+	serviceTier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
 	/** Presence, rather than truthiness, makes this the highest-priority schema. */
 	outputSchema?: unknown;
 	schemaMode?: StructuredSubagentSchemaMode;
@@ -105,18 +105,18 @@ export interface StructuredSubagentRequest {
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
 	retainArtifacts?: boolean;
-	/** Task UI agents keep live registry references; eval one-shots normally do not. */
+	/** Whether completed agents remain addressable. */
 	keepAlive?: boolean;
-	/** Task subagents share their parent's eval kernel; eval bridge children must not. */
+	/** Share the parent evaluation session when the frontend supports it. */
 	shareEvalSession?: boolean;
-	/** Task frontends may inherit LSP; eval frontends normally set this false. */
+	/** Whether the child may inherit the parent's LSP connection. */
 	enableLsp?: boolean;
-	/** Explicitly pass false for plan mode or invocation kinds that must not use IRC. */
 	enableIrc?: boolean;
 	/** `0` disables executor wall-clock timeout. Undefined inherits settings. */
 	maxRuntimeMs?: number;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
+	onAdmission?: (admission: SubagentRuntimeAdmission) => void;
 }
 
 /** A normalized preflight result, reusable by tests and adapters. */
@@ -126,18 +126,45 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string | string[];
-	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
-	/** Set when the selector set names the Claude runtime instead of Pi. */
 	claudeCode?: ClaudeCodeSelection;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
-	planMode: boolean;
 	isIsolated: boolean;
 	mergeMode: "patch" | "branch";
 	applyChanges: boolean;
 	enableLsp: boolean;
 	enableIrc: boolean;
+}
+
+/** Renders the exact Task user prompt shared by local and external workers. */
+export function renderStructuredSubagentPrompt(assignment: string): string {
+	return prompt.render(subagentUserPromptTemplate, { assignment: assignment.trim() });
+}
+
+function trimToUndefined(value: string | undefined): string | undefined {
+	const trimmed = value?.trim();
+	return trimmed || undefined;
+}
+
+function sanitizeAgentId(value: string | undefined): string | undefined {
+	const sanitized = trimToUndefined(value)
+		?.replace(/[^A-Za-z0-9_-]+/g, "")
+		.slice(0, 48);
+	return sanitized || undefined;
+}
+
+function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinition): StructuredSubagentSchemaResolution {
+	const mode = request.schemaMode ?? request.session.outputSchemaMode ?? "permissive";
+	if (Object.hasOwn(request, "outputSchema")) {
+		return { schema: request.outputSchema, source: "caller", mode, outputSchemaOverridesAgent: true };
+	}
+	if (agent.output !== undefined)
+		return { schema: agent.output, source: "agent", mode, outputSchemaOverridesAgent: false };
+	if (request.session.outputSchema !== undefined) {
+		return { schema: request.session.outputSchema, source: "session", mode, outputSchemaOverridesAgent: false };
+	}
+	return { schema: undefined, source: "none", mode, outputSchemaOverridesAgent: false };
 }
 
 /** Settled child execution plus data needed by the frontends' own rendering. */
@@ -158,85 +185,6 @@ export class StructuredSubagentError extends Error {
 		super(message, options);
 		this.name = "StructuredSubagentError";
 		this.kind = kind;
-	}
-}
-
-const PLAN_MODE_TOOLS = ["read", "grep", "glob", "web_search"] as const;
-
-/** Renders the exact Task user prompt shared by local and external workers. */
-export function renderStructuredSubagentPrompt(assignment: string): string {
-	return prompt.render(subagentUserPromptTemplate, {
-		assignment: assignment.trim(),
-	});
-}
-
-function trimToUndefined(value: string | undefined): string | undefined {
-	const trimmed = value?.trim();
-	return trimmed || undefined;
-}
-
-function sanitizeAgentId(value: string | undefined): string | undefined {
-	const trimmed = trimToUndefined(value);
-	const sanitized = trimmed?.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 48);
-	return sanitized || undefined;
-}
-
-function resolveSchema(request: StructuredSubagentRequest, agent: AgentDefinition): StructuredSubagentSchemaResolution {
-	const mode = request.schemaMode ?? request.session.outputSchemaMode ?? "permissive";
-	if (Object.hasOwn(request, "outputSchema")) {
-		return {
-			schema: request.outputSchema,
-			source: "caller",
-			mode,
-			outputSchemaOverridesAgent: true,
-		};
-	}
-	if (agent.output !== undefined) {
-		return {
-			schema: agent.output,
-			source: "agent",
-			mode,
-			outputSchemaOverridesAgent: false,
-		};
-	}
-	if (request.session.outputSchema !== undefined) {
-		return {
-			schema: request.session.outputSchema,
-			source: "session",
-			mode,
-			outputSchemaOverridesAgent: false,
-		};
-	}
-	return {
-		schema: undefined,
-		source: "none",
-		mode,
-		outputSchemaOverridesAgent: false,
-	};
-}
-
-function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
-	const tools = [...PLAN_MODE_TOOLS, ...(agent.tools ?? []).filter(tool => tool === "ast_grep")];
-	return {
-		...agent,
-		systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
-		tools,
-		spawns: undefined,
-		prewalk: undefined,
-	};
-}
-
-function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode: boolean): void {
-	if (!planMode) return;
-	const isolation = request.isolation;
-	if (
-		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
-	) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Subagent isolation, apply, and merge controls are unavailable in plan mode.",
-		);
 	}
 }
 
@@ -266,7 +214,7 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 }
 
 /**
- * Resolve every policy shared by task and eval before allocating artifacts or
+ * Resolve task policy before allocating artifacts or
  * dispatching work. Callers translate {@link StructuredSubagentError} into
  * their own wire-level error surface.
  */
@@ -275,8 +223,6 @@ export async function resolveEffectiveSubagentPolicy(
 ): Promise<EffectiveSubagentPolicy> {
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
-	const planMode = request.session.getPlanModeState?.()?.enabled === true;
-	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
 	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.settings.getModelRoles());
@@ -296,7 +242,7 @@ export async function resolveEffectiveSubagentPolicy(
 		);
 	}
 
-	const effectiveAgent = planMode ? createPlanModeAgent(agent) : agent;
+	const effectiveAgent = agent;
 	const schema = resolveSchema(request, effectiveAgent);
 	if (schema.source === "caller" || (schema.source !== "none" && schema.mode === "strict")) {
 		const { error } = buildOutputValidator(schema.schema);
@@ -316,10 +262,10 @@ export async function resolveEffectiveSubagentPolicy(
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	};
-	// Role identity and patterns come from one call so they cannot be derived
-	// from different sources: the expansion below discards the alias, and the
-	// child's inherited retry-fallback chain is keyed off the role.
-	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
+	// Keep role identity from the same effective non-empty source that supplies
+	// model selection: caller request, settings override, then agent definition.
+	const modelRole = resolveExplicitModelRole(resolveAgentModelSource(modelResolution), request.session.settings);
+	const modelOverride = resolveAgentModelPatterns(modelResolution);
 	// Runtime selection reads the raw selector set, before Pi model resolution:
 	// `claude-code` is a task-runtime namespace, not a provider.
 	let claudeCode: ClaudeCodeSelection | undefined;
@@ -329,15 +275,6 @@ export async function resolveEffectiveSubagentPolicy(
 		throw new StructuredSubagentError("preflight", error instanceof Error ? error.message : String(error), {
 			cause: error,
 		});
-	}
-	if (request.invocationKind !== "task" && claudeCode) {
-		throw new StructuredSubagentError("preflight", "The Claude Code runtime is available only for task invocations.");
-	}
-	if (planMode && claudeCode) {
-		throw new StructuredSubagentError(
-			"preflight",
-			"Plan mode is unavailable for subagents selected with a claude-code/ model.",
-		);
 	}
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	const isIsolated = request.isolation?.requested === true;
@@ -357,20 +294,15 @@ export async function resolveEffectiveSubagentPolicy(
 		claudeCode,
 		parentActiveModelPattern,
 		schema,
-		planMode,
 		isIsolated,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
-		applyChanges:
-			request.isolation?.apply ??
-			(request.invocationKind === "task" ? request.session.settings.get("task.isolation.apply") : true),
+		applyChanges: request.isolation?.apply ?? request.session.settings.get("task.isolation.apply"),
 		enableLsp:
-			!planMode &&
-			(request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp"))),
+			request.enableLsp ?? ((request.session.enableLsp ?? true) && request.session.settings.get("task.enableLsp")),
 		enableIrc:
-			!planMode &&
-			(request.enableIrc ??
-				(request.session.enableIrc !== false &&
-					isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0))),
+			request.enableIrc ??
+			(request.session.enableIrc !== false &&
+				isIrcEnabled(request.session.settings, request.session.taskDepth ?? 0)),
 	};
 }
 
@@ -394,10 +326,7 @@ interface ArtifactLease {
 	unregister: (() => void) | undefined;
 }
 
-async function leaseArtifacts(
-	session: ToolSession,
-	invocationKind: StructuredSubagentRequest["invocationKind"],
-): Promise<ArtifactLease> {
+async function leaseArtifacts(session: ToolSession): Promise<ArtifactLease> {
 	const sessionFile = session.getSessionFile();
 	if (sessionFile) {
 		const artifactsDir = sessionSidecarDir(sessionFile);
@@ -409,10 +338,7 @@ async function leaseArtifacts(
 			unregister: undefined,
 		};
 	}
-	const artifactsDir = path.join(
-		os.tmpdir(),
-		`${invocationKind === "eval" ? "omp-eval-agent" : "omp-task"}-${Snowflake.next()}`,
-	);
+	const artifactsDir = path.join(os.tmpdir(), `omp-task-${Snowflake.next()}`);
 	await fs.mkdir(artifactsDir, { recursive: true });
 	return {
 		sessionFile: null,
@@ -442,8 +368,8 @@ function buildExecutorOptions(
 		getArtifactsDir: session.getArtifactsDir ?? (() => null),
 		getSessionId: session.getSessionId ?? (() => null),
 	};
-	const restrictToolNames = policy.planMode || session.restrictToolNames === true;
-	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
+	const restrictClaudeTools = policy.claudeCode !== undefined && session.restrictToolNames === true;
+	const enableMCP = session.enableMCP ?? true;
 	return {
 		cwd: session.cwd,
 		additionalDirectories: session.additionalDirectories,
@@ -452,7 +378,6 @@ function buildExecutorOptions(
 		task: renderStructuredSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),
 		context: request.context?.trim() || undefined,
-		planReference: undefined,
 		description: trimToUndefined(request.identity?.label),
 		index: request.index ?? 0,
 		parentToolCallId: request.parentToolCallId,
@@ -480,11 +405,12 @@ function buildExecutorOptions(
 		enableLsp: policy.enableLsp,
 		enableIrc: policy.enableIrc,
 		maxRuntimeMs: request.maxRuntimeMs,
-		restrictToolNames,
+		restrictToolNames: restrictClaudeTools || undefined,
 		keepAlive: request.keepAlive,
 		signal: request.signal,
 		eventBus: session.eventBus,
 		onProgress: request.onProgress,
+		onAdmission: request.onAdmission,
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
@@ -498,29 +424,22 @@ function buildExecutorOptions(
 		workspaceTree: session.workspaceTree,
 		promptTemplates: session.promptTemplates,
 		rules: session.rules,
-		preloadedExtensionPaths: restrictToolNames ? [] : session.extensionPaths,
-		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
+		preloadedExtensionPaths: session.extensionPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 		parentHindsightSessionState: session.getHindsightSessionState?.(),
 		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
-		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
-		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		parentServiceTier:
+			request.serviceTier !== undefined
+				? request.serviceTier === null
+					? {}
+					: serviceTierForAllFamilies(request.serviceTier)
+				: session.getServiceTierByFamily
+					? (session.getServiceTierByFamily() ?? null)
+					: undefined,
 	};
-}
-
-async function loadPlanReference(
-	request: StructuredSubagentRequest,
-	policy: EffectiveSubagentPolicy,
-): Promise<{ path: string; content: string } | undefined> {
-	if (policy.planMode) return undefined;
-	const localProtocolOptions: LocalProtocolOptions = request.session.localProtocolOptions ?? {
-		getArtifactsDir: request.session.getArtifactsDir ?? (() => null),
-		getSessionId: request.session.getSessionId ?? (() => null),
-	};
-	return loadOverallPlanReference(request.session.getPlanReferencePath?.() ?? "local://PLAN.md", localProtocolOptions);
 }
 
 function buildFailureResult(
@@ -608,19 +527,15 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
-	const lease = await leaseArtifacts(request.session, request.invocationKind);
+	const lease = await leaseArtifacts(request.session);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
 	let deferredCleanup: Promise<void> | undefined;
 	try {
-		const id = await reserveStructuredSubagentId(request.session, {
-			...request.identity,
-			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
-		});
-		const planReference = await loadPlanReference(request, policy);
-		if (request.invocationKind === "task" && request.session.coordinationBackend) {
+		const id = await reserveStructuredSubagentId(request.session, request.identity);
+		if (request.session.coordinationBackend) {
 			const handle = await request.session.coordinationBackend.spawn(
 				{
 					peerId: id,
@@ -628,12 +543,26 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					generated: trimToUndefined(request.identity?.label) === undefined,
 					request,
 					policy,
-					planReference,
 					artifactsDir: lease.artifactsDir,
 					temporaryArtifacts: lease.temporary,
 				},
 				request.signal,
 			);
+			if (request.onAdmission) {
+				const model =
+					(typeof request.model === "string" ? request.model : request.model?.[0]) ??
+					(typeof policy.modelOverride === "string" ? policy.modelOverride : policy.modelOverride?.[0]) ??
+					request.session.getActiveModelString?.() ??
+					request.session.getModelString?.();
+				if (!model) throw new Error(`Parent subagent ${id} started without a resolved model.`);
+				request.onAdmission({
+					id,
+					name: id,
+					sessionDir: lease.artifactsDir,
+					model,
+					cwd: request.session.cwd,
+				});
+			}
 			const result = await handle.wait(request.signal, request.onProgress);
 			completedSuccessfully = result.result.exitCode === 0 && !result.result.error && !result.result.aborted;
 			return result;
@@ -642,7 +571,6 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		baseOptions.onCleanupDeferred = completion => {
 			deferredCleanup = completion;
 		};
-		baseOptions.planReference = planReference;
 		let isolationContext: IsolationContext | null = null;
 		if (policy.isIsolated) {
 			try {

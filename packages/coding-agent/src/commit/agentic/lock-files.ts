@@ -37,9 +37,8 @@ export const LOCK_FILE_MANIFESTS: Readonly<Record<string, readonly string[]>> = 
 };
 
 /**
- * Lock-file basenames the commit agent excludes from `git_overview` output and
- * from split-commit validation. Derived from {@link LOCK_FILE_MANIFESTS} so a
- * single edit keeps both the analysis filter and the post-plan pairing in sync.
+ * Lock-file basenames eligible for deterministic post-plan placement. Derived
+ * from {@link LOCK_FILE_MANIFESTS} so a single edit keeps pairing in sync.
  */
 export const EXCLUDED_LOCK_FILES: ReadonlySet<string> = new Set(Object.keys(LOCK_FILE_MANIFESTS));
 

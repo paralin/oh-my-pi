@@ -8,7 +8,6 @@ import {
 	collectShakeRegions,
 	DEFAULT_SHAKE_CONFIG,
 	estimateTokens,
-	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
 
@@ -84,12 +83,6 @@ describe("collectShakeRegions — tool results", () => {
 		applyShakeRegion(region, "[shaken]");
 		expect(tr.prunedAt).toBeGreaterThan(0);
 		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
-	});
-
-	test("never collects protected tools", () => {
-		const entry = messageEntry(toolResultMessage("skill", "y".repeat(800)));
-		const regions = collectShakeRegions([entry], cfg({ protectedTools: ["skill"] }));
-		expect(regions).toHaveLength(0);
 	});
 
 	test("never collects already-pruned tool results", () => {
@@ -205,33 +198,15 @@ describe("applyShakeRegions — multi-region ordering", () => {
 });
 
 describe("shake config presets", () => {
-	test("aggressive preset protects skill and keeps a small recent tail", () => {
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
+	test("aggressive preset drops every eligible region", () => {
+		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBe(0);
 		expect(AGGRESSIVE_SHAKE_CONFIG.minSavings).toBe(0);
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("skill");
-	});
-
-	test("manual shake preserves the recent tool-result tail instead of stripping everything", () => {
-		const older = messageEntry(toolResultMessage("bash", "old-result ".repeat(300)));
-		const recent = messageEntry(toolResultMessage("bash", "recent-result ".repeat(3000)));
-		const regions = collectShakeRegions([older, recent], AGGRESSIVE_SHAKE_CONFIG);
-
-		// The recent result sits inside the preserved tail; the older one is
-		// still shaken aggressively.
-		expect(regions).toHaveLength(1);
-		expect(regions[0].entry).toBe(older);
+		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toEqual([]);
 	});
 
 	test("default preset keeps a protect window", () => {
 		expect(DEFAULT_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
-	});
-
-	test("rescue preset overrides the manual tail so it can elide the newest result", () => {
-		const recent = messageEntry(toolResultMessage("bash", "oversized-result ".repeat(2000)));
-		const regions = collectShakeRegions([recent], RESCUE_SHAKE_CONFIG);
-		expect(regions).toHaveLength(1);
-		expect(regions[0].entry).toBe(recent);
+		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toHaveLength(1);
 	});
 
 	test("empty branch yields no regions", () => {

@@ -9,11 +9,9 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import type { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets/obfuscator";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 import { e2eApiKey } from "../../ai/test/oauth";
 
@@ -31,8 +29,6 @@ export interface TestSessionOptions {
 	settingsOverrides?: Record<string, unknown>;
 	/** Extension runner to wire into the session (e.g. to stub `session_before_tree`/etc. hooks) */
 	extensionRunner?: ExtensionRunner;
-	/** Secret obfuscator to wire into the session (e.g. to test deobfuscation of persisted tool arguments) */
-	obfuscator?: SecretObfuscator;
 	/** Suspend session-bound services before a test session changes history. */
 	beginSessionFork?: () => Promise<void>;
 	/** Resume session-bound services after a test session history change. */
@@ -87,14 +83,7 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 	const tempDir = path.join(os.tmpdir(), `omp-test-${Snowflake.next()}`);
 	fs.mkdirSync(tempDir, { recursive: true });
 
-	const toolSession: ToolSession = {
-		cwd: tempDir,
-		hasUI: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-		settings: Settings.isolated(options.settingsOverrides),
-	};
-	const tools = await createTools(toolSession);
+	const tools: [] = [];
 
 	const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 	const agent = new Agent({
@@ -119,7 +108,6 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 		settings,
 		modelRegistry,
 		extensionRunner: options.extensionRunner,
-		obfuscator: options.obfuscator,
 		beginSessionFork: options.beginSessionFork,
 		completeSessionFork: options.completeSessionFork,
 	});

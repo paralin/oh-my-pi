@@ -52,20 +52,11 @@ export interface SegmentContext {
 	session: AgentSession;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
 	focusedAgentId?: string | undefined;
-	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */
-	sessionAccent?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;
 	/** Render the model segment's thinking level as a compact leading glyph. */
 	compactThinkingLevel: boolean;
-	planMode: {
-		enabled: boolean;
-		paused: boolean;
-	} | null;
-	prewalk: {
-		enabled: boolean;
-	} | null;
 	loopMode: {
 		state: "waiting" | "running" | "paused";
 		limit?: LoopLimitRuntime;

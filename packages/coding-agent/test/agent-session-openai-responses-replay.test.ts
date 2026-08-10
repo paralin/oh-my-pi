@@ -281,7 +281,6 @@ async function createSessionHarness(
 		// touching any asserted behavior.
 		rules: [],
 		workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
-		toolNames: ["read"],
 	});
 
 	return { session };

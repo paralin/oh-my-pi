@@ -13,7 +13,6 @@ import type { Prompt } from "../../../capability/prompt";
 import type { Rule } from "../../../capability/rule";
 import type { Skill } from "../../../capability/skill";
 import type { SlashCommand } from "../../../capability/slash-command";
-import type { CustomTool } from "../../../capability/tool";
 import type { SourceMeta } from "../../../capability/types";
 import {
 	disableProvider,
@@ -121,16 +120,6 @@ export async function loadAllExtensions(cwd?: string, disabledIds?: string[]): P
 		});
 	} catch (error) {
 		logger.warn("Failed to load rules capability", { error: String(error) });
-	}
-
-	// Load custom tools
-	try {
-		const tools = await loadCapability<CustomTool>("tools", loadOpts);
-		addItems(tools.all, "tool", {
-			getDescription: t => t.description,
-		});
-	} catch (error) {
-		logger.warn("Failed to load tools capability", { error: String(error) });
 	}
 
 	// Load extension modules
@@ -443,8 +432,6 @@ function getKindDisplayName(kind: ExtensionKind): string {
 			return "Skills";
 		case "rule":
 			return "Rules";
-		case "tool":
-			return "Tools";
 		case "mcp":
 			return "MCP Servers";
 		case "prompt":

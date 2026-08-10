@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "bun:test";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { HistoricalToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/historical-tool-execution";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 
@@ -53,9 +53,9 @@ describe("InputController tool activity visibility", () => {
 	it("persists the toggle, preserves transient children, and reveals tools collapsed", () => {
 		const pendingUserMessage = { kind: "pending-user" };
 		const loadingIndicator = { kind: "loading" };
-		const assistant = new AssistantMessageComponent();
-		const setToolResultImagesVisible = vi.spyOn(assistant, "setToolResultImagesVisible");
-		const children = [pendingUserMessage, assistant, loadingIndicator];
+		const historical = Object.create(HistoricalToolExecutionComponent.prototype) as HistoricalToolExecutionComponent;
+		historical.setToolActivityVisible = vi.fn();
+		const children = [pendingUserMessage, historical, loadingIndicator];
 		const clear = vi.fn();
 		const addChild = vi.fn();
 		const rebuildChatFromMessages = vi.fn();
@@ -63,12 +63,11 @@ describe("InputController tool activity visibility", () => {
 		const clearInlineImages = vi.fn();
 		const resetDisplay = vi.fn();
 		const showStatus = vi.fn();
-		const setToolActivityVisible = vi.fn();
 		const ctx = {
 			hideToolActivity: false,
 			toolOutputExpanded: true,
 			settings: { set },
-			chatContainer: { children, clear, addChild, setToolActivityVisible },
+			chatContainer: { children, clear, addChild },
 			rebuildChatFromMessages,
 			showStatus,
 			ui: { clearInlineImages, resetDisplay },
@@ -89,8 +88,7 @@ describe("InputController tool activity visibility", () => {
 		expect(resetDisplay).toHaveBeenCalledTimes(1);
 		expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(resetDisplay.mock.invocationCallOrder[0]);
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: hidden");
-		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(false);
-		expect(setToolActivityVisible).toHaveBeenLastCalledWith(false);
+		expect(historical.setToolActivityVisible).toHaveBeenLastCalledWith(false);
 
 		controller.toggleToolActivityVisibility();
 
@@ -104,7 +102,6 @@ describe("InputController tool activity visibility", () => {
 		expect(clearInlineImages).toHaveBeenCalledTimes(1);
 		expect(resetDisplay).toHaveBeenCalledTimes(2);
 		expect(showStatus).toHaveBeenLastCalledWith("Tool activity: visible");
-		expect(setToolResultImagesVisible).toHaveBeenLastCalledWith(true);
-		expect(setToolActivityVisible).toHaveBeenLastCalledWith(true);
+		expect(historical.setToolActivityVisible).toHaveBeenLastCalledWith(true);
 	});
 });

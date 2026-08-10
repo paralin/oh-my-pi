@@ -7,10 +7,9 @@
  * args), `### Tool Result: <name>`, and the execution/summary sections.
  */
 import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, Model, ToolExample, TSchema } from "@oh-my-pi/pi-ai";
-import { renderDelimitedThinking, renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { YAML } from "bun";
+import { IPYTHON_JOURNAL_MESSAGE_TYPE, isIpythonJournalDetail, renderIpythonJournalText } from "../ipython/journal";
 import { canonicalizeMessage } from "../utils/thinking-display";
 import {
 	type BashExecutionMessage,
@@ -29,7 +28,6 @@ export interface SessionDumpToolInfo {
 	name: string;
 	description: string;
 	parameters: unknown;
-	examples?: readonly ToolExample[];
 }
 
 export interface FormatSessionDumpTextOptions {
@@ -38,27 +36,23 @@ export interface FormatSessionDumpTextOptions {
 	model?: Model | null;
 	thinkingLevel?: ThinkingLevel | string | null;
 	tools?: readonly SessionDumpToolInfo[];
-	inlineToolDescriptors?: boolean;
 }
 
-interface InventoryTool {
-	name: string;
-	description: string;
-	parameters: TSchema;
-	examples?: readonly ToolExample[];
+function renderToolInventory(tools: readonly SessionDumpToolInfo[]): string {
+	return tools.map(tool => `### ${tool.name}\n${tool.description}`).join("\n\n");
 }
 
-function toInventoryTools(tools: readonly SessionDumpToolInfo[]): InventoryTool[] {
-	return tools.map(tool => ({
-		name: tool.name,
-		description: tool.description,
-		parameters: tool.parameters as TSchema,
-		examples: tool.examples,
-	}));
+function renderThinking(text: string): string {
+	const trimmed = text.trim();
+	if (trimmed.startsWith("<thinking>") && trimmed.endsWith("</thinking>")) return trimmed;
+	return `<thinking>\n${trimmed}\n</thinking>`;
 }
 
 /** System prompt + model/thinking config + tool inventory — shared by both transcript styles. */
-function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools: readonly InventoryTool[]): string[] {
+function renderDumpHeader(
+	options: FormatSessionDumpTextOptions,
+	inventoryTools: readonly SessionDumpToolInfo[],
+): string[] {
 	const lines: string[] = [];
 
 	const systemPrompt = options.systemPrompt?.filter(prompt => prompt.length > 0) ?? [];
@@ -79,8 +73,7 @@ function renderDumpHeader(options: FormatSessionDumpTextOptions, inventoryTools:
 	lines.push(`Thinking Level: ${options.thinkingLevel ?? ""}`);
 	lines.push("\n");
 
-	const hasSystemPromptToolInventory = options.inlineToolDescriptors === true;
-	if (inventoryTools.length > 0 && !hasSystemPromptToolInventory) {
+	if (inventoryTools.length > 0) {
 		lines.push("## Available Tools\n");
 		lines.push(renderToolInventory(inventoryTools));
 		lines.push("\n");
@@ -114,25 +107,14 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
 					if (thinking.length === 0) continue;
 					// Unwrap any literal `<thinking>` envelope already present in the
 					// block (e.g. Opus 4.5 — issue #2700) so the dump never nests tags.
-					lines.push(`${renderDelimitedThinking("<thinking>", "</thinking>", thinking)}\n`);
+					lines.push(`${renderThinking(thinking)}\n`);
 				} else if (c.type === "toolCall") {
 					lines.push(`### Tool Call: ${c.name}`);
 					const rawArgs = c.arguments as Record<string, unknown> | undefined;
 					if (rawArgs && typeof rawArgs === "object") {
-						const intent = rawArgs[INTENT_FIELD];
-						if (typeof intent === "string" && intent.trim().length > 0) {
-							for (const line of intent.split("\n")) lines.push(`// ${line}`);
-						}
-						const args: Record<string, unknown> = {};
-						let hasArgs = false;
-						for (const key in rawArgs) {
-							if (key === INTENT_FIELD) continue;
-							args[key] = rawArgs[key];
-							hasArgs = true;
-						}
-						if (hasArgs) {
+						if (Object.keys(rawArgs).length > 0) {
 							lines.push("```yaml");
-							lines.push(YAML.stringify(args, null, 2).trimEnd());
+							lines.push(YAML.stringify(rawArgs, null, 2).trimEnd());
 							lines.push("```\n");
 						}
 					}
@@ -168,6 +150,10 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
 			}
 		} else if (msg.role === "custom" || msg.role === "hookMessage") {
 			const customMsg = msg as CustomMessage | HookMessage;
+			if (customMsg.customType === IPYTHON_JOURNAL_MESSAGE_TYPE && isIpythonJournalDetail(customMsg.details)) {
+				lines.push("## IPython\n", renderIpythonJournalText(customMsg.details), "\n");
+				continue;
+			}
 			lines.push(`## ${customMsg.customType}\n`);
 			if (typeof customMsg.content === "string") {
 				lines.push(customMsg.content);
@@ -209,7 +195,7 @@ function appendMarkdownTranscript(lines: string[], messages: readonly AgentMessa
  * AgentSession.formatSessionAsText / /dump).
  */
 export function formatSessionDumpText(options: FormatSessionDumpTextOptions): string {
-	const inventoryTools = toInventoryTools(options.tools ?? []);
+	const inventoryTools = options.tools ?? [];
 	const lines = renderDumpHeader(options, inventoryTools);
 	appendMarkdownTranscript(lines, options.messages);
 	return lines.join("\n").trim();

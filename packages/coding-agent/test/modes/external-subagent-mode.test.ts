@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { CODEX_HOME_ENV, OPENAI_CODEX_OAUTH_TOKEN_ENV } from "@oh-my-pi/pi-coding-agent/cli/codex-home";
 import {
-	type ExternalSubagentProfileV1,
+	type ExternalSubagentProfileV2,
 	encodeExternalSubagentProfile,
 } from "@oh-my-pi/pi-coding-agent/coordination/external-subagent-profile";
 import {
@@ -22,14 +22,14 @@ import { parseConfiguredThinkingLevel } from "@oh-my-pi/pi-coding-agent/thinking
 const roots: string[] = [];
 
 async function fixture(): Promise<{
-	profile: ExternalSubagentProfileV1;
+	profile: ExternalSubagentProfileV2;
 	env: Record<string, string | undefined>;
 	path: string;
 }> {
 	const root = await fs.mkdtemp(path.join(process.env.TMPDIR ?? "/tmp", "omp-external-mode-"));
 	roots.push(root);
-	const profile: ExternalSubagentProfileV1 = {
-		schemaVersion: 1,
+	const profile: ExternalSubagentProfileV2 = {
+		schemaVersion: 2,
 		runtime: "native",
 		isolated: false,
 		peerId: "reviewer-2",
@@ -45,7 +45,6 @@ async function fixture(): Promise<{
 			tools: ["read"],
 			spawns: [],
 			skills: [],
-			readMode: "summary",
 		},
 		effort: "hi",
 		enableIrc: true,
@@ -53,7 +52,6 @@ async function fixture(): Promise<{
 		thinkingLevel: parseConfiguredThinkingLevel("high")!,
 		maxRuntimeMs: 60_000,
 		outputSchema: null,
-		planReference: null,
 		workspaceRoots: [root],
 	};
 	const encoded = encodeExternalSubagentProfile(profile);

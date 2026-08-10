@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TaskTool, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskService, taskSchema } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 // Contract: the single-spawn schema (`task.batch: false`; the exported
 // `taskSchema` instance) carries no batch fields while accepting a caller
@@ -69,8 +69,8 @@ describe("task spawn validation", () => {
 
 	async function executeText(params: unknown): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [], projectAgentsDir: null });
-		const tool = await TaskTool.create(createSession());
-		const result = await tool.execute("tool-call", params);
+		const tool = await TaskService.create(createSession());
+		const result = await tool.spawn("tool-call", params);
 		return result.content.find(part => part.type === "text")?.text ?? "";
 	}
 

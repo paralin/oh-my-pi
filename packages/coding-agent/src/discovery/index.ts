@@ -18,13 +18,10 @@ import "../capability/skill";
 import "../capability/slash-command";
 import "../capability/ssh";
 import "../capability/system-prompt";
-import "../capability/tool";
 // Import providers (each registers itself on import)
-import "./agent-plugins";
 import "./agents-md";
 import "./builtin";
 import "./builtin-defaults";
-import "./aperture-defaults";
 import "./claude";
 import "./claude-plugins";
 import "./cline";
@@ -78,6 +75,5 @@ export type { Skill, SkillFrontmatter } from "../capability/skill";
 export type { SlashCommand } from "../capability/slash-command";
 export type { SSHHost } from "../capability/ssh";
 export type { SystemPrompt } from "../capability/system-prompt";
-export type { CustomTool } from "../capability/tool";
 // Re-export types
 export type * from "../capability/types";

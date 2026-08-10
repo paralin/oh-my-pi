@@ -14,8 +14,8 @@ export interface ObservableSession {
 	/**
 	 * Spawn runs as a detached background job (parent turn not blocked on it).
 	 * The anchored subagent HUD only lists detached spawns: sync task spawns
-	 * and eval `agent()` spawns are already rendered live by their own inline
-	 * tool block / eval cell.
+	 * and synchronous task spawns are already rendered live by their own inline
+	 * tool block.
 	 */
 	detached?: boolean;
 	index?: number;

@@ -1,8 +1,3 @@
-import { $which } from "@oh-my-pi/pi-utils";
-
-/** Portable command that rejects credential prompts without assuming an FHS layout. */
-export const REJECT_PROMPT_COMMAND = $which("false") ?? "false";
-
 export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	// Disable pagers so commands don't block on interactive views.
 	PAGER: "cat",
@@ -18,8 +13,9 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	AWS_PAGER: "",
 	HOMEBREW_PAGER: "cat",
 	LESS: "FRX",
-	// Disable terminal features that can block the process.
+	// Disable terminal features and macOS shell-session bookkeeping.
 	TERM: "dumb",
+	SHELL_SESSIONS_DISABLE: "1",
 	NO_COLOR: "1",
 	PYTHONUNBUFFERED: "1",
 	// Disable editor and terminal credential prompts.
@@ -27,9 +23,8 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	VISUAL: "true",
 	EDITOR: "true",
 	GIT_TERMINAL_PROMPT: "0",
-	SSH_ASKPASS: REJECT_PROMPT_COMMAND,
-	CI: "true",
-	AGENT: "1",
+	SSH_ASKPASS: "/usr/bin/false",
+	CI: "1",
 	// Package manager defaults for unattended execution.
 	npm_config_yes: "true",
 	npm_config_update_notifier: "false",
@@ -101,28 +96,17 @@ function hasEnvGroupValue(
 	return false;
 }
 
-/** Copy of the base env with `CI` removed, for the `PI_BASH_NO_CI` opt-out. */
-function withoutCI(env: Readonly<Record<string, string>>): Record<string, string> {
-	const { CI: _ci, ...rest } = env;
-	return rest;
-}
-
 /** Builds the per-command environment for non-interactive child processes. */
 export function buildNonInteractiveEnv(
 	overrides?: Record<string, string>,
 	baseEnv: Record<string, string | undefined> = Bun.env,
 	platform: NodeJS.Platform = process.platform,
 ): Record<string, string> {
-	// `PI_BASH_NO_CI` (and its legacy alias) opts out of the automatic `CI=true`
-	// injection. Mirrors the session-env gate in `procmgr.ts` so the opt-out
-	// reaches the per-command env, which otherwise overrides the session value.
-	const base =
-		baseEnv.PI_BASH_NO_CI || baseEnv.CLAUDE_BASH_NO_CI ? withoutCI(NON_INTERACTIVE_ENV) : NON_INTERACTIVE_ENV;
 	if (platform !== "win32") {
-		return overrides ? { ...base, ...overrides } : base;
+		return overrides ? { ...NON_INTERACTIVE_ENV, ...overrides } : NON_INTERACTIVE_ENV;
 	}
 
-	const env: Record<string, string> = { ...base };
+	const env: Record<string, string> = { ...NON_INTERACTIVE_ENV };
 	for (const group of WINDOWS_UTF8_ENV_DEFAULT_GROUPS) {
 		if (hasEnvGroupValue(baseEnv, group, platform) || hasEnvGroupValue(overrides, group, platform)) {
 			continue;

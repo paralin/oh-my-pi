@@ -10,7 +10,6 @@
  */
 import { describe, expect, it } from "bun:test";
 import { formatSessionHistoryMarkdown } from "@oh-my-pi/pi-coding-agent/session/session-history-format";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 function buildMessages(): unknown[] {
 	return [
@@ -230,56 +229,6 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).not.toContain("→ ast_edit(packages/coding-agent/src/**/*.ts)");
 	});
 
-	it("renders tool intent comments immediately before tool call lines when includeToolIntent is true", () => {
-		const messages = [
-			{
-				role: "assistant",
-				content: [
-					{
-						type: "toolCall",
-						id: "tc-intent",
-						name: "read",
-						arguments: { path: "src/config.ts", [INTENT_FIELD]: "reading config file" },
-					},
-					{
-						type: "toolCall",
-						id: "tc-long-intent",
-						name: "read",
-						arguments: {
-							path: "src/config.ts",
-							[INTENT_FIELD]:
-								"reading config file with a very very long and descriptive intent that will exceed the maximum length limit of eighty characters",
-						},
-					},
-				],
-			},
-			{
-				role: "toolResult",
-				toolCallId: "tc-intent",
-				toolName: "read",
-				content: [{ type: "text", text: "ok" }],
-				isError: false,
-			},
-			{
-				role: "toolResult",
-				toolCallId: "tc-long-intent",
-				toolName: "read",
-				content: [{ type: "text", text: "ok" }],
-				isError: false,
-			},
-		];
-
-		const outputWithIntent = formatSessionHistoryMarkdown(messages, { includeToolIntent: true });
-		expect(outputWithIntent).toContain("// reading config file\n→ read(src/config.ts) ⇒ ok · 1 line");
-		// The long intent should be flattened to one line and truncated to 80 characters (including ellipsis).
-		expect(outputWithIntent).toContain(
-			"// reading config file with a very very long and descriptive intent that will exce…\n→ read(src/config.ts) ⇒ ok · 1 line",
-		);
-
-		const outputWithoutIntent = formatSessionHistoryMarkdown(messages);
-		expect(outputWithoutIntent).not.toContain("// reading config file");
-		expect(outputWithoutIntent).toContain("→ read(src/config.ts) ⇒ ok · 1 line");
-	});
 	it("summarizes advise tool calls by their note and severity", () => {
 		const messages = [
 			{

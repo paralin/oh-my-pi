@@ -55,8 +55,15 @@ export class PermanentIrcDeliveryError extends Error {
 	}
 }
 
-interface IrcWaiter {
+export interface IrcMessageFilter {
 	from?: string;
+	fromAny?: ReadonlySet<string>;
+	replyTo?: string;
+}
+
+export type IrcOutboundMessage = Omit<IrcMessage, "id" | "ts"> & Partial<Pick<IrcMessage, "id" | "ts">>;
+
+interface IrcWaiter extends IrcMessageFilter {
 	resolve: (msg: IrcMessage) => void;
 	cancel: () => void;
 }
@@ -116,10 +123,10 @@ export class IrcBus {
 	 * incoming card, so relaying the sibling legs would duplicate it.
 	 */
 	async send(
-		msg: Omit<IrcMessage, "id" | "ts">,
+		msg: IrcOutboundMessage,
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
-		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		const message: IrcMessage = { ...msg, id: msg.id ?? Snowflake.next(), ts: msg.ts ?? Date.now() };
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
@@ -180,7 +187,7 @@ export class IrcBus {
 		// A pending `wait` from the recipient consumes the message directly —
 		// it is returned from their irc tool call and never hits the inbox or
 		// the session injection path.
-		const waiter = this.#takeMatchingWaiter(message.to, message.from);
+		const waiter = this.#takeMatchingWaiter(message.to, message);
 		if (waiter) {
 			waiter.resolve(message);
 			if (!opts?.suppressRelay) this.#relayToMainUi(message);
@@ -218,7 +225,7 @@ export class IrcBus {
 	 */
 	async wait(
 		agentId: string,
-		filter: { from?: string },
+		filter: IrcMessageFilter,
 		timeoutMs: number,
 		signal?: AbortSignal,
 		options?: { drainPending?: boolean; liveness?: { registry: AgentRegistry; senderId: string } },
@@ -229,7 +236,7 @@ export class IrcBus {
 
 		if (options?.drainPending !== false) {
 			// Already-pending mail satisfies the wait without parking a waiter.
-			const pending = this.#takeFromMailbox(agentId, filter.from);
+			const pending = this.#takeFromMailbox(agentId, filter);
 			if (pending) return pending;
 		}
 
@@ -264,7 +271,7 @@ export class IrcBus {
 		};
 
 		const waiter: IrcWaiter = {
-			from: filter.from,
+			...filter,
 			resolve: msg => settle({ kind: "message", msg }),
 			cancel: () => cleanup(),
 		};
@@ -307,13 +314,31 @@ export class IrcBus {
 		return promise;
 	}
 
-	/** Drain (or peek) pending messages for `agentId`. */
-	inbox(agentId: string, opts?: { peek?: boolean }): IrcMessage[] {
+	/** Drain (or peek) pending messages for `agentId`, preserving unmatched entries. */
+	inbox(
+		agentId: string,
+		opts?: IrcMessageFilter & { peek?: boolean; limit?: number; ids?: ReadonlySet<string> },
+	): IrcMessage[] {
 		const mailbox = this.#mailboxes.get(agentId);
 		if (!mailbox || mailbox.length === 0) return [];
-		if (opts?.peek) return [...mailbox];
-		this.#mailboxes.delete(agentId);
-		return mailbox;
+		const selected: IrcMessage[] = [];
+		const remaining: IrcMessage[] = [];
+		const limit = opts?.limit ?? Number.POSITIVE_INFINITY;
+		for (const message of mailbox) {
+			const matches =
+				selected.length < limit &&
+				(opts?.from === undefined || message.from === opts.from) &&
+				(opts?.fromAny === undefined || opts.fromAny.has(message.from)) &&
+				(opts?.replyTo === undefined || message.replyTo === opts.replyTo) &&
+				(opts?.ids === undefined || opts.ids.has(message.id));
+			if (matches) selected.push(message);
+			if (!matches || opts?.peek) remaining.push(message);
+		}
+		if (!opts?.peek) {
+			if (remaining.length > 0) this.#mailboxes.set(agentId, remaining);
+			else this.#mailboxes.delete(agentId);
+		}
+		return selected;
 	}
 
 	unreadCount(agentId: string): number {
@@ -337,11 +362,16 @@ export class IrcBus {
 		}
 	}
 
-	/** Resolve the OLDEST waiter for `agentId` whose from-filter accepts `from`. */
-	#takeMatchingWaiter(agentId: string, from: string): IrcWaiter | undefined {
+	/** Resolve the oldest waiter whose sender and reply filters accept the message. */
+	#takeMatchingWaiter(agentId: string, message: IrcMessage): IrcWaiter | undefined {
 		const waiters = this.#waiters.get(agentId);
 		if (!waiters) return undefined;
-		const index = waiters.findIndex(waiter => !waiter.from || waiter.from === from);
+		const index = waiters.findIndex(
+			waiter =>
+				(waiter.from === undefined || waiter.from === message.from) &&
+				(waiter.fromAny === undefined || waiter.fromAny.has(message.from)) &&
+				(waiter.replyTo === undefined || waiter.replyTo === message.replyTo),
+		);
 		if (index === -1) return undefined;
 		const [waiter] = waiters.splice(index, 1);
 		if (waiters.length === 0) this.#waiters.delete(agentId);
@@ -356,10 +386,15 @@ export class IrcBus {
 		if (waiters.length === 0) this.#waiters.delete(agentId);
 	}
 
-	#takeFromMailbox(agentId: string, from?: string): IrcMessage | undefined {
+	#takeFromMailbox(agentId: string, filter: IrcMessageFilter): IrcMessage | undefined {
 		const mailbox = this.#mailboxes.get(agentId);
 		if (!mailbox) return undefined;
-		const index = from ? mailbox.findIndex(msg => msg.from === from) : 0;
+		const index = mailbox.findIndex(
+			message =>
+				(filter.from === undefined || message.from === filter.from) &&
+				(filter.fromAny === undefined || filter.fromAny.has(message.from)) &&
+				(filter.replyTo === undefined || message.replyTo === filter.replyTo),
+		);
 		if (index === -1 || mailbox.length === 0) return undefined;
 		const [message] = mailbox.splice(index, 1);
 		if (mailbox.length === 0) this.#mailboxes.delete(agentId);

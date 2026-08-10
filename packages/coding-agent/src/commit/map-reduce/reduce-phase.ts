@@ -6,9 +6,7 @@ import reduceSystemPrompt from "../../commit/prompts/reduce-system.md" with { ty
 import reduceUserPrompt from "../../commit/prompts/reduce-user.md" with { type: "text" };
 import type { ConventionalAnalysis, FileObservation } from "../../commit/types";
 import { toReasoningEffort } from "../../thinking";
-import { createConventionalAnalysisTool, parseConventionalAnalysisResponse } from "../shared-llm";
-
-const ReduceTool = createConventionalAnalysisTool("Synthesize file observations into a conventional commit analysis.");
+import { parseConventionalAnalysisResponse } from "../shared-llm";
 
 export interface ReducePhaseInput {
 	model: Model<Api>;
@@ -40,10 +38,9 @@ export async function runReducePhase({
 		{
 			systemPrompt: [prompt.render(reduceSystemPrompt)],
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-			tools: [ReduceTool],
 		},
 		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
 	);
 
-	return parseConventionalAnalysisResponse(response, ReduceTool);
+	return parseConventionalAnalysisResponse(response);
 }

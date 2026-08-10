@@ -10,7 +10,7 @@ import type { AgentSession } from "../../session/agent-session";
 import { BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE } from "../../session/messages";
 import { SessionManager } from "../../session/session-manager";
 import { sessionSidecarDir } from "../../session/session-paths";
-import { createMCPProxyTools, createSubagentSettings } from "../../task/executor";
+import { createSubagentSettings } from "../../task/executor";
 import { USER_TODO_EDIT_CUSTOM_TYPE } from "../../tools/todo";
 import type { InteractiveModeContext } from "../types";
 
@@ -76,7 +76,6 @@ export class TanCommandController {
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];
-		const toolNames = session.getActiveToolNames();
 		const modelRegistry = session.modelRegistry;
 		const ownerId = session.getAgentId() ?? MAIN_AGENT_ID;
 		const mcpManager = this.ctx.mcpManager;
@@ -99,7 +98,6 @@ export class TanCommandController {
 		// artifacts in place — no copy needed.
 		const sessionDir = sessionSidecarDir(parentFile);
 		const settings = createSubagentSettings(this.ctx.settings);
-		const customTools = mcpManager ? createMCPProxyTools(mcpManager) : undefined;
 		const enableLsp = this.ctx.settings.get("task.enableLsp") !== false;
 		const agentRegistry = AgentRegistry.global();
 		const cloneId = `Tan-${Snowflake.next()}`;
@@ -130,15 +128,14 @@ export class TanCommandController {
 							model,
 							thinkingLevel,
 							systemPrompt,
-							toolNames,
 							providerSessionId: `${parentSessionId}:tan:${Snowflake.next()}`,
 							providerPromptCacheKey: parentPromptCacheKey,
 							modelRegistry,
 							authStorage: modelRegistry.authStorage,
 							settings,
 							hasUI: false,
-							enableMCP: false,
-							customTools,
+							enableMCP: mcpManager !== undefined,
+							mcpManager,
 							enableLsp,
 							agentId: cloneId,
 							agentDisplayName: "tan",
@@ -152,7 +149,7 @@ export class TanCommandController {
 						clone.sessionManager?.appendSessionInit?.({
 							systemPrompt: clone.systemPrompt ? clone.systemPrompt.join("\n\n") : systemPrompt.join("\n\n"),
 							task: trimmedWork,
-							tools: clone.getActiveToolNames ? clone.getActiveToolNames() : toolNames,
+							tools: ["ipython"],
 						});
 						const abortClone = () => {
 							void clone?.abort();

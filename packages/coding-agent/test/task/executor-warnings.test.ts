@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	finalizeSubprocessOutput,
-	SUBAGENT_WARNING_MISSING_YIELD,
+	SUBAGENT_WARNING_MISSING_OUTPUT,
 	SUBAGENT_WARNING_NULL_YIELD,
 	SUBAGENT_WARNING_SCHEMA_OVERRIDDEN,
 } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -22,7 +22,7 @@ describe("subagent warning injection", () => {
 		expect(result.hasYield).toBe(true);
 	});
 
-	it("injects missing-submit warning when subagent exits cleanly without yield", () => {
+	it("injects missing-response warning when subagent exits cleanly without a terminal response", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "",
 			exitCode: 0,
@@ -33,11 +33,11 @@ describe("subagent warning injection", () => {
 			outputSchema: { properties: { ok: { type: "boolean" } } },
 		});
 
-		expect(result.rawOutput).toBe(SUBAGENT_WARNING_MISSING_YIELD);
+		expect(result.rawOutput).toBe(SUBAGENT_WARNING_MISSING_OUTPUT);
 		expect(result.hasYield).toBe(false);
 	});
 
-	it("does not inject missing-submit warning when fallback completion is recoverable", () => {
+	it("does not inject missing-response warning when fallback completion is recoverable", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: '{"data":{"ok":true}}',
 			exitCode: 0,
@@ -52,7 +52,7 @@ describe("subagent warning injection", () => {
 		expect(result.rawOutput.includes("SYSTEM WARNING")).toBe(false);
 	});
 
-	it("prefixes missing-submit warning on stop outputs", () => {
+	it("prefixes missing-response warning on stop outputs", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "agent stopped after writing analysis",
 			exitCode: 0,
@@ -63,10 +63,10 @@ describe("subagent warning injection", () => {
 			outputSchema: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] },
 		});
 
-		expect(result.rawOutput).toBe(`${SUBAGENT_WARNING_MISSING_YIELD}\n\nagent stopped after writing analysis`);
+		expect(result.rawOutput).toBe(`${SUBAGENT_WARNING_MISSING_OUTPUT}\n\nagent stopped after writing analysis`);
 	});
 
-	it("does not inject missing-submit warning when execution exits non-zero", () => {
+	it("does not inject missing-response warning when execution exits non-zero", () => {
 		const result = finalizeSubprocessOutput({
 			rawOutput: "",
 			exitCode: 1,

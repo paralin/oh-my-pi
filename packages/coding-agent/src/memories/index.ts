@@ -17,6 +17,7 @@ import readPathTemplate from "../prompts/memories/read-path.md" with { type: "te
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
 import stageOneSystemTemplate from "../prompts/memories/stage_one_system.md" with { type: "text" };
 import type { AgentSession } from "../session/agent-session";
+import { projectIpythonJournalSummaryMessage } from "../session/ipython-summary";
 import {
 	claimStage1Jobs,
 	clearMemoryData as clearMemoryDataInDb,
@@ -154,22 +155,19 @@ interface MemoryInstructionSession {
 	sessionManager: Pick<AgentSession["sessionManager"], "getSessionFile">;
 }
 
-interface MemoryToolDeveloperInstructionsSnapshot {
+interface MemoryDeveloperInstructionsSnapshot {
 	summary: string;
 	learned: string;
 }
 
-interface CachedMemoryToolDeveloperInstructions {
+interface CachedMemoryDeveloperInstructions {
 	sessionFile: string | undefined;
-	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined;
+	snapshot: MemoryDeveloperInstructionsSnapshot | undefined;
 	value: string | undefined;
 }
 
-const memoryToolDeveloperInstructionsBySession = new WeakMap<
-	MemoryInstructionSession,
-	CachedMemoryToolDeveloperInstructions
->();
-const memoryToolDeveloperInstructionsByRoot = new Map<string, MemoryToolDeveloperInstructionsSnapshot | undefined>();
+const memoryDeveloperInstructionsBySession = new WeakMap<MemoryInstructionSession, CachedMemoryDeveloperInstructions>();
+const memoryDeveloperInstructionsByRoot = new Map<string, MemoryDeveloperInstructionsSnapshot | undefined>();
 
 function getMemoryInstructionRoot(agentDir: string, settings: Settings): string {
 	return getMemoryRoot(agentDir, settings.getCwd());
@@ -179,10 +177,10 @@ function getMemoryInstructionSessionFile(session: MemoryInstructionSession): str
 	return session.sessionManager.getSessionFile() ?? undefined;
 }
 
-async function readMemoryToolDeveloperInstructionsSnapshot(
+async function readMemoryDeveloperInstructionsSnapshot(
 	agentDir: string,
 	settings: Settings,
-): Promise<MemoryToolDeveloperInstructionsSnapshot | undefined> {
+): Promise<MemoryDeveloperInstructionsSnapshot | undefined> {
 	const cfg = loadMemoryConfig(settings);
 	if (!cfg.enabled) return undefined;
 	const memoryRoot = getMemoryInstructionRoot(agentDir, settings);
@@ -198,8 +196,8 @@ async function readMemoryToolDeveloperInstructionsSnapshot(
 	return { summary, learned };
 }
 
-function renderMemoryToolDeveloperInstructionsSnapshot(
-	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
+function renderMemoryDeveloperInstructionsSnapshot(
+	snapshot: MemoryDeveloperInstructionsSnapshot | undefined,
 	settings: Settings,
 ): string | undefined {
 	if (!snapshot) return undefined;
@@ -227,14 +225,14 @@ function renderMemoryToolDeveloperInstructionsSnapshot(
 	});
 }
 
-function cacheMemoryToolDeveloperInstructions(
+function cacheMemoryDeveloperInstructions(
 	session: MemoryInstructionSession,
 	sessionFile: string | undefined,
-	snapshot: MemoryToolDeveloperInstructionsSnapshot | undefined,
+	snapshot: MemoryDeveloperInstructionsSnapshot | undefined,
 	settings: Settings,
 ): string | undefined {
-	const value = renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
-	memoryToolDeveloperInstructionsBySession.set(session, { sessionFile, snapshot, value });
+	const value = renderMemoryDeveloperInstructionsSnapshot(snapshot, settings);
+	memoryDeveloperInstructionsBySession.set(session, { sessionFile, snapshot, value });
 	return value;
 }
 
@@ -243,8 +241,8 @@ function cacheMemoryToolDeveloperInstructions(
  * changes that must affect the active conversation immediately, such as
  * `/memory clear`.
  */
-export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstructionSession | undefined): void {
-	if (session) memoryToolDeveloperInstructionsBySession.delete(session);
+export function clearMemoryDeveloperInstructionsCache(session: MemoryInstructionSession | undefined): void {
+	if (session) memoryDeveloperInstructionsBySession.delete(session);
 }
 
 /**
@@ -255,42 +253,42 @@ export function clearMemoryToolDeveloperInstructionsCache(session: MemoryInstruc
  * because a `learn` call racing with startup belongs to the next session's
  * memory prompt, not the active prompt-cache prefix.
  */
-export async function refreshMemoryToolDeveloperInstructionsCacheAfterStartup(
+export async function refreshMemoryDeveloperInstructionsCacheAfterStartup(
 	session: MemoryInstructionSession,
 	agentDir: string,
 	settings: Settings,
 ): Promise<void> {
 	const sessionFile = getMemoryInstructionSessionFile(session);
-	const cached = memoryToolDeveloperInstructionsBySession.get(session);
-	const current = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
+	const cached = memoryDeveloperInstructionsBySession.get(session);
+	const current = await readMemoryDeveloperInstructionsSnapshot(agentDir, settings);
 	const root = getMemoryInstructionRoot(agentDir, settings);
-	const baseline = memoryToolDeveloperInstructionsByRoot.get(root);
+	const baseline = memoryDeveloperInstructionsByRoot.get(root);
 	const cachedLearned = cached && cached.sessionFile === sessionFile ? cached.snapshot?.learned : undefined;
 	const learned = cachedLearned ?? baseline?.learned ?? "";
 	const snapshot = current ? { summary: current.summary, learned } : undefined;
-	cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+	cacheMemoryDeveloperInstructions(session, sessionFile, snapshot, settings);
 }
 
 /**
  * Build memory usage instructions for prompt injection.
  */
-export async function buildMemoryToolDeveloperInstructions(
+export async function buildMemoryDeveloperInstructions(
 	agentDir: string,
 	settings: Settings,
 	session?: MemoryInstructionSession,
 ): Promise<string | undefined> {
 	if (!session) {
-		const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
-		memoryToolDeveloperInstructionsByRoot.set(getMemoryInstructionRoot(agentDir, settings), snapshot);
-		return renderMemoryToolDeveloperInstructionsSnapshot(snapshot, settings);
+		const snapshot = await readMemoryDeveloperInstructionsSnapshot(agentDir, settings);
+		memoryDeveloperInstructionsByRoot.set(getMemoryInstructionRoot(agentDir, settings), snapshot);
+		return renderMemoryDeveloperInstructionsSnapshot(snapshot, settings);
 	}
 
 	const sessionFile = getMemoryInstructionSessionFile(session);
-	const cached = memoryToolDeveloperInstructionsBySession.get(session);
+	const cached = memoryDeveloperInstructionsBySession.get(session);
 	if (cached && cached.sessionFile === sessionFile) return cached.value;
 
-	const snapshot = await readMemoryToolDeveloperInstructionsSnapshot(agentDir, settings);
-	return cacheMemoryToolDeveloperInstructions(session, sessionFile, snapshot, settings);
+	const snapshot = await readMemoryDeveloperInstructionsSnapshot(agentDir, settings);
+	return cacheMemoryDeveloperInstructions(session, sessionFile, snapshot, settings);
 }
 
 /**
@@ -337,7 +335,7 @@ async function runMemoryStartup(options: MemoryStartupOptions): Promise<void> {
 	if (!isMemoryStartupActive(options)) return;
 	await runPhase2(options);
 	if (!isMemoryStartupActive(options)) return;
-	await refreshMemoryToolDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
+	await refreshMemoryDeveloperInstructionsCacheAfterStartup(options.session, options.agentDir, options.settings);
 	if (!isMemoryStartupActive(options)) return;
 	await options.session.refreshBaseSystemPrompt?.();
 }
@@ -689,16 +687,7 @@ async function collectThreads(session: AgentSession, currentThreadId?: string): 
 
 function shouldPersistResponseItemForMemories(message: AgentMessage): boolean {
 	const role = (message as { role: string }).role;
-	if (role === "system" || role === "developer" || role === "user" || role === "assistant") {
-		return true;
-	}
-	if (role !== "toolResult") return false;
-	const toolName = (message as { toolName?: string }).toolName;
-	if (toolName === "bash" || toolName === "eval" || toolName === "read" || toolName === "grep") {
-		const text = extractMessageText(message);
-		return text.length > 0 && text.length <= 32_000;
-	}
-	return false;
+	return role === "system" || role === "developer" || role === "user" || role === "assistant";
 }
 
 function extractPersistableMessages(payload: string): AgentMessage[] {
@@ -712,7 +701,13 @@ function extractPersistableMessages(payload: string): AgentMessage[] {
 		const maybeMessage = entry.message;
 		if (!maybeMessage || typeof maybeMessage !== "object") continue;
 		const message = maybeMessage as AgentMessage;
-		if (shouldPersistResponseItemForMemories(message)) {
+		const projectedJournal = projectIpythonJournalSummaryMessage(message, 16 * 1024);
+		if (projectedJournal !== message) {
+			// Stage 1 may admit only a validated typed journal after the same bounded
+			// safe-text projection used by other non-provider consumers.
+			messages.push(projectedJournal);
+		} else if (shouldPersistResponseItemForMemories(message)) {
+			// Keep ordinary retained messages exactly as parsed from the rollout.
 			messages.push(message);
 		}
 	}
@@ -781,9 +776,9 @@ async function runStage1Job(options: {
 			return { kind: "failed", reason: "stage1 JSON schema validation failure" };
 		}
 
-		const rawMemory = redactSecrets(schemaOutput.raw_memory).trim();
-		const rolloutSummary = redactSecrets(schemaOutput.rollout_summary).trim();
-		const rolloutSlug = schemaOutput.rollout_slug === null ? null : redactSecrets(schemaOutput.rollout_slug).trim();
+		const rawMemory = schemaOutput.raw_memory.trim();
+		const rolloutSummary = schemaOutput.rollout_summary.trim();
+		const rolloutSlug = schemaOutput.rollout_slug === null ? null : schemaOutput.rollout_slug.trim();
 		if (!rawMemory || !rolloutSummary) {
 			return { kind: "no_output" };
 		}
@@ -912,12 +907,12 @@ async function runConsolidationModel(options: {
 	if (!parsed) throw new Error("phase2 JSON parse failure");
 	const schemaOutput = parseConsolidationOutputSchema(parsed);
 	if (!schemaOutput) throw new Error("phase2 JSON schema validation failure");
-	const memoryMd = redactSecrets(schemaOutput.memory_md).trim();
-	const memorySummary = redactSecrets(schemaOutput.memory_summary).trim();
+	const memoryMd = schemaOutput.memory_md.trim();
+	const memorySummary = schemaOutput.memory_summary.trim();
 	const skills = schemaOutput.skills
 		.map(item => {
 			const name = sanitizeSkillName(item.name.trim());
-			const content = redactSecrets(item.content ?? "").trim();
+			const content = (item.content ?? "").trim();
 			if (!name || !content) return null;
 			return {
 				name,
@@ -1121,25 +1116,6 @@ function hasExactKeys(value: Record<string, unknown>, expectedKeys: string[], al
 	return true;
 }
 
-function redactSecrets(input: string): string {
-	let out = input;
-	const patterns = [
-		/(?:sk|pk|rk|tok|key|secret|token|password)[-_A-Za-z0-9]{12,}/g,
-		/[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}/g,
-		/(?:AKIA|ASIA)[A-Z0-9]{16}/g,
-		// Common provider token prefixes (GitHub, npm, Slack, Google).
-		/(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{20,}/g,
-		/github_pat_[A-Za-z0-9_]{20,}/g,
-		/npm_[A-Za-z0-9]{30,}/g,
-		/xox[baprs]-[A-Za-z0-9-]{10,}/g,
-		/AIza[A-Za-z0-9_-]{30,}/g,
-	];
-	for (const pattern of patterns) {
-		out = out.replace(pattern, "[REDACTED]");
-	}
-	return out;
-}
-
 function sanitizeSkillName(name: string): string {
 	return name
 		.toLowerCase()
@@ -1171,7 +1147,7 @@ function sanitizeConsolidationSkillFiles(
 	for (const file of files) {
 		const relativePath = sanitizeSkillRelativePath(file.path);
 		if (!relativePath) continue;
-		const content = redactSecrets(file.content).trim();
+		const content = file.content.trim();
 		if (!content) continue;
 		sanitized.set(path.posix.join(bucket, relativePath), content);
 	}
@@ -1196,19 +1172,6 @@ function sanitizeSkillRelativePath(rawPath: string): string | undefined {
 		if (!/^[A-Za-z0-9._-]+$/.test(part)) return undefined;
 	}
 	return parts.join("/");
-}
-
-function extractMessageText(message: AgentMessage): string {
-	const content = (message as { content?: unknown }).content;
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map(item => {
-			if (item.type === "text") return item.text;
-			if (item.type === "toolCall") return `${item.toolName} ${JSON.stringify(item.arguments)}`;
-			return "";
-		})
-		.join("\n");
 }
 
 function truncateByApproxTokens(text: string, tokenLimit: number): string {
@@ -1275,7 +1238,7 @@ export function getMemoryRoot(agentDir: string, cwd: string): string {
  * Filename of the captured-lessons file under a project's memory root.
  *
  * Written by the `learn` tool via {@link saveLearnedLesson} and read back by
- * {@link buildMemoryToolDeveloperInstructions}. Deliberately distinct from the
+ * {@link buildMemoryDeveloperInstructions}. Deliberately distinct from the
  * consolidation artifacts (`MEMORY.md`, `memory_summary.md`, `skills/`) so a
  * consolidation pass never clobbers manually captured lessons.
  */
@@ -1309,12 +1272,11 @@ function boundChars(text: string, maxChars: number): string {
 }
 
 /**
- * Normalize one lesson field for storage: neutralize injection delimiters
- * FIRST, then redact secrets (so delimiter stripping can't reassemble a token
- * the redactor would have caught), then bound the length.
+ * Normalize one lesson field for storage: neutralize injection delimiters, then
+ * bound the length.
  */
 function normalizeLearnedText(text: string, maxChars: number): string {
-	return boundChars(redactSecrets(neutralizeInjection(text)).trim(), maxChars);
+	return boundChars(neutralizeInjection(text).trim(), maxChars);
 }
 
 /** Per-path write chains serializing `learned.md` read-modify-write. */
@@ -1322,8 +1284,8 @@ const learnedWriteChains = new Map<string, Promise<unknown>>();
 
 /**
  * Append one lesson to the project's `learned.md` (newest-first, deduped,
- * capped, secret-redacted, injection-neutralized). The file backs the `learn`
- * tool when `memory.backend` is `local`.
+ * capped, injection-neutralized). The file backs the `learn` tool when
+ * `memory.backend` is `local`.
  */
 export async function saveLearnedLesson(
 	agentDir: string,
@@ -1401,11 +1363,9 @@ async function readLearnedLessons(memoryRoot: string): Promise<string> {
 		return "";
 	}
 	if (!raw) return "";
-	// Neutralize delimiters THEN redact per line — mirrors the write path so a
-	// hand-edited line cannot reassemble a token after delimiter stripping.
 	return raw
 		.split("\n")
-		.map(line => redactSecrets(neutralizeInjection(line)))
+		.map(line => neutralizeInjection(line))
 		.join("\n");
 }
 

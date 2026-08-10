@@ -475,7 +475,7 @@ export class GoalRuntime {
 		});
 	}
 
-	async pauseGoal(): Promise<GoalModeState | undefined> {
+	async pauseGoal(reason?: string): Promise<GoalModeState | undefined> {
 		return await this.#withAccounting(async () => {
 			await this.#flushUsageLocked("suppressed");
 			const state = this.#getStateClone();
@@ -486,6 +486,7 @@ export class GoalRuntime {
 			if (state.goal.status === "active" || state.goal.status === "budget-limited") {
 				state.goal.status = "paused";
 			}
+			state.reason = reason?.trim() || undefined;
 			state.goal.updatedAt = this.#now();
 			this.#clearActiveAccounting();
 			this.#budgetReportedFor = undefined;

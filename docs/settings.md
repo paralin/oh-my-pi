@@ -98,7 +98,7 @@ built-in defaults  <-  global config  <-  project config  <-  CLI overlays  <-  
 
 From highest to lowest:
 
-1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--plan`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
+1. **Runtime overrides** — dedicated CLI flags and feature env vars applied in memory for the current process: `--model`, `--smol`, `--slow`, `--approval-mode`, `--auto-approve`/`--yolo`, `--hide-thinking`, `--advisor`, `--no-pty`, `--api-key`, and protocol-mode defaults. Never persisted.
 2. **CLI config overlays** — each `--config <file>`; later overlay files override earlier ones.
 3. **Project settings** — `<cwd>/.omp/settings.json` then `<cwd>/.omp/config.yml` (and contributions from other discovery providers at project level).
 4. **Global settings** — `~/.omp/agent/config.yml`.
@@ -114,10 +114,7 @@ Environment variables are **not** a single settings layer. Each is read by the f
 | ----------------------- | --------------------------- | ------------------------------------------------------------------------------------------------- |
 | `PI_SMOL_MODEL`         | `modelRoles.smol`           | Also exposed as `--smol`.                                                                         |
 | `PI_SLOW_MODEL`         | `modelRoles.slow`           | Also exposed as `--slow`.                                                                         |
-| `PI_PLAN_MODEL`         | `modelRoles.plan`           | Also exposed as `--plan`.                                                                         |
 | `PI_NO_PTY=1`           | (disables PTY bash)         | Equivalent to `--no-pty` for the process.                                                         |
-| `PI_PY`                 | `eval.py`                   | `PI_PY=0` disables the Python eval backend.                                                       |
-| `PI_JS`                 | `eval.js`                   | `PI_JS=0` disables the JavaScript eval backend.                                                   |
 | `PI_TINY_DEVICE`        | `providers.tinyModelDevice` | ONNX execution provider for local tiny models.                                                    |
 | `PI_TINY_DTYPE`         | `providers.tinyModelDtype`  | ONNX precision for local tiny models.                                                             |
 | `OMP_AUTH_BROKER_URL`   | `auth.broker.url`           | Env value takes precedence over config.                                                           |
@@ -143,49 +140,7 @@ theme:
 
 tools:
   approvalMode: write
-  approval:
-    bash: prompt
-    read: allow
 ```
-
-### Bash command approval patterns
-
-`tools.approval` sets default policy by tool name. For bash, you can add ordered command rules with `bash.patterns`; the first matching rule wins. Patterns support literal text plus `*` as a wildcard.
-
-```yaml
-tools:
-  approvalMode: write
-  approval:
-    bash: allow
-
-bash:
-  patterns:
-    - match: "git *"
-      approval: allow
-    - match: "rm -rf *"
-      approval: deny
-    - match: "*"
-      approval: allow
-```
-
-Valid rule approvals are `allow`, `prompt`, and `deny`. Critical bash commands still require confirmation unless a matching rule explicitly denies them; broad allow rules such as `match: "*"` do not bypass the critical-command guard.
-
-Matching is asymmetric so that rules mean what they appear to: `deny` and `prompt` rules fire when the glob matches the whole command **or any single segment** of a compound line (split on `&&`, `||`, `;`, `|`, a single `&`, subshells, and newlines), so `match: "rm -rf *"` still denies `cd /tmp && rm -rf build` and `sleep 1 & rm -rf build`. `allow` rules must match the **entire** command and never apply to a compound line, so a narrow allow such as `match: "git *"` cannot vouch for `git status && rm -rf /`.
-
-### Bash interceptor patterns
-
-`bashInterceptor` is separate from `bash.patterns`: it redirects Bash commands to dedicated tools rather than defining whether a command may execute. Enable it explicitly and configure regular-expression patterns with a replacement tool and a model-facing message:
-
-```yaml
-bashInterceptor:
-  enabled: true
-  patterns:
-    - pattern: '^\s*(cat|head|tail)\s+'
-      tool: read
-      message: "Use the read tool instead."
-```
-
-The named replacement tool must be available in the current session or the interceptor does not block the Bash call. For a detailed comparison of permission policy and dedicated-tool routing, including compound-command behavior and ordering, see [the Bash tool documentation](tools/bash.md#command-policy-and-dedicated-tool-routing).
 
 ### Worked example: global vs. project
 
@@ -193,18 +148,12 @@ The named replacement tool must be available in the current session or the inter
 # ~/.omp/agent/config.yml
 tools:
   approvalMode: write
-  approval:
-    bash: prompt
-    read: allow
 disabledProviders:
   - anthropic
   - openai
   - google
 
 # <repo>/.omp/config.yml
-tools:
-  approval:
-    bash: allow
 disabledProviders:
   - groq
 ```
@@ -214,9 +163,6 @@ Effective settings inside `<repo>`:
 ```yaml
 tools:
   approvalMode: write # kept from global (object deep-merge)
-  approval:
-    bash: allow # overridden by project
-    read: allow # kept from global
 disabledProviders:
   - groq # project array REPLACES the global array
 ```
@@ -236,8 +182,6 @@ modelRoles:
 
 tools:
   approvalMode: write
-  approval:
-    bash: prompt
 
 compaction:
   strategy: snapcompact
@@ -354,7 +298,7 @@ enabledModels:
 
 | Key                    | Type    | Default                     | Notes                                                                                                                                                                                                                                                                                                                                                                                                            |
 | ---------------------- | ------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `modelRoles`           | record  | `{}`                        | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`/`--plan`; configure the advisor with `modelRoles.advisor`. |
+| `modelRoles`           | record  | `{}`                        | Map of role name -> model id. Built-in roles: `default`, `smol`, `slow`, `vision`, `designer`, `commit`, `tiny`, `task`, `advisor`. The `tiny` role overrides the online model for lightweight background tasks (titles, memory, auto-thinking, unexpected-stop), else `@smol`. Per-role env/flags exist only for `--model`/`--smol`/`--slow`; configure the advisor with `modelRoles.advisor`. |
 | `modelRoleStorage`     | enum    | `global`                    | `global` saves model-selector role assignments in the active global/profile config; `project` saves only those role assignments in `<cwd>/.omp/config.yml`. Missing project roles fall back to global roles.                                                                                                                                                                                                     |
 | `modelTags`            | record  | `{}`                        | Custom role/tag metadata; can introduce additional roles.                                                                                                                                                                                                                                                                                                                                                        |
 | `modelProviderOrder`   | array   | `[]`                        | Preferred provider order when a model id is ambiguous.                                                                                                                                                                                                                                                                                                                                                           |
@@ -374,7 +318,7 @@ See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATC
 | Key                   | Type    | Default | Notes                                                                                                                                                |
 | --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
-| `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
+| `advisor.subagents`   | boolean | `false` | Also enable advisor runtimes for spawned IPython task subagents.                                                                                        |
 | `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
 | `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
 
@@ -478,37 +422,26 @@ providers:
 
 When the active model keeps failing (429s, quota walls, provider outages) and `retry.modelFallback` is on, the session picks the chain that owns the failing model, by specificity: an exact `provider/model-id` key, then a `provider/*` wildcard, then the current role's chain, then `default`. It skips models whose selectors are still cooling down and switches for the rest of the turn. Subagents get their own per-spawn chains when their agent definition lists multiple model patterns — the first resolvable pattern is primary and the rest become its fallbacks; there is no `agent:<name>` key in `fallbackChains`.
 
-### Tools and approvals
+### IPython approval and host capabilities
 
-```yaml
-tools:
-  format: auto
-  approvalMode: yolo # default
-  approval:
-    bash: prompt
-    edit: allow
-  maxTimeout: 0
-  intentTracing: true
-```
+Every model-facing request is an `ipython` cell. `tools.approvalMode` determines
+the session-wide behavior for a model-originated cell. OMP applies that decision once to
+the complete cell. The typed host APIs that a cell calls retain their own
+service authority and validation. See [IPython cell approval](./approval-mode.md)
+and [Persistent IPython runtime](./ipython.md).
 
-| Key                            | Type    | Default | Notes                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------------ | ------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tools.format`                 | enum    | `auto`  | Tool wire format: `auto`, `native`, `glm`, `hermes`, `kimi`, `xml`, `anthropic`, `deepseek`, `harmony`, `qwen3`, `gemini`, `gemma`, or `minimax`. `native` always uses provider-native tool calls. `auto` also uses native calls unless the selected model explicitly has `supportsTools: false`; then it selects the model-family owned dialect, falling back to GLM when no specific family dialect is known. Other values force that owned in-band dialect. `xml` is the [generic XML format](./toolconv/xml.md); `minimax` is the [MiniMax format](./toolconv/minimax.md). Applies on session start. See [GLM](./toolconv/glm-4.5.md), [Qwen3/Hermes](./toolconv/qwen3.md), [Kimi](./toolconv/kimi-k2.md), [Anthropic](./toolconv/anthropic.md), [DeepSeek](./toolconv/deepseek.md), [Harmony](./toolconv/harmony.md), [Gemini](./toolconv/gemini.md), and [Gemma](./toolconv/gemma.md). |
-| `tools.approvalMode`           | enum    | `yolo`  | `always-ask` (auto-approve read-only), `write` (auto-approve read + workspace-write), `yolo` (auto-approve all tiers). `--approval-mode` and `--auto-approve`/`--yolo` override per run.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| `tools.approval`               | record  | `{}`    | Per-tool policy keyed by tool name; each value is `allow`, `deny`, or `prompt`. e.g. `omp config set tools.approval '{"bash":"prompt"}'`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `tools.maxTimeout`             | number  | `0`     | Max tool runtime in seconds; `0` = no cap.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| `tools.intentTracing`          | boolean | `true`  | Record per-call intent strings.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `tools.outputMaxColumns`       | number  | `768`   | Per-line byte cap for streaming output; `0` disables.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `tools.artifactSpillThreshold` | number  | `50`    | KB of tool output above which output spills to an artifact.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| `tools.artifactHeadBytes`      | number  | `20`    | KB of head kept inline on spill; `0` = tail-only.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| `tools.artifactTailBytes`      | number  | `20`    | KB of tail kept inline on spill.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| `tools.artifactTailLines`      | number  | `500`   | Max tail lines kept inline on spill.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-
-Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `launch.enabled`, `eval.py`, `eval.js`, `glob.enabled`, `grep.enabled`, `fetch.enabled`, `browser.enabled`, `computer.enabled`, `astEdit.enabled`, `astGrep.enabled`, and `web_search.enabled`. The `inspect_image` tool is controlled by the tri-state `inspect_image.mode` (`auto`|`on`|`off`, default `auto`): `auto` exposes it only when the active model lacks native image input, and the `/vision` slash command overrides the mode per session.
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `tools.approvalMode` | enum | `yolo` | Session default for model-originated IPython cells. `--approval-mode` and `--auto-approve`/`--yolo` override the run. |
+| `tools.outputMaxColumns` | number | `768` | Per-line byte cap for streamed cell output; `0` disables it. |
+| `tools.artifactSpillThreshold` | number | `50` | KB of cell output above which OMP spills an artifact. |
+| `tools.artifactHeadBytes` | number | `20` | KB of head kept inline on spill; `0` keeps only the tail. |
+| `tools.artifactTailBytes` | number | `20` | KB of tail kept inline on spill. |
+| `tools.artifactTailLines` | number | `500` | Maximum tail lines kept inline on spill. |
 
 ### Window-scoped computer use
 
-The disabled-by-default `computer` essential tool captures and controls one real host window through native OS APIs. Numeric targets isolate an application without focusing it or moving the real pointer; the synthetic `desktop` target preserves the previous selected-display composite and global input behavior. It remains separate from `browser`, which manages Chromium/CDP tabs and structured page automation.
+The disabled-by-default `computer` host capability captures and controls one real host window through native OS APIs. Numeric targets isolate an application without focusing it or moving the real pointer; the synthetic `desktop` target preserves the previous selected-display composite and global input behavior. It remains separate from `browser`, which manages Chromium/CDP tabs and structured page automation.
 
 ```yaml
 computer:
@@ -520,86 +453,41 @@ computer:
 
 | Key                  | Type    | Default | Notes                                                                                                                                                                                                                                                        |
 | -------------------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `computer.enabled`   | boolean | `false` | Enable the window-aware computer function tool. Every result lists current numeric window ids plus `desktop`; the `/computer` slash command toggles the tool for the current session only.                                                                   |
+| `computer.enabled`   | boolean | `false` | Enable the window-aware computer host capability. Every result lists current numeric window ids plus `desktop`; the `/computer` slash command toggles the capability for the current session only.                                                                   |
 | `computer.display`   | string  | `all`   | Controls the `desktop` target only: composite all active displays, or use one numeric display ID.                                                                                                                                                            |
 | `computer.maxWidth`  | number  | `3840`  | Maximum composite screenshot width in pixels. Image transports that cannot preserve original detail, including GitHub Copilot Responses and xAI OAuth, cap the effective width at `1280`; Claude-family models use the same cap as a compatibility fallback. |
 | `computer.maxHeight` | number  | `2400`  | Maximum composite screenshot height in pixels. Those coordinate-safe transports cap the effective height at `896`; other models retain the configured limit.                                                                                                 |
 
-Computer settings are captured when the desktop controller is created. A model switch that crosses the coordinate-safe sizing boundary recreates the controller and resnapshots those settings; changing config alone does not, so start a new session after a settings change. Every call must name `desktop` or a numeric id from the preceding window list. Switching targets invalidates the prior coordinate frame, so capture the new target before pointer input. Before enabling input, configure `tools.approvalMode` or `tools.approval.computer` and grant platform permissions. See [Window-scoped computer use](computer-use.md).
+Computer settings are captured when the desktop controller is created. A model switch that crosses the coordinate-safe sizing boundary recreates the controller and resnapshots those settings; changing config alone does not, so start a new session after a settings change. Every call must name `desktop` or a numeric id from the preceding window list. Switching targets invalidates the prior coordinate frame, so capture the new target before pointer input. Before enabling input, configure IPython cell approval and grant platform permissions. See [Window-scoped computer use](computer-use.md).
 
-### Shell, eval, and LSP
+### Persistent IPython and host services
 
-```yaml
-bash:
-  enabled: true
-  autoBackground:
-    enabled: false
-    thresholdMs: 60000
+OMP provisions the persistent IPython runtime for every session. There is no
+per-language execution selector or provider function filter. Use Python and
+`%%bash` cells for local work; call `omp.code` for host-owned language
+intelligence and the other typed `omp.*` domains for host services. See
+[Persistent IPython runtime](./ipython.md).
 
-eval:
-  py: true
-  js: true
+### Files and editing
 
-python:
-  kernelMode: session # session, per-call
-  interpreter: ""
-
-lsp:
-  enabled: true
-  lazy: true
-  diagnosticsOnWrite: true
-  diagnosticsOnEdit: false
-  formatOnWrite: false
-```
-
-| Key                               | Type    | Default   | Notes                                                                                                                                                       |
-| --------------------------------- | ------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bash.enabled`                    | boolean | `true`    | Enable the bash tool.                                                                                                                                       |
-| `launch.enabled`                  | boolean | `true`    | Enable the launch tool for shared long-running project processes.                                                                                           |
-| `bash.autoBackground.enabled`     | boolean | `false`   | Auto-background long-running commands.                                                                                                                      |
-| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
-| `eval.py`                         | boolean | `true`    | Python eval backend. `PI_PY=0` disables for the process.                                                                                                    |
-| `eval.js`                         | boolean | `true`    | JavaScript eval backend. `PI_JS=0` disables for the process.                                                                                                |
-| `python.kernelMode`               | enum    | `session` | `session` (persistent kernel) or `per-call`.                                                                                                                |
-| `python.interpreter`              | string  | `""`      | Path to a Python interpreter; empty = auto-detect.                                                                                                          |
-| `lsp.enabled`                     | boolean | `true`    | Language-server integration. `--no-lsp` disables for the run.                                                                                               |
-| `lsp.lazy`                        | boolean | `true`    | Start servers on demand.                                                                                                                                    |
-| `lsp.shared`                      | boolean | `true`    | Share one language server per project across local `omp` processes through the daemon broker; falls back to private servers when the broker is unavailable. |
-| `lsp.diagnosticsOnWrite`          | boolean | `true`    | Run diagnostics after a write.                                                                                                                              |
-| `lsp.diagnosticsOnEdit`           | boolean | `false`   | Run diagnostics after an edit.                                                                                                                              |
-| `lsp.formatOnWrite`               | boolean | `false`   | Format files on write.                                                                                                                                      |
-| `lsp.diagnosticsDeduplicate`      | boolean | `true`    | Collapse duplicate diagnostics.                                                                                                                             |
-| `shellPath`                       | string  | _(unset)_ | Override the shell binary used by bash.                                                                                                                     |
-
-### Files: editing and reading
+Use Python filesystem libraries and `%%bash` for ordinary model work. The
+focused `edit` Python skill provides exact single-occurrence replacement, and
+`omp.code` provides host-owned language intelligence. The retained `omp read`
+CLI uses these presentation defaults:
 
 ```yaml
-edit:
-  mode: hashline # apply_patch, hashline, patch, replace
-  fuzzyMatch: true
-  fuzzyThreshold: 0.95
-  blockAutoGenerated: true
-
+readLineNumbers: false
 read:
   defaultLimit: 300
-  toolResultPreview: false
-  summarize:
-    enabled: true
-    prose: false
 ```
 
-| Key                       | Type    | Default    | Notes                                             |
-| ------------------------- | ------- | ---------- | ------------------------------------------------- |
-| `edit.mode`               | enum    | `hashline` | `apply_patch`, `hashline`, `patch`, `replace`.    |
-| `edit.fuzzyMatch`         | boolean | `true`     | Allow fuzzy anchor matching.                      |
-| `edit.fuzzyThreshold`     | number  | `0.95`     | Similarity threshold for fuzzy matching.          |
-| `edit.blockAutoGenerated` | boolean | `true`     | Refuse to edit generated/lockfile-like files.     |
-| `edit.streamingAbort`     | boolean | `false`    | Abort on streaming edit mismatch.                 |
-| `read.defaultLimit`       | number  | `300`      | Default line count for `read` without a selector. |
-| `read.summarize.enabled`  | boolean | `true`     | Structural summaries for code reads.              |
-| `read.summarize.prose`    | boolean | `false`    | Summarize prose files too.                        |
-| `read.toolResultPreview`  | boolean | `false`    | Inline preview of tool results.                   |
-| `readLineNumbers`         | boolean | `false`    | Show plain line numbers.                          |
+| Key                 | Type    | Default | Notes                                      |
+| ------------------- | ------- | ------- | ------------------------------------------ |
+| `readLineNumbers`   | boolean | `false` | Show line numbers in `omp read` output.    |
+| `read.defaultLimit` | number  | `300`   | Default line limit for the `omp read` CLI. |
+
+The removed provider edit/read tools have no `edit.*`, `read.summarize.*`, or
+`read.toolResultPreview` settings.
 
 ### Context, compaction, and memory
 
@@ -632,9 +520,9 @@ memory:
 | `compaction.remoteEnabled`    | boolean | `true`        | Allow remote compaction service.                                                                                                                                                                                                          |
 | `compaction.autoContinue`     | boolean | `true`        | Continue automatically after compaction.                                                                                                                                                                                                  |
 | `memory.backend`              | enum    | `off`         | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
-| `autolearn.enabled`           | boolean | `false`       | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
-| `autolearn.autoContinue`      | boolean | `false`       | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |
-| `autolearn.minToolCalls`      | number  | `5`           | Only nudge after a turn that used at least this many tools.                                                                                                                                                                               |
+| `autolearn.enabled`      | boolean | `false` | Enables `omp.long_term_memory.learn` for configured `local`, `hindsight`, or `mnemopi` memory. It can persist a lesson and report an optional managed-skill outcome without adding provider tools. |
+| `autolearn.autoContinue` | boolean | `false` | Legacy capture-turn setting. It does not schedule an IPython capture turn.                                                                                           |
+| `autolearn.minToolCalls` | number  | `5`     | Legacy capture threshold. It does not affect the fixed IPython provider interface.                                                                                   |
 
 `compaction` has additional tuning keys (idle compaction, supersede/drop heuristics) visible in `omp config list`. See [Compaction](./compaction.md) for the full strategy reference.
 
@@ -747,13 +635,12 @@ searxng:
 | `searxng.token`                     | string  | _(unset)_ | SearXNG token; also `searxng.basicUsername`/`searxng.basicPassword`/`searxng.categories`/`searxng.language`.                                                                                                                                                                                                                                                                                                                           |
 | `auth.broker.url`                   | string  | _(unset)_ | Auth-broker URL. Overridden by `OMP_AUTH_BROKER_URL`.                                                                                                                                                                                                                                                                                                                                                                                  |
 | `auth.broker.token`                 | string  | _(unset)_ | Auth-broker token. Overridden by `OMP_AUTH_BROKER_TOKEN`.                                                                                                                                                                                                                                                                                                                                                                              |
-| `secrets.enabled`                   | boolean | `false`   | Enable configured secret obfuscation and built-in credential-shaped token redaction before provider requests. See [Secret obfuscation](./secrets.md).                                                                                                                                                                                                                                                                                  |
 
 Provider credentials and custom model definitions are configured separately — see [Providers](./providers.md) and [Models](./models.md).
 
 ### Other groups
 
-`omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends), and `bashInterceptor.*`. Each follows the same type/default rules shown above.
+`omp config list` exposes many more grouped settings, including: `task.*` (subagent concurrency, isolation, model overrides), `skills.*` and `commands.*` (discovery toggles), `mcp.*`, `github.*`, `async.*`, `goal.*`, `loop.*`, `todo.*`, `magicKeywords.*`, `ttsr.*` (time-traveling stream rules), `display.*`, `startup.*`, `share.*`, `collab.*`, `stt.*`/`tts.*`, `memories.*`/`hindsight.*`/`mnemopi.*` (memory backends). Each follows the same type/default rules shown above.
 
 ## Legacy migration
 
@@ -774,7 +661,6 @@ Applied whenever raw settings are loaded (global, project, overlays, and runtime
 
 | Old                                                                      | New                                                                                                          |
 | ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| `inspect_image.enabled` boolean                                          | `inspect_image.mode` (`true` → `on`, `false` → `off`)                                                        |
 | `queueMode`                                                              | `steeringMode`                                                                                               |
 | `ask.timeout` in milliseconds (value `> 1000`)                           | seconds (divided by 1000)                                                                                    |
 | flat `theme: "<name>"` string                                            | `theme.dark` / `theme.light` (slot chosen by luminance; built-in `light`/`dark` are dropped to use defaults) |
@@ -818,7 +704,7 @@ Arrays replace; they do not append. If a project sets `disabledProviders`, `enab
 
 ### An environment variable beats my config
 
-Some settings (model roles, eval backends, tiny-model device/precision, auth broker, PTY) are overridable by env vars or CLI flags for per-machine convenience, and those take precedence over `config.yml`. Unset the variable or drop the flag to let the persisted value win. See [Environment overrides](#environment-overrides) and [Environment variables](./environment-variables.md).
+Some settings (model roles, tiny-model device/precision, auth broker, and PTY) are overridable by env vars or CLI flags for per-machine convenience, and those take precedence over `config.yml`. Unset the variable or drop the flag to let the persisted value win. See [Environment overrides](#environment-overrides) and [Environment variables](./environment-variables.md).
 
 ### `omp config set <key>` says "Unknown setting"
 

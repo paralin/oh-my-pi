@@ -259,14 +259,6 @@ async function readTextViaPowerShell(): Promise<string | null> {
 	}
 }
 
-async function readTextFromX11Clipboard(): Promise<string> {
-	try {
-		return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
-	} catch {
-		return await spawnCapture(["xsel", "--clipboard", "--output"]);
-	}
-}
-
 /**
  * Read an image from the system clipboard.
  *
@@ -348,11 +340,11 @@ export async function readTextFromClipboard(): Promise<string> {
 				return await spawnCapture(["wl-paste", "--type", "text/plain", "--no-newline"]);
 			} catch {
 				if (hasX11Display) {
-					return await readTextFromX11Clipboard();
+					return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
 				}
 			}
 		} else if (hasX11Display) {
-			return await readTextFromX11Clipboard();
+			return await spawnCapture(["xclip", "-selection", "clipboard", "-o"]);
 		}
 	} catch (error) {
 		logger.warn("clipboard: failed to read clipboard text", { error: String(error) });

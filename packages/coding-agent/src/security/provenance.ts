@@ -51,20 +51,22 @@ export function redactPrivateSecurityMetadata(value: unknown): unknown {
 	return result;
 }
 
+export function createPublicSecurityPlan(plan: SecurityScan["plan"]): unknown {
+	if (!plan) return undefined;
+	const publicPlan = redactPrivateSecurityMetadata(plan) as Record<string, unknown>;
+	return {
+		...publicPlan,
+		authorization: {
+			provider: plan.account.provider,
+			credentialAffinity: createSecurityCredentialAffinity(plan.account),
+		},
+	};
+}
+
 export function createPublicSecurityScan(scan: SecurityScan, options: { includePlan?: boolean } = {}): unknown {
-	const plan =
-		options.includePlan && scan.plan
-			? {
-					...scan.plan,
-					account: {
-						provider: scan.plan.account.provider,
-						credentialAffinity: createSecurityCredentialAffinity(scan.plan.account),
-					},
-				}
-			: undefined;
 	return redactPrivateSecurityMetadata({
 		...scan,
-		plan,
+		plan: options.includePlan ? createPublicSecurityPlan(scan.plan) : undefined,
 	});
 }
 

@@ -144,4 +144,16 @@ describe("AdvisorEmissionGuard", () => {
 		}
 		expect(accepted).toEqual(["Concrete-but-repeated nit: x"]);
 	});
+
+	it("allows a real severity escalation across updates", () => {
+		const guard = new AdvisorEmissionGuard();
+
+		expect(guard.accept("The same concrete risk.", "nit")).toBe(true);
+		guard.beginUpdate();
+		expect(guard.accept("The same concrete risk.", "concern")).toBe(true);
+		guard.beginUpdate();
+		expect(guard.accept("The same concrete risk.", "blocker")).toBe(true);
+		guard.beginUpdate();
+		expect(guard.accept("The same concrete risk.", "concern")).toBe(false);
+	});
 });

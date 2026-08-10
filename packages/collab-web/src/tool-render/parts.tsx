@@ -1,5 +1,5 @@
 /**
- * Shared UI primitives for tool renderers. Every renderer composes these
+ * Shared UI primitives for transcript cards. The generic renderer composes these
  * instead of inventing new CSS — see tool-render.css for the `tv-` classes.
  */
 import type { ReactNode } from "react";

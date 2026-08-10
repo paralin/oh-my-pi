@@ -5,7 +5,7 @@
  * the parent already paid for), but each session MUST rebuild its own
  * `Extension` instances so factories see the subagent's `ExtensionAPI`
  * (cwd, eventBus, runtime). Forwarding the parent's loaded Extension
- * instances would have tools/handlers/commands close over the parent's
+ * instances would have handlers/commands close over the parent's
  * `cwd` and event bus — wrong for isolated tasks.
  *
  * Pins down `loadExtensions()` so the SDK can rely on it returning fresh
@@ -32,12 +32,7 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 			extPath,
 			[
 				"export default function (api) {",
-				"  api.registerTool({",
-				"    name: 'tag',",
-				"    description: 'binding probe',",
-				"    parameters: api.typebox.Type.Object({}),",
-				"    async execute() { return { content: [{ type: 'text', text: '' }] }; },",
-				"  });",
+				'  api.registerCommand("tag", { handler: async () => {} });',
 				"  Object.defineProperty(globalThis, '__lastExtBinding', {",
 				"    value: { cwd: api.exec.toString().includes('cwd') ? api : api, events: api.events },",
 				"    writable: true,",
@@ -73,7 +68,7 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 
 		// Distinct Extension instances — the subagent must never share with parent.
 		expect(subagent.extensions[0]).not.toBe(parent.extensions[0]);
-		// Distinct ExtensionRuntime instances — flagValues and pendingProviderRegistrations
+		// Distinct ExtensionRuntime instances — flag values and pending provider registrations
 		// MUST NOT be shared, or per-session flags/registrations bleed across.
 		expect(subagent.runtime).not.toBe(parent.runtime);
 

@@ -4,7 +4,6 @@
  * Shows name, description, origin, status, and kind-specific preview.
  */
 import * as os from "node:os";
-import { arkToWireSchema, isArkSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { type Component, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
@@ -83,9 +82,6 @@ export class InspectorPanel implements Component {
 			case "context-file":
 				content = this.#renderFilePreview(ext.raw, width);
 				break;
-			case "tool":
-				content = this.#renderToolArgs(ext.raw, width);
-				break;
 			case "skill":
 				content = this.#renderSkillContent(ext.raw, width);
 				break;
@@ -160,53 +156,6 @@ export class InspectorPanel implements Component {
 		}
 
 		return highlighted;
-	}
-
-	#renderToolArgs(raw: unknown, width: number): string[] {
-		const lines: string[] = [];
-		lines.push(theme.fg("muted", "Arguments:"));
-		lines.push(theme.fg("dim", theme.boxRound.horizontal.repeat(Math.min(width - 2, 40))));
-
-		try {
-			const tool = raw as { parameters?: unknown; inputSchema?: unknown };
-			const wire = (schema: unknown): unknown => (isArkSchema(schema) ? arkToWireSchema(schema) : schema);
-			const paramSchema = wire(tool.parameters) as Record<string, unknown> | undefined;
-			const inputSchema = wire(tool.inputSchema) as Record<string, unknown> | undefined;
-			const params = paramSchema?.properties || inputSchema?.properties || {};
-
-			if (Object.keys(params).length === 0) {
-				lines.push(theme.fg("dim", "  (no arguments)"));
-			} else {
-				const requiredValue = paramSchema?.required ?? inputSchema?.required;
-				const required = new Set(
-					Array.isArray(requiredValue)
-						? requiredValue.filter((value): value is string => typeof value === "string")
-						: [],
-				);
-
-				for (const [name, spec] of Object.entries(params)) {
-					const param = spec as any;
-					const type = param.type || "any";
-					const isRequired = required.has(name);
-					const defaultVal = param.default !== undefined ? `Default: ${param.default}` : null;
-
-					const nameCol = theme.fg("accent", name.padEnd(12));
-					const typeCol = theme.fg("muted", type.padEnd(10));
-					const reqCol = isRequired
-						? theme.fg("warning", "Required")
-						: defaultVal
-							? theme.fg("dim", defaultVal)
-							: theme.fg("dim", "Optional");
-
-					lines.push(`  ${nameCol} ${typeCol} ${reqCol}`);
-				}
-			}
-		} catch {
-			lines.push(theme.fg("dim", "  (unable to parse tool definition)"));
-		}
-
-		lines.push("");
-		return lines;
 	}
 
 	#renderSkillContent(raw: unknown, width: number): string[] {

@@ -4,8 +4,7 @@
  * - `dist/omp-browser-relay-extension.zip` — packaged extension for GH releases
  * - `../coding-agent/src/tools/browser/relay/extension-assets/*.txt` —
  *   generated text assets embedded into the omp CLI so `omp browser-relay
- *   install` works from the compiled binary (same committed-generated-output
- *   pattern as tool-views.generated.js). Re-run this script after touching
+ *   install` works from the compiled binary. Re-run this script after touching
  *   anything under `extension/` and commit the regenerated assets.
  *
  * Dependency-free on purpose: CI runs this without `bun install`.

@@ -15,8 +15,8 @@ import {
 	visibleUnits,
 } from "../src/modes/controllers/streaming-reveal";
 import { getEditorTheme, initTheme } from "../src/modes/theme/theme";
-import type { ToolSession } from "../src/tools";
-import { ReadTool } from "../src/tools/read";
+import type { ToolSession } from "../src/session/tool-session";
+import { ReadService } from "../src/tools/read";
 
 const ITERATIONS = 500;
 const WIDTH = 100;
@@ -270,7 +270,7 @@ try {
 
 // ── E4: tool read/parse redundancy ──────────────────────────────────────────
 //
-// E4 root cause: the read tool re-parses (tree-sitter `summarizeCode`, ~12-18ms
+// E4 root cause: the read service re-parses (tree-sitter `summarizeCode`, ~12-18ms
 // for a ~1500-line file) on every summary read of the same unchanged file. E4-ii
 // memoizes the parse per session keyed on the content hash of the freshly-read
 // bytes, so a repeat read of the same file reuses the parse (the file is still
@@ -296,10 +296,10 @@ try {
 			settings: Settings.isolated(),
 		}) as unknown as ToolSession;
 	const sameSession = mkSession();
-	const rt = new ReadTool(sameSession);
-	for (let i = 0; i < 3; i++) await rt.execute("warm", { path: file });
-	const repeatMs = await benchStepAsync(20, () => rt.execute("c", { path: file }));
-	const coldMs = await benchStepAsync(20, () => new ReadTool(mkSession()).execute("c", { path: file }));
+	const rt = new ReadService(sameSession);
+	for (let i = 0; i < 3; i++) await rt.read(file);
+	const repeatMs = await benchStepAsync(20, () => rt.read(file));
+	const coldMs = await benchStepAsync(20, () => new ReadService(mkSession()).read(file));
 	console.log(`  same-session repeat read: ${repeatMs.toFixed(3)}ms/call (memoized parse)`);
 	console.log(`  fresh-session each read:  ${coldMs.toFixed(3)}ms/call (cold parse)`);
 	fs.rmSync(dir, { recursive: true, force: true });

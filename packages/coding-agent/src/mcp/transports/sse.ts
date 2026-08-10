@@ -12,7 +12,6 @@ import type {
 import { toJsonRpcError } from "../../mcp/types";
 import { RequestIdAllocator } from "../request-id";
 import { createMCPTimeout, getNeverAbortSignal, resolveMCPTimeoutMs } from "../timeout";
-import { type MCPFetchInit, mcpFetch } from "./header-policy";
 
 interface MCPTimeoutOperation {
 	signal?: AbortSignal;
@@ -47,16 +46,6 @@ export class LegacySseTransport implements MCPTransport {
 		this.#config = config;
 	}
 
-	/** Fetch an endpoint with header precedence and origin policy. */
-	#fetch(url: string, init: MCPFetchInit, generated: Record<string, string>): Promise<Response> {
-		return mcpFetch(
-			url,
-			init,
-			{ generated, configured: this.#config.headers },
-			this.#config.headerPolicy === "origin-locked",
-		);
-	}
-
 	get connected(): boolean {
 		return this.#connected;
 	}
@@ -76,11 +65,14 @@ export class LegacySseTransport implements MCPTransport {
 		this.#sseConnection = connection;
 
 		try {
-			const response = await this.#fetch(
-				this.#config.url,
-				{ method: "GET", signal: operation.signal },
-				{ Accept: "text/event-stream" },
-			);
+			const response = await fetch(this.#config.url, {
+				method: "GET",
+				headers: {
+					Accept: "text/event-stream",
+					...this.#config.headers,
+				},
+				signal: operation.signal,
+			});
 
 			if (!response.ok) {
 				const text = await response.text();
@@ -294,12 +286,17 @@ export class LegacySseTransport implements MCPTransport {
 	): Promise<Response> {
 		const endpointUrl = this.#endpointUrl;
 		if (!endpointUrl) throw new Error("Transport not connected");
-		const generated: Record<string, string> = {
+		let headers: Record<string, string> = {
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
+			...this.#config.headers,
 		};
-		const payload = JSON.stringify(body);
-		let response = await this.#fetch(endpointUrl, { method: "POST", body: payload, signal }, generated);
+		let response = await fetch(endpointUrl, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+			signal,
+		});
 		const status = AIError.status(response);
 		if (!this.onAuthError || (status !== 401 && status !== 403)) return response;
 
@@ -307,7 +304,17 @@ export class LegacySseTransport implements MCPTransport {
 		if (!refreshedHeaders) return response;
 		await response.body?.cancel();
 		this.#config.headers = refreshedHeaders;
-		response = await this.#fetch(endpointUrl, { method: "POST", body: payload, signal }, generated);
+		headers = {
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+			...this.#config.headers,
+		};
+		response = await fetch(endpointUrl, {
+			method: "POST",
+			headers,
+			body: JSON.stringify(body),
+			signal,
+		});
 		return response;
 	}
 

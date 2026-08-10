@@ -8,7 +8,6 @@ import type { KeybindingsManager } from "../config/keybindings";
 import type { Settings } from "../config/settings";
 import type {
 	AutocompleteProviderFactory,
-	ExtensionCustomOptions,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionUISelectItem,
@@ -17,8 +16,8 @@ import type {
 } from "../extensibility/extensions";
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
+import type { LspStartupServerInfo } from "../lsp";
 import type { MCPManager } from "../mcp";
-import type { PlanApprovalDetails } from "../plan-mode/approved-plan";
 import type { AgentSession } from "../session/agent-session";
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
@@ -26,17 +25,14 @@ import type { HistoryStorage } from "../session/history-storage";
 import type { SessionContext } from "../session/session-context";
 import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
-import type { LspStartupServerInfo } from "../tools";
 import type { EventBus } from "../utils/event-bus";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import type { CustomEditor } from "./components/custom-editor";
-import type { EvalExecutionComponent } from "./components/eval-execution";
 import type { HookEditorComponent } from "./components/hook-editor";
 import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorOptions } from "./components/hook-selector";
 import type { StatusLineComponent } from "./components/status-line";
-import type { ToolExecutionHandle } from "./components/tool-execution";
 import type { TranscriptContainer } from "./components/transcript-container";
 import type { EventController } from "./controllers/event-controller";
 import type { LoopLimitRuntime } from "./loop-limit";
@@ -98,8 +94,6 @@ export interface RenderSessionContextOptions {
 	updateFooter?: boolean;
 	populateHistory?: boolean;
 	reuseSettledComponents?: boolean;
-	/** Tool calls whose existing live component remains the sole render owner across a rebuild. */
-	preservedLiveToolCallIds?: ReadonlySet<string>;
 }
 
 export interface InteractiveModeContext {
@@ -114,7 +108,6 @@ export interface InteractiveModeContext {
 	omfgContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
-	deferredCommandContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -136,7 +129,7 @@ export interface InteractiveModeContext {
 	focusParentSession(): Promise<void>;
 	/** Return the view to the main session (delegates to SessionFocusController.unfocus). */
 	unfocusSession(): Promise<void>;
-	/** Clear loader, transient HUD/pending containers, streaming state, and pending tools. */
+	/** Clear loader, transient HUD/pending containers, and streaming state. */
 	clearTransientSessionUi(): void;
 	settings: Settings;
 	keybindings: KeybindingsManager;
@@ -166,15 +159,13 @@ export interface InteractiveModeContext {
 	toolOutputExpanded: boolean;
 	hideToolActivity: boolean;
 	todoExpanded: boolean;
-	planModeEnabled: boolean;
-	vibeModeEnabled: boolean;
 	goalModeEnabled: boolean;
 	goalModePaused: boolean;
+	vibeModeEnabled: boolean;
 	loopModeEnabled: boolean;
 	loopModePaused: boolean;
-	loopPrompt?: string;
-	loopLimit?: LoopLimitRuntime;
-	planModePlanFilePath?: string;
+	loopPrompt: string | undefined;
+	loopLimit: LoopLimitRuntime | undefined;
 	hideThinkingBlock: boolean;
 	/**
 	 * Effective thinking-block visibility: true when hidden by user setting OR
@@ -190,12 +181,8 @@ export interface InteractiveModeContext {
 	compactionQueuedMessages: CompactionQueuedMessage[];
 	/** Settled user/assistant components reusable across post-compaction transcript rebuilds. */
 	transcriptMessageComponents: WeakMap<AgentMessage, Component>;
-	pendingTools: Map<string, ToolExecutionHandle>;
 	pendingBashComponents: BashExecutionComponent[];
 	bashComponent: BashExecutionComponent | undefined;
-	pendingPythonComponents: EvalExecutionComponent[];
-	pythonComponent: EvalExecutionComponent | undefined;
-	isPythonMode: boolean;
 	streamingComponent: AssistantMessageComponent | undefined;
 	streamingMessage: AssistantMessage | undefined;
 	/**
@@ -271,14 +258,13 @@ export interface InteractiveModeContext {
 	showError(message: string): void;
 	showPinnedError(message: string): void;
 	clearPinnedError(): void;
-	showWarning(message: string, options?: { hideWithToolActivity?: boolean }): void;
+	showWarning(message: string): void;
 	showNewVersionNotification(newVersion: string): void;
 	clearEditor(): void;
 	updatePendingMessagesDisplay(): void;
 	queueCompactionMessage(text: string, mode: "steer" | "followUp", images?: ImageContent[]): void;
 	flushCompactionQueue(options?: { willRetry?: boolean }): Promise<void>;
 	flushPendingBashComponents(): void;
-	flushPendingModelSwitch(): Promise<void>;
 	setWorkingMessage(message?: string): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
@@ -362,7 +348,6 @@ export interface InteractiveModeContext {
 	handleDropCommand(): Promise<void>;
 	handleForkCommand(): Promise<void>;
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void>;
-	handlePythonCommand(code: string, excludeFromContext?: boolean): Promise<void>;
 	handleMCPCommand(text: string): Promise<void>;
 	handleSSHCommand(text: string): Promise<void>;
 	handleCompactCommand(
@@ -444,36 +429,25 @@ export interface InteractiveModeContext {
 	toggleToolOutputExpansion(): void;
 	setToolsExpanded(expanded: boolean): void;
 	toggleThinkingBlockVisibility(): void;
-	handlePlanModeCommand(
-		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean>;
-	handleVibeModeCommand(
-		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean>;
-	handleGoalModeCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
-	handleGuidedGoalCommand(rest?: string, input?: Pick<SubmittedUserInput, "images" | "imageLinks">): Promise<boolean>;
+	openExternalEditor(): void;
+	registerExtensionShortcuts(): void;
+	handleVibeModeCommand(initialPrompt?: string): Promise<void>;
+	handleGoalModeCommand(rest?: string): Promise<void>;
+	handleGuidedGoalCommand(rest?: string): Promise<void>;
 	handleLoopCommand(args?: string): Promise<string | undefined>;
 	setLoopPrompt(prompt: string): void;
 	disableLoopMode(): void;
 	pauseLoop(): void;
-	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
-	openPlanReview(): Promise<void>;
 
 	// Hook UI methods
-	initHooksAndCustomTools(): Promise<void>;
+	initExtensions(): Promise<void>;
 	/**
 	 * The live `ExtensionUIContext` (picker/dialog primitives) used for tool
 	 * execution, `undefined` before hooks have initialized. `/tree` `ask`
 	 * re-answer (issue #5642) reuses it to drive a standalone
-	 * `AskTool.execute()` call.
+	 * structured-question request.
 	 */
 	getToolUIContext(): ExtensionUIContext | undefined;
-	emitCustomToolSessionEvent(
-		reason: "start" | "switch" | "branch" | "tree" | "shutdown",
-		previousSessionFile?: string,
-	): Promise<void>;
 	setHookWidget(key: string, content: ExtensionWidgetContent, options?: ExtensionWidgetOptions): void;
 	setHookStatus(key: string, text: string | undefined): void;
 	showHookSelector(
@@ -499,8 +473,7 @@ export interface InteractiveModeContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
-		options?: ExtensionCustomOptions,
+		options?: { overlay?: boolean },
 	): Promise<T>;
 	showExtensionError(extensionPath: string, error: string): void;
-	showToolError(toolName: string, error: string): void;
 }

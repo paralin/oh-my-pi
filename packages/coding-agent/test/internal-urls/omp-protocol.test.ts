@@ -9,16 +9,16 @@ describe("OmpProtocolHandler", () => {
 		const resource = await InternalUrlRouter.instance().resolve("omp://docs");
 
 		expect(resource.content).toContain("# Documentation");
-		expect(resource.content).toContain("tools/read.md");
+		expect(resource.content).toContain("ipython.md");
 	});
 
 	it("resolves docs-prefixed documentation paths", async () => {
 		const router = InternalUrlRouter.instance();
-		const direct = await router.resolve("omp://tools/read.md");
-		const prefixed = await router.resolve("omp://docs/tools/read.md");
+		const direct = await router.resolve("omp://ipython.md");
+		const prefixed = await router.resolve("omp://docs/ipython.md");
 
 		expect(prefixed.content).toBe(direct.content);
-		expect(prefixed.content).toContain("# read");
+		expect(prefixed.content).toContain("# Persistent IPython runtime");
 	});
 
 	it("leaves maintainer pages out of the listing", async () => {

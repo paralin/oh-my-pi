@@ -47,8 +47,8 @@ Behavior details:
 
 - `--copy`, `clipboard`, and `copy` arguments are explicitly rejected with a warning to use `/dump`.
 - Export embeds session header/entries/leaf plus current `systemPrompt` and tool descriptions from agent state.
-- Subagent transcripts stored next to the session file (`<session>/<AgentId>.jsonl`, recursively for nested spawns) are embedded as `subSessions` (`collectSubSessions` in `src/export/html/index.ts`; disable with `includeSubSessions: false` in `ExportOptions`). In the page, agent ids in task tool cards open a breadcrumbed sub-session overlay.
-- Tool calls render through the `<omp-tool-view>` web component — the React per-tool renderers shared with collab-web (`packages/collab-web/src/tool-render/`), prebuilt into `src/export/html/tool-views.generated.js` by `bun run gen:tool-views`.
+- Subagent transcripts stored next to the session file (`<session>/<AgentId>.jsonl`, recursively for nested spawns) are embedded as `subSessions` (`collectSubSessions` in `src/export/html/index.ts`; disable with `includeSubSessions: false` in `ExportOptions`). In historical sessions, agent ids in retained task-call cards open a breadcrumbed sub-session overlay.
+- IPython cells render from their journal projection. Historical removed tool calls render as bounded, escaped text.
 - No session entries are appended during export.
 
 Caveat:
@@ -81,13 +81,13 @@ Dump transcript content includes:
 
 - System prompt
 - Active model/thinking level
-- Tool definitions + parameters
+- Fixed IPython interface description
 - User/assistant messages
 - Thinking blocks and tool calls
 - Tool results and execution blocks (except `excludeFromContext` bash/python entries)
 - Custom/hook/file mention/branch summary/compaction summary entries
 
-The best-effort JSON sidecar is named `omp-llm-request-<id>.json` under the OS temporary directory. It contains the current model, thinking level, service tier, system prompt, wire tool schemas, and LLM-converted messages. It persists after the command and can contain raw context or secrets; protect or remove it accordingly. A sidecar failure does not suppress the transcript (the TUI reports the failure; headless execution silently omits the path).
+The best-effort JSON sidecar is named `omp-llm-request-<id>.json` under the OS temporary directory. It contains the current model, thinking level, service tier, system prompt, the fixed IPython interface schema, and LLM-converted messages. It persists after the command and can contain raw context or secrets; protect or remove it accordingly. A sidecar failure does not suppress the transcript (the TUI reports the failure; headless execution silently omits the path).
 
 No session persistence entries are appended by dumping.
 
@@ -130,11 +130,11 @@ Critical fallback behavior:
 For headless execution, or in the TUI only when no custom share handler is found, `shareSession()`:
 
 1. Builds the session snapshot (`header`, `entries`, `leafId`, plus current
-   `systemPrompt` and tool descriptions from agent state).
-2. If `share.redactSecrets` is enabled (default) and the obfuscator has configured or regex-discovered secrets, a typed per-field redaction pass rewrites text-bearing header, prompt, tool, entry, sub-session, and message fields. Inline image bytes remain for the later size pass. Opaque provider replay fields and untyped extension payloads (`details`, `data`, `outputSchema`, compaction preserve data) are dropped rather than traversed.
-3. The JSON is gzipped and sealed with a fresh AES-256-GCM key
+   `systemPrompt` and tool descriptions from agent state). Snapshot text is
+   exported verbatim; `/share` does not rewrite or redact it.
+2. The JSON is gzipped and sealed with a fresh AES-256-GCM key
    (`[12B IV][ciphertext+tag]`).
-4. Upload target is chosen by `share.store`:
+3. Upload target is chosen by `share.store`:
    - **Share server** (default, `store: "blob"`) — `POST <share.serverUrl>`
      (default `https://my.omp.sh/s`) with the raw blob, capped at 1 MB.
      Oversized snapshots are trimmed until they fit: inline images first,
@@ -261,7 +261,7 @@ Startup `--fork` is resolved before normal session creation:
 2. Path-like values (`/`, `\`, or `.jsonl`) call `SessionManager.forkFrom(path, cwd, sessionDir)`.
 3. Other values resolve via `resolveResumableSession(...)`: local sessions first, then global search when `sessionDir` is not forced. Matching accepts lowercased session id prefixes, full JSONL filename prefixes, and timestamp-stripped filename id suffixes.
 4. The forked file is created in the current cwd/session-dir scope and becomes the active session manager for startup.
-5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance when `--model`, `--thinking`, `--system-prompt`, `--append-system-prompt`, `--tools`, or `--no-tools` changes the provider route or prompt/tool shape.
+5. Full-context forks automatically seed `providerPromptCacheKey` from the source header's inherited key, falling back to the source session id. Startup drops that automatic inheritance when `--model`, `--thinking`, `--system-prompt`, or `--append-system-prompt` changes the provider route or prompt shape.
 
 Use `--prompt-cache-key <key>` to pin the provider prompt-cache identity explicitly and independently from both the OMP session id and `--provider-session-id`. `--provider-session-id` continues to control provider session/routing headers and sticky credential selection; `--prompt-cache-key` controls the OpenAI Responses `prompt_cache_key` payload where supported.
 
@@ -355,17 +355,11 @@ For `newSession`, `fork`, and `switchSession`:
 
 `ExtensionRunner.emit()` returns early on the first cancelling before-event result.
 
-### Custom tool `onSession` behavior
+### Extension session events
 
-SDK bridges extension session events to custom tool `onSession` callbacks:
-
-- `session_switch` -> `onSession({ reason: "switch", previousSessionFile })`
-- `session_branch` -> `reason: "branch"`
-- `session_start` -> `reason: "start"`
-- `session_tree` -> `reason: "tree"`
-- `session_shutdown` -> `reason: "shutdown"`
-
-These callbacks are observational; they do not cancel switch/fork.
+Extensions may observe `session_switch`, `session_branch`, `session_start`,
+`session_tree`, and `session_shutdown`. These observations do not cancel a
+switch or fork and do not add functions to the provider interface.
 
 ### Other cancellation surfaces relevant to this doc
 

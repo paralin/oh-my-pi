@@ -13,7 +13,7 @@ const loggingHook: ExtensionFactory = api => {
 	});
 
 	api.on("tool_call", async event => {
-		console.log(`[Hook] Tool: ${event.toolName}`);
+		console.log(`[Hook] IPython: ${event.input.code}`);
 		return undefined; // Don't block
 	});
 
@@ -25,11 +25,8 @@ const loggingHook: ExtensionFactory = api => {
 // Blocking extension (returns { block: true, reason: "..." })
 const safetyHook: ExtensionFactory = api => {
 	api.on("tool_call", async event => {
-		if (event.toolName === "bash") {
-			const cmd = (event.input as { command?: string }).command ?? "";
-			if (cmd.includes("rm -rf")) {
-				return { block: true, reason: "Dangerous command blocked" };
-			}
+		if (event.input.code.includes("rm -rf")) {
+			return { block: true, reason: "Dangerous IPython cell blocked" };
 		}
 		return undefined;
 	});

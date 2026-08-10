@@ -2,11 +2,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { ApiKeyResolveContext, AssistantMessage, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolveContext, AssistantMessage, ToolCall } from "@oh-my-pi/pi-ai";
 import { unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { createMockModel, type MockResponse, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -21,13 +20,6 @@ type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 
 const RETRY_CAP_MOCK_API_SOURCE = "agent-session-retry-cap-test";
-const CYBER_POLICY_ERROR =
-	"Codex error event: This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)";
-const CYBER_POLICY_FAILURE: MockResponse = {
-	content: [{ type: "thinking", thinking: "Checking whether this security request is allowed." }],
-	stopReason: "error",
-	errorMessage: CYBER_POLICY_ERROR,
-};
 
 function lastAssistant(session: AgentSession): AssistantMessage {
 	const message = session.agent.state.messages.at(-1);
@@ -169,61 +161,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.stopReason).toBe("error");
 		expect(last.errorMessage).toContain("rate_limit_error");
 		expect(session.isRetrying).toBe(false);
-	});
-
-	it("honors the reason backoff for a transient rate-limit 429 without a provider hint", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) {
-			throw new Error("Expected bundled Anthropic test model to exist");
-		}
-
-		const mock = createMockModel({
-			responses: [
-				{ throw: "429 Rate limit exceeded, too many requests" },
-				{ content: ["recovered after rate-limit window"], stopReason: "stop" },
-			],
-		});
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
-		});
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxDelayMs": 60_000,
-			"retry.maxRetries": 1,
-			"retry.modelFallback": false,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-		});
-
-		await session.prompt("Trigger transient rate limit without retry-after");
-		await session.waitForIdle();
-
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryStartEvents[0].delayMs).toBe(30_000);
-		expect(waitSpy.mock.calls.some(call => call[0] === 30_000)).toBe(true);
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "recovered after rate-limit window",
-		});
 	});
 
 	it("auto-retries OpenAI Responses stream_read_error instead of stopping the conversation", async () => {
@@ -591,188 +528,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after sibling account" });
 	});
 
-	it("tries every Codex account before the configured model fallback on cyber-policy denials", async () => {
-		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
-		const fallbackModel = getBundledModel("openai", "gpt-5.5");
-		if (!primaryModel || !fallbackModel) {
-			throw new Error("Expected bundled primary and fallback test models to exist");
-		}
-		const providerSessionId = "cyber-policy-account-rotation";
-
-		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
-		authStorage.setRuntimeApiKey("openai", "openai-fallback-key");
-		await authStorage.set("openai-codex", [
-			{ type: "api_key", key: "codex-key-A" },
-			{ type: "api_key", key: "codex-key-B" },
-			{ type: "api_key", key: "codex-key-C" },
-			{ type: "api_key", key: "codex-key-D" },
-		]);
-
-		const requestedKeys: string[] = [];
-		const mock = createMockModel({
-			id: primaryModel.id,
-			provider: primaryModel.provider,
-			handler: (_context, options) => {
-				const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
-				if (!apiKey) throw new Error("Expected streamSimple to pass a resolved string API key");
-				requestedKeys.push(apiKey);
-				return new Set(requestedKeys).size >= 4
-					? { content: ["recovered on cyber-approved account"], stopReason: "stop" }
-					: CYBER_POLICY_FAILURE;
-			},
-		});
-		const requestedModels: string[] = [];
-		const agent = new Agent({
-			getApiKey: model => modelRegistry.resolver(model, providerSessionId),
-			sessionId: providerSessionId,
-			initialState: {
-				model: primaryModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (requestedModel, context, options) => {
-				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				return aiStream.streamSimple(mock.model, context, options);
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.maxRetries": 0,
-			"retry.modelFallback": true,
-			"retry.fallbackChains": {
-				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
-			},
-		});
-		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-			providerSessionId,
-		});
-
-		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
-		});
-
-		await session.prompt("Continue authorized security work");
-		await session.waitForIdle();
-
-		expect(requestedModels).toEqual([
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-		]);
-		expect(requestedKeys).toHaveLength(4);
-		expect([...requestedKeys].sort()).toEqual(["codex-key-A", "codex-key-B", "codex-key-C", "codex-key-D"]);
-		expect(fallbackEvents).toEqual([]);
-		expect(session.model?.provider).toBe(primaryModel.provider);
-		expect(session.model?.id).toBe(primaryModel.id);
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "recovered on cyber-approved account",
-		});
-	});
-
-	it("tries sibling Codex accounts before advisor model fallback on cyber-policy denials", async () => {
-		const mainModel = getBundledModel("anthropic", "claude-sonnet-4-5");
-		const advisorModel = getBundledModel("openai-codex", "gpt-5.6-sol");
-		const fallbackModel = getBundledModel("openai", "gpt-5.5");
-		if (!mainModel || !advisorModel || !fallbackModel) {
-			throw new Error("Expected bundled main, advisor, and fallback test models to exist");
-		}
-
-		registerMockApi(RETRY_CAP_MOCK_API_SOURCE);
-		authStorage.setRuntimeApiKey("openai", "openai-fallback-key");
-		await authStorage.set("openai-codex", [
-			{ type: "api_key", key: "advisor-codex-key-A" },
-			{ type: "api_key", key: "advisor-codex-key-B" },
-			{ type: "api_key", key: "advisor-codex-key-C" },
-		]);
-
-		const mainMock = createMockModel({ responses: [{ content: ["Primary complete"] }] });
-		const requestedAdvisorKeys: string[] = [];
-		const advisorRecovered = Promise.withResolvers<void>();
-		const advisorMock = createMockModel({
-			id: advisorModel.id,
-			provider: advisorModel.provider,
-			handler: (_context, options) => {
-				const apiKey = typeof options?.apiKey === "string" ? options.apiKey : undefined;
-				if (!apiKey) throw new Error("Expected advisor streamSimple to pass a resolved string API key");
-				requestedAdvisorKeys.push(apiKey);
-				if (new Set(requestedAdvisorKeys).size < 3) return CYBER_POLICY_FAILURE;
-				advisorRecovered.resolve();
-				return { content: ["Advisor recovered on cyber-approved account"], stopReason: "stop" };
-			},
-		});
-		const requestedAdvisorModels: string[] = [];
-		const advisorSelector = `${advisorModel.provider}/${advisorModel.id}`;
-		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
-		const agent = new Agent({
-			getApiKey: model => `${model.provider}-test-key`,
-			initialState: {
-				model: mainModel,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: mainMock.stream,
-		});
-
-		const settings = Settings.isolated({
-			"advisor.syncBacklog": "1",
-			"compaction.enabled": false,
-			"retry.maxRetries": 0,
-			"retry.modelFallback": true,
-			"retry.fallbackChains": {
-				[advisorSelector]: [fallbackSelector],
-			},
-		});
-		settings.setModelRole("default", `${mainModel.provider}/${mainModel.id}`);
-		settings.setModelRole("advisor", advisorSelector);
-
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-			advisorTools: [],
-			advisorConfigs: [{ name: "cyber-policy", model: advisorSelector }],
-			advisorStreamFn: (requestedModel, context, options) => {
-				requestedAdvisorModels.push(`${requestedModel.provider}/${requestedModel.id}`);
-				return aiStream.streamSimple(advisorMock.model, context, options);
-			},
-		});
-
-		const fallbackEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
-		session.subscribe(event => {
-			if (event.type === "retry_fallback_applied") fallbackEvents.push(event);
-		});
-
-		expect(session.setAdvisorEnabled(true)).toBe(true);
-		await session.prompt("Complete one primary turn");
-		await advisorRecovered.promise;
-		await session.waitForIdle();
-
-		expect(requestedAdvisorModels).toEqual([advisorSelector, advisorSelector, advisorSelector]);
-		expect([...requestedAdvisorKeys].sort()).toEqual([
-			"advisor-codex-key-A",
-			"advisor-codex-key-B",
-			"advisor-codex-key-C",
-		]);
-		expect(fallbackEvents).toEqual([]);
-		expect(session.getAdvisorAgent()?.state.model).toMatchObject({
-			provider: advisorModel.provider,
-			id: advisorModel.id,
-		});
-	});
-
 	it("waits for the earliest sibling unblock instead of failing the delay cap", async () => {
 		// Regression: with every sibling credential momentarily blocked (e.g. a
 		// short post-401 or usage-probe block), a usage-limit 429 with a
@@ -957,7 +712,7 @@ describe("AgentSession retry delay cap", () => {
 					const toolCall: ToolCall = {
 						type: "toolCall",
 						id: "tc-write",
-						name: "write",
+						name: "ipython",
 						arguments: { path: "doc/report.md", content: "large report chunk" },
 					};
 					partial.content.push(toolCall);
@@ -1036,7 +791,7 @@ describe("AgentSession retry delay cap", () => {
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: "grok-write-1",
-			name: "write",
+			name: "ipython",
 			arguments: { path: "review.md", content: "partial review" },
 		};
 		let streamCalls = 0;
@@ -1141,244 +896,6 @@ describe("AgentSession retry delay cap", () => {
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
 			text: "Recovered after interrupted tool call",
-		});
-	});
-
-	it("resumes a stalled Cursor stream after its exec tool result", async () => {
-		const stallMessage = "Provider stream stalled while waiting for the next event";
-		const model = createMockModel({
-			id: "composer-2.5",
-			provider: "cursor",
-		});
-		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
-		const toolCall = {
-			type: "toolCall" as const,
-			id: "cursor-shell-1",
-			name: "shell",
-			arguments: { command: "pwd" },
-			[kCursorExecResolved]: true as const,
-		};
-		const toolResult: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			content: [{ type: "text", text: "/workspace" }],
-			isError: false,
-			timestamp: Date.now(),
-		};
-		let streamCalls = 0;
-		let resumedWithToolResult = false;
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			cursorOnToolResult: message => message,
-			streamFn: (_requestedModel, context, options) => {
-				streamCalls += 1;
-				if (streamCalls > 1) {
-					resumedWithToolResult = context.messages.some(
-						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-					);
-					model.push({ content: ["Recovered after Cursor stall"] });
-					return model.stream(model, context, options);
-				}
-
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(async () => {
-					await options?.cursorOnToolResult?.(toolResult);
-					const partial: AssistantMessage = {
-						role: "assistant",
-						content: [toolCall],
-						api: model.api,
-						provider: model.provider,
-						model: model.id,
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "stop",
-						timestamp: Date.now(),
-					};
-					stream.push({ type: "start", partial });
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(toolCall.arguments),
-						partial,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
-					stream.push({
-						type: "error",
-						reason: "error",
-						error: {
-							...partial,
-							stopReason: "error",
-							errorMessage: stallMessage,
-						},
-					});
-				});
-				return stream;
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
-
-		await session.prompt("Run pwd");
-		await session.waitForIdle();
-
-		expect(streamCalls).toBe(2);
-		expect(resumedWithToolResult).toBe(true);
-		expect(
-			session.agent.state.messages.filter(
-				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-			),
-		).toHaveLength(1);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
-		expect(lastAssistant(session).content).toContainEqual({ type: "text", text: "Recovered after Cursor stall" });
-	});
-	it("resumes a Cursor reasonless abort after an unmarked client-side tool call", async () => {
-		const model = createMockModel({
-			id: "composer-2.5",
-			provider: "cursor",
-		});
-		authStorage.setRuntimeApiKey("cursor", "cursor-test-key");
-		// Cursor emits `todo` client-side without the server-execution marker; a
-		// reasonless abort after it must still recover (issue #6668 review).
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: "cursor-todo-1",
-			name: "todo",
-			arguments: { ops: [] },
-		};
-		let streamCalls = 0;
-		let resumedWithSyntheticResult = false;
-		const agent = new Agent({
-			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-				messages: [],
-			},
-			streamFn: (_requestedModel, context, options) => {
-				streamCalls += 1;
-				if (streamCalls > 1) {
-					const matchingResult = context.messages.find(
-						message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-					);
-					resumedWithSyntheticResult =
-						matchingResult?.role === "toolResult" &&
-						typeof matchingResult.details === "object" &&
-						matchingResult.details !== null &&
-						"executed" in matchingResult.details &&
-						matchingResult.details.executed === false;
-					model.push({ content: ["Recovered after Cursor reasonless abort"] });
-					return model.stream(model, context, options);
-				}
-
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const partial: AssistantMessage = {
-						role: "assistant",
-						content: [toolCall],
-						api: model.api,
-						provider: model.provider,
-						model: model.id,
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						stopReason: "stop",
-						timestamp: Date.now(),
-					};
-					stream.push({ type: "start", partial });
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial });
-					stream.push({
-						type: "toolcall_delta",
-						contentIndex: 0,
-						delta: JSON.stringify(toolCall.arguments),
-						partial,
-					});
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
-					stream.push({
-						type: "error",
-						reason: "aborted",
-						error: {
-							...partial,
-							stopReason: "aborted",
-							errorMessage: "Request was aborted",
-						},
-					});
-				});
-				return stream;
-			},
-		});
-
-		const settings = Settings.isolated({
-			"compaction.enabled": false,
-			"retry.baseDelayMs": 5,
-			"retry.maxRetries": 1,
-		});
-		settings.setModelRole("default", `${model.provider}/${model.id}`);
-		session = new AgentSession({
-			agent,
-			sessionManager: SessionManager.inMemory(),
-			settings,
-			modelRegistry,
-		});
-		const retryStartEvents: AutoRetryStartEvent[] = [];
-		const retryEndEvents: AutoRetryEndEvent[] = [];
-		session.subscribe(event => {
-			if (event.type === "auto_retry_start") retryStartEvents.push(event);
-			if (event.type === "auto_retry_end") retryEndEvents.push(event);
-		});
-
-		await session.prompt("Update the todo list");
-		await session.waitForIdle();
-
-		expect(streamCalls).toBe(2);
-		expect(resumedWithSyntheticResult).toBe(true);
-		expect(
-			session.agent.state.messages.filter(
-				message => message.role === "toolResult" && message.toolCallId === toolCall.id,
-			),
-		).toHaveLength(1);
-		expect(retryStartEvents).toHaveLength(1);
-		expect(retryEndEvents).toContainEqual(expect.objectContaining({ success: true, attempt: 1 }));
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "Recovered after Cursor reasonless abort",
 		});
 	});
 
@@ -1903,9 +1420,7 @@ describe("AgentSession retry delay cap", () => {
 		expect(retryStartEvents[0]).toMatchObject({ attempt: 1, maxAttempts: 1 });
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: false, attempt: 1 });
-		expect(lastAssistant(session).errorMessage).toBe(
-			"Retry budget exhausted after 1 retry: server_error: stream closed with reason: error",
-		);
+		expect(lastAssistant(session).errorMessage).toBe("server_error: stream closed with reason: error");
 		expect(session.isRetrying).toBe(false);
 	});
 

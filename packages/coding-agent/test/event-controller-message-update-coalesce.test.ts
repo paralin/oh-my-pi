@@ -49,7 +49,6 @@ function createStreamingFixture() {
 		ui,
 		settings,
 		chatContainer: { addChild: vi.fn(), children: [] },
-		pendingTools: new Map(),
 		transcriptMessageComponents: new WeakMap(),
 		streamingComponent: {
 			setHideThinkingBlock: vi.fn(),

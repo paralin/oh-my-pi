@@ -4,7 +4,7 @@
  * The CLI loads extensions early to parse custom flags, then hands the result
  * back through `preloadedExtensions` so its OWN session can reuse the loaded
  * instances without redoing the FS scan. `createAgentSession()` augments the
- * result with inline extensions (autoresearch + custom-tools wrapper), so it
+ * result with inline extensions (autoresearch), so it
  * MUST clone the caller's `extensions` array before mutating it — otherwise
  * the caller's array accumulates session-local wrappers it never authored.
  *
@@ -64,10 +64,8 @@ describe("createAgentSession preloadedExtensions isolation (issue #2190)", () =>
 			// Disable everything that would touch the network / FS scans.
 			enableLsp: false,
 			enableMCP: false,
-			skipPythonPreflight: true,
 			skills: [],
 			rules: [],
-			preloadedCustomToolPaths: [],
 			contextFiles: [],
 			promptTemplates: [],
 			slashCommands: [],

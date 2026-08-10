@@ -9,7 +9,7 @@ import {
 
 /**
  * Contract: every change to the *active* theme bumps the theme epoch — including
- * setTheme()'s fallback path. ToolExecutionComponent (and other memoized
+ * setTheme()'s fallback path. retired cards (and other memoized
  * renderers) fold getThemeEpoch() into their dirty key, so a failed theme load
  * that swapped to the dark fallback without bumping the epoch would leave those
  * renderers holding the failed theme's stale colors until some other state moved.

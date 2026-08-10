@@ -6,11 +6,11 @@ import { ReviewCommand } from "@oh-my-pi/pi-coding-agent/extensibility/custom-co
 import type { CustomCommandAPI } from "@oh-my-pi/pi-coding-agent/extensibility/custom-commands/types";
 import type { HookCommandContext } from "@oh-my-pi/pi-coding-agent/extensibility/hooks/types";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import type { PrDiffPayload, ViewLookupResult } from "@oh-my-pi/pi-coding-agent/tools/gh";
-import * as gh from "@oh-my-pi/pi-coding-agent/tools/gh";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { PrDiffPayload, ViewLookupResult } from "../../../src/tools/gh.js";
+import * as gh from "../../../src/tools/gh.js";
 
 const SAMPLE_JJ_DIFF = `diff --git a/src/workspace.ts b/src/workspace.ts
 --- a/src/workspace.ts
@@ -208,7 +208,7 @@ describe("ReviewCommand", () => {
 			const promptText = result!;
 			expect(promptText).toContain("src/workspace.ts");
 			expect(promptText).toContain("+1/-1");
-			expect(promptText).toContain("MAY read full file context as needed via `read`");
+			expect(promptText).toContain("MAY inspect full file context with `Path.read_text()` in `ipython`");
 			expect(jjDiffSpy).toHaveBeenCalledWith(dir);
 			expect(gitStatusSpy).not.toHaveBeenCalled();
 			expect(gitDiffSpy).not.toHaveBeenCalled();

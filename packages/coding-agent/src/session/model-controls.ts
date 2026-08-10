@@ -35,7 +35,6 @@ import {
 	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
-import type { EditMode } from "../utils/edit-mode";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { ModelCycleResult, ResolvedRoleModel, RoleModelCycle, RoleModelCycleResult } from "./agent-session-types";
 import { formatRoleModelValue, resolveRoleModelFull } from "./role-models";
@@ -52,12 +51,10 @@ export interface ModelControlsHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	promptGeneration(): number;
-	resolveActiveEditMode(): EditMode;
-	syncAfterModelChange(previousEditMode: EditMode): Promise<void>;
 	setModelWithProviderSessionReset(model: Model): Promise<void>;
 	clearActiveRetryFallback(): void;
 	clearInheritedProviderPromptCacheKey(): void;
-	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink" | "workflow"): boolean;
+	magicKeywordEnabled(keyword: "orchestrate" | "ultrathink"): boolean;
 	emit(event: AgentSessionEvent): void;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -242,7 +239,6 @@ export class ModelControls {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
-		const previousEditMode = this.#host.resolveActiveEditMode();
 		const previousModel = this.#model;
 		const previousThinkingLevel = this.#thinkingLevel;
 		const previousAutoThinking = this.#autoThinking;
@@ -259,7 +255,6 @@ export class ModelControls {
 			await this.#afterModelTransition(coordinationToken, targetModel);
 			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 			this.#host.clearActiveRetryFallback();
-			await this.#host.syncAfterModelChange(previousEditMode);
 			this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
 			if (options?.persist) {
 				this.#host.settings.setModelRole(
@@ -301,7 +296,6 @@ export class ModelControls {
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		const previousEditMode = this.#host.resolveActiveEditMode();
 		const previousModel = this.#model;
 		const previousThinkingLevel = this.#thinkingLevel;
 		const previousAutoThinking = this.#autoThinking;
@@ -318,7 +312,6 @@ export class ModelControls {
 			await this.#afterModelTransition(coordinationToken, targetModel);
 			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 			this.#host.clearActiveRetryFallback();
-			await this.#host.syncAfterModelChange(previousEditMode);
 			this.#host.sessionManager.appendModelChange(
 				`${targetModel.provider}/${targetModel.id}`,
 				options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
@@ -464,7 +457,6 @@ export class ModelControls {
 	}
 
 	async #cycleScopedModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		const previousEditMode = this.#host.resolveActiveEditMode();
 		const previousModel = this.#model;
 		const previousThinkingLevel = this.#thinkingLevel;
 		const previousAutoThinking = this.#autoThinking;
@@ -486,7 +478,6 @@ export class ModelControls {
 			await this.#afterModelTransition(coordinationToken, next.model);
 			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 			this.#host.clearActiveRetryFallback();
-			await this.#host.syncAfterModelChange(previousEditMode);
 			this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 			this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 			this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
@@ -505,7 +496,6 @@ export class ModelControls {
 
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousModel = this.#model;
-		const previousEditMode = this.#host.resolveActiveEditMode();
 		const previousThinkingLevel = this.#thinkingLevel;
 		const previousAutoThinking = this.#autoThinking;
 		const previousAutoResolvedLevel = this.#autoResolvedLevel;
@@ -531,7 +521,6 @@ export class ModelControls {
 			await this.#afterModelTransition(coordinationToken, nextModel);
 			this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 			this.#host.clearActiveRetryFallback();
-			await this.#host.syncAfterModelChange(previousEditMode);
 			this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 			this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 			this.#reapplyThinkingLevel();

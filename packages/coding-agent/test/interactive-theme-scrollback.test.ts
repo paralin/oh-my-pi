@@ -21,15 +21,7 @@ import { TempDir } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-const MULTIPLEXER_ENV_KEYS = [
-	"TMUX",
-	"STY",
-	"ZELLIJ",
-	"HERDR_ENV",
-	"CMUX_WORKSPACE_ID",
-	"CMUX_SURFACE_ID",
-	"TERM",
-] as const;
+const MULTIPLEXER_ENV_KEYS = ["TMUX", "STY", "ZELLIJ", "CMUX_WORKSPACE_ID", "CMUX_SURFACE_ID", "TERM"] as const;
 
 class AppearanceVirtualTerminal extends VirtualTerminal {
 	#appearance?: TerminalAppearance;

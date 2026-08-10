@@ -1,5 +1,5 @@
 /**
- * Test grep tool.
+ * Search files with the grep CLI.
  */
 
 import { GrepOutputMode } from "@oh-my-pi/pi-natives";

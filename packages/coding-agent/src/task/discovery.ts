@@ -88,7 +88,7 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 /**
  * Discover agents from filesystem and merge with bundled agents.
  * Precedence (highest wins): project `.omp/agents`, user `.omp/agents`,
- * OMP extension-package agents in `listOmpExtensionRoots` source order
+ * generated `managed-agents`, OMP extension-package agents in `listOmpExtensionRoots` source order
  * (CLI roots > project `extensions:` settings > user `extensions:` settings >
  * installed npm/link plugins), Claude marketplace plugin agents (project
  * scope before user), then bundled.
@@ -119,7 +119,10 @@ export async function discoverAgents(
 	const project = projectDirs[0];
 	if (project) orderedDirs.push({ dir: project.path, source: "project" });
 	const user = userDirs[0];
-	if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	if (user) {
+		orderedDirs.push({ dir: user.path, source: "user" });
+		orderedDirs.push({ dir: path.join(path.dirname(user.path), "managed-agents"), source: "user" });
+	}
 
 	// OMP extension-package agents/ dirs. `listOmpExtensionRoots` returns roots in
 	// source-precedence order (CLI > project `extensions:` settings > user

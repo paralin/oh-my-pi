@@ -18,7 +18,7 @@ export interface LoadMCPConfigsOptions {
 	enableProjectConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
-	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
+	/** Whether to filter out browser MCP servers when browser host service is enabled (default: false) */
 	filterBrowser?: boolean;
 }
 
@@ -54,7 +54,6 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		};
 		if (server.args) config.args = server.args;
 		if (server.env) config.env = server.env;
-		if (server.envPolicy) config.envPolicy = server.envPolicy;
 		if (server.cwd) config.cwd = server.cwd;
 		return config;
 	}
@@ -66,7 +65,6 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
-		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
 		return config;
 	}
 
@@ -77,7 +75,6 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 			url: server.url ?? "",
 		};
 		if (server.headers) config.headers = server.headers;
-		if (server.headerPolicy) config.headerPolicy = server.headerPolicy;
 		return config;
 	}
 
@@ -363,7 +360,7 @@ export interface BrowserFilterResult {
 
 /**
  * Filter out browser automation MCP servers.
- * Since we have a native browser tool, we don't need these MCP servers.
+ * Since we have a browser host service, we don't need these MCP servers.
  */
 export function filterBrowserMCPServers(
 	configs: Record<string, MCPServerConfig>,

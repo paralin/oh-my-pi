@@ -25,8 +25,6 @@ import type { Skill } from "../capability/skill";
 import { skillCapability } from "../capability/skill";
 import type { SlashCommand } from "../capability/slash-command";
 import { slashCommandCapability } from "../capability/slash-command";
-import type { CustomTool } from "../capability/tool";
-import { toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 
 import {
@@ -407,43 +405,6 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 }
 
 // =============================================================================
-// Tools (tools/)
-// =============================================================================
-
-async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const userToolsDir = path.join(ctx.home, SOURCE_PATHS.codex.userBase, "tools");
-	const codexDir = getProjectCodexDir(ctx);
-	const projectToolsDir = path.join(codexDir, "tools");
-
-	const transformTool =
-		(level: "user" | "project") => (name: string, _content: string, path: string, source: SourceMeta) => {
-			const toolName = name.replace(/\.(ts|js)$/, "");
-			return {
-				name: toolName,
-				path,
-				level,
-				_source: source,
-			} as CustomTool;
-		};
-
-	const results = await Promise.all([
-		loadFilesFromDir(ctx, userToolsDir, PROVIDER_ID, "user", {
-			extensions: ["ts", "js"],
-			transform: transformTool("user"),
-		}),
-		loadFilesFromDir(ctx, projectToolsDir, PROVIDER_ID, "project", {
-			extensions: ["ts", "js"],
-			transform: transformTool("project"),
-		}),
-	]);
-
-	const items = results.flatMap(r => r.items);
-	const warnings = results.flatMap(r => r.warnings || []);
-
-	return { items, warnings };
-}
-
-// =============================================================================
 // Settings (config.toml)
 // =============================================================================
 
@@ -534,14 +495,6 @@ registerProvider<Hook>(hookCapability.id, {
 	description: "Load hooks from ~/.codex/hooks and .codex/hooks/",
 	priority: PRIORITY,
 	load: loadHooks,
-});
-
-registerProvider<CustomTool>(toolCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load custom tools from ~/.codex/tools and .codex/tools/",
-	priority: PRIORITY,
-	load: loadTools,
 });
 
 registerProvider<Settings>(settingsCapability.id, {

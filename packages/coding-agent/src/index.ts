@@ -4,7 +4,7 @@ import { HookEditorComponent, HookInputComponent, HookSelectorComponent } from "
 
 export * as zod from "@oh-my-pi/omptype/zod";
 export { z } from "@oh-my-pi/omptype/zod";
-// Re-export TUI components for custom tool rendering
+// Re-export TUI components for tool rendering
 export { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 // Logging
 export { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
@@ -17,9 +17,6 @@ export type { RetrySettings, SkillsSettings } from "./config/settings";
 export { Settings, settings } from "./config/settings";
 // Custom commands
 export type * from "./extensibility/custom-commands/types";
-export type * from "./extensibility/custom-tools";
-// Custom tools
-export * from "./extensibility/custom-tools";
 export type * from "./extensibility/extensions";
 // Extension types and utilities
 export * from "./extensibility/extensions";
@@ -34,7 +31,7 @@ export * from "./main";
 // Run modes for programmatic SDK usage
 export * from "./modes";
 export * from "./modes/components";
-// Theme utilities for custom tools
+// Theme utilities for tool renderers
 export * from "./modes/theme/theme";
 // SDK for programmatic usage
 export * from "./sdk";
@@ -56,7 +53,6 @@ export * from "./session/sql-session-storage";
 export * from "./task/executor";
 export type * from "./task/types";
 // Tools (detail types and utilities)
-export * from "./tools";
 export * from "./utils/git";
 // UI components for extensions
 export {

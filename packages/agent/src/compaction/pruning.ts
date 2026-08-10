@@ -7,13 +7,7 @@ import type { AgentMessage, AgentToolCall } from "../types";
 import { estimateTokens } from "./compaction";
 import type { SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
-import {
-	collectToolCallsById,
-	isProtectedToolResult,
-	isSkillReadToolResult,
-	type ProtectedToolMatcher,
-} from "./tool-protection";
-import { splitReadSelector } from "./utils";
+import { collectToolCallsById, isProtectedToolResult, type ProtectedToolMatcher } from "./tool-protection";
 
 export interface PruneConfig {
 	/** Keep the most recent tool output tokens intact. */
@@ -22,13 +16,6 @@ export interface PruneConfig {
 	minimumSavings: number;
 	/** Tool-result protection matchers. String entries protect every result from that tool; predicates may inspect the paired tool call. */
 	protectedTools: ProtectedToolMatcher[];
-	/**
-	 * Optional supersede key function (see {@link SupersedePruneConfig.supersedeKey}).
-	 * When provided, superseded tool results are pruned first — even inside the
-	 * `protectTokens` window — before age-based victims. Absent, behavior is
-	 * unchanged.
-	 */
-	supersedeKey?: SupersedeKeyFn;
 	/** Useless-flagged results bypass the protect window (see {@link USELESS_NOTICE}). Default true. */
 	pruneUseless?: boolean;
 	/**
@@ -43,10 +30,9 @@ export interface PruneConfig {
 	 * Prompt-cache guard. When set, a tool result whose all-message suffix
 	 * (tokens of every message after it) EXCEEDS this is part of the warm,
 	 * already-sent cache prefix: mutating it forces the provider to re-write the
-	 * whole suffix (cacheWrite premium). Such results — including superseded and
-	 * useless ones, which otherwise bypass {@link protectTokens} — are left for
-	 * compaction/shake (which rebuild the cache anyway) to reclaim. Undefined =
-	 * no cache guard (legacy: superseded/useless prune at any depth).
+	 * whole suffix (cacheWrite premium). Results in that prefix are left for
+	 * compaction or shake, which rebuild the cache, to reclaim. Undefined means
+	 * no cache guard.
 	 */
 	cacheWarmSuffixTokens?: number;
 }
@@ -54,7 +40,7 @@ export interface PruneConfig {
 export const DEFAULT_PRUNE_CONFIG: PruneConfig = {
 	protectTokens: 40_000,
 	minimumSavings: 20_000,
-	protectedTools: ["skill", isSkillReadToolResult],
+	protectedTools: [],
 	pruneUseless: true,
 };
 
@@ -63,47 +49,8 @@ export interface PruneResult {
 	tokensSaved: number;
 }
 
-/** Exact placeholder written over a superseded tool result. */
-export const SUPERSEDED_NOTICE = "[Superseded by a newer read of this file]";
-
 /** Exact placeholder written over an elided useless tool result. */
 export const USELESS_NOTICE = "[Uneventful result elided]";
-
-/**
- * Maps a tool call to a supersede key. Results sharing a key form a group in
- * which every result except the newest is a supersede candidate. A key `K`
- * additionally supersedes keys with prefix `K + "\u0000"` (selector-free read
- * supersedes selector-carrying reads of the same base path). Return
- * `undefined` to exempt a call from supersede grouping.
- */
-export type SupersedeKeyFn = (toolName: string, args: Record<string, unknown>) => string | undefined;
-
-export interface SupersedePruneConfig {
-	/** Supersede key function; results sharing a key supersede older ones. */
-	supersedeKey?: SupersedeKeyFn;
-	/** Also prune results flagged useless by their tool. Default false. */
-	pruneUseless?: boolean;
-	/** Prune a candidate now when all messages after it total at most this many estimated tokens. Default 8 000. */
-	suffixTokenLimit?: number;
-	/**
-	 * Prune all candidates when the last message is at least this old: the
-	 * provider prompt cache is then cold, so re-writing it is free. MUST exceed
-	 * the cache retention (Anthropic "long" = 1h) or a still-warm prefix is busted
-	 * by the flush. Default 30 min — callers on long retention override it.
-	 */
-	idleFlushMs?: number;
-	/** Clock override for tests. */
-	now?: number;
-	/**
-	 * Compaction boundary (`firstKeptEntryId` of the latest compaction). Entries
-	 * before it are summarized away and never sent, so they are skipped in every
-	 * path — including the idle flush — to avoid pointless history churn.
-	 * Undefined = no compaction (the whole branch is sent).
-	 */
-	keepBoundaryId?: string;
-	/** Tool-result protection matchers (same contract as {@link PruneConfig.protectedTools}). */
-	protectedTools: ProtectedToolMatcher[];
-}
 
 const DEFAULT_SUFFIX_TOKEN_LIMIT = 8_000;
 const DEFAULT_IDLE_FLUSH_MS = 30 * 60_000;
@@ -116,9 +63,8 @@ function createPrunedNotice(tokens: number): string {
  * Generic age-based pruning floor. Below this, blanking a result to
  * `[Output truncated - N tokens]` recovers nothing — the placeholder itself
  * costs ~8 tokens, so a sub-floor result grows the context (and churns the
- * prompt cache) instead of shrinking it. Superseded/useless results keep their
- * own rules: useless already drops no-savings candidates, superseded prunes for
- * correctness regardless of size.
+ * prompt cache) instead of shrinking it. Useless results use their own
+ * no-savings check.
  */
 const MIN_PRUNE_TOKENS = 50;
 
@@ -163,57 +109,17 @@ function resolveBoundaryIndex(entries: readonly SessionEntry[], keepBoundaryId: 
 	return index < 0 ? 0 : index;
 }
 
-interface SupersedeCandidate {
+interface PruneCandidate {
 	entry: SessionMessageEntry;
 	message: ToolResultMessage;
 	/** Index of the entry within the `entries` array. */
 	index: number;
 	tokens: number;
-	/** Placeholder text written over the blanked result. */
-	notice: string;
-}
-
-/**
- * Collect superseded tool results: for every unpruned, unprotected tool result
- * whose paired call resolves a supersede key, a LATER result with the same key
- * — or with a key that is the `"\u0000"`-prefix parent of this one — marks it
- * superseded. Returned in message order.
- */
-function collectSupersededResults(
-	entries: readonly SessionEntry[],
-	toolCallsById: ReadonlyMap<string, AgentToolCall>,
-	supersedeKey: SupersedeKeyFn,
-	protectedTools: readonly ProtectedToolMatcher[],
-): SupersedeCandidate[] {
-	const candidates: SupersedeCandidate[] = [];
-	const seenKeys = new Set<string>();
-	for (let i = entries.length - 1; i >= 0; i--) {
-		const entry = entries[i];
-		const message = getToolResultMessage(entry);
-		if (!message || message.prunedAt !== undefined) continue;
-		const toolCall = toolCallsById.get(message.toolCallId);
-		if (!toolCall) continue;
-		if (isProtectedToolResult(message, toolCall, protectedTools)) continue;
-		const key = supersedeKey(toolCall.name, toolCall.arguments as Record<string, unknown>);
-		if (key === undefined) continue;
-		const separator = key.indexOf("\u0000");
-		const superseded = seenKeys.has(key) || (separator >= 0 && seenKeys.has(key.slice(0, separator)));
-		seenKeys.add(key);
-		if (!superseded) continue;
-		candidates.push({
-			entry: entry as SessionMessageEntry,
-			message,
-			index: i,
-			tokens: estimateTokens(message as AgentMessage),
-			notice: SUPERSEDED_NOTICE,
-		});
-	}
-	return candidates.reverse();
 }
 
 /**
  * Collect tool results their tool flagged contextually useless (zero matches,
- * elapsed wait): unpruned, non-error, unprotected, not in `exclude`, and large
+ * elapsed wait): unpruned, non-error, unprotected, and large
  * enough that blanking to {@link USELESS_NOTICE} actually saves tokens.
  * Returned in message order.
  */
@@ -221,41 +127,42 @@ function collectUselessResults(
 	entries: readonly SessionEntry[],
 	toolCallsById: ReadonlyMap<string, AgentToolCall>,
 	protectedTools: readonly ProtectedToolMatcher[],
-	exclude: ReadonlySet<ToolResultMessage>,
-): SupersedeCandidate[] {
-	const candidates: SupersedeCandidate[] = [];
+): PruneCandidate[] {
+	const candidates: PruneCandidate[] = [];
 	for (let i = 0; i < entries.length; i++) {
 		const entry = entries[i];
 		const message = getToolResultMessage(entry);
 		if (message?.useless !== true || message.prunedAt !== undefined || message.isError === true) continue;
-		if (exclude.has(message)) continue;
 		if (isProtectedToolResult(message, toolCallsById.get(message.toolCallId), protectedTools)) continue;
 		const tokens = estimateTokens(message as AgentMessage);
 		if (estimatePrunedSavings(tokens, USELESS_NOTICE) <= 0) continue;
-		candidates.push({ entry: entry as SessionMessageEntry, message, index: i, tokens, notice: USELESS_NOTICE });
+		candidates.push({ entry: entry as SessionMessageEntry, message, index: i, tokens });
 	}
 	return candidates;
 }
 
 /**
- * Prune superseded tool results (e.g. stale `read` outputs replaced by a newer
- * read of the same file) and, when `pruneUseless` is set, results their tool
- * flagged contextually useless. Cheap, incremental, and prompt-cache-aware: a
- * candidate is pruned now only when the suffix after it is small (tail case —
- * the read→edit→read loop) or when the context has been idle long enough that
- * the provider cache is cold anyway (then all still-sent candidates flush).
- * Never mutates entries before `keepBoundaryId` (summarized away — not sent).
+ * Prune tool results that the tool marked contextually useless. The pass is
+ * cache-aware: it only rewrites a cheap tail, or the whole live region after
+ * the provider cache has gone cold. Entries before the latest compaction
+ * boundary are already summarized away and never rewritten.
  */
-export function pruneSupersededToolResults(entries: SessionEntry[], config: SupersedePruneConfig): PruneResult {
+export interface UselessPruneConfig {
+	/** Prune a candidate now when all later messages total at most this many estimated tokens. Default 8 000. */
+	suffixTokenLimit?: number;
+	/** Treat the provider cache as cold after this idle period. Default 30 minutes. */
+	idleFlushMs?: number;
+	/** Clock override for tests. */
+	now?: number;
+	/** Latest compaction boundary; earlier entries are summarized away. */
+	keepBoundaryId?: string;
+	/** Tool-result protection matchers. */
+	protectedTools: readonly ProtectedToolMatcher[];
+}
+
+export function pruneUselessToolResults(entries: SessionEntry[], config: UselessPruneConfig): PruneResult {
 	const toolCallsById = collectToolCallsById(entries);
-	const candidates = config.supersedeKey
-		? collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools)
-		: [];
-	if (config.pruneUseless) {
-		const exclude = new Set(candidates.map(candidate => candidate.message));
-		candidates.push(...collectUselessResults(entries, toolCallsById, config.protectedTools, exclude));
-		candidates.sort((a, b) => a.index - b.index);
-	}
+	const candidates = collectUselessResults(entries, toolCallsById, config.protectedTools);
 	if (candidates.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
 	const now = config.now ?? Date.now();
@@ -269,35 +176,25 @@ export function pruneSupersededToolResults(entries: SessionEntry[], config: Supe
 	}
 	const idle =
 		lastMessageTimestamp !== undefined && now - lastMessageTimestamp >= (config.idleFlushMs ?? DEFAULT_IDLE_FLUSH_MS);
-
 	const boundaryIndex = resolveBoundaryIndex(entries, config.keepBoundaryId);
-
-	let toPrune: SupersedeCandidate[];
-	if (idle) {
-		// Provider cache is cold (idle exceeds the retention TTL), so re-writing
-		// the sent region costs nothing. Entries before the compaction boundary
-		// are summarized away and never sent — skip them to avoid pointless churn.
-		toPrune = candidates.filter(candidate => candidate.index >= boundaryIndex);
-	} else {
-		const suffixTokenLimit = config.suffixTokenLimit ?? DEFAULT_SUFFIX_TOKEN_LIMIT;
-		// suffixTokens[i] = estimated tokens of all messages strictly after entry i.
-		// Mutating a candidate re-writes its suffix in the warm cache, so prune only
-		// when that suffix is small (cheap-to-recache tail) and the candidate sits
-		// at/after the compaction boundary.
-		const suffixTokens = computeMessageSuffixTokens(entries);
-		toPrune = candidates.filter(
-			candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
-		);
-	}
+	const toPrune = idle
+		? candidates.filter(candidate => candidate.index >= boundaryIndex)
+		: (() => {
+				const suffixTokenLimit = config.suffixTokenLimit ?? DEFAULT_SUFFIX_TOKEN_LIMIT;
+				const suffixTokens = computeMessageSuffixTokens(entries);
+				return candidates.filter(
+					candidate => candidate.index >= boundaryIndex && suffixTokens[candidate.index] <= suffixTokenLimit,
+				);
+			})();
 	if (toPrune.length === 0) return { prunedCount: 0, tokensSaved: 0 };
 
 	const prunedAt = Date.now();
 	let tokensSaved = 0;
 	for (const candidate of toPrune) {
-		candidate.message.content = [{ type: "text", text: candidate.notice }];
+		candidate.message.content = [{ type: "text", text: USELESS_NOTICE }];
 		candidate.message.prunedAt = prunedAt;
 		invalidateMessageCache(candidate.message as AgentMessage);
-		tokensSaved += estimatePrunedSavings(candidate.tokens, candidate.notice);
+		tokensSaved += estimatePrunedSavings(candidate.tokens, USELESS_NOTICE);
 	}
 	return { prunedCount: toPrune.length, tokensSaved };
 }
@@ -307,24 +204,12 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	let tokensSaved = 0;
 	let prunedCount = 0;
 
-	const candidates: Array<{ entry: SessionMessageEntry; tokens: number; superseded: boolean; useless: boolean }> = [];
+	const candidates: Array<{ entry: SessionMessageEntry; tokens: number; useless: boolean }> = [];
 	const toolCallsById = collectToolCallsById(entries);
-	const supersededMessages = config.supersedeKey
-		? new Set(
-				collectSupersededResults(entries, toolCallsById, config.supersedeKey, config.protectedTools).map(
-					candidate => candidate.message,
-				),
-			)
-		: undefined;
 	const uselessMessages =
 		config.pruneUseless !== false
 			? new Set(
-					collectUselessResults(
-						entries,
-						toolCallsById,
-						config.protectedTools,
-						supersededMessages ?? new Set(),
-					).map(candidate => candidate.message),
+					collectUselessResults(entries, toolCallsById, config.protectedTools).map(candidate => candidate.message),
 				)
 			: undefined;
 
@@ -350,8 +235,8 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 		// warm-cache window sits in the already-sent cached prefix — mutating it
 		// re-writes the whole suffix (cacheWrite premium). Entries before the
 		// compaction boundary are summarized away (never sent). Both are skipped
-		// before any prune decision, so superseded/useless cannot reach a deep,
-		// still-cached copy; compaction/shake reclaim those when they rebuild.
+		// before any prune decision, so a deep cached copy is left for compaction or
+		// shake to reclaim when it rebuilds the cache.
 		const inWarmPrefix =
 			messageSuffix !== undefined && cacheWarmSuffixTokens !== undefined && messageSuffix[i] > cacheWarmSuffixTokens;
 		if (inWarmPrefix || i < boundaryIndex) {
@@ -359,30 +244,23 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 			continue;
 		}
 
-		// Superseded and useless results bypass the age-based protect window
-		// (a stale re-read copy, or a result the tool flagged as uninformative,
-		// is dead weight at any age) — but only within the cache-warm tail: the
-		// guard above already excluded deeper, still-cached copies.
-		const superseded = supersededMessages?.has(message) ?? false;
+		// Results marked useless bypass the age-based protect window, but the
+		// cache guard above still leaves deep cached copies untouched.
 		const useless = uselessMessages?.has(message) ?? false;
 		const tooSmall = tokens < MIN_PRUNE_TOKENS;
-		if (!superseded && !useless && (accumulatedTokens < config.protectTokens || isProtected || tooSmall)) {
+		if (!useless && (accumulatedTokens < config.protectTokens || isProtected || tooSmall)) {
 			accumulatedTokens += tokens;
 			continue;
 		}
 
-		candidates.push({ entry: entry as SessionMessageEntry, tokens, superseded, useless });
+		candidates.push({ entry: entry as SessionMessageEntry, tokens, useless });
 		accumulatedTokens += tokens;
 	}
 
 	for (const candidate of candidates) {
 		tokensSaved += estimatePrunedSavings(
 			candidate.tokens,
-			candidate.superseded
-				? SUPERSEDED_NOTICE
-				: candidate.useless
-					? USELESS_NOTICE
-					: createPrunedNotice(candidate.tokens),
+			candidate.useless ? USELESS_NOTICE : createPrunedNotice(candidate.tokens),
 		);
 	}
 
@@ -393,11 +271,7 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	const prunedAt = Date.now();
 	for (const candidate of candidates) {
 		const message = candidate.entry.message as ToolResultMessage;
-		const notice = candidate.superseded
-			? SUPERSEDED_NOTICE
-			: candidate.useless
-				? USELESS_NOTICE
-				: createPrunedNotice(candidate.tokens);
+		const notice = candidate.useless ? USELESS_NOTICE : createPrunedNotice(candidate.tokens);
 		message.content = [{ type: "text", text: notice }];
 		message.prunedAt = prunedAt;
 		invalidateMessageCache(message as AgentMessage);
@@ -405,23 +279,4 @@ export function pruneToolOutputs(entries: SessionEntry[], config: PruneConfig = 
 	}
 
 	return { prunedCount, tokensSaved };
-}
-
-/**
- * Supersede key for the `read` tool: the file path with the trailing line/raw
- * selector stripped (the read tool's own splitter grammar via
- * {@link splitReadSelector}, e.g. `src/foo.ts:50-200`, `:2-4:raw`).
- * Internal/URL-scheme paths (`skill://…`, `https://…`) are exempt.
- * Selector-free reads key on the bare path; selector-carrying reads key on
- * `path + "\u0000" + selector`, so two reads collide only when the newer is
- * selector-free or the selectors are identical (the pass's prefix rule lets a
- * bare-path read supersede selector-carrying reads of the same file).
- */
-export function readToolSupersedeKey(toolName: string, args: Record<string, unknown>): string | undefined {
-	if (toolName !== "read") return undefined;
-	const path = args.path;
-	if (typeof path !== "string" || path.length === 0) return undefined;
-	if (path.includes("://")) return undefined;
-	const { path: base, sel } = splitReadSelector(path);
-	return sel === undefined ? base : `${base}\u0000${sel}`;
 }

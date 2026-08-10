@@ -17,7 +17,7 @@ export interface RosterRender {
 }
 
 /** Legacy progress snapshots may omit counters; snapshot absence remains distinct. */
-function metricNumber(value: number | undefined): number {
+export function metricNumber(value: number | undefined): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
@@ -68,7 +68,7 @@ export function statusText(status: AgentRef["status"], text: string): string {
 }
 
 /** Model id + thinking level (`sonnet-4-6 ◒ high`), level colored per theme. */
-function formatModelBadge(modelId: string, level: ThinkingLevel | undefined): string {
+export function formatModelBadge(modelId: string, level: ThinkingLevel | undefined): string {
 	const model = theme.fg("muted", sanitizeDisplayText(modelId));
 	if (!level || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) return model;
 	const display = theme.thinking[level as keyof typeof theme.thinking] ?? level;
@@ -82,7 +82,11 @@ export function formatRoleBadge(role: string, settings: Settings): string {
 }
 
 /** Format a resolved selector, preserving provider identity when requested. */
-function formatResolvedModelBadge(resolved: string, preserveProvider = false, fallbackLevel?: ThinkingLevel): string {
+export function formatResolvedModelBadge(
+	resolved: string,
+	preserveProvider = false,
+	fallbackLevel?: ThinkingLevel,
+): string {
 	const cleanResolved = sanitizeDisplayText(resolved);
 	// Model ids may themselves contain colons (`qwen3:14b`), so only treat the
 	// suffix as a thinking level when it parses as one.

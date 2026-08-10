@@ -33,6 +33,9 @@ import {
 } from "./messages";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
+	type ActStartEntry,
+	type ActTerminalEntry,
+	type ActTerminalStatus,
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type CredentialPinEntry,
@@ -171,9 +174,7 @@ function isAssistantEntry(entry: SessionEntry): boolean {
 
 function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 	// Startup-recorded selector state that does not survive as user intent
-	// once the draft is cleared. `mode_change` covers the `plan.defaultOnStartup`
-	// path (interactive-mode.ts enters plan mode before draft restoration) and
-	// `/plan` toggles that leave the session otherwise empty; entries carrying
+	// once the draft is cleared. `mode_change` covers mode changes that leave the session otherwise empty; entries carrying
 	// real conversation state — messages, compactions, branch summaries,
 	// custom/custom_message, session_init, labels, title/tool selection — never
 	// reach this branch and always keep the file resumable.
@@ -462,15 +463,8 @@ export class SessionManager {
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
 
-	#turnBudgetTotal: number | null = null;
-	#turnBudgetHard = false;
-	#turnOutputBaseline = 0;
-	#turnEvalOutput = 0;
-
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
-	/** Sealed by {@link releaseRetainedEntries}: every later append/title/rewrite is a dropped no-op. */
-	#released = false;
 	/** Serializes async disk work (flush/close/atomic rewrite). Appends are synchronous and bypass it. */
 	#diskTail: Promise<void> = Promise.resolve();
 	#diskFailure: Error | undefined;
@@ -644,16 +638,6 @@ export class SessionManager {
 	}
 
 	async #authoritativelyRewriteCurrentStateLocked(operationError: Error): Promise<void> {
-		if (this.#released) {
-			// Terminal seal: repair would reset the disk tail (escaping the
-			// close() serialization) and atomically publish #fileBody() — after
-			// release that truncates, and a revival may already own the file.
-			// The original operation error still propagates to the caller.
-			logger.warn("Skipped authoritative session repair after terminal release", {
-				error: String(operationError),
-			});
-			return;
-		}
 		if (!this.#persist || !this.#sessionFile) return;
 		const previousDiskTail = this.#diskTail;
 		const writer = this.#writer;
@@ -700,7 +684,7 @@ export class SessionManager {
 				const body = this.#fileBody();
 				try {
 					await this.#storage.writeTextAtomic(sessionFile, body, {
-						commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+						commitGuard: () => this.#diskEpoch === epoch,
 					});
 				} catch (error) {
 					const recoveryErrors = [toError(error)];
@@ -776,7 +760,12 @@ export class SessionManager {
 	}
 
 	#shouldHaveSessionFile(): boolean {
-		return this.#forceFileCreation || this.#fileIsCurrent || this.#historyContainsAssistantMessage();
+		return (
+			this.#forceFileCreation ||
+			this.#fileIsCurrent ||
+			this.#historyContainsAssistantMessage() ||
+			this.#entries.some(entry => entry.type === "act_start")
+		);
 	}
 
 	/**
@@ -804,7 +793,6 @@ export class SessionManager {
 	 * concurrent completed entries are durable without recreating a vacated source.
 	 */
 	#rewriteSynchronously(): void {
-		if (this.#released) return;
 		if (!this.#persist || !this.#shouldHaveSessionFile()) return;
 		const targetPath = this.#liveRelocationWritePath() ?? this.#sessionFile;
 		if (!targetPath) return;
@@ -847,7 +835,6 @@ export class SessionManager {
 	 */
 	async #rewriteAtomically(): Promise<void> {
 		if (!this.#persist || !this.#sessionFile) return;
-		if (this.#released) return;
 
 		const startEpoch = this.#diskEpoch;
 		await this.#scheduleDiskWork(
@@ -873,7 +860,6 @@ export class SessionManager {
 	 * their post-publish state updates.
 	 */
 	async #runFencedAtomicRewrite(epoch: number): Promise<boolean> {
-		if (this.#released) return false;
 		this.#atomicRewriteFenceEpoch = epoch;
 		try {
 			do {
@@ -883,7 +869,7 @@ export class SessionManager {
 				if (!sessionFile) return false;
 				if (this.#diskEpoch !== epoch) return false;
 				await this.#storage.writeTextAtomic(sessionFile, this.#fileBody(), {
-					commitGuard: () => !this.#released && this.#diskEpoch === epoch,
+					commitGuard: () => this.#diskEpoch === epoch,
 				});
 				if (this.#diskEpoch !== epoch) return false;
 			} while (this.#atomicRewriteDirty);
@@ -900,7 +886,7 @@ export class SessionManager {
 	}
 
 	#appendToSessionFile(entry: SessionEntry): void {
-		if (this.#released || !this.#persist || !this.#sessionFile) return;
+		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#atomicEntryBatch) {
 			this.#fileIsCurrent = false;
 			this.#rewriteRequired = true;
@@ -995,7 +981,6 @@ export class SessionManager {
 		const line = this.#lineFor(entry);
 		await this.#scheduleDiskWork(
 			async () => {
-				if (this.#released) return;
 				const sessionFile = this.#sessionFile;
 				if (!sessionFile) return;
 				try {
@@ -1060,10 +1045,6 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
 		this.#draftOnlySessionCleanupArmed = false;
-		this.#turnBudgetTotal = null;
-		this.#turnBudgetHard = false;
-		this.#turnOutputBaseline = 0;
-		this.#turnEvalOutput = 0;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
@@ -1110,10 +1091,6 @@ export class SessionManager {
 	}
 
 	#recordEntry(entry: SessionEntry): void {
-		if (this.#released) {
-			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
-			return;
-		}
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		const batch = this.#atomicEntryBatch;
@@ -1732,49 +1709,6 @@ export class SessionManager {
 		if (this.#diskFailure) throw this.#diskFailure;
 	}
 
-	/**
-	 * Raise the terminal write barrier ahead of the final {@link close}. Once
-	 * sealed:
-	 * - every later append, title change, and rewrite is a dropped no-op —
-	 *   including work an event handler tries to enqueue while dispose is
-	 *   awaiting `close()` on the disk tail;
-	 * - the disk epoch is bumped, so queued-but-unexecuted tail work is
-	 *   superseded and an ALREADY-RUNNING fenced/repair rewrite (awaiting the
-	 *   tail, drain, writer close, or the atomic stage) fails its commit guard
-	 *   at the rename fence instead of publishing over a revived file.
-	 * The final `close()` itself is scheduled after the bump and still runs;
-	 * pre-seal hot-path appends are already in the page cache. Idempotent;
-	 * terminal.
-	 */
-	seal(): void {
-		if (this.#released) return;
-		this.#released = true;
-		this.#diskEpoch++;
-	}
-
-	/**
-	 * Terminal release: drop the in-memory transcript and complete the
-	 * {@link seal}. The entry journal and its index mirror the agent's message
-	 * array (tool results, file contents, base64 frame images); on a disposed
-	 * session — e.g. a parked subagent still referenced by the lifecycle
-	 * adoption record — they would otherwise stay pinned for the process
-	 * lifetime.
-	 *
-	 * Closes the append writer; with the seal up, nothing can reopen it. A
-	 * revival may reopen the same JSONL through a NEW manager the moment
-	 * dispose returns; a late event handler resuming on THIS manager must
-	 * never race that writer — and a post-release rewrite would persist the
-	 * now-empty entry list, truncating the transcript. Reads after this point
-	 * reopen from disk (revival, `history://`). Only call from session
-	 * dispose, after the final `close()`; idempotent.
-	 */
-	releaseRetainedEntries(): void {
-		this.seal();
-		this.#entries = [];
-		this.#index.clear();
-		this.#closeWriterEventually();
-	}
-
 	getCwd(): string {
 		return this.#cwd;
 	}
@@ -1854,26 +1788,6 @@ export class SessionManager {
 
 	getUsageStatistics(): UsageStatistics {
 		return this.#index.usageSnapshot();
-	}
-
-	/**
-	 * Open a new per-turn budget window: snapshot the cumulative output baseline,
-	 * reset the eval-subagent counter, and set the (optional) ceiling.
-	 */
-	beginTurnBudget(total: number | null, hard: boolean): void {
-		this.#turnBudgetTotal = total;
-		this.#turnBudgetHard = hard;
-		this.#turnOutputBaseline = this.#index.usageSnapshot().output;
-		this.#turnEvalOutput = 0;
-	}
-
-	recordEvalSubagentOutput(output: number): void {
-		if (Number.isFinite(output) && output > 0) this.#turnEvalOutput += output;
-	}
-
-	getTurnBudget(): { total: number | null; spent: number; hard: boolean } {
-		const mainOutput = Math.max(0, this.#index.usageSnapshot().output - this.#turnOutputBaseline);
-		return { total: this.#turnBudgetTotal, spent: mainOutput + this.#turnEvalOutput, hard: this.#turnBudgetHard };
 	}
 
 	getSessionDir(): string {
@@ -1996,7 +1910,6 @@ export class SessionManager {
 	 *   Auto titles are ignored once the user has set a name.
 	 */
 	async setSessionName(name: string, source: SessionTitleSource = "auto", trigger?: string): Promise<boolean> {
-		if (this.#released) return false;
 		if (this.#titleSource === "user" && source === "auto") return false;
 
 		const title = SessionManager.#cleanTitle(name);
@@ -2146,13 +2059,64 @@ export class SessionManager {
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
 		spawns?: string;
-		readSummarize?: boolean;
-		advisor?: string;
 		runtime?: SessionInitEntry["runtime"];
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
 		return entry.id;
+	}
+
+	/** Persist the usage baseline before a root Act starts. */
+	appendActStart(actId: string, usageBaseline: Usage, sessionKey?: string): string {
+		if (!actId) throw new Error("Act id is required");
+		const entry: ActStartEntry = {
+			type: "act_start",
+			...this.#freshEntryFields(),
+			actId,
+			usageBaseline: structuredClone(usageBaseline),
+			sessionKey,
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/** Persist the terminal fact for a root Act; replay never stores returned values. */
+	appendActTerminal(
+		actId: string,
+		status: ActTerminalStatus,
+		usage: Usage,
+		options: {
+			model?: { provider: string; id: string };
+			error?: string;
+			sessionKey?: string;
+		} = {},
+	): string {
+		if (!actId) throw new Error("Act id is required");
+		const error = options.error === undefined ? undefined : options.error.slice(0, 4096);
+		const entry: ActTerminalEntry = {
+			type: "act_terminal",
+			...this.#freshEntryFields(),
+			actId,
+			status,
+			usage: structuredClone(usage),
+			model: options.model,
+			error,
+			sessionKey: options.sessionKey,
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/** Root Acts started on the active branch without a terminal fact. */
+	getUnmatchedActStarts(): ActStartEntry[] {
+		const terminalIds = new Set(
+			this.getBranch()
+				.filter((entry): entry is ActTerminalEntry => entry.type === "act_terminal")
+				.map(entry => entry.actId),
+		);
+		return this.getBranch().filter(
+			(entry): entry is ActStartEntry => entry.type === "act_start" && !terminalIds.has(entry.actId),
+		);
 	}
 
 	appendCompaction<T = unknown>(
@@ -2642,8 +2606,6 @@ export class SessionManager {
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
 			spawns?: string;
-			readSummarize?: boolean;
-			advisor?: string;
 			runtime?: SessionInitEntry["runtime"];
 		} | null;
 	} | null> {
@@ -2667,8 +2629,6 @@ export class SessionManager {
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
 			spawns?: string;
-			readSummarize?: boolean;
-			advisor?: string;
 			runtime?: SessionInitEntry["runtime"];
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
@@ -2684,9 +2644,7 @@ export class SessionManager {
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
-					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
-					advisor: entry.advisor,
 					runtime: entry.runtime,
 				};
 				break;

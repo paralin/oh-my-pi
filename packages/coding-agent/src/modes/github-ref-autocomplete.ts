@@ -3,8 +3,8 @@
  *
  * Mirrors the `@` file-reference and `scheme://` internal-url conventions: the
  * token is rewritten to an internal URL (`pr://3164` or `issue://3164`) plus a
- * trailing space, and the existing tool-mediated pipeline (the `read` tool →
- * InternalUrlRouter → `gh`) resolves it from the session cwd's git remote.
+ * trailing space. The model can inspect that reference through the typed
+ * `omp.github` host service using the session cwd's Git remote.
  *
  * No network at suggestion time — candidates are generated locally. GitHub
  * shares the issue/PR number space and there is no cheap way to tell which a

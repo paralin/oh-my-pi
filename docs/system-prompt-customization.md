@@ -1,142 +1,111 @@
-# System Prompt Customization
+# System prompt customization
 
-How the coding agent assembles its system prompt and what users can control with `SYSTEM.md`, `APPEND_SYSTEM.md`, `TITLE_SYSTEM.md`, and the matching CLI flags.
+OMP sends every model the same fixed provider interface. `SYSTEM.md`, custom
+prompt inputs, and project instructions add context to that interface; they do
+not replace it.
 
-Primary implementation:
+The implementation is `packages/coding-agent/src/system-prompt.ts`:
+`buildSystemPrompt()` builds the provider-facing blocks, and
+`loadProjectContextFiles()` and `loadSystemPromptFiles()` load discovered
+context. The static templates are:
 
-- `packages/coding-agent/src/main.ts` (`discoverSystemPromptFile`, `discoverAppendSystemPromptFile`, `applyResolvedSystemPromptInputs`)
-- `packages/coding-agent/src/sdk.ts` (`CreateAgentSessionOptions`, prompt construction)
-- `packages/coding-agent/src/system-prompt.ts` (`buildSystemPrompt`, `resolvePromptInput`)
-- `packages/coding-agent/src/prompts/system/system-prompt.md` (default instruction template)
-- `packages/coding-agent/src/prompts/system/custom-system-prompt.md` (template used when `SYSTEM.md` is active)
-- `packages/coding-agent/src/prompts/system/project-prompt.md` (project/environment footer)
+- `src/prompts/system/system-prompt.md` — the fixed IPython ABI
+- `src/prompts/system/project-prompt.md` — project and operator context
+- `src/prompts/system/runtime-notice.md` — volatile session facts
 
-## Inputs and precedence
+## Fixed block order
 
-| Input                                   | Source                 | Effect                                                                                                   |
-| --------------------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------- |
-| `--system-prompt <text-or-file>`        | CLI                    | Uses the bundled custom-prompt template instead of the default instruction template. Highest precedence. |
-| `SYSTEM.md`                             | Discovered config file | Same template switch as the flag; used when the flag is absent.                                          |
-| `--append-system-prompt <text-or-file>` | CLI                    | Adds text to the rendered prompt. Highest append precedence.                                             |
-| `APPEND_SYSTEM.md`                      | Discovered config file | Same effect as the append flag; used when the flag is absent.                                            |
+`buildSystemPrompt()` emits up to three blocks in this order:
 
-`SYSTEM.md` and `APPEND_SYSTEM.md` are searched project-first, then user-level. At each scope the config bases are ordered `.omp`, `.claude`, `.codex`, `.gemini`:
+1. **Fixed IPython ABI.** Every provider receives exactly one `ipython` call
+   with `{ "code": "<cell>" }`. Python cells and `%%bash` cells run in the
+   retained IPython namespace. This block is always present unless
+   `NULL_PROMPT=true`.
+2. **Stable project and operator context.** This block is omitted only when it
+   has no rendered content.
+3. **Runtime notice.** The current date and working directory, plus the
+   optional session notice and recursive depth, are rendered after stable
+   context.
 
-1. `<cwd>/.omp/<file>`, `<cwd>/.claude/<file>`, `<cwd>/.codex/<file>`, `<cwd>/.gemini/<file>`
-2. `~/.omp/agent/<file>`, `~/.claude/<file>`, `~/.codex/<file>`, `~/.gemini/<file>`
+No custom input selects another base template or restores a tool catalog. The
+fixed ABI remains the first block for CLI and SDK sessions alike.
 
-The native user path follows the active profile: with `omp --profile work`, `~/.omp/agent` becomes `~/.omp/profiles/work/agent`. `PI_CONFIG_DIR` changes the native config-directory name. This shared config lookup does not use `PI_CODING_AGENT_DIR` as an arbitrary replacement base.
+## Project context and precedence
 
-Discovery does **not** walk ancestors. Starting OMP in `<repo>/packages/api` does not discover `<repo>/.omp/SYSTEM.md`; launch from `<repo>`, put the file under the current directory's config base, or use a user-level file. See [Configuration usage](./config-usage.md) for the shared config-directory contract.
+`loadProjectContextFiles()` loads the context-file capability for the session
+working directory. It expands `@` imports, removes identical content, and
+orders entries from the outer directory toward the current directory. A nested
+instruction therefore appears after its ancestor and governs its own scope.
+The fixed ABI states the same precedence rule: applicable project instructions,
+including nested `AGENTS.md`, take precedence over the runtime guidance.
 
-A flag wins over every discovered file. For each filename, project scope wins over user scope and the first config base in the order above wins within that scope.
+Additional workspace roots contribute context through the same loader. Their
+files are combined with the primary workspace files, deduplicated by exact
+content, and sorted by depth and path before rendering.
 
-### Text or file resolution
+Always-apply rules render after project context. A rule is omitted when the
+same normalized text already occurs in project context or an operator input, so
+one instruction is not presented twice.
 
-For a single-line value, OMP first tries to read that value as a file path. If reading fails because the path does not exist (or is too long to be a path), the value is used literally. A value containing a newline is used literally without a file read. Other file-read failures are logged and the original value is still used literally.
+## Operator context
 
-## What `SYSTEM.md` replaces
+`project-prompt.md` renders these operator inputs after project context and
+always-apply rules:
 
-`SYSTEM.md` does not become a raw, sole system message. The CLI stores it as `CreateAgentSessionOptions.customSystemPrompt`, and `buildSystemPrompt` renders `custom-system-prompt.md` instead of the default `system-prompt.md`.
+1. discovered `SYSTEM.md` as `<operator-context source="SYSTEM.md">`;
+2. caller-supplied custom text as
+   `<operator-context source="custom-system-prompt">`;
+3. appended text as `<operator-context source="append-system-prompt">`.
 
-The custom template keeps these generated surfaces:
+A non-empty caller custom prompt suppresses discovered `SYSTEM.md`. Otherwise
+`loadSystemPromptFiles()` selects the first discovered project-level
+`SYSTEM.md`, then the first user-level file. Capability-provider precedence has
+already decided ties at each level. A caller can also pass
+`resolvedSystemPromptCustomization`, including `null`, to bypass discovery.
 
-- the custom text and any append text;
-- discovered context files;
-- discovered skills;
-- always-apply rules and the rulebook listing;
-- secret-redaction guidance when enabled.
+The CLI resolves `--system-prompt` and `--append-system-prompt` before it
+creates the session. When a flag is absent, its startup path chooses a
+project-level config file before a user-level file. The resolved text becomes
+the caller custom or append input above; it still does not replace the fixed
+IPython ABI.
 
-The separate project/environment footer remains and carries workstation data, deeper-directory context pointers, optional workspace information, current date/cwd, and the final completion requirements. Optional extra system blocks, such as computer-tool safety and active nested-repository context, also remain when applicable.
+## Text-or-file values
 
-What disappears is the content unique to the default instruction template: its built-in role/personality text, tool inventory and general tool policy, internal-URL catalog, exploration/delegation/workflow rules, and `xd://` protocol guidance. Generated skills and rules are **not** lost; the custom template renders them explicitly.
+`resolvePromptInput()` treats a one-line custom or append value as a candidate
+file path. If that read fails because the path is absent or too long, the value
+is literal text. A value containing a newline is always literal text. Other
+read failures are logged and also fall back to literal text.
 
-Consequences:
+Operator inputs are plain text. They are inserted into the static templates and
+are not compiled as Handlebars. For example, `{{cwd}}` in `SYSTEM.md` reaches
+the model literally.
 
-- To add a few instructions while retaining the complete default prompt, use only `APPEND_SYSTEM.md` or `--append-system-prompt`.
-- To replace the default instruction template while retaining generated project context, skills, and rules, use `SYSTEM.md` or `--system-prompt`.
-- If a custom prompt still needs the default tool policy or workflow, copy and maintain the required guidance yourself; selective inheritance from `system-prompt.md` is not supported.
+## Title prompts and full SDK replacement
 
-### Append placement
+`TITLE_SYSTEM.md` is separate from the provider prompt. It affects automatic
+session-title generation only. `discoverTitleSystemPromptFile()` checks a
+project config file before a user config file; it does not add text to
+`buildSystemPrompt()`.
 
-Without `SYSTEM.md`, append text is rendered at the end of `project-prompt.md`, after the default instruction block and project/environment content.
+`CreateAgentSessionOptions.systemPrompt` is the lower-level SDK escape hatch.
+A string, array, or callback replaces the complete block array returned by
+`buildSystemPrompt()`. Use it only when the embedder intentionally accepts
+responsibility for replacing the fixed ABI, project context, operator context,
+and runtime notice. CLI files and flags use `customSystemPrompt` and
+`appendSystemPrompt` instead.
 
-With `SYSTEM.md`, append text is rendered immediately after the custom text in `custom-system-prompt.md`. Context, skills, and rules follow it, and the separate project/environment footer follows that block. The templates prevent the append text and context files from being emitted twice.
+## Examples
 
-SDK-generated append content (for enabled memory/auto-learn features and MCP guidance) is combined before the user-supplied append text.
+To add context while retaining the normal block order, pass append text:
 
-## Plain-text contract
-
-`SYSTEM.md`, `APPEND_SYSTEM.md`, `--system-prompt`, and `--append-system-prompt` are plain text. They are values inserted into bundled Handlebars templates; their contents are not recursively compiled as Handlebars.
-
-For example, if `SYSTEM.md` contains:
-
-```handlebars
-Working in
-{{cwd}}
-on
-{{date}}.
-{{#if hasMemoryRoot}}Memory enabled.{{/if}}
+```ts
+await buildSystemPrompt({ appendSystemPrompt: "Run the focused check before reporting completion." });
 ```
 
-those characters reach the model literally. Internal values such as `cwd`, `date`, `skills`, `rules`, and `toolRefs` are private template implementation details, not a user templating API.
+To supply operator context without changing the IPython ABI, pass custom text:
 
-## Recipes
-
-### Add rules to the default prompt
-
-Create `APPEND_SYSTEM.md` without a `SYSTEM.md`:
-
-```text
-# ~/.omp/agent/APPEND_SYSTEM.md
-Prefer Bun APIs over Node APIs in this project.
-When you change a public function, run `bun check` before yielding.
+```ts
+await buildSystemPrompt({ customPrompt: "Review changes and report concrete findings." });
 ```
 
-### Supply a custom base prompt
-
-```text
-# <cwd>/.omp/SYSTEM.md
-You are a code reviewer. Read changes, surface concrete issues, and never edit files.
-Cite paths with backticks.
-```
-
-OMP still adds the generated context, skills, rules, and project/environment footer, but not the default instruction template's tool and workflow guidance.
-
-### Customize automatic session titles
-
-`SYSTEM.md` and `APPEND_SYSTEM.md` do not affect title-generation calls. Use `TITLE_SYSTEM.md`:
-
-```text
-# ~/.omp/agent/TITLE_SYSTEM.md
-Generate a session name using lowercase `<type>:<primary-objective>`.
-If the message has no concrete task, output exactly `none`.
-```
-
-`TITLE_SYSTEM.md` uses the same project-first, config-base discovery and no-ancestor-walk behavior. When absent, OMP uses its bundled title prompt. The override is used for both initial automatic titles and replan-driven title refreshes.
-
-Generated title output has an enforced normalization contract even with a
-custom prompt. OMP considers only the first trimmed line, strips surrounding
-quotes, `<title>...</title>` markers, and terminal punctuation, and treats
-`none` or `<title/>` as “no title yet.” A result longer than 80 characters or
-12 words is rejected rather than truncated. Empty, deferred, or rejected output
-leaves the session unnamed, so a later eligible title attempt can name it.
-
-## Full provider-facing replacement (SDK only)
-
-`CreateAgentSessionOptions.systemPrompt` is a different, lower-level API. A string or array replaces the fully rendered default blocks; a callback receives the rendered block array and returns its replacement. This can omit all generated context and safety blocks.
-
-The CLI flags and files do **not** set this property: they set `customSystemPrompt` and `appendSystemPrompt`, which continue through the bundled templates described above.
-
-## Quick reference
-
-| Goal                                                                                   | Use                                                                      |
-| -------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
-| Add instructions while keeping the complete default prompt                             | `APPEND_SYSTEM.md` or `--append-system-prompt`                           |
-| Replace the default instruction template but keep generated context, skills, and rules | `SYSTEM.md` or `--system-prompt`                                         |
-| Replace every provider-facing system block                                             | SDK `CreateAgentSessionOptions.systemPrompt`                             |
-| Customize automatic session titles                                                     | `TITLE_SYSTEM.md`                                                        |
-| Use `{{cwd}}` or other internal variables in a user file                               | Not supported; user content is inserted verbatim                         |
-| Inherit selected default-template sections                                             | Not supported; append to the default or copy the required text           |
-| Per-directory override                                                                 | A supported config base directly under the cwd used to launch OMP        |
-| Global override                                                                        | The active native agent directory, or another supported user config base |
+For the full persistent-runtime contract, see [Persistent IPython runtime](./ipython.md).

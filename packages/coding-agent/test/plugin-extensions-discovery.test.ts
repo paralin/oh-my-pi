@@ -124,23 +124,17 @@ describe("plugin extension discovery", () => {
 			[
 				'import * as nodePath from "path";',
 				'if (false) import("./optional-missing.js");',
-				'import { isToolCallEventType as legacyRoot } from "@mariozechner/pi-coding-agent";',
-				'import { isToolCallEventType as legacyExtensions } from "@mariozechner/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernRoot } from ${JSON.stringify(currentPiCodingAgentPath)};`,
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
+				'import { ExtensionRuntimeNotInitializedError as legacyRoot } from "@mariozechner/pi-coding-agent";',
+				'import { ExtensionRuntimeNotInitializedError as legacyExtensions } from "@mariozechner/pi-coding-agent/extensibility/extensions";',
+				`import { ExtensionRuntimeNotInitializedError as modernRoot } from ${JSON.stringify(currentPiCodingAgentPath)};`,
+				`import { ExtensionRuntimeNotInitializedError as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
 				"",
 				'if (legacyRoot !== modernRoot) throw new Error("legacy root import did not remap");',
 				'if (legacyExtensions !== modernExtensions) throw new Error("legacy extension import did not remap");',
 				'if (typeof nodePath.join !== "function") throw new Error("node builtin import did not resolve");',
 				"",
 				"export default function(pi) {",
-				"\tconst { Type } = pi.typebox;",
-				"\tpi.registerTool({",
-				'\t\tname: "legacy-pi-ext",',
-				'\t\tdescription: "Legacy Pi extension smoke test",',
-				"\t\tparameters: Type.Object({}),",
-				'\t\texecute: async () => ({ content: [{ type: "text", text: "ok" }] }),',
-				"\t});",
+				'\tpi.registerCommand("legacy-pi-ext", { handler: async () => {} });',
 				"}",
 			].join("\n"),
 		);
@@ -153,7 +147,7 @@ describe("plugin extension discovery", () => {
 		}
 		expect(result.errors).toHaveLength(0);
 		expect(extension).toBeDefined();
-		expect(extension?.tools.has("legacy-pi-ext")).toBe(true);
+		expect(extension?.commands.has("legacy-pi-ext")).toBe(true);
 	});
 
 	it("loads installed legacy Pi plugin extensions that use package imports", async () => {
@@ -198,8 +192,8 @@ describe("plugin extension discovery", () => {
 		fs.writeFileSync(
 			path.join(pluginDir, "src", "feature", "command.ts"),
 			[
-				'import { isToolCallEventType as legacyExtensions } from "@earendil-works/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
+				'import { ExtensionRuntimeNotInitializedError as legacyExtensions } from "@earendil-works/pi-coding-agent/extensibility/extensions";',
+				`import { ExtensionRuntimeNotInitializedError as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
 				"",
 				'if (legacyExtensions !== modernExtensions) throw new Error("legacy extension import did not remap");',
 				'export const commandName = "package-import-ext";',
@@ -477,8 +471,8 @@ describe("plugin extension discovery", () => {
 		fs.writeFileSync(
 			path.join(pluginDir, "src", "register.ts"),
 			[
-				'import { isToolCallEventType as legacyExtensions } from "@earendil-works/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
+				'import { ExtensionRuntimeNotInitializedError as legacyExtensions } from "@earendil-works/pi-coding-agent/extensibility/extensions";',
+				`import { ExtensionRuntimeNotInitializedError as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
 				"",
 				'if (legacyExtensions !== modernExtensions) throw new Error("legacy side-effect import did not remap");',
 				"(globalThis as { __sideEffectMarker?: { ok: boolean; runs: number } }).__sideEffectMarker = { ok: true, runs: 1 };",

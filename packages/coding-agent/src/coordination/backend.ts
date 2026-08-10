@@ -1,5 +1,4 @@
 import type { IrcMessage } from "../irc/bus";
-import type { OverallPlanReference } from "../plan-mode/plan-handoff";
 import type { AgentPeer, AgentRef } from "../registry/agent-registry";
 import type {
 	EffectiveSubagentPolicy,
@@ -15,7 +14,6 @@ export interface CoordinationSpawnRequest {
 	generated: boolean;
 	request: StructuredSubagentRequest;
 	policy: EffectiveSubagentPolicy;
-	planReference?: OverallPlanReference;
 	artifactsDir: string;
 	temporaryArtifacts: boolean;
 }
@@ -59,6 +57,7 @@ export interface CoordinationMessageReceipt {
 
 export interface CoordinationMessageFilter {
 	from?: string;
+	fromAny?: ReadonlySet<string>;
 	replyTo?: string;
 }
 
@@ -116,7 +115,13 @@ export interface CoordinationBackend {
 	listPeers(signal?: AbortSignal): Promise<CoordinationPeerRoster>;
 	attachMailbox(receiverPeerId: string, receiver: Pick<AgentPeer, "deliverIrcMessage">): void;
 	send(request: CoordinationMessageRequest, signal?: AbortSignal): Promise<CoordinationMessageReceipt>;
-	inbox(options?: { peek?: boolean; from?: string; replyTo?: string; limit?: number }): IrcMessage[];
+	inbox(options?: {
+		peek?: boolean;
+		from?: string;
+		fromAny?: ReadonlySet<string>;
+		replyTo?: string;
+		limit?: number;
+	}): IrcMessage[];
 	waitMessage(filter: CoordinationMessageFilter, timeoutMs: number, signal?: AbortSignal): Promise<IrcMessage | null>;
 	interrupt(peerId: string, reason: string, signal?: AbortSignal): Promise<void>;
 	close(): Promise<void>;

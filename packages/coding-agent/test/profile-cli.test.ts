@@ -141,7 +141,6 @@ describe("global --profile flag", () => {
 		const outSpy = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
 
 		await runCli(["--profile", "work", "--alias", "omp-work", "--version"]);
-
 		expect(process.exitCode).toBe(0);
 		expect(installSpy).toHaveBeenCalledWith(
 			expect.objectContaining({
@@ -235,7 +234,8 @@ describe("global --profile flag", () => {
 				probePath,
 				[
 					`import { runCli } from ${JSON.stringify(url.pathToFileURL(cliEntry).href)};`,
-					'await runCli(["--profile", "work", "--help"]);',
+					'await runCli(["--profile", "work", "--alias", "omp-work"]);',
+					'await import("@oh-my-pi/pi-utils/env");',
 					'process.stdout.write("\\nSENTINEL=" + (Bun.env.OMP_PROFILE_BOOTSTRAP_SENTINEL ?? ""));',
 				].join("\n"),
 			);

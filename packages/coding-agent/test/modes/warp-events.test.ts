@@ -134,7 +134,7 @@ describe("Warp CLI-agent events", () => {
 		expect(written.endsWith("\x1b\\\x07")).toBe(true);
 	});
 
-	const attentionEvents = ["stop", "stop_failure", "permission_request", "question_asked"] as const;
+	const attentionEvents = ["stop", "stop_failure", "permission_request"] as const;
 	const nonAttentionEvents = [
 		"session_start",
 		"prompt_submit",

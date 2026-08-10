@@ -71,6 +71,29 @@ describe("Bedrock system prompt normalization", () => {
 		expect(textBlocks(payload)).toEqual(["You are a test."]);
 	});
 
+	test("sends an async onPayload replacement body", async () => {
+		let sentBody: Record<string, unknown> | undefined;
+		const stream = streamBedrock(
+			model(),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{
+				bearerToken: "test-token",
+				fetch: async (_input, init) => {
+					if (!(init?.body instanceof Uint8Array)) throw new Error("Expected encoded request body");
+					sentBody = JSON.parse(new TextDecoder().decode(init.body)) as Record<string, unknown>;
+					return new Response("rejected", { status: 418 });
+				},
+				onPayload: async payload => ({
+					...(payload as Record<string, unknown>),
+					inferenceConfig: { maxTokens: 7 },
+				}),
+			},
+		);
+
+		await stream.result();
+		expect(sentBody?.inferenceConfig).toEqual({ maxTokens: 7 });
+	});
+
 	test("string and single-element array produce identical system blocks", async () => {
 		const fromString = await capturePayload("You are a test." as unknown as string[]);
 		const fromArray = await capturePayload(["You are a test."]);

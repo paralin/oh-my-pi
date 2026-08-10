@@ -5,7 +5,6 @@ import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	type RpcHarnessPublishedEvent,
-	type RpcHarnessResult,
 	RpcHarnessSessionOwner,
 	rpcHarnessRecordFileForSessionFile,
 	rpcSteeringPayloadIdentity,
@@ -135,28 +134,6 @@ describe("RPC harness session owner", () => {
 		expect(await reopened.replay()).toMatchObject([
 			{ type: "session_terminal", terminalSequence: 1, resultId: "session-1:result" },
 		]);
-	});
-
-	it("keeps terminal secrets obfuscated on disk while returning display text", async () => {
-		const file = recordFile();
-		const displayResult = (result: RpcHarnessResult) => ({
-			...result,
-			finalMessage: result.finalMessage.replace("$$HASH$$", "display secret"),
-		});
-		const owner = await RpcHarnessSessionOwner.open("session-1", file, undefined, undefined, { displayResult });
-		await owner.completeResult({
-			outcome: "completed",
-			stopReason: "finished",
-			finalMessage: "$$HASH$$",
-			usage: usage(),
-		});
-		expect((await owner.waitResult()).finalMessage).toBe("display secret");
-		expect(await fs.readFile(file, "utf8")).not.toContain("display secret");
-
-		const reopened = await RpcHarnessSessionOwner.open("session-1", file, undefined, undefined, { displayResult });
-		expect((await reopened.waitResult()).finalMessage).toBe("display secret");
-		const replayedTerminal = (await reopened.replay()).find(event => event.type === "session_terminal");
-		expect(replayedTerminal?.finalMessage).toBe("display secret");
 	});
 
 	it("rejects result waiters when ledger persistence fails", async () => {

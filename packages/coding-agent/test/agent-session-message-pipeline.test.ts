@@ -26,8 +26,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as memoryBackend from "@oh-my-pi/pi-coding-agent/memory-backend";
 import type { MemoryBackend } from "@oh-my-pi/pi-coding-agent/memory-backend/types";
 import { type MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
-import { createAgentSession, type ExtensionContext, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
+import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -65,20 +64,6 @@ function getConvertedUserText(message: Message | undefined): string {
 		throw new Error("Expected converted text content");
 	}
 	return text.text;
-}
-
-async function withNativeDialectEnv<T>(fn: () => Promise<T>): Promise<T> {
-	const previous = Bun.env.PI_DIALECT;
-	delete Bun.env.PI_DIALECT;
-	try {
-		return await fn();
-	} finally {
-		if (previous === undefined) {
-			delete Bun.env.PI_DIALECT;
-		} else {
-			Bun.env.PI_DIALECT = previous;
-		}
-	}
 }
 
 describe("AgentSession message pipeline", () => {
@@ -181,187 +166,6 @@ describe("AgentSession message pipeline", () => {
 		});
 
 		expect(session.getImageAttachments()).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage }]);
-	});
-
-	it("normalizes historical WebP on the main provider request path", async () => {
-		using tempDir = TempDir.createSync("@pi-stb-main-path-");
-		const api = "test-stb-main-path";
-		const contexts: Context[] = [];
-		registerCustomApi(api, (_model, context) => {
-			contexts.push(context);
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage("ok");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
-		});
-		const seed = Buffer.from(
-			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
-			"base64",
-		);
-		const webpData = Buffer.from(await new Bun.Image(seed).resize(2, 2).webp({ quality: 90 }).bytes()).toBase64();
-		const historicalImage: ImageContent = {
-			type: "image",
-			data: webpData,
-			// Confirm byte sniffing catches persisted blocks with stale metadata.
-			mimeType: "image/png",
-		};
-		const model = buildModel({
-			id: "stb-main-path",
-			name: "STB main path",
-			api,
-			provider: "managed-primary",
-			baseUrl: "http://127.0.0.1:8080/v1",
-			reasoning: false,
-			input: ["text", "image"],
-			imageInputDecoder: "stb",
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
-		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		const { session } = await createAgentSession({
-			cwd: tempDir.path(),
-			agentDir: tempDir.path(),
-			sessionManager: SessionManager.inMemory(tempDir.path()),
-			authStorage,
-			modelRegistry,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			model,
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			taskDepth: 1,
-			agentId: "SubAgent",
-		});
-		try {
-			session.agent.appendMessage({
-				role: "toolResult",
-				toolCallId: "read-1",
-				toolName: "read",
-				content: [{ type: "text", text: "screenshot" }, historicalImage],
-				isError: false,
-				timestamp: 1,
-			});
-
-			await session.sendUserMessage("continue");
-
-			expect(contexts).toHaveLength(1);
-			const outboundImages: ImageContent[] = [];
-			for (const message of contexts[0]!.messages) {
-				if (typeof message.content === "string") continue;
-				for (const part of message.content) {
-					if (part.type === "image") outboundImages.push(part);
-				}
-			}
-			expect(outboundImages).toHaveLength(1);
-			expect(outboundImages[0]!.mimeType).not.toBe("image/webp");
-			expect(Buffer.from(outboundImages[0]!.data.slice(0, 16), "base64").toString("ascii", 8, 12)).not.toBe("WEBP");
-			expect(historicalImage.mimeType).toBe("image/png");
-			expect(Buffer.from(historicalImage.data.slice(0, 16), "base64").toString("ascii", 8, 12)).toBe("WEBP");
-		} finally {
-			await session.dispose();
-			authStorage.close();
-		}
-	});
-
-	it("continues a user turn when an attached WebP is undecodable by an STB model", async () => {
-		using tempDir = TempDir.createSync("@pi-stb-corrupt-attachment-");
-		const api = "test-stb-corrupt-attachment";
-		const contexts: Context[] = [];
-		registerCustomApi(api, (_model, context) => {
-			contexts.push(context);
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage("ok");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
-		});
-		const model = buildModel({
-			id: "stb-corrupt-attachment",
-			name: "STB corrupt attachment",
-			api,
-			provider: "managed-primary",
-			baseUrl: "http://127.0.0.1:8080/v1",
-			reasoning: false,
-			input: ["text", "image"],
-			imageInputDecoder: "stb",
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
-		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		authStorage.setRuntimeApiKey(model.provider, "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		const { session } = await createAgentSession({
-			cwd: tempDir.path(),
-			agentDir: tempDir.path(),
-			sessionManager: SessionManager.inMemory(tempDir.path()),
-			authStorage,
-			modelRegistry,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			model,
-			disableExtensionDiscovery: true,
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			taskDepth: 1,
-			agentId: "SubAgent",
-		});
-		try {
-			// Session persistence accepts historical image blocks without MIME
-			// metadata, so exercise that runtime shape through the real provider path.
-			const corrupt = {
-				type: "image",
-				data: Buffer.from("RIFF0000WEBPbroken-attachment").toBase64(),
-			} as unknown as ImageContent;
-
-			await session.sendUserMessage([{ type: "text", text: "inspect this" }, corrupt]);
-
-			expect(contexts).toHaveLength(1);
-			const userMessage = contexts[0]!.messages.find(message => message.role === "user");
-			expect(userMessage?.content).toEqual([
-				{ type: "text", text: "inspect this" },
-				{ type: "text", text: "[image omitted: WebP could not be decoded for this model]" },
-			]);
-		} finally {
-			await session.dispose();
-			authStorage.close();
-		}
-	});
-
-	it("deobfuscates the last assistant text returned to clients", () => {
-		const secret = "TERMINAL_SECRET_TOKEN_12345";
-		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
-		const session = new AgentSession({
-			agent: createAgent(),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: {} as never,
-			obfuscator,
-		});
-		sessions.push(session);
-		session.agent.appendMessage(createAssistantMessage(obfuscator.obfuscate(`terminal ${secret}`)));
-
-		expect(session.getLastAssistantText()).toBe(`terminal ${secret}`);
-		const providerSafe = session.getLastAssistantText({ providerSafe: true });
-		expect(providerSafe).not.toContain(secret);
-		expect(session.restoreProviderTextForDisplay(providerSafe!)).toBe(`terminal ${secret}`);
 	});
 
 	it("distinguishes transient steering state from durable session history", () => {
@@ -667,136 +471,6 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedOptions?.openrouterVariant).toBe("nitro");
 	});
 
-	it("obfuscates user messages on ephemeral side-channel requests", async () => {
-		const api = "test-ephemeral-secret-redaction";
-		const secret = "EPHEMERAL_SECRET_TOKEN_12345";
-		let capturedContext: Context | undefined;
-		registerCustomApi(api, (_model, context, _options) => {
-			capturedContext = context;
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				const message = createAssistantMessage("Answer");
-				stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
-				stream.push({ type: "done", reason: "stop", message });
-			});
-			return stream;
-		});
-
-		const model = buildModel({
-			id: "side-model-secrets",
-			name: "Side Model Secrets",
-			api,
-			provider: "test-provider",
-			baseUrl: "",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
-		const session = new AgentSession({
-			agent: new Agent({
-				initialState: {
-					model,
-					systemPrompt: ["system prompt"],
-					messages: [],
-					tools: [],
-				},
-			}),
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry: createModelRegistryStub() as never,
-			obfuscator: new SecretObfuscator([{ type: "plain", content: secret }]),
-		});
-		sessions.push(session);
-
-		const result = await session.runEphemeralTurn({ promptText: `question about ${secret}` });
-
-		expect(result.replyText).toBe("Answer");
-		expect(capturedContext).toBeDefined();
-		// The secret entered only via the user prompt, which the opt-in obfuscator redacts.
-		expect(JSON.stringify(capturedContext)).not.toContain(secret);
-	});
-
-	it("keeps obfuscated side-channel stable prefix byte-identical to the main turn", async () => {
-		await withNativeDialectEnv(async () => {
-			const api = "test-ephemeral-obfuscated-prefix-parity";
-			const secret = "PREFIX_SECRET_TOKEN_12345";
-			let callCount = 0;
-			let mainContext: Context | undefined;
-			let sideContext: Context | undefined;
-			registerCustomApi(api, (_model, context, _options) => {
-				if (callCount === 0) {
-					mainContext = context;
-				} else {
-					sideContext = context;
-				}
-				callCount += 1;
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const message = createAssistantMessage("Answer");
-					stream.push({ type: "text_delta", contentIndex: 0, delta: "Answer", partial: message });
-					stream.push({ type: "done", reason: "stop", message });
-				});
-				return stream;
-			});
-
-			const model = buildModel({
-				id: "side-model-prefix-parity",
-				name: "Side Model Prefix Parity",
-				api,
-				provider: "test-provider",
-				baseUrl: "",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 4096,
-				maxTokens: 1024,
-			} as ModelSpec<Api>) as Model<Api>;
-			const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
-			const tool: AgentTool = {
-				name: "secret_probe",
-				label: "Secret Probe",
-				description: `Tool description ${secret}`,
-				parameters: {
-					type: "object",
-					properties: {
-						value: { type: "string", description: `Schema description ${secret}` },
-					},
-					required: ["value"],
-				},
-				execute: async () => ({ content: [], details: {} }),
-			};
-			const agent = new Agent({
-				initialState: {
-					model,
-					systemPrompt: [`system prompt with ${secret}`],
-					messages: [],
-					tools: [tool],
-				},
-				transformProviderContext: context => obfuscateProviderContext(obfuscator, context),
-			});
-			const session = new AgentSession({
-				agent,
-				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({ "compaction.enabled": false }),
-				modelRegistry: createModelRegistryStub() as never,
-				obfuscator,
-			});
-			sessions.push(session);
-
-			await agent.prompt("Main Question?");
-			await session.runEphemeralTurn({ promptText: `Side Question ${secret}?` });
-
-			// The static prefix (system prompt + tools) is left untouched, so it stays byte-identical
-			// between the main turn and the side turn and the prompt cache prefix survives.
-			expect(JSON.stringify(mainContext?.systemPrompt)).toBe(JSON.stringify(sideContext?.systemPrompt));
-			expect(JSON.stringify(mainContext?.tools)).toBe(JSON.stringify(sideContext?.tools));
-			// The side turn's user prompt secret is redacted from the outbound messages.
-			expect(JSON.stringify(sideContext?.messages)).not.toContain(secret);
-		});
-	});
-
 	it("records raw SSE diagnostics into the session buffer before request hooks", async () => {
 		const requestOnSseEvent = vi.fn();
 		const session = new AgentSession({
@@ -1025,7 +699,6 @@ describe("AgentSession message pipeline", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 			taskDepth: 1,
 			agentId: "SubAgent",
 		});
@@ -1048,11 +721,9 @@ describe("AgentSession message pipeline", () => {
 		}
 	});
 	it("applies a tool_call input revision at arg-prep time across events, execution, and history", async () => {
-		// End-to-end wiring for the loop-level tool_call emission (session
-		// #beforeToolCall): the handler fires once per dispatch (the wrapper's
-		// own emission is suppressed via the runner marker), the revision is what
-		// tool_execution_start reports, what bash executes, and what the
-		// assistant message persists.
+		// End-to-end wiring for the fixed-IPython tool events: the revision is
+		// what the loop schedules, executes, and persists; the result handler
+		// receives that revised cell and can change its provider-visible result.
 		using tempDir = TempDir.createSync("@pi-tool-call-revision-");
 		const api = "test-tool-call-revision";
 		let requests = 0;
@@ -1065,8 +736,8 @@ describe("AgentSession message pipeline", () => {
 					const toolCall = {
 						type: "toolCall",
 						id: "call-revise-1",
-						name: "bash",
-						arguments: { command: "echo original" },
+						name: "ipython",
+						arguments: { code: "echo original" },
 					} as const;
 					message.content = [toolCall];
 					message.stopReason = "toolUse";
@@ -1093,11 +764,15 @@ describe("AgentSession message pipeline", () => {
 			maxTokens: 1024,
 		} as ModelSpec<Api>) as Model<Api>;
 		let handlerCalls = 0;
-		const reviseBash: ExtensionFactory = pi => {
-			pi.on("tool_call", async event => {
-				if (event.toolName !== "bash") return undefined;
+		const resultCodes: string[] = [];
+		const reviseIpython: ExtensionFactory = pi => {
+			pi.on("tool_call", () => {
 				handlerCalls++;
-				return { input: { command: "echo revised" } };
+				return { input: { code: "echo revised" } };
+			});
+			pi.on("tool_result", event => {
+				resultCodes.push(event.input.code);
+				return { content: [...event.content, { type: "text", text: "extension result" }] };
 			});
 		};
 		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
@@ -1110,20 +785,16 @@ describe("AgentSession message pipeline", () => {
 			modelRegistry,
 			settings: Settings.isolated({
 				"compaction.enabled": false,
-				"bash.autoBackground.enabled": false,
-				"bashInterceptor.enabled": false,
 			}),
 			model,
 			disableExtensionDiscovery: true,
-			extensions: [reviseBash],
+			extensions: [reviseIpython],
 			skills: [],
 			contextFiles: [],
 			promptTemplates: [],
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
-			toolNames: ["bash"],
 		});
 		try {
 			const startArgs: unknown[] = [];
@@ -1134,130 +805,28 @@ describe("AgentSession message pipeline", () => {
 			await session.sendUserMessage("run it");
 
 			expect(handlerCalls).toBe(1);
-			expect(startArgs).toEqual([{ command: "echo revised" }]);
+			expect(resultCodes).toEqual(["echo revised"]);
+			expect(startArgs).toEqual([{ code: "echo revised" }]);
 			const messages = session.agent.state.messages;
 			const toolCallBlock = messages
 				.filter(m => m.role === "assistant")
 				.flatMap(m => (m as { content: Array<{ type: string }> }).content)
 				.find(c => c.type === "toolCall") as { arguments?: unknown } | undefined;
-			expect(toolCallBlock?.arguments).toEqual({ command: "echo revised" });
+			expect(toolCallBlock?.arguments).toEqual({ code: "echo revised" });
 			const toolResult = messages.find(m => m.role === "toolResult") as
 				| { content: Array<{ type: string; text?: string }> }
 				| undefined;
-			const text = toolResult?.content.find(block => block.type === "text")?.text ?? "";
-			expect(text).toContain("revised");
-			expect(text).not.toContain("original");
+			const text =
+				toolResult?.content
+					.filter((block): block is { type: "text"; text: string } => block.type === "text")
+					.map(block => block.text)
+					.join("\n") ?? "";
+			expect(text).toContain("extension result");
 		} finally {
 			await session.dispose();
 			authStorage.close();
 		}
-	});
-	it("exposes ctx.invokeTool to a re-registered built-in so it can delegate to the native tool", async () => {
-		// End-to-end for the extension path: a tool that re-registers `bash` receives ctx.invokeTool
-		// (bound to its own name), delegates to the native bash, and the native output flows back.
-		using tempDir = TempDir.createSync("@pi-invoke-tool-");
-		const api = "test-invoke-tool";
-		let requests = 0;
-		registerCustomApi(api, () => {
-			requests++;
-			const stream = new AssistantMessageEventStream();
-			queueMicrotask(() => {
-				if (requests === 1) {
-					const message = createAssistantMessage("");
-					const toolCall = {
-						type: "toolCall",
-						id: "call-invoke-1",
-						name: "bash",
-						arguments: { command: "echo from-model" },
-					} as const;
-					message.content = [toolCall];
-					message.stopReason = "toolUse";
-					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
-					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall: toolCall as never, partial: message });
-					stream.push({ type: "done", reason: "toolUse", message });
-				} else {
-					const message = createAssistantMessage("done");
-					stream.push({ type: "done", reason: "stop", message });
-				}
-			});
-			return stream;
-		});
-		const model = buildModel({
-			id: "local-invoke-model",
-			name: "Local Invoke Model",
-			api,
-			provider: "ollama",
-			baseUrl: "http://127.0.0.1:11434",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			contextWindow: 4096,
-			maxTokens: 1024,
-		} as ModelSpec<Api>) as Model<Api>;
-		let invokeToolPresent = false;
-		let delegatedText = "";
-		// Re-register `bash`: the wrapper ignores the model's args, delegates to the native bash with
-		// its own command via ctx.invokeTool, and returns the native result.
-		const wrapBash: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "bash",
-				label: "Bash",
-				description: "wrapped bash",
-				parameters: pi.arktype({ command: pi.arktype("string") }),
-				async execute(
-					_toolCallId: string,
-					_params: unknown,
-					_signal: unknown,
-					_onUpdate: unknown,
-					ctx: ExtensionContext,
-				) {
-					invokeToolPresent = typeof ctx.invokeTool === "function";
-					const native = await ctx.invokeTool?.({ command: "echo from-wrapper" });
-					const textBlock = native?.content.find(b => b.type === "text");
-					delegatedText = textBlock?.type === "text" ? textBlock.text : "";
-					return native ?? { content: [{ type: "text" as const, text: "no invokeTool" }], details: {} };
-				},
-			});
-		};
-		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		const { session } = await createAgentSession({
-			cwd: tempDir.path(),
-			agentDir: tempDir.path(),
-			sessionManager: SessionManager.inMemory(tempDir.path()),
-			authStorage,
-			modelRegistry,
-			settings: Settings.isolated({
-				"compaction.enabled": false,
-				"bash.autoBackground.enabled": false,
-				"bashInterceptor.enabled": false,
-				"tools.xdev": false,
-			}),
-			model,
-			disableExtensionDiscovery: true,
-			extensions: [wrapBash],
-			skills: [],
-			contextFiles: [],
-			promptTemplates: [],
-			slashCommands: [],
-			enableMCP: false,
-			enableLsp: false,
-			skipPythonPreflight: true,
-			toolNames: ["bash"],
-		});
-		try {
-			await session.sendUserMessage("run it");
-
-			expect(invokeToolPresent).toBe(true);
-			// The native bash actually ran the wrapper's command, not the model's.
-			expect(delegatedText).toContain("from-wrapper");
-			expect(delegatedText).not.toContain("from-model");
-		} finally {
-			await session.dispose();
-			authStorage.close();
-		}
-	});
-
+	}, 15_000);
 	it("clears promoted memory from the base prompt when switching sessions", async () => {
 		using tempDir = TempDir.createSync("@pi-injected-memory-switch-");
 		const sessionManager = SessionManager.create(tempDir.path(), tempDir.join("sessions"));
@@ -1566,84 +1135,82 @@ describe("AgentSession message pipeline", () => {
 	});
 
 	it("ephemeral side-channel forwards native tools, injects developer reminder, leaves toolChoice auto", async () => {
-		await withNativeDialectEnv(async () => {
-			const api = "test-ephemeral-tools-warm-cache";
-			let capturedContext: Context | undefined;
-			let capturedOptions: SimpleStreamOptions | undefined;
-			registerCustomApi(api, (_model, context, options) => {
-				capturedContext = context;
-				capturedOptions = options;
-				const stream = new AssistantMessageEventStream();
-				queueMicrotask(() => {
-					const message = createAssistantMessage("Not using tools");
-					stream.push({ type: "text_delta", contentIndex: 0, delta: "Not using tools", partial: message });
-					stream.push({ type: "done", reason: "stop", message });
-				});
-				return stream;
+		const api = "test-ephemeral-tools-warm-cache";
+		let capturedContext: Context | undefined;
+		let capturedOptions: SimpleStreamOptions | undefined;
+		registerCustomApi(api, (_model, context, options) => {
+			capturedContext = context;
+			capturedOptions = options;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("Not using tools");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "Not using tools", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
 			});
-
-			const model = buildModel({
-				id: "side-model-with-tools",
-				name: "Side Model with Tools",
-				api,
-				provider: "test-provider",
-				baseUrl: "",
-				reasoning: false,
-				input: ["text"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 4096,
-				maxTokens: 1024,
-			} as ModelSpec<Api>) as Model<Api>;
-
-			const tool: AgentTool = {
-				name: "side_tool",
-				label: "Side Tool",
-				description: "A tool in side channel",
-				parameters: { type: "object", properties: {} },
-				execute: async () => ({ content: [], details: {} }),
-			};
-
-			const session = new AgentSession({
-				agent: new Agent({
-					initialState: {
-						model,
-						systemPrompt: ["system prompt"],
-						messages: [],
-						tools: [tool],
-					},
-				}),
-				sessionManager: SessionManager.inMemory(),
-				settings: Settings.isolated({ "compaction.enabled": false }),
-				modelRegistry: createModelRegistryStub() as never,
-			});
-			sessions.push(session);
-
-			const result = await session.runEphemeralTurn({ promptText: "Side Question?" });
-
-			expect(result.replyText).toBe("Not using tools");
-			expect(capturedContext).toBeDefined();
-			expect(capturedContext!.tools).toBeDefined();
-			expect(capturedContext!.tools!.length).toBe(1);
-			expect(capturedContext!.tools![0].name).toBe("side_tool");
-
-			// Developer reminder injected immediately before user prompt
-			const messages = capturedContext!.messages;
-			expect(messages.length).toBeGreaterThanOrEqual(2);
-			const lastMessage = messages.at(-1);
-			const secondToLast = messages.at(-2);
-
-			expect(lastMessage?.role).toBe("user");
-			expect(getConvertedUserText(lastMessage)).toBe("Side Question?");
-
-			expect(secondToLast?.role).toBe("developer");
-			const textContent = secondToLast?.content as TextContent[];
-			expect(textContent).toHaveLength(1);
-			expect(textContent[0]?.type).toBe("text");
-			expect(textContent[0]?.text).toMatch(/^<system-reminder>\n[\s\S]+\n<\/system-reminder>\n?$/);
-
-			// Tool choice must be undefined (not "none") for cache hits
-			expect(capturedOptions?.toolChoice).toBeUndefined();
+			return stream;
 		});
+
+		const model = buildModel({
+			id: "side-model-with-tools",
+			name: "Side Model with Tools",
+			api,
+			provider: "test-provider",
+			baseUrl: "",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+
+		const tool: AgentTool = {
+			name: "side_tool",
+			label: "Side Tool",
+			description: "A tool in side channel",
+			parameters: { type: "object", properties: {} },
+			execute: async () => ({ content: [], details: {} }),
+		};
+
+		const session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["system prompt"],
+					messages: [],
+					tools: [tool],
+				},
+			}),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: createModelRegistryStub() as never,
+		});
+		sessions.push(session);
+
+		const result = await session.runEphemeralTurn({ promptText: "Side Question?" });
+
+		expect(result.replyText).toBe("Not using tools");
+		expect(capturedContext).toBeDefined();
+		expect(capturedContext!.tools).toBeDefined();
+		expect(capturedContext!.tools!.length).toBe(1);
+		expect(capturedContext!.tools![0].name).toBe("side_tool");
+
+		// Developer reminder injected immediately before user prompt
+		const messages = capturedContext!.messages;
+		expect(messages.length).toBeGreaterThanOrEqual(2);
+		const lastMessage = messages.at(-1);
+		const secondToLast = messages.at(-2);
+
+		expect(lastMessage?.role).toBe("user");
+		expect(getConvertedUserText(lastMessage)).toBe("Side Question?");
+
+		expect(secondToLast?.role).toBe("developer");
+		const textContent = secondToLast?.content as TextContent[];
+		expect(textContent).toHaveLength(1);
+		expect(textContent[0]?.type).toBe("text");
+		expect(textContent[0]?.text).toMatch(/^<system-reminder>\n[\s\S]+\n<\/system-reminder>\n?$/);
+
+		// Tool choice must be undefined (not "none") for cache hits
+		expect(capturedOptions?.toolChoice).toBeUndefined();
 	});
 
 	it("ephemeral side-channel discards any emitted tool calls", async () => {

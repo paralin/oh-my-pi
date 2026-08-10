@@ -1,7 +1,7 @@
 ---
 description: "Do not use `ReturnType<typeof fn>` — name the type explicitly"
 condition: "ReturnType<"
-scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

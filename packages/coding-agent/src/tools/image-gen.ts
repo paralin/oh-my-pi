@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import { type ApiKey, type FetchImpl, getEnvApiKey, getOpenRouterHeaders, type Model, withAuth } from "@oh-my-pi/pi-ai";
+import { type ApiKey, type FetchImpl, getEnvApiKey, type Model, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
 import {
 	CODEX_BASE_URL,
@@ -11,24 +11,14 @@ import {
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import {
-	$env,
-	isEnoent,
-	parseImageMetadata,
-	prompt,
-	ptree,
-	readSseJson,
-	Snowflake,
-	USER_AGENT,
-	untilAborted,
-} from "@oh-my-pi/pi-utils";
+import { $env, isEnoent, parseImageMetadata, ptree, readSseJson, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import packageJson from "../../package.json" with { type: "json" };
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
-import type { CustomTool } from "../extensibility/custom-tools/types";
-import { resolveXAIHttpCredentials } from "../lib/xai-http";
-import imageGenDescription from "../prompts/tools/image-gen.md" with { type: "text" };
+import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
 import { resolveReadPath } from "./path-utils";
+import type { HostExecutionContext, HostResult } from "./tool-types";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
 const DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-image-preview";
@@ -56,15 +46,24 @@ interface ImageApiKey {
 }
 
 const COMMON_IMAGE_ASPECT_RATIOS = ["1:1", "3:4", "4:3", "9:16", "16:9"] as const;
-const XAI_IMAGE_ASPECT_RATIOS = [...COMMON_IMAGE_ASPECT_RATIOS, "3:2", "2:3"] as const;
+export const IMAGE_ASPECT_RATIO_CHOICES = [...COMMON_IMAGE_ASPECT_RATIOS, "3:2", "2:3"] as const;
+export const IMAGE_SIZE_CHOICES = ["1024x1024", "1536x1024", "1024x1536"] as const;
+
+export function isImageAspectRatio(value: string): value is (typeof IMAGE_ASPECT_RATIO_CHOICES)[number] {
+	return IMAGE_ASPECT_RATIO_CHOICES.includes(value as (typeof IMAGE_ASPECT_RATIO_CHOICES)[number]);
+}
+
+export function isImageSize(value: string): value is (typeof IMAGE_SIZE_CHOICES)[number] {
+	return IMAGE_SIZE_CHOICES.includes(value as (typeof IMAGE_SIZE_CHOICES)[number]);
+}
 const COMMON_IMAGE_ASPECT_RATIO_SET = new Set<string>(COMMON_IMAGE_ASPECT_RATIOS);
 const IMAGE_PROVIDER_REQUEST_CHOICES = ["auto", ...AUTO_IMAGE_PROVIDER_ORDER] as const;
 const IMAGE_PROVIDER_PREFERENCES = new Set<string>(IMAGE_PROVIDER_REQUEST_CHOICES);
 
 const responseModalitySchema = type('"IMAGE" | "TEXT"');
 
-const aspectRatioSchema = type.enumerated(...XAI_IMAGE_ASPECT_RATIOS).describe("aspect ratio");
-const imageSizeSchema = type('"1024x1024" | "1536x1024" | "1024x1536"').describe("image size");
+const aspectRatioSchema = type.enumerated(...IMAGE_ASPECT_RATIO_CHOICES).describe("aspect ratio");
+const imageSizeSchema = type.enumerated(...IMAGE_SIZE_CHOICES).describe("image size");
 
 const inputImageSchema = type({
 	"path?": type("string").describe("input image path"),
@@ -76,7 +75,7 @@ const imageProviderSchema = type
 	.enumerated(...IMAGE_PROVIDER_REQUEST_CHOICES)
 	.describe("image provider for this request; overrides the providers.imageOrder setting (default: use the setting)");
 
-export const imageGenSchema = type({
+export const imageGenerationInputSchema = type({
 	subject: type("string").describe("main subject"),
 	"action?": type("string").describe("what subject is doing"),
 	"scene?": type("string").describe("location or environment"),
@@ -90,7 +89,7 @@ export const imageGenSchema = type({
 	"input?": inputImageSchema.array().describe("input images"),
 	"provider?": imageProviderSchema,
 });
-export type ImageGenParams = typeof imageGenSchema.infer;
+export type ImageGenerationParams = typeof imageGenerationInputSchema.infer;
 export type GeminiResponseModality = typeof responseModalitySchema.infer;
 
 /**
@@ -98,7 +97,7 @@ export type GeminiResponseModality = typeof responseModalitySchema.infer;
  * For generation: builds "subject, action, scene. composition. lighting. camera. style."
  * For edits: appends change instructions and preserve directives.
  */
-function assemblePrompt(params: ImageGenParams): string {
+function assemblePrompt(params: ImageGenerationParams): string {
 	const parts: string[] = [];
 
 	// Core subject line: subject + action + scene
@@ -334,7 +333,7 @@ interface AntigravityResponseChunk {
 	};
 }
 
-interface ImageGenToolDetails {
+export interface ImageGenerationDetails {
 	provider: ImageProvider;
 	model: string;
 	imageCount: number;
@@ -352,7 +351,7 @@ interface ImageInput {
 	mime_type?: string;
 }
 
-interface InlineImageData {
+export interface InlineImageData {
 	data: string;
 	mimeType: string;
 }
@@ -450,7 +449,10 @@ export function isImageProviderPreference(value: unknown): value is ImageProvide
 export function setImageProviderOrder(providers: readonly string[]): void {
 	configuredImageProviderOrder = providers.filter(isImageProviderId);
 }
-function assertImageAspectRatioSupported(provider: ImageProvider, aspectRatio: ImageGenParams["aspect_ratio"]): void {
+function assertImageAspectRatioSupported(
+	provider: ImageProvider,
+	aspectRatio: ImageGenerationParams["aspect_ratio"],
+): void {
 	if (!aspectRatio || provider === "xai" || COMMON_IMAGE_ASPECT_RATIO_SET.has(aspectRatio)) {
 		return;
 	}
@@ -783,7 +785,7 @@ function resolveOpenAIImageSize(aspectRatio: string | undefined, imageSize: stri
 function buildOpenAIHostedImageRequest(
 	model: Model,
 	promptText: string,
-	params: ImageGenParams,
+	params: ImageGenerationParams,
 	inputImages: InlineImageData[],
 	stream: boolean,
 ): OpenAIHostedImageRequest {
@@ -897,7 +899,7 @@ function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string
 		}
 		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 		headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
-		headers.set("User-Agent", USER_AGENT);
+		headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
 		if (sessionId) {
 			headers.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
 			headers.set(OPENAI_HEADERS.SESSION_ID, sessionId);
@@ -942,7 +944,7 @@ async function parseOpenAIHostedImageSse(response: Response, signal?: AbortSigna
 async function generateOpenAIHostedImage(
 	apiKey: string,
 	model: Model,
-	params: ImageGenParams,
+	params: ImageGenerationParams,
 	inputImages: InlineImageData[],
 	fetchImpl: FetchImpl,
 	signal: AbortSignal | undefined,
@@ -1091,112 +1093,86 @@ async function parseAntigravitySseForImage(response: Response, signal?: AbortSig
 	return { images, text: textParts, usage };
 }
 
-export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails> = {
-	name: "generate_image",
-	label: "GenerateImage",
-	strict: false,
-	approval: "write",
-	description: prompt.render(imageGenDescription),
-	parameters: imageGenSchema,
-	async execute(_toolCallId, params, _onUpdate, ctx, signal) {
-		return untilAborted(signal, async () => {
-			const sessionId = ctx.sessionManager.getSessionId();
-			const providerOrder = imageProviderOrder(ctx.model, params.provider);
-			const cwd = ctx.sessionManager.getCwd();
-			const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
-			const fetchImpl = ctx.fetch ?? fetch;
-			const failures: Array<{ provider: ImageProvider; error: ProviderHttpError }> = [];
-			let unsupportedAspectRatioProvider: ImageProvider | undefined;
-			let foundCredentials = false;
-			let resolvedImageCache: InlineImageData[] | undefined;
+export async function executeImageGeneration(
+	ctx: HostExecutionContext,
+	params: ImageGenerationParams,
+	signal?: AbortSignal,
+): Promise<HostResult<ImageGenerationDetails>> {
+	return untilAborted(signal, async () => {
+		const sessionId = ctx.sessionManager.getSessionId();
+		const providerOrder = imageProviderOrder(ctx.model, params.provider);
+		const cwd = ctx.sessionManager.getCwd();
+		const requestSignal = ptree.combineSignals(signal, IMAGE_TIMEOUT);
+		const fetchImpl = ctx.fetch ?? fetch;
+		const failures: Array<{ provider: ImageProvider; error: ProviderHttpError }> = [];
+		let unsupportedAspectRatioProvider: ImageProvider | undefined;
+		let foundCredentials = false;
+		let resolvedImageCache: InlineImageData[] | undefined;
 
-			for (const preferredProvider of providerOrder) {
-				const apiKey = await findImageApiKey(preferredProvider, ctx.modelRegistry, ctx.model, sessionId);
-				if (!apiKey) continue;
-				foundCredentials = true;
-				if (!resolvedImageCache) {
-					resolvedImageCache = [];
-					if (params.input?.length) {
-						for (const input of params.input) {
-							resolvedImageCache.push(await resolveInputImage(input, cwd));
-						}
+		for (const preferredProvider of providerOrder) {
+			const apiKey = await findImageApiKey(preferredProvider, ctx.modelRegistry, ctx.model, sessionId);
+			if (!apiKey) continue;
+			foundCredentials = true;
+			if (!resolvedImageCache) {
+				resolvedImageCache = [];
+				if (params.input?.length) {
+					for (const input of params.input) {
+						resolvedImageCache.push(await resolveInputImage(input, cwd));
 					}
 				}
-				const resolvedImages = resolvedImageCache;
+			}
+			const resolvedImages = resolvedImageCache;
 
-				const provider = apiKey.provider;
-				try {
-					const model =
-						provider === "openai" || provider === "openai-codex"
-							? (apiKey.model?.id ?? "gpt")
-							: provider === "antigravity"
-								? DEFAULT_ANTIGRAVITY_MODEL
-								: provider === "openrouter"
-									? DEFAULT_OPENROUTER_MODEL
-									: provider === "xai"
-										? DEFAULT_XAI_IMAGE_MODEL
-										: DEFAULT_MODEL;
-					const resolvedModel = provider === "openrouter" ? resolveOpenRouterModel(model) : model;
-					if (
-						params.aspect_ratio &&
-						provider !== "xai" &&
-						!COMMON_IMAGE_ASPECT_RATIO_SET.has(params.aspect_ratio)
-					) {
-						unsupportedAspectRatioProvider ??= provider;
-						continue;
+			const provider = apiKey.provider;
+			try {
+				const model =
+					provider === "openai" || provider === "openai-codex"
+						? (apiKey.model?.id ?? "gpt")
+						: provider === "antigravity"
+							? DEFAULT_ANTIGRAVITY_MODEL
+							: provider === "openrouter"
+								? DEFAULT_OPENROUTER_MODEL
+								: provider === "xai"
+									? DEFAULT_XAI_IMAGE_MODEL
+									: DEFAULT_MODEL;
+				const resolvedModel = provider === "openrouter" ? resolveOpenRouterModel(model) : model;
+				if (params.aspect_ratio && provider !== "xai" && !COMMON_IMAGE_ASPECT_RATIO_SET.has(params.aspect_ratio)) {
+					unsupportedAspectRatioProvider ??= provider;
+					continue;
+				}
+				if (provider === "openai" || provider === "openai-codex") {
+					if (!apiKey.model) {
+						throw new Error("Missing active GPT model for OpenAI image generation");
 					}
-					if (provider === "openai" || provider === "openai-codex") {
-						if (!apiKey.model) {
-							throw new Error("Missing active GPT model for OpenAI image generation");
-						}
 
-						const hostedModel = apiKey.model;
-						const hostedKey: ApiKey = ctx.modelRegistry.resolver(hostedModel, sessionId);
+					const hostedModel = apiKey.model;
+					const hostedKey: ApiKey = ctx.modelRegistry.resolver(hostedModel, sessionId);
 
-						const parsed = await withAuth(
-							hostedKey,
-							key =>
-								generateOpenAIHostedImage(
-									key,
-									hostedModel,
-									params,
-									resolvedImages,
-									fetchImpl,
-									requestSignal,
-									sessionId,
-								),
-							{ signal: requestSignal },
-						);
+					const parsed = await withAuth(
+						hostedKey,
+						key =>
+							generateOpenAIHostedImage(
+								key,
+								hostedModel,
+								params,
+								resolvedImages,
+								fetchImpl,
+								requestSignal,
+								sessionId,
+							),
+						{ signal: requestSignal },
+					);
 
-						if (parsed.images.length === 0) {
-							const messageText = parsed.responseText ? `\n\n${parsed.responseText}` : "";
-							return {
-								content: [{ type: "text", text: `No image data returned.${messageText}` }],
-								details: {
-									provider,
-									model,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-									responseText: parsed.responseText,
-									revisedPrompt: parsed.revisedPrompt,
-									usage: parsed.usage,
-								},
-							};
-						}
-
-						const imagePaths = await saveImagesToTemp(parsed.images);
-
+					if (parsed.images.length === 0) {
+						const messageText = parsed.responseText ? `\n\n${parsed.responseText}` : "";
 						return {
-							content: [
-								{ type: "text", text: buildResponseSummary(provider, model, imagePaths, parsed.responseText) },
-							],
+							content: [{ type: "text", text: `No image data returned.${messageText}` }],
 							details: {
 								provider,
 								model,
-								imageCount: parsed.images.length,
-								imagePaths,
-								images: parsed.images,
+								imageCount: 0,
+								imagePaths: [],
+								images: [],
 								responseText: parsed.responseText,
 								revisedPrompt: parsed.revisedPrompt,
 								usage: parsed.usage,
@@ -1204,387 +1180,307 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						};
 					}
 
-					if (provider === "antigravity") {
-						if (!apiKey.projectId) {
-							throw new Error("Missing projectId in antigravity credentials");
-						}
+					const imagePaths = await saveImagesToTemp(parsed.images);
 
-						const prompt = assemblePrompt(params);
-						const antigravityKey: ApiKey = ctx.modelRegistry.resolver("google-antigravity", {
-							sessionId,
-							modelId: DEFAULT_ANTIGRAVITY_MODEL,
-						});
+					return {
+						content: [
+							{ type: "text", text: buildResponseSummary(provider, model, imagePaths, parsed.responseText) },
+						],
+						details: {
+							provider,
+							model,
+							imageCount: parsed.images.length,
+							imagePaths,
+							images: parsed.images,
+							responseText: parsed.responseText,
+							revisedPrompt: parsed.revisedPrompt,
+							usage: parsed.usage,
+						},
+					};
+				}
 
-						const response = await withAuth(
-							antigravityKey,
-							async key => {
-								// On a retry the resolver yields the raw stored credential JSON
-								// ({ token, projectId }); the initial seed is the already-parsed
-								// access token. Tolerate both, falling back to the seed projectId.
-								const rotated = parseAntigravityCredentials(key);
-								const bearer = rotated?.accessToken ?? key;
-								const projectId = rotated?.projectId ?? apiKey.projectId!;
-								const requestBody = buildAntigravityRequest(
-									prompt,
-									model,
-									projectId,
-									params.aspect_ratio,
-									params.image_size,
-									resolvedImages,
-								);
+				if (provider === "antigravity") {
+					if (!apiKey.projectId) {
+						throw new Error("Missing projectId in antigravity credentials");
+					}
 
-								let endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+					const prompt = assemblePrompt(params);
+					const antigravityKey: ApiKey = ctx.modelRegistry.resolver("google-antigravity", {
+						sessionId,
+						modelId: DEFAULT_ANTIGRAVITY_MODEL,
+					});
+
+					const response = await withAuth(
+						antigravityKey,
+						async key => {
+							// On a retry the resolver yields the raw stored credential JSON
+							// ({ token, projectId }); the initial seed is the already-parsed
+							// access token. Tolerate both, falling back to the seed projectId.
+							const rotated = parseAntigravityCredentials(key);
+							const bearer = rotated?.accessToken ?? key;
+							const projectId = rotated?.projectId ?? apiKey.projectId!;
+							const requestBody = buildAntigravityRequest(
+								prompt,
+								model,
+								projectId,
+								params.aspect_ratio,
+								params.image_size,
+								resolvedImages,
+							);
+
+							let endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD, DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+							try {
+								const mode = settings.get("providers.antigravityEndpoint");
+								if (mode === "production") {
+									endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
+								} else if (mode === "sandbox") {
+									endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
+								}
+							} catch {
+								// Ignored
+							}
+
+							let resp: Response | undefined;
+							let lastError: Error | undefined;
+
+							for (let i = 0; i < endpoints.length; i++) {
+								const endpoint = endpoints[i];
+								const isLastEndpoint = i === endpoints.length - 1;
 								try {
-									const mode = settings.get("providers.antigravityEndpoint");
-									if (mode === "production") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_PROD];
-									} else if (mode === "sandbox") {
-										endpoints = [DEFAULT_ANTIGRAVITY_ENDPOINT_SANDBOX];
-									}
-								} catch {
-									// Ignored
-								}
+									resp = await fetchImpl(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
+										method: "POST",
+										headers: {
+											Authorization: `Bearer ${bearer}`,
+											"Content-Type": "application/json",
+											Accept: "text/event-stream",
+											"User-Agent": getAntigravityUserAgent(),
+										},
+										body: JSON.stringify(requestBody),
+										signal: requestSignal,
+									});
 
-								let resp: Response | undefined;
-								let lastError: Error | undefined;
-
-								for (let i = 0; i < endpoints.length; i++) {
-									const endpoint = endpoints[i];
-									const isLastEndpoint = i === endpoints.length - 1;
-									try {
-										resp = await fetchImpl(`${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
-											method: "POST",
-											headers: {
-												Authorization: `Bearer ${bearer}`,
-												"Content-Type": "application/json",
-												Accept: "text/event-stream",
-												"User-Agent": getAntigravityUserAgent(),
-											},
-											body: JSON.stringify(requestBody),
-											signal: requestSignal,
-										});
-
-										if (resp.ok) {
-											break;
-										}
-
-										const errorText = await resp.text();
-										let message = errorText;
-										try {
-											const parsedErr = JSON.parse(errorText) as { error?: { message?: string } };
-											message = parsedErr.error?.message ?? message;
-										} catch {
-											// Keep raw text.
-										}
-
-										lastError = new ProviderHttpError(
-											`Antigravity image request failed (${resp.status}): ${message}`,
-											resp.status,
-											{ headers: resp.headers },
-										);
-
-										if (resp.status === 429 || (resp.status >= 500 && resp.status < 600)) {
-											if (!isLastEndpoint) {
-												continue;
-											}
-										}
+									if (resp.ok) {
 										break;
-									} catch (error) {
-										lastError = error as Error;
-										if (isLastEndpoint) {
-											break;
+									}
+
+									const errorText = await resp.text();
+									let message = errorText;
+									try {
+										const parsedErr = JSON.parse(errorText) as { error?: { message?: string } };
+										message = parsedErr.error?.message ?? message;
+									} catch {
+										// Keep raw text.
+									}
+
+									lastError = new ProviderHttpError(
+										`Antigravity image request failed (${resp.status}): ${message}`,
+										resp.status,
+										{ headers: resp.headers },
+									);
+
+									if (resp.status === 429 || (resp.status >= 500 && resp.status < 600)) {
+										if (!isLastEndpoint) {
+											continue;
 										}
 									}
+									break;
+								} catch (error) {
+									lastError = error as Error;
+									if (isLastEndpoint) {
+										break;
+									}
 								}
+							}
 
-								if (!resp?.ok) {
-									throw lastError ?? new Error("Antigravity image generation failed");
-								}
+							if (!resp?.ok) {
+								throw lastError ?? new Error("Antigravity image generation failed");
+							}
 
-								return resp;
-							},
-							{ signal: requestSignal },
-						);
+							return resp;
+						},
+						{ signal: requestSignal },
+					);
 
-						const parsed = await parseAntigravitySseForImage(response, requestSignal);
-						const responseText = parsed.text.length > 0 ? parsed.text.join(" ") : undefined;
+					const parsed = await parseAntigravitySseForImage(response, requestSignal);
+					const responseText = parsed.text.length > 0 ? parsed.text.join(" ") : undefined;
 
-						if (parsed.images.length === 0) {
-							const messageText = responseText ? `\n\n${responseText}` : "";
-							return {
-								content: [{ type: "text", text: `No image data returned.${messageText}` }],
-								details: {
-									provider,
-									model,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-									responseText,
-									usage: parsed.usage,
-								},
-							};
-						}
-
-						const imagePaths = await saveImagesToTemp(parsed.images);
-
+					if (parsed.images.length === 0) {
+						const messageText = responseText ? `\n\n${responseText}` : "";
 						return {
-							content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, responseText) }],
+							content: [{ type: "text", text: `No image data returned.${messageText}` }],
 							details: {
 								provider,
 								model,
-								imageCount: parsed.images.length,
-								imagePaths,
-								images: parsed.images,
+								imageCount: 0,
+								imagePaths: [],
+								images: [],
 								responseText,
 								usage: parsed.usage,
 							},
 						};
 					}
 
-					if (provider === "xai") {
-						if (!ctx.modelRegistry) {
-							throw new Error("Missing modelRegistry for xAI image generation");
-						}
-						const xaiCreds = await resolveXAIHttpCredentials(ctx.modelRegistry, resolvedModel);
-						if (!xaiCreds) {
-							throw new Error(
-								"No xAI credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+) or set XAI_API_KEY.",
-							);
-						}
+					const imagePaths = await saveImagesToTemp(parsed.images);
 
-						const prompt = assemblePrompt(params);
-						const aspectRatio = params.aspect_ratio ?? "1:1";
-						const xaiResolution = resolveXAIResolution(params.image_size);
-
-						const isEdit = resolvedImages.length > 0;
-						if (isEdit && resolvedImages.length > XAI_MAX_EDIT_IMAGES) {
-							throw new Error(
-								`xAI image edits accept up to ${XAI_MAX_EDIT_IMAGES} reference images; got ${resolvedImages.length}.`,
-							);
-						}
-
-						const xaiBaseBody: XAIImageRequestBase = {
-							model: resolvedModel,
-							prompt,
-							aspect_ratio: aspectRatio,
-							resolution: xaiResolution,
-							n: 1,
-							response_format: "b64_json",
-						};
-						const xaiBody: XAIImageRequestBody = isEdit
-							? buildXAIEditPayload(xaiBaseBody, resolvedImages)
-							: xaiBaseBody;
-						const xaiEndpoint = isEdit ? "/images/edits" : "/images/generations";
-
-						const xaiKey: ApiKey = ctx.modelRegistry.resolver(xaiCreds.provider, {
-							sessionId,
-							baseUrl: xaiCreds.baseURL,
-						});
-
-						const xaiRawText = await withAuth(
-							xaiKey,
-							async key => {
-								const resp = await fetchImpl(`${xaiCreds.baseURL}${xaiEndpoint}`, {
-									method: "POST",
-									headers: {
-										Authorization: `Bearer ${key}`,
-										"Content-Type": "application/json",
-										"User-Agent": USER_AGENT,
-									},
-									body: JSON.stringify(xaiBody),
-									signal: requestSignal,
-								});
-								const rawText = await resp.text();
-								if (!resp.ok) {
-									let message = rawText;
-									try {
-										const parsedErr = JSON.parse(rawText) as { error?: { message?: string } };
-										message = parsedErr.error?.message ?? message;
-									} catch {
-										// Keep raw text.
-									}
-									throw new ProviderHttpError(
-										`xAI image request failed (${resp.status}): ${message}`,
-										resp.status,
-										{
-											headers: resp.headers,
-										},
-									);
-								}
-								return rawText;
-							},
-							{ signal: requestSignal },
-						);
-
-						const xaiData = JSON.parse(xaiRawText) as {
-							data?: Array<{ b64_json?: string; url?: string }>;
-						};
-						const xaiInlineImages: InlineImageData[] = [];
-						for (const entry of xaiData.data ?? []) {
-							if (entry.b64_json) {
-								const bytes = Buffer.from(entry.b64_json, "base64");
-								const mimeType = parseImageMetadata(bytes)?.mimeType ?? "image/png";
-								xaiInlineImages.push({ data: entry.b64_json, mimeType });
-							} else if (entry.url) {
-								xaiInlineImages.push(await loadImageFromUrl(entry.url, fetchImpl, requestSignal));
-							}
-						}
-
-						if (xaiInlineImages.length === 0) {
-							return {
-								content: [{ type: "text", text: "No image data returned." }],
-								details: {
-									provider,
-									model: resolvedModel,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-								},
-							};
-						}
-
-						const xaiImagePaths = await saveImagesToTemp(xaiInlineImages);
-
-						return {
-							content: [
-								{ type: "text", text: buildResponseSummary(provider, resolvedModel, xaiImagePaths, undefined) },
-							],
-							details: {
-								provider,
-								model: resolvedModel,
-								imageCount: xaiInlineImages.length,
-								imagePaths: xaiImagePaths,
-								images: xaiInlineImages,
-							},
-						};
-					}
-
-					if (provider === "openrouter") {
-						const prompt = assemblePrompt(params);
-						const contentParts: OpenRouterContentPart[] = [{ type: "text", text: prompt }];
-						for (const image of resolvedImages) {
-							contentParts.push({ type: "image_url", image_url: { url: toDataUrl(image) } });
-						}
-
-						const requestBody = {
-							model: resolvedModel,
-							messages: [{ role: "user" as const, content: contentParts }],
-						};
-
-						const rawText = await withAuth(
-							apiKey.apiKey,
-							async key => {
-								const resp = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
-									method: "POST",
-									headers: {
-										"Content-Type": "application/json",
-										Authorization: `Bearer ${key}`,
-										...getOpenRouterHeaders(),
-									},
-									body: JSON.stringify(requestBody),
-									signal: requestSignal,
-								});
-								const text = await resp.text();
-								if (!resp.ok) {
-									let message = text;
-									try {
-										const parsed = JSON.parse(text) as { error?: { message?: string } };
-										message = parsed.error?.message ?? message;
-									} catch {
-										// Keep raw text.
-									}
-									throw new ProviderHttpError(
-										`OpenRouter image request failed (${resp.status}): ${message}`,
-										resp.status,
-										{ headers: resp.headers },
-									);
-								}
-								return text;
-							},
-							{ signal: requestSignal },
-						);
-
-						const data = JSON.parse(rawText) as OpenRouterResponse;
-						const message = data.choices?.[0]?.message;
-						const responseText = collectOpenRouterResponseText(message);
-						const imageUrls = extractOpenRouterImageUrls(message);
-						const inlineImages: InlineImageData[] = [];
-						for (const imageUrl of imageUrls) {
-							inlineImages.push(await loadImageFromUrl(imageUrl, fetchImpl, requestSignal));
-						}
-
-						if (inlineImages.length === 0) {
-							const messageText = responseText ? `\n\n${responseText}` : "";
-							return {
-								content: [{ type: "text", text: `No image data returned.${messageText}` }],
-								details: {
-									provider,
-									model: resolvedModel,
-									imageCount: 0,
-									imagePaths: [],
-									images: [],
-									responseText,
-								},
-							};
-						}
-
-						const imagePaths = await saveImagesToTemp(inlineImages);
-
-						return {
-							content: [
-								{ type: "text", text: buildResponseSummary(provider, resolvedModel, imagePaths, responseText) },
-							],
-							details: {
-								provider,
-								model: resolvedModel,
-								imageCount: inlineImages.length,
-								imagePaths,
-								images: inlineImages,
-								responseText,
-							},
-						};
-					}
-
-					const parts = [] as Array<{ text?: string; inlineData?: InlineImageData }>;
-					for (const image of resolvedImages) {
-						parts.push({ inlineData: image });
-					}
-					parts.push({ text: assemblePrompt(params) });
-
-					const generationConfig: {
-						responseModalities: GeminiResponseModality[];
-						imageConfig?: { aspectRatio?: string; imageSize?: string };
-					} = {
-						responseModalities: ["IMAGE"],
+					return {
+						content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, responseText) }],
+						details: {
+							provider,
+							model,
+							imageCount: parsed.images.length,
+							imagePaths,
+							images: parsed.images,
+							responseText,
+							usage: parsed.usage,
+						},
 					};
+				}
 
-					if (params.aspect_ratio || params.image_size) {
-						generationConfig.imageConfig = {
-							aspectRatio: params.aspect_ratio,
-							imageSize: params.image_size,
+				if (provider === "xai") {
+					if (!ctx.modelRegistry) {
+						throw new Error("Missing modelRegistry for xAI image generation");
+					}
+					const xaiCreds = await resolveXAIHttpCredentials(ctx.modelRegistry, resolvedModel);
+					if (!xaiCreds) {
+						throw new Error(
+							"No xAI credentials. Run /login → xAI Grok OAuth (SuperGrok or X Premium+) or set XAI_API_KEY.",
+						);
+					}
+
+					const prompt = assemblePrompt(params);
+					const aspectRatio = params.aspect_ratio ?? "1:1";
+					const xaiResolution = resolveXAIResolution(params.image_size);
+
+					const isEdit = resolvedImages.length > 0;
+					if (isEdit && resolvedImages.length > XAI_MAX_EDIT_IMAGES) {
+						throw new Error(
+							`xAI image edits accept up to ${XAI_MAX_EDIT_IMAGES} reference images; got ${resolvedImages.length}.`,
+						);
+					}
+
+					const xaiBaseBody: XAIImageRequestBase = {
+						model: resolvedModel,
+						prompt,
+						aspect_ratio: aspectRatio,
+						resolution: xaiResolution,
+						n: 1,
+						response_format: "b64_json",
+					};
+					const xaiBody: XAIImageRequestBody = isEdit
+						? buildXAIEditPayload(xaiBaseBody, resolvedImages)
+						: xaiBaseBody;
+					const xaiEndpoint = isEdit ? "/images/edits" : "/images/generations";
+
+					const xaiKey: ApiKey = ctx.modelRegistry.resolver(xaiCreds.provider, {
+						sessionId,
+						baseUrl: xaiCreds.baseURL,
+					});
+
+					const xaiRawText = await withAuth(
+						xaiKey,
+						async key => {
+							const resp = await fetchImpl(`${xaiCreds.baseURL}${xaiEndpoint}`, {
+								method: "POST",
+								headers: {
+									Authorization: `Bearer ${key}`,
+									"Content-Type": "application/json",
+									"User-Agent": ohMyPiXAIUserAgent(),
+								},
+								body: JSON.stringify(xaiBody),
+								signal: requestSignal,
+							});
+							const rawText = await resp.text();
+							if (!resp.ok) {
+								let message = rawText;
+								try {
+									const parsedErr = JSON.parse(rawText) as { error?: { message?: string } };
+									message = parsedErr.error?.message ?? message;
+								} catch {
+									// Keep raw text.
+								}
+								throw new ProviderHttpError(
+									`xAI image request failed (${resp.status}): ${message}`,
+									resp.status,
+									{
+										headers: resp.headers,
+									},
+								);
+							}
+							return rawText;
+						},
+						{ signal: requestSignal },
+					);
+
+					const xaiData = JSON.parse(xaiRawText) as {
+						data?: Array<{ b64_json?: string; url?: string }>;
+					};
+					const xaiInlineImages: InlineImageData[] = [];
+					for (const entry of xaiData.data ?? []) {
+						if (entry.b64_json) {
+							const bytes = Buffer.from(entry.b64_json, "base64");
+							const mimeType = parseImageMetadata(bytes)?.mimeType ?? "image/png";
+							xaiInlineImages.push({ data: entry.b64_json, mimeType });
+						} else if (entry.url) {
+							xaiInlineImages.push(await loadImageFromUrl(entry.url, fetchImpl, requestSignal));
+						}
+					}
+
+					if (xaiInlineImages.length === 0) {
+						return {
+							content: [{ type: "text", text: "No image data returned." }],
+							details: {
+								provider,
+								model: resolvedModel,
+								imageCount: 0,
+								imagePaths: [],
+								images: [],
+							},
 						};
+					}
+
+					const xaiImagePaths = await saveImagesToTemp(xaiInlineImages);
+
+					return {
+						content: [
+							{ type: "text", text: buildResponseSummary(provider, resolvedModel, xaiImagePaths, undefined) },
+						],
+						details: {
+							provider,
+							model: resolvedModel,
+							imageCount: xaiInlineImages.length,
+							imagePaths: xaiImagePaths,
+							images: xaiInlineImages,
+						},
+					};
+				}
+
+				if (provider === "openrouter") {
+					const prompt = assemblePrompt(params);
+					const contentParts: OpenRouterContentPart[] = [{ type: "text", text: prompt }];
+					for (const image of resolvedImages) {
+						contentParts.push({ type: "image_url", image_url: { url: toDataUrl(image) } });
 					}
 
 					const requestBody = {
-						contents: [{ role: "user" as const, parts }],
-						generationConfig,
+						model: resolvedModel,
+						messages: [{ role: "user" as const, content: contentParts }],
 					};
 
 					const rawText = await withAuth(
 						apiKey.apiKey,
 						async key => {
-							const resp = await fetchImpl(
-								`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
-								{
-									method: "POST",
-									headers: {
-										"Content-Type": "application/json",
-										"x-goog-api-key": key,
-									},
-									body: JSON.stringify(requestBody),
-									signal: requestSignal,
+							const resp = await fetchImpl("https://openrouter.ai/api/v1/chat/completions", {
+								method: "POST",
+								headers: {
+									"Content-Type": "application/json",
+									Authorization: `Bearer ${key}`,
+									"HTTP-Referer": "https://omp.sh/",
+									"X-OpenRouter-Title": "Oh-My-Pi",
+									"X-OpenRouter-Categories": "cli-agent",
 								},
-							);
+								body: JSON.stringify(requestBody),
+								signal: requestSignal,
+							});
 							const text = await resp.text();
 							if (!resp.ok) {
 								let message = text;
@@ -1595,11 +1491,9 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 									// Keep raw text.
 								}
 								throw new ProviderHttpError(
-									`Gemini image request failed (${resp.status}): ${message}`,
+									`OpenRouter image request failed (${resp.status}): ${message}`,
 									resp.status,
-									{
-										headers: resp.headers,
-									},
+									{ headers: resp.headers },
 								);
 							}
 							return text;
@@ -1607,26 +1501,26 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 						{ signal: requestSignal },
 					);
 
-					const data = JSON.parse(rawText) as GeminiGenerateContentResponse;
-					const responseParts = combineParts(data);
-					const responseText = collectResponseText(responseParts);
-					const inlineImages = collectInlineImages(responseParts);
+					const data = JSON.parse(rawText) as OpenRouterResponse;
+					const message = data.choices?.[0]?.message;
+					const responseText = collectOpenRouterResponseText(message);
+					const imageUrls = extractOpenRouterImageUrls(message);
+					const inlineImages: InlineImageData[] = [];
+					for (const imageUrl of imageUrls) {
+						inlineImages.push(await loadImageFromUrl(imageUrl, fetchImpl, requestSignal));
+					}
 
 					if (inlineImages.length === 0) {
-						const blocked = data.promptFeedback?.blockReason
-							? `Blocked: ${data.promptFeedback.blockReason}`
-							: "No image data returned.";
+						const messageText = responseText ? `\n\n${responseText}` : "";
 						return {
-							content: [{ type: "text", text: `${blocked}${responseText ? `\n\n${responseText}` : ""}` }],
+							content: [{ type: "text", text: `No image data returned.${messageText}` }],
 							details: {
 								provider,
-								model,
+								model: resolvedModel,
 								imageCount: 0,
 								imagePaths: [],
 								images: [],
 								responseText,
-								promptFeedback: data.promptFeedback,
-								usage: data.usageMetadata,
 							},
 						};
 					}
@@ -1634,54 +1528,156 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 					const imagePaths = await saveImagesToTemp(inlineImages);
 
 					return {
-						content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, responseText) }],
+						content: [
+							{ type: "text", text: buildResponseSummary(provider, resolvedModel, imagePaths, responseText) },
+						],
 						details: {
 							provider,
-							model,
+							model: resolvedModel,
 							imageCount: inlineImages.length,
 							imagePaths,
 							images: inlineImages,
+							responseText,
+						},
+					};
+				}
+
+				const parts = [] as Array<{ text?: string; inlineData?: InlineImageData }>;
+				for (const image of resolvedImages) {
+					parts.push({ inlineData: image });
+				}
+				parts.push({ text: assemblePrompt(params) });
+
+				const generationConfig: {
+					responseModalities: GeminiResponseModality[];
+					imageConfig?: { aspectRatio?: string; imageSize?: string };
+				} = {
+					responseModalities: ["IMAGE"],
+				};
+
+				if (params.aspect_ratio || params.image_size) {
+					generationConfig.imageConfig = {
+						aspectRatio: params.aspect_ratio,
+						imageSize: params.image_size,
+					};
+				}
+
+				const requestBody = {
+					contents: [{ role: "user" as const, parts }],
+					generationConfig,
+				};
+
+				const rawText = await withAuth(
+					apiKey.apiKey,
+					async key => {
+						const resp = await fetchImpl(
+							`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
+							{
+								method: "POST",
+								headers: {
+									"Content-Type": "application/json",
+									"x-goog-api-key": key,
+								},
+								body: JSON.stringify(requestBody),
+								signal: requestSignal,
+							},
+						);
+						const text = await resp.text();
+						if (!resp.ok) {
+							let message = text;
+							try {
+								const parsed = JSON.parse(text) as { error?: { message?: string } };
+								message = parsed.error?.message ?? message;
+							} catch {
+								// Keep raw text.
+							}
+							throw new ProviderHttpError(
+								`Gemini image request failed (${resp.status}): ${message}`,
+								resp.status,
+								{
+									headers: resp.headers,
+								},
+							);
+						}
+						return text;
+					},
+					{ signal: requestSignal },
+				);
+
+				const data = JSON.parse(rawText) as GeminiGenerateContentResponse;
+				const responseParts = combineParts(data);
+				const responseText = collectResponseText(responseParts);
+				const inlineImages = collectInlineImages(responseParts);
+
+				if (inlineImages.length === 0) {
+					const blocked = data.promptFeedback?.blockReason
+						? `Blocked: ${data.promptFeedback.blockReason}`
+						: "No image data returned.";
+					return {
+						content: [{ type: "text", text: `${blocked}${responseText ? `\n\n${responseText}` : ""}` }],
+						details: {
+							provider,
+							model,
+							imageCount: 0,
+							imagePaths: [],
+							images: [],
 							responseText,
 							promptFeedback: data.promptFeedback,
 							usage: data.usageMetadata,
 						},
 					};
-				} catch (error) {
-					if (!(error instanceof ProviderHttpError) || requestSignal?.aborted) {
-						throw error;
-					}
-					failures.push({ provider, error });
 				}
-			}
 
-			if (!foundCredentials) {
-				throw new Error(
-					"No image API credentials found. Connect a Codex (ChatGPT) subscription, use a GPT Responses/Codex model with OpenAI credentials, log in with google-antigravity or xAI Grok OAuth, or set OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.",
-				);
-			}
+				const imagePaths = await saveImagesToTemp(inlineImages);
 
-			if (failures.length === 0 && unsupportedAspectRatioProvider) {
-				assertImageAspectRatioSupported(unsupportedAspectRatioProvider, params.aspect_ratio);
+				return {
+					content: [{ type: "text", text: buildResponseSummary(provider, model, imagePaths, responseText) }],
+					details: {
+						provider,
+						model,
+						imageCount: inlineImages.length,
+						imagePaths,
+						images: inlineImages,
+						responseText,
+						promptFeedback: data.promptFeedback,
+						usage: data.usageMetadata,
+					},
+				};
+			} catch (error) {
+				if (!(error instanceof ProviderHttpError) || requestSignal?.aborted) {
+					throw error;
+				}
+				failures.push({ provider, error });
 			}
+		}
 
-			throw new AggregateError(
-				failures.map(failure => failure.error),
-				`Image generation failed for all credentialed providers: ${failures.map(failure => failure.provider).join(", ")}`,
+		if (!foundCredentials) {
+			throw new Error(
+				"No image API credentials found. Connect a Codex (ChatGPT) subscription, use a GPT Responses/Codex model with OpenAI credentials, log in with google-antigravity or xAI Grok OAuth, or set OPENAI_API_KEY, XAI_API_KEY, OPENROUTER_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY.",
 			);
-		});
-	},
-};
+		}
 
-export async function getImageGenTools(
-	_modelRegistry?: ModelRegistry,
-	_activeModel?: Model,
-): Promise<Array<CustomTool<typeof imageGenSchema, ImageGenToolDetails>>> {
-	return [imageGenTool];
+		if (failures.length === 0 && unsupportedAspectRatioProvider) {
+			assertImageAspectRatioSupported(unsupportedAspectRatioProvider, params.aspect_ratio);
+		}
+
+		throw new AggregateError(
+			failures.map(failure => failure.error),
+			`Image generation failed for all credentialed providers: ${failures.map(failure => failure.provider).join(", ")}`,
+		);
+	});
 }
 
-export async function getImageGenToolsWithRegistry(
-	_modelRegistry: ModelRegistry,
-	_activeModel?: Model,
-): Promise<Array<CustomTool<typeof imageGenSchema, ImageGenToolDetails>>> {
-	return [imageGenTool];
+export interface ImageGenerationOwner {
+	generate(params: ImageGenerationParams, signal: AbortSignal): Promise<ImageGenerationDetails>;
+}
+
+export function createImageGenerationOwner(ctx: HostExecutionContext): ImageGenerationOwner {
+	return {
+		generate: async (params, signal) => {
+			const result = await executeImageGeneration(ctx, params, signal);
+			if (!result.details) throw new Error("Image generation completed without result details");
+			return result.details;
+		},
+	};
 }

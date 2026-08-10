@@ -38,8 +38,7 @@ GitHub webhook
                  └─ worker.run_task(task_kind=..., inputs=TaskInputs, …)
                       ├─ ToolBindings(inbound_thread_number=pr_number, inbound_is_pr=…)
                       ├─ _build_prompt(task_kind, …) → persona.<prompt>(...)
-                      ├─ RpcClient(omp --mode rpc, cwd=worktree, custom_tools=host_tools.build(bindings))
-                      └─ _drive_turn(...)  → completion/dirty reminders until terminal tool / clean
+                      └─ _drive_turn(...)  → completion/dirty reminders until terminal operation / clean
 ```
 
 Existing task kinds and their analogues for us:
@@ -56,7 +55,7 @@ Two facts that shape the wiring:
 - `route()` and `WorkerPool._dispatch()` **both** branch on `(event_type, action)`. `route`
   decides queue/skip + carries `submitter`/`directive`; `_dispatch` re-derives the handler.
   **A new task kind must be added in both.**
-- `host_tools.build(bindings)` returns an **identical tuple for every task kind** (to keep the
+- `operations.build(bindings)` returns an **identical tuple for every task kind** (to keep the
   LLM prompt cache warm); tools **self-gate at execution time** (e.g. `classify_issue` rejects
   when `bindings.inbound_is_pr`). We follow the same pattern: add the new tools to `build()`
   unconditionally and gate them on a `review_mode` flag.
@@ -199,7 +198,7 @@ comment tools at the PR thread (existing behavior). Add `review_pr` to `tasks.__
   from `inputs.issue` (number/author) + a `get_pull_request` call inside the branch.
 - **`todo_phases.toml`**: add a `review_pr` table (Phase 0 orient / Phase 1 classify / Phase 2
   review) so `seed_phases("review_pr")` seeds the todo list, like `triage_issue`.
-- **`host_tools.toml`**: add descriptions for the four new tools (see §7).
+Tool descriptions and parameters are defined by the operation schemas in the runtime.
 
 ---
 
@@ -233,7 +232,7 @@ is configured for review worktrees.
 
 ---
 
-## 7. Host tools (`src/host_tools.py`)
+## 7. Operations (`src/operations.py`)
 
 Add a `review_mode: bool = False` field to `ToolBindings`; set it from `run_task`
 (`review_mode = task_kind == "review_pr"`). Self-gating pattern (consistent with how
@@ -308,7 +307,7 @@ PR's `issue_key`.
 ## 10. Worker completion gate (`src/worker.py`)
 
 - `_needs_completion_reminder`: extend so `task_kind == "review_pr"` reminds until
-  `submit_pr_review` is in `tools_called` (the terminal action), mirroring the
+  `submit_pr_review` is in `operations_called` (the terminal operation), mirroring the
   `_TERMINAL_TRIAGE_TOOLS` logic. Add a `_TERMINAL_REVIEW_TOOLS = {"submit_pr_review", "abort_task"}`.
   Review worktrees are read-only, so the dirty-state reminder is irrelevant — skip it for
   `review_pr` (or it'll be clean anyway).
@@ -345,7 +344,7 @@ Mirror existing test style; assert observable contracts, never internals.
 
 - **Routing** (`test_github_events.py`): `pull_request.opened` → `review_pr`; draft/bot/non-allowlist
   → skip; `synchronize` → skip; incoming-PR comment → skip unless directive.
-- **classify_pr** (`test_host_tools.py`): happy path applies `triaged`+`review:pN`+type+area
+- **classify_pr** (`test_operations.py`): happy path applies `triaged`+`review:pN`+type+area
   (assert the labels in the mocked `add_issue_labels` call); bad rank → validation error; unknown
   area dropped silently.
 - **Staging + submit**: `pr_review_comment` writes rows (assert via DB); `submit_pr_review` posts

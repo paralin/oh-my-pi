@@ -68,7 +68,6 @@ function createContext(opts: {
 			isStreaming: opts.isStreaming,
 			isCompacting: false,
 			isBashRunning: false,
-			isEvalRunning: false,
 			extensionRunner: undefined,
 			prompt,
 		},

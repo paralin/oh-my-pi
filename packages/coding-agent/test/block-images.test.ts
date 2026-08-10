@@ -4,9 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { processFileArguments } from "@oh-my-pi/pi-coding-agent/cli/file-processor";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../src/session/tool-session.js";
+import { ReadService } from "../src/tools/read.js";
 
 // 1x1 red PNG image as base64 (smallest valid PNG)
 const TINY_PNG_BASE64 =
@@ -22,8 +22,8 @@ function createTestToolSession(cwd: string, settings: Settings = Settings.isolat
 	};
 }
 
-describe("blockImages setting", () => {
-	describe("Read tool", () => {
+describe("image content blocks", () => {
+	describe("Read service", () => {
 		let testDir: string;
 
 		beforeEach(() => {
@@ -35,15 +35,13 @@ describe("blockImages setting", () => {
 			removeSyncWithRetries(testDir);
 		});
 
-		it("should include image blocks when inspect_image is disabled", async () => {
+		it("includes an inline image block", async () => {
 			// Create test image
 			const imagePath = path.join(testDir, "test.png");
 			fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-			const tool = new ReadTool(
-				createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false })),
-			);
-			const result = await tool.execute("test-1", { path: imagePath });
+			const tool = new ReadService(createTestToolSession(testDir));
+			const result = await tool.read(imagePath);
 
 			// Should have text note + image content
 			expect(result.content.length).toBeGreaterThanOrEqual(1);
@@ -56,8 +54,8 @@ describe("blockImages setting", () => {
 			const textPath = path.join(testDir, "test.txt");
 			fs.writeFileSync(textPath, "Hello, world!");
 
-			const tool = new ReadTool(createTestToolSession(testDir));
-			const result = await tool.execute("test-2", { path: textPath });
+			const tool = new ReadService(createTestToolSession(testDir));
+			const result = await tool.read(textPath);
 
 			expect(result.content).toHaveLength(1);
 			expect(result.content[0].type).toBe("text");

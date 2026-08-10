@@ -1,4 +1,4 @@
-Propose conventional commit for staged changes.
+Generate a conventional commit proposal for the current staged changes.
 
 {{#if user_context}}
 User context:
@@ -6,13 +6,13 @@ User context:
 {{/if}}
 
 {{#if changelog_targets}}
-For changelog targets: MUST call propose_changelog.
+Changelog targets (include exactly one entry for each in `changelog_proposal`):
 {{changelog_targets}}
 {{/if}}
 
 {{#if existing_changelog_entries}}
 ## Existing Unreleased Changelog Entries
-May remove listed entries via propose_changelog `deletions`.
+These entries may be included in a changelog entry's `deletions` map.
 {{#each existing_changelog_entries}}
 ### {{path}}
 {{#each sections}}
@@ -22,4 +22,5 @@ May remove listed entries via propose_changelog `deletions`.
 {{/each}}
 {{/if}}
 
-Inspect staged changes: git_* tools. Deeper per-file summaries: call analyze_files. Finish: propose_commit | split_commit.
+Inspect staged Git state through IPython, then finish with the JSON contract in
+the system prompt.

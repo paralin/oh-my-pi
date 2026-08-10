@@ -1,13 +1,13 @@
 import { type } from "@oh-my-pi/omptype";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple, validateToolCall } from "@oh-my-pi/pi-ai";
+import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import changelogSystemPrompt from "../../commit/prompts/changelog-system.md" with { type: "text" };
 import changelogUserPrompt from "../../commit/prompts/changelog-user.md" with { type: "text" };
 import type { ChangelogGenerationResult } from "../../commit/types";
 import { toReasoningEffort } from "../../thinking";
-import { extractTextContent, extractToolCall, parseJsonPayload } from "../utils";
+import { extractTextContent, parseJsonPayload } from "../utils";
 
 // Build the changelog entry schema with arktype
 // Each category maps to an optional array of strings
@@ -21,11 +21,7 @@ const changelogEntriesSchema = type({
 	"Security?": "string[]",
 });
 
-export const changelogTool = {
-	name: "create_changelog_entries",
-	description: "Generate changelog entries grouped by Keep a Changelog categories.",
-	parameters: type({ entries: changelogEntriesSchema }),
-};
+const changelogResponseSchema = type({ entries: changelogEntriesSchema });
 
 export interface ChangelogPromptInput {
 	model: Model<Api>;
@@ -60,7 +56,6 @@ export async function generateChangelogEntries({
 		{
 			systemPrompt: [prompt.render(changelogSystemPrompt)],
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-			tools: [changelogTool],
 		},
 		{ apiKey, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
 	);
@@ -70,15 +65,8 @@ export async function generateChangelogEntries({
 }
 
 function parseChangelogResponse(message: AssistantMessage): ChangelogGenerationResult {
-	const toolCall = extractToolCall(message, "create_changelog_entries");
-	if (toolCall) {
-		const parsed = validateToolCall([changelogTool], toolCall) as typeof changelogTool.parameters.infer;
-		return { entries: parsed.entries ?? {} };
-	}
-
 	const text = extractTextContent(message);
-	const parsed = parseJsonPayload(text) as ChangelogGenerationResult;
-	return { entries: parsed.entries ?? {} };
+	return changelogResponseSchema.assert(parseJsonPayload(text));
 }
 
 function dedupeEntries(entries: Record<string, string[]>): Record<string, string[]> {

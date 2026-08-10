@@ -158,11 +158,11 @@ export interface DashboardController {
 	updateWidget(ctx: ExtensionContext, runtime: AutoresearchRuntime): void;
 }
 
-export interface AutoresearchToolFactoryOptions {
+export interface AutoresearchOperationOptions {
 	dashboard: DashboardController;
 	getRuntime(ctx: ExtensionContext): AutoresearchRuntime;
 	pi: ExtensionAPI;
 }
 
-export type AutoresearchToolResult<TDetails> = AgentToolResult<TDetails>;
+export type AutoresearchOperationResult<TDetails> = AgentToolResult<TDetails>;
 export type SessionEntries = SessionEntry[];

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { pathTargetsSsh, peelWriteUrlSelector, splitInternalUrlSel } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
+import { pathTargetsSsh, peelWriteUrlSelector, splitInternalUrlSel } from "../../src/tools/path-utils.js";
 
 describe("splitInternalUrlSel", () => {
 	it("returns the input unchanged when there is no selector tail", () => {
@@ -72,9 +72,6 @@ describe("splitInternalUrlSel", () => {
 		expect(splitInternalUrlSel("mcp://server/resource:L10")).toEqual({
 			path: "mcp://server/resource:L10",
 		});
-		expect(splitInternalUrlSel("mcp://server/resource:conflicts")).toEqual({
-			path: "mcp://server/resource:conflicts",
-		});
 	});
 
 	it("keeps escaped selector-shaped mcp:// suffixes opaque too", () => {
@@ -89,9 +86,6 @@ describe("splitInternalUrlSel", () => {
 		});
 		expect(splitInternalUrlSel("mcp://server/resource/:L10")).toEqual({
 			path: "mcp://server/resource/:L10",
-		});
-		expect(splitInternalUrlSel("mcp://server/resource/:conflicts")).toEqual({
-			path: "mcp://server/resource/:conflicts",
 		});
 	});
 
@@ -143,12 +137,10 @@ describe("splitInternalUrlSel", () => {
 describe("peelWriteUrlSelector (write/read selector parity)", () => {
 	it("peels whole-file display selectors so write targets the same file read does", () => {
 		expect(peelWriteUrlSelector("ssh://h/f:raw")).toBe("ssh://h/f");
-		expect(peelWriteUrlSelector("ssh://h/f:conflicts")).toBe("ssh://h/f");
 	});
 
 	it("matches read's case-insensitive selector grammar", () => {
 		expect(peelWriteUrlSelector("ssh://h/f:RAW")).toBe("ssh://h/f");
-		expect(peelWriteUrlSelector("ssh://h/f:Conflicts")).toBe("ssh://h/f");
 	});
 
 	it("passes through paths with no peelable selector", () => {
@@ -162,7 +154,6 @@ describe("peelWriteUrlSelector (write/read selector parity)", () => {
 		// vault:// and local:// writes peel display selectors too — write targets
 		// the base resource read resolves, not a note/file literally named `note:raw`.
 		expect(peelWriteUrlSelector("vault://note:raw")).toBe("vault://note");
-		expect(peelWriteUrlSelector("local://foo.txt:conflicts")).toBe("local://foo.txt");
 		expect(() => peelWriteUrlSelector("vault://note:1-20")).toThrow(/whole file/);
 	});
 
@@ -170,7 +161,6 @@ describe("peelWriteUrlSelector (write/read selector parity)", () => {
 		expect(() => peelWriteUrlSelector("ssh://h/f:1-20")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:-10")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:raw:1-20")).toThrow(/whole file/);
-		expect(() => peelWriteUrlSelector("ssh://h/f:conflicts:1-20")).toThrow(/whole file/);
 	});
 });
 
@@ -180,8 +170,6 @@ describe("pathTargetsSsh", () => {
 		expect(pathTargetsSsh("SSH://h/x")).toBe(true);
 		// A delimited entry that search only splits into separate paths AFTER approval runs.
 		expect(pathTargetsSsh("src,ssh://h/etc/hosts")).toBe(true);
-		// A hashline-wrapped path.
-		expect(pathTargetsSsh("[ssh://h/x#AB12]")).toBe(true);
 	});
 
 	it("does not match local filesystem paths or other internal schemes", () => {

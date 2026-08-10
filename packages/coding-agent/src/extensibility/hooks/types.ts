@@ -1,17 +1,15 @@
-import type { type as ArkType } from "@oh-my-pi/omptype";
+import type { Type } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
 import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "../../edit";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { Theme } from "../../modes/theme/theme";
 import type { CustomMessagePayload, HookMessage } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
-import type { BashToolDetails, GlobToolDetails, GrepToolDetails, ReadToolDetails } from "../../tools";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -299,90 +297,24 @@ export type {
 	TurnStartEvent,
 } from "../shared-events";
 
-/**
- * Event data for tool_call event.
- * Fired before a tool is executed. Hooks can block execution.
- */
+/** Fired before the fixed IPython cell executes. Hooks can block or replace its code. */
 export interface ToolCallEvent {
 	type: "tool_call";
-	/** Tool name (e.g., "bash", "edit", "write") */
-	toolName: string;
-	/** Tool call ID */
+	toolName: "ipython";
 	toolCallId: string;
-	/** Tool input parameters */
-	input: Record<string, unknown>;
+	input: { code: string };
 }
 
-/**
- * Base interface for tool_result events.
- */
-interface ToolResultEventBase {
+/** Fired after the fixed IPython cell executes. Hooks can modify its result. */
+export interface ToolResultEvent {
 	type: "tool_result";
-	/** Tool call ID */
+	toolName: "ipython";
 	toolCallId: string;
-	/** Tool input parameters */
-	input: Record<string, unknown>;
-	/** Full content array (text and images) */
+	input: { code: string };
 	content: (TextContent | ImageContent)[];
-	/** Whether the tool execution was an error */
-	isError?: boolean;
-}
-
-/** Tool result event for bash tool */
-export interface BashToolResultEvent extends ToolResultEventBase {
-	toolName: "bash";
-	details: BashToolDetails | undefined;
-}
-
-/** Tool result event for read tool */
-export interface ReadToolResultEvent extends ToolResultEventBase {
-	toolName: "read";
-	details: ReadToolDetails | undefined;
-}
-
-/** Tool result event for edit tool */
-export interface EditToolResultEvent extends ToolResultEventBase {
-	toolName: "edit";
-	details: EditToolDetails | undefined;
-}
-
-/** Tool result event for write tool */
-export interface WriteToolResultEvent extends ToolResultEventBase {
-	toolName: "write";
-	details: undefined;
-}
-
-/** Tool result event for grep tool */
-export interface GrepToolResultEvent extends ToolResultEventBase {
-	toolName: "grep";
-	details: GrepToolDetails | undefined;
-}
-
-/** Tool result event for glob tool */
-export interface GlobToolResultEvent extends ToolResultEventBase {
-	toolName: "glob";
-	details: GlobToolDetails | undefined;
-}
-
-/** Tool result event for custom/unknown tools */
-export interface CustomToolResultEvent extends ToolResultEventBase {
-	toolName: string;
 	details: unknown;
+	isError: boolean;
 }
-
-/**
- * Event data for tool_result event.
- * Fired after a tool is executed. Hooks can modify the result.
- * Use toolName to discriminate and get typed details.
- */
-export type ToolResultEvent =
-	| BashToolResultEvent
-	| ReadToolResultEvent
-	| EditToolResultEvent
-	| WriteToolResultEvent
-	| GrepToolResultEvent
-	| GlobToolResultEvent
-	| CustomToolResultEvent;
 
 /**
  * Union of all hook event types.
@@ -582,11 +514,11 @@ export interface HookAPI {
 
 	/** File logger for error/warning/debug messages */
 	logger: typeof PiLogger;
-	/** Injected TypeBox shim (legacy/compat — prefer `arktype`). */
+	/** Injected zod-backed typebox shim (legacy/compat — prefer `arktype`). */
 	typebox: typeof TypeBox;
-	/** Injected omptype schema builder for hooks. */
-	arktype: typeof ArkType;
-	/** Injected Zod-compatible omptype builder for hooks. */
+	/** Injected arktype module for arktype-authored hooks. */
+	arktype: typeof Type;
+	/** Injected omptype-backed zod facade for hook validation. */
 	zod: typeof zod;
 	/** Injected pi-coding-agent exports */
 	pi: typeof PiCodingAgent;

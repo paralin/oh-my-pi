@@ -15,7 +15,6 @@ function createContext() {
 		init: vi.fn(async () => {}),
 		ui: { requestRender: vi.fn() },
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn() },
 		updateEditorTopBorder: vi.fn(),
 		clearPinnedError: vi.fn(),

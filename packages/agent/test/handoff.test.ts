@@ -45,7 +45,6 @@ function createHandoffTool(): AgentTool<typeof handoffToolSchema> {
 		label: "Handoff Probe",
 		description: "Confirms handoff requests keep live tools available.",
 		parameters: handoffToolSchema,
-		intent: "omit",
 		execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
 	};
 }

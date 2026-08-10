@@ -32,7 +32,7 @@ function restoreAgentDir(): void {
 }
 
 function createController() {
-	const refreshMCPTools = vi.fn(async () => {});
+	const refreshMCPInstructions = vi.fn(async () => {});
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
@@ -64,13 +64,13 @@ function createController() {
 			tryClaimInput: vi.fn(),
 		},
 		session: {
-			refreshMCPTools,
+			refreshMCPInstructions,
 			modelRegistry: { authStorage: undefined },
 		},
 		mcpManager,
 	} as never);
 
-	return { controller, mcpManager, refreshMCPTools };
+	return { controller, mcpManager, refreshMCPInstructions };
 }
 
 async function writeProjectConfig(projectDir: string, servers: Record<string, MCPServerConfig>): Promise<void> {
@@ -114,12 +114,12 @@ describe("/mcp enable and disable", () => {
 			mcp1: { type: "stdio", command: "mcp-one" },
 			mcp2: { type: "stdio", command: "mcp-two" },
 		});
-		const { controller, mcpManager, refreshMCPTools } = createController();
+		const { controller, mcpManager, refreshMCPInstructions } = createController();
 
 		await controller.handle("/mcp disable mcp1");
 
 		expect(mcpManager.disconnectServer).toHaveBeenCalledWith("mcp1");
-		expect(refreshMCPTools).toHaveBeenCalledWith([]);
+		expect(refreshMCPInstructions).toHaveBeenCalledWith();
 		expect(mcpManager.disconnectAll).not.toHaveBeenCalled();
 		expect(mcpManager.discoverAndConnect).not.toHaveBeenCalled();
 		expect(mcpManager.connectServers).not.toHaveBeenCalled();

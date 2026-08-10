@@ -2,9 +2,21 @@ import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatBytes } from "../tools/render-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
-import { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, DEFAULT_MAX_LINES } from "./streaming-output-constants";
+import {
+	type ByteTruncationResult,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_COLUMN,
+	DEFAULT_MAX_LINES,
+	truncateHeadBytes,
+} from "./streaming-output-constants";
 
-export { DEFAULT_MAX_BYTES, DEFAULT_MAX_COLUMN, DEFAULT_MAX_LINES } from "./streaming-output-constants";
+export {
+	type ByteTruncationResult,
+	DEFAULT_MAX_BYTES,
+	DEFAULT_MAX_COLUMN,
+	DEFAULT_MAX_LINES,
+	truncateHeadBytes,
+} from "./streaming-output-constants";
 
 // =============================================================================
 // Constants
@@ -125,11 +137,6 @@ export interface TruncationOptions {
 }
 
 /** Result from byte-level truncation helpers. */
-export interface ByteTruncationResult {
-	text: string;
-	bytes: number;
-}
-
 export interface TailTruncationNoticeOptions {
 	fullOutputPath?: string;
 	originalContent?: string;
@@ -251,10 +258,6 @@ export function truncateTailBytes(data: string | Uint8Array, maxBytes: number): 
  * Truncate a string/buffer to fit within a byte limit, keeping the head.
  * Handles multi-byte UTF-8 boundaries correctly.
  */
-export function truncateHeadBytes(data: string | Uint8Array, maxBytes: number): ByteTruncationResult {
-	return truncateBytesWindowed(data, maxBytes, "head");
-}
-
 // =============================================================================
 // Line-level utilities
 // =============================================================================
@@ -1417,7 +1420,7 @@ export function formatTailTruncationNotice(
 }
 
 /**
- * Format a truncation notice for head-truncated output (read tool).
+ * Format a truncation notice for head-truncated workspace-read output.
  * Returns empty string if not truncated.
  */
 export function formatHeadTruncationNotice(

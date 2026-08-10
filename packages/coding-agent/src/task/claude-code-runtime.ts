@@ -187,7 +187,6 @@ async function writeClaudeCodeSessionMetadata(
 			task: options.task,
 			tools: options.agent.tools ?? [],
 			spawns: persistedSpawns(options),
-			readSummarize: options.agent.readSummarize,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			restrictToolNames: options.restrictToolNames || undefined,
@@ -338,7 +337,7 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 	const ref = registry.registerIfAvailable(
 		{
 			id: options.id,
-			displayName: options.agent.name,
+			displayName: options.description ?? options.agent.name,
 			kind: "sub",
 			parentId: options.parentAgentId,
 			session: peer,
@@ -352,6 +351,14 @@ export async function runClaudeCodeSubprocess(request: ClaudeCodeSubprocessReque
 		throw new Error(`Agent "${options.id}" is already owned by another session generation.`);
 	}
 	peer.bindRef(ref);
+	options.onAdmission?.({
+		id: options.id,
+		name: options.id,
+		sessionDir: metadataSessionFile ? path.dirname(metadataSessionFile) : (options.artifactsDir ?? cwd),
+		...(metadataSessionFile ? { sessionFile: metadataSessionFile } : {}),
+		model: `claude-code/${model}`,
+		cwd,
+	});
 	const yieldItems: YieldItem[] = [];
 	const progress: AgentProgress = {
 		index: options.index,

@@ -1,7 +1,5 @@
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import type { AssistantMessage, ToolCall, ToolResultMessage } from "../types";
 
-const LEGACY_INTENT_FIELD = "__intent";
 const RESULT_SUMMARY_LIMIT = 200;
 const ARGUMENT_SUMMARY_LIMIT = 400;
 
@@ -37,7 +35,6 @@ function canonicalizeToolCallValue(value: unknown): unknown {
 	const input = value as Record<string, unknown>;
 	const output: Record<string, unknown> = {};
 	for (const key of Object.keys(input).sort()) {
-		if (key === INTENT_FIELD || key === LEGACY_INTENT_FIELD) continue;
 		output[key] = canonicalizeToolCallValue(input[key]);
 	}
 	return output;

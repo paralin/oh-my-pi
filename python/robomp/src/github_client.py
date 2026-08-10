@@ -219,7 +219,7 @@ class GitHubClient:
         if resp.status_code >= 300:
             # Redirect we couldn't (or weren't asked to) follow. GitHub uses 301
             # for transferred repos / issues. Surface as a normal error so host
-            # tools map it to RpcCommandError instead of mis-parsing the body.
+            # tools map it to OperationError instead of mis-parsing the body.
             location = resp.headers.get("location", "")
             raise GitHubError(
                 resp.status_code,

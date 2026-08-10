@@ -1,17 +1,12 @@
 /**
  * report_issue — automated QA backend for tracking unexpected tool behavior.
  *
- * No model-facing tool schema anymore: the write tool dispatches plain text to
- * `xd://report_issue`, and the system prompt tells the model to write
- * `<tool>: <concise description>` there when auto-QA is enabled.
- *
  * Enabled by default (`dev.autoqa` defaults to true); `PI_AUTO_QA=0` or an
  * explicit `dev.autoqa: false` short-circuits injection entirely. When the
  * user is only enabled by default (never configured `dev.autoqa` themselves),
  * a persisted `dev.autoqaConsent: "denied"` also disables injection so a "No"
  * in the consent dialog fully turns the feature off.
- * Records grievances to a local SQLite database; never throws from the device
- * dispatch path.
+ * Records grievances to a local SQLite database.
  *
  * Nothing is written until consent resolves. If the user has never been asked
  * (`dev.autoqaConsent === "unset"`) the process-global consent handler —
@@ -25,75 +20,14 @@
  * bundled endpoint (`dev.autoqaPush.endpoint`, default `qa.omp.sh`). Each
  * insert schedules a background flush that POSTs pending rows and deletes them
  * on HTTP 2xx. `PI_AUTO_QA_PUSH=1` forces push in non-interactive environments
- * where the consent dialog never fires. Device execution is never blocked on
- * the network and never throws.
+ * where the consent dialog never fires.
  */
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
 import { $env, $flag, getAutoQaDbPath, getInstallId, logger, VERSION } from "@oh-my-pi/pi-utils";
 import type { Settings } from "..";
-import type { Theme } from "../modes/theme/theme";
-import { renderStatusLine, truncateToWidth } from "../tui";
-import type { ToolSession } from "./index";
-import { replaceTabs } from "./render-utils";
-import { ToolError } from "./tool-errors";
-import type { XdevDispatch } from "./xdev";
-
-export const REPORT_ISSUE_DEVICE_NAME = "report_issue";
-export const REPORT_ISSUE_DEVICE_PATH = `xd://${REPORT_ISSUE_DEVICE_NAME}`;
-
-/** Usage text for `read xd://report_issue`. */
-export function reportIssueDeviceUsage(): string {
-	return `Write \`<tool>: <concise description>\` as plain text to ${REPORT_ISSUE_DEVICE_PATH}. A two-line fallback also works: tool name on line 1, report body below.`;
-}
-
-/** Whether a tool call writes to `xd://report_issue`. */
-export function isReportIssueToolCall(toolCall: { name: string; arguments?: Record<string, unknown> }): boolean {
-	if (toolCall.name !== "write") return false;
-	const args = toolCall.arguments;
-	const path =
-		typeof args?.path === "string" ? args.path : typeof args?.file_path === "string" ? args.file_path : undefined;
-	return path === REPORT_ISSUE_DEVICE_PATH || path === `${REPORT_ISSUE_DEVICE_PATH}/`;
-}
-
-/** Call preview for an `xd://report_issue` write. */
-export function renderReportIssueDeviceCall(content: unknown, uiTheme: Theme): Component {
-	const body = typeof content === "string" ? replaceTabs(content.trim().split("\n")[0] ?? "") : "";
-	const text = renderStatusLine(
-		{
-			icon: "pending",
-			title: "Report Tool Issue",
-			description: body ? truncateToWidth(body, 72) : undefined,
-		},
-		uiTheme,
-	);
-	return new Text(text, 0, 0);
-}
-
-function parseReportIssueBody(text: string): { tool: string; report: string } {
-	const body = text.trim();
-	if (!body) {
-		throw new ToolError(`Empty report. ${reportIssueDeviceUsage()}`);
-	}
-	const firstNewline = body.indexOf("\n");
-	if (firstNewline >= 0) {
-		const tool = body.slice(0, firstNewline).trim();
-		const report = body.slice(firstNewline + 1).trim();
-		if (tool && report) return { tool, report };
-	}
-	const colon = body.indexOf(":");
-	if (colon > 0) {
-		const tool = body.slice(0, colon).trim();
-		const report = body.slice(colon + 1).trim();
-		if (tool && report) return { tool, report };
-	}
-	throw new ToolError(`Invalid report format. ${reportIssueDeviceUsage()}`);
-}
 
 /**
  * Whether Auto-QA is active for this session.
@@ -142,7 +76,7 @@ let consentHandler: AutoQaConsentHandler | null = null;
  * Persistent settings instance supplied by the consent-handler registrant.
  * Subagents have in-memory `Settings` snapshots that don't write to disk;
  * we persist the decision through this disk-backed reference so a grant
- * survives across runs even when triggered from a subagent device write.
+ * survives across runs even when triggered from a subagent report.
  */
 let persistentConsentSettings: Settings | null = null;
 /**
@@ -312,14 +246,14 @@ export interface FlushResult {
 /**
  * Optional per-flush controls. Used by `omp grievances push` to surface
  * progress to a TTY and to skip the user-facing consent gate (manual
- * pushes are the user's explicit intent, not a side effect of a device write).
+ * pushes are the user's explicit intent, not an automatic report).
  */
 export interface FlushOptions {
 	/**
 	 * Skip the `dev.autoqaConsent === "granted"` gate in
 	 * {@link resolvePushConfig}. Endpoint configuration is still required.
 	 * Reserved for explicit user-driven pushes (CLI `grievances push`,
-	 * future debug recipes); never set from the device's auto-flush path.
+	 * future debug recipes); never set from the automatic flush path.
 	 */
 	bypassConsent?: boolean;
 	/**
@@ -512,7 +446,7 @@ export async function flushGrievances(
  * swallows its own errors); retained so tests can await the fire-and-forget
  * work deterministically via {@link __awaitAutoQaRecordPipelineForTests}.
  */
-let lastRecordPipeline: Promise<void> = Promise.resolve();
+const lastRecordPipeline: Promise<void> = Promise.resolve();
 
 /** Test-only: await the last consent → insert → flush pipeline. */
 export function __awaitAutoQaRecordPipelineForTests(): Promise<void> {
@@ -522,47 +456,68 @@ export function __awaitAutoQaRecordPipelineForTests(): Promise<void> {
 /**
  * Queue a grievance for recording. The consent → insert → flush pipeline is
  * fire-and-forget: nothing is written until the user grants consent (or
- * `PI_AUTO_QA_PUSH=1` forces headless recording), and the device result
- * returns immediately so the model never waits on the dialog or the network.
+ * `PI_AUTO_QA_PUSH=1` forces headless recording).
  */
-function recordToolIssue(session: ToolSession, tool: string, report: string): void {
-	const canonicalTool = tool.startsWith("proxy_") ? tool.slice("proxy_".length) : tool;
-	const model = session.getActiveModelString?.() ?? "unknown";
-	lastRecordPipeline = (async () => {
-		try {
-			if (!$flag("PI_AUTO_QA_PUSH") && !(await resolveAutoQaConsent(session.settings))) return;
-			const db = openAutoQaDb();
-			if (!db) return;
-			db.prepare(
-				"INSERT INTO grievances (model, version, tool, report, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
-			).run(model, VERSION, canonicalTool, report);
-			await flushGrievances(db, session.settings);
-		} catch (error) {
-			logger.debug("autoqa consent pipeline failed", { error: String(error) });
-		}
-	})();
+export const MAX_AUTO_QA_TOOL_CHARS = 256;
+export const MAX_AUTO_QA_REPORT_CHARS = 16_384;
+
+export type AutoQaReportIssueStatus = "disabled" | "consent_denied" | "recorded";
+
+export interface AutoQaReportIssueInput {
+	readonly settings: Settings | undefined;
+	readonly model: string;
+	readonly tool: string;
+	readonly report: string;
+	readonly signal?: AbortSignal;
+}
+
+export interface AutoQaReportIssueResult {
+	readonly status: AutoQaReportIssueStatus;
+	readonly pushed: number;
+	readonly pushOk: boolean;
+	readonly pushSkipped: boolean;
+}
+
+function boundedAutoQaText(value: string, name: string, maxChars: number): string {
+	const text = value.trim();
+	if (!text) throw new TypeError(`${name} must be a nonempty string`);
+	if (text.length > maxChars) throw new RangeError(`${name} is too large`);
+	return text;
+}
+
+function awaitWithAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return work;
+	signal.throwIfAborted();
+	const { promise, reject } = Promise.withResolvers<T>();
+	const onAbort = () =>
+		reject(signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError"));
+	signal.addEventListener("abort", onAbort, { once: true });
+	return Promise.race([work, promise]).finally(() => signal.removeEventListener("abort", onAbort));
 }
 
 /**
- * Execute `write xd://report_issue`. `text` must be either:
- * - `<tool>: <concise description>` on one line, or
- * - tool name on the first line with the report body below.
+ * Record one typed Auto-QA grievance through the existing consent, local-store,
+ * and push owners. This intentionally accepts only explicit report data rather
+ * than a legacy tool request.
  */
-export async function dispatchReportIssueDevice(
-	session: ToolSession,
-	text: string,
-): Promise<{ result: AgentToolResult<unknown>; xdev: XdevDispatch }> {
-	try {
-		if (isAutoQaEnabled(session.settings)) {
-			const { tool, report } = parseReportIssueBody(text);
-			recordToolIssue(session, tool, report);
-		}
-	} catch (error) {
-		if (error instanceof ToolError) throw error;
-		logger.error("Failed to record tool issue", { error });
+export async function reportAutoQaIssue(input: AutoQaReportIssueInput): Promise<AutoQaReportIssueResult> {
+	const tool = boundedAutoQaText(input.tool, "tool", MAX_AUTO_QA_TOOL_CHARS);
+	const report = boundedAutoQaText(input.report, "report", MAX_AUTO_QA_REPORT_CHARS);
+	input.signal?.throwIfAborted();
+	if (!isAutoQaEnabled(input.settings)) {
+		return { status: "disabled", pushed: 0, pushOk: false, pushSkipped: true };
 	}
-	return {
-		result: { content: [{ type: "text", text: "Noted, thanks!" }] },
-		xdev: { tool: REPORT_ISSUE_DEVICE_NAME, mode: "execute", args: { report: text.trim() } },
-	};
+	const consented =
+		$flag("PI_AUTO_QA_PUSH") || (await awaitWithAbort(resolveAutoQaConsent(input.settings), input.signal));
+	input.signal?.throwIfAborted();
+	if (!consented) return { status: "consent_denied", pushed: 0, pushOk: false, pushSkipped: true };
+	const db = openAutoQaDb();
+	if (!db) return { status: "recorded", pushed: 0, pushOk: false, pushSkipped: true };
+	const canonicalTool = tool.startsWith("proxy_") ? tool.slice("proxy_".length) : tool;
+	db.prepare(
+		"INSERT INTO grievances (model, version, tool, report, created_at) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)",
+	).run(input.model || "unknown", VERSION, canonicalTool, report);
+	input.signal?.throwIfAborted();
+	const flush = await awaitWithAbort(flushGrievances(db, input.settings), input.signal);
+	return { status: "recorded", pushed: flush.pushed, pushOk: flush.ok, pushSkipped: flush.skipped === true };
 }

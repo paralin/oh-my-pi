@@ -7,7 +7,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { type } from "@oh-my-pi/omptype";
+import { z } from "@oh-my-pi/omptype/zod";
 import { agentLoop, agentLoopDetailed } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	type AgentRunSummary,
@@ -132,8 +132,7 @@ function buildTool(spec: TestTool): AgentTool {
 			name: spec.name,
 			label: spec.name,
 			description: `test tool ${spec.name}`,
-			parameters: type({ value: type("string").optional() }),
-			intent: "omit",
+			parameters: z.object({ value: z.string().optional() }),
 			execute: async () => {
 				if (spec.behavior === "throw") throw new Error(`${spec.name} boom`);
 				return { content: [{ type: "text", text: spec.result ?? "ok" }], details: {} };
@@ -145,8 +144,7 @@ function buildTool(spec: TestTool): AgentTool {
 		name: spec.name,
 		label: spec.name,
 		description: `blocked tool ${spec.name}`,
-		parameters: type({ value: type("string").optional() }),
-		intent: "omit",
+		parameters: z.object({ value: z.string().optional() }),
 		execute: async () => ({ content: [{ type: "text", text: "should not run" }], details: {} }),
 	} satisfies AgentTool;
 }
@@ -545,8 +543,7 @@ describe("skipped tools without spans", () => {
 			name: "fast",
 			label: "fast",
 			description: "fast",
-			parameters: type({ value: type("string").optional() }),
-			intent: "omit",
+			parameters: z.object({ value: z.string().optional() }),
 			execute: async () => {
 				fastDone = true;
 				return { content: [{ type: "text", text: "fast-ok" }], details: {} };
@@ -556,8 +553,7 @@ describe("skipped tools without spans", () => {
 			name: "slow",
 			label: "slow",
 			description: "slow",
-			parameters: type({ value: type("string").optional() }),
-			intent: "omit",
+			parameters: z.object({ value: z.string().optional() }),
 			// concurrency: shared (default) — both run in parallel. Interruptible:
 			// queued steering hard-aborts only interruptible waits; non-interruptible
 			// tools now run to completion and the steer injects at the boundary.
@@ -636,8 +632,7 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			name: "fast",
 			label: "fast",
 			description: "fast",
-			parameters: type({ value: type("string").optional() }),
-			intent: "omit",
+			parameters: z.object({ value: z.string().optional() }),
 			concurrency: "exclusive",
 			execute: async () => {
 				state.firstDone = true;
@@ -762,8 +757,7 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			name: "cyclic",
 			label: "cyclic",
 			description: "returns cyclic details",
-			parameters: type({ value: type("string").optional() }),
-			intent: "omit",
+			parameters: z.object({ value: z.string().optional() }),
 			execute: async () => ({
 				content: [{ type: "text", text: "ok" }],
 				details: { ring: cyclic },

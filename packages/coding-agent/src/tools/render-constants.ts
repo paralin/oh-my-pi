@@ -20,5 +20,4 @@ export const TRUNCATE_LENGTHS = {
 	LONG: 100,
 	LINE: 110,
 	SHORT: 40,
-	RECAP: 280,
 } as const;

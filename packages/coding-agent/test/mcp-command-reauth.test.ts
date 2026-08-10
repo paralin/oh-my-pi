@@ -8,7 +8,6 @@ import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	getConfigRootDir,
@@ -57,8 +56,7 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 		getConnectionStatus: vi.fn(() => "connected"),
 		...mcpManagerOverrides,
 	};
-	const oauthManualInput = new OAuthManualInputManager();
-	const ctx = {
+	const controller = new MCPCommandController({
 		chatContainer: { addChild: vi.fn() },
 		present,
 		presentCommandOutput: present,
@@ -66,20 +64,23 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 		editor,
 		showError,
 		showStatus,
-		oauthManualInput,
+		oauthManualInput: {
+			hasPending: vi.fn(() => false),
+			pendingProviderId: undefined,
+			tryClaimInput: vi.fn(),
+		},
 		settings: {
 			get: vi.fn((_key: string): unknown => undefined),
 		},
 		session: {
-			refreshMCPTools: vi.fn(),
+			refreshMCPInstructions: vi.fn(),
 			setMCPPromptCommands: vi.fn(),
 			modelRegistry: { authStorage },
 		},
 		mcpManager,
-	} as never;
-	const controller = new MCPCommandController(ctx);
+	} as never);
 
-	return { controller, ctx, showError, showStatus, present, editor, oauthManualInput, prepareConfig, mcpManager };
+	return { controller, showError, showStatus, present, editor, prepareConfig, mcpManager };
 }
 
 describe("/mcp auth commands", () => {
@@ -443,65 +444,6 @@ describe("/mcp auth commands", () => {
 		// onEscape must be restored to its previous value so subsequent user
 		// input does not keep aborting the (now-finished) flow.
 		expect(editor.onEscape).not.toBe(installedEscape);
-	});
-
-	test("reauth supersedes an unfinished MCP OAuth flow", async () => {
-		const authStorage = freshAuthStorage();
-		await authStorage.reload();
-		vi.spyOn(mcpClient, "connectToServer").mockRejectedValue(AUTH_ERROR);
-		let loginAttempt = 0;
-		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockImplementation(function (this: oauthFlow.MCPOAuthFlow) {
-			loginAttempt += 1;
-			if (loginAttempt > 1) {
-				return Promise.resolve({
-					access: "replacement-access",
-					refresh: "replacement-refresh",
-					expires: Date.now() + 3_600_000,
-				});
-			}
-
-			const manualInputPromise = this.ctrl.onManualCodeInput?.();
-			void manualInputPromise?.catch(() => {});
-			const pending = Promise.withResolvers<never>();
-			this.ctrl.signal?.addEventListener(
-				"abort",
-				() => {
-					pending.reject(new Error(`OAuth callback cancelled: ${String(this.ctrl.signal?.reason ?? "aborted")}`));
-				},
-				{ once: true },
-			);
-			return pending.promise;
-		});
-
-		const { controller, ctx, showError, showStatus, editor, oauthManualInput } = createController(authStorage);
-		const firstReauth = controller.handle("/mcp reauth envserver");
-		const claimDeadline = Date.now() + 1_000;
-		while (!oauthManualInput.hasPending() && Date.now() < claimDeadline) {
-			await Bun.sleep(10);
-		}
-		expect(oauthManualInput.pendingProviderId).toBe("mcp");
-
-		const replacementReauth = new MCPCommandController(ctx).handle("/mcp reauth envserver");
-		await Promise.race([
-			replacementReauth,
-			Bun.sleep(2_000).then(() => {
-				throw new Error("replacement reauth did not resolve within 2s");
-			}),
-		]);
-		if (oauthManualInput.hasPending()) editor.onEscape?.();
-		await Promise.race([
-			firstReauth,
-			Bun.sleep(2_000).then(() => {
-				throw new Error("superseded reauth did not resolve within 2s");
-			}),
-		]);
-
-		expect(loginAttempt).toBe(2);
-		expect(showError).not.toHaveBeenCalled();
-		expect(showStatus).toHaveBeenCalledWith(expect.stringMatching(/cancel/i));
-		expect(authStorage.get(oauthFlow.mcpOAuthCredentialId(EXPANDED_SERVER_URL))).toMatchObject({
-			access: "replacement-access",
-		});
 	});
 
 	test("Esc cancels even when OAuth login has not registered its signal listener yet", async () => {

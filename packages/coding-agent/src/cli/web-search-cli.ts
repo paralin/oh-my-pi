@@ -9,9 +9,9 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
+import { renderSearchResult } from "../web/search/cli-render";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
 import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
-import { renderSearchResult } from "../web/search/render";
 import type { SearchProviderId } from "../web/search/types";
 
 export interface SearchCommandArgs {

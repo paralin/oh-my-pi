@@ -48,7 +48,6 @@ import { CliUsageError } from "./usage-error";
 export interface ParseDeps {
 	logger: { warn: (message: string, meta?: Record<string, unknown>) => void };
 	parseThinking: (value: string | null | undefined) => ConfiguredThinkingLevel | undefined;
-	normalizeToolNames: (values: Iterable<string>) => string[];
 	thinkingEfforts: readonly string[];
 }
 
@@ -141,15 +140,6 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--slow": (result, value) => {
 		result.slow = value;
 	},
-	"--plan": (result, value) => {
-		result.plan = value;
-	},
-	"--prewalk-into": (result, value) => {
-		result.prewalkInto = value;
-	},
-	"--plan-yolo-into": (result, value) => {
-		result.planYoloInto = value;
-	},
 	"--max-time": (result, value) => {
 		result.maxTime = parseMaxTimeSeconds(value);
 	},
@@ -190,17 +180,6 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--models": (result, value) => {
 		result.models = value.split(",").map(s => s.trim());
 	},
-	"--tools": (result, value, deps) => {
-		const names = deps.normalizeToolNames(
-			value
-				.split(",")
-				.map(s => s.trim())
-				.filter(Boolean),
-		);
-		// Validation runs after session tool discovery. At this point extension,
-		// custom, plugin-manifest, and MCP tools are not all known yet.
-		result.tools = names;
-	},
 	"--thinking": (result, value, deps) => {
 		const thinking = deps.parseThinking(value);
 		if (thinking !== undefined) {
@@ -221,10 +200,6 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	},
 	"--extension": setExtension,
 	"-e": setExtension,
-	"--trusted-extension": (result, value) => {
-		result.trustedExtensions = result.trustedExtensions ?? [];
-		result.trustedExtensions.push(value);
-	},
 	"--plugin-dir": (result, value) => {
 		result.pluginDirs = result.pluginDirs ?? [];
 		result.pluginDirs.push(value);
@@ -268,10 +243,10 @@ export const STRING_VALUE_FLAGS: ReadonlySet<string> = new Set(Object.keys(STRIN
 /**
  * Built-in string flags known to be shadowed by bundled/common boolean
  * extensions before extension metadata is available. They still accept a
- * value-like successor for the built-in form (`--plan opus`), but a
- * flag-looking successor remains a fresh flag (`--plan --profile work`).
+ * value-like successor for a value-taking built-in form, but a
+ * flag-looking successor remains a fresh flag (a boolean extension flag followed by `--profile work`).
  */
-export const EXTENSION_SHADOWABLE_STRING_FLAGS: ReadonlySet<string> = new Set(["--plan"]);
+export const EXTENSION_SHADOWABLE_STRING_FLAGS: ReadonlySet<string> = new Set();
 
 /**
  * Derived from {@link OPTIONAL_FLAGS}. Same single-source contract as
@@ -307,15 +282,10 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--from-claude",
 	"--from-codex",
 	"--no-session",
-	"--no-tools",
 	"--no-lsp",
 	"--no-pty",
 	"--hide-thinking",
 	"--advisor",
-	"--external-thinking",
-	"--prewalk",
-	"--no-prewalk",
-	"--plan-yolo",
 	"--print",
 	"--print-thoughts",
 	"--no-extensions",

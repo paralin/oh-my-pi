@@ -285,6 +285,7 @@ export class DapSessionManager {
 	#sessions = new Map<string, DapSession>();
 	#activeSessionId: string | null = null;
 	#cleanupLoopPromise?: Promise<void>;
+	readonly #cleanupAbort = new AbortController();
 	#nextId = 0;
 	#treeOutcomeWaiters = new Set<DapTreeOutcomeWaiter>();
 
@@ -1161,13 +1162,28 @@ export class DapSessionManager {
 	}
 
 	async #runCleanupLoop(): Promise<void> {
-		for await (const _ of timers.setInterval(CLEANUP_INTERVAL_MS, null, { ref: false })) {
-			try {
-				this.#cleanupIdleSessions();
-			} catch (error) {
-				logger.error("DAP idle session cleanup failed", { error: toErrorMessage(error) });
+		try {
+			for await (const _ of timers.setInterval(CLEANUP_INTERVAL_MS, null, {
+				ref: false,
+				signal: this.#cleanupAbort.signal,
+			})) {
+				try {
+					this.#cleanupIdleSessions();
+				} catch (error) {
+					logger.error("DAP idle session cleanup failed", { error: toErrorMessage(error) });
+				}
 			}
+		} catch (error) {
+			if (!this.#cleanupAbort.signal.aborted) throw error;
 		}
+	}
+
+	/** Stops the cleanup loop and disposes the active session tree. */
+	async dispose(): Promise<void> {
+		this.#cleanupAbort.abort();
+		await this.terminate(AbortSignal.timeout(5_000), 4_000).catch(() => undefined);
+		for (const session of [...this.#sessions.values()]) this.#disposeSession(session);
+		await this.#cleanupLoopPromise?.catch(() => undefined);
 	}
 
 	#cleanupIdleSessions(): void {

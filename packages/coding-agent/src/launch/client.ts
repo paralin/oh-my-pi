@@ -3,8 +3,8 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getGlobalDaemonRuntimeDir, isEexist, isEisdir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
-import { hostHasInheritableConsole } from "../eval/py/spawn-options";
 import { resolveWorkerSpawnCmd, workerEnvFromParent } from "../subprocess/worker-client";
+import { hostHasInheritableConsole } from "./host-console";
 import { daemonBrokerEndpoint, daemonRuntimeDir } from "./paths";
 import {
 	DAEMON_BROKER_WORKER_ARG,
@@ -367,17 +367,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			try {
 				message = parseDaemonWireMessage(decoded);
 			} catch (error) {
-				const parseError = error instanceof Error ? error : new Error(String(error));
-				if (
-					typeof decoded === "object" &&
-					decoded !== null &&
-					"event" in decoded &&
-					decoded.event === "daemon-completed"
-				) {
-					logger.warn("Ignoring malformed daemon completion", { error: parseError.message });
-					continue;
-				}
-				this.#rejectPending(parseError);
+				this.#rejectPending(error instanceof Error ? error : new Error(String(error)));
 				continue;
 			}
 			if ("event" in message) {

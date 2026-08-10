@@ -1,8 +1,7 @@
 /**
  * Extensions Configuration
  *
- * Extensions intercept agent events and can register custom tools.
- * They provide a unified system for extensions, custom tools, commands, and more.
+ * Extensions intercept agent events and register commands, shortcuts, and flags.
  *
  * Extension files are discovered from:
  * - ~/.omp/agent/extensions/ (legacy: ~/.pi/agent/extensions/)
@@ -55,20 +54,6 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_end", async (event) => {
 		console.log(\`[Extension] Done, \${event.messages.length} messages\`);
-	});
-
-	// Register a custom tool
-	pi.registerTool({
-		name: "my_tool",
-		label: "My Tool",
-		description: "Does something useful",
-		parameters: z.object({
-			input: z.string(),
-		}),
-		execute: async (_toolCallId, params, _onUpdate, _ctx, _signal) => ({
-			content: [{ type: "text", text: \`Processed: \${params.input}\` }],
-			details: {},
-		}),
 	});
 
 	// Register a command

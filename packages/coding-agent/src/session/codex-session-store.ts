@@ -124,7 +124,7 @@ function toolArguments(value: unknown): Record<string, unknown> {
 		const parsed: unknown = JSON.parse(value);
 		if (isRecord(parsed)) return parsed;
 	} catch {
-		// Custom tools intentionally carry non-JSON input.
+		// Responses raw-input calls intentionally carry non-JSON input.
 	}
 	return { input: value };
 }

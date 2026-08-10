@@ -498,10 +498,6 @@ Request shaping:
 - `supportsMultipleSystemMessages` — preserve separate leading system/developer messages instead of coalescing them. Default: auto (known OpenAI-compatible hosted APIs preserve; strict-template/local hosts coalesce).
 - `supportsUsageInStreaming` — send `stream_options: { include_usage: true }` to receive token usage on streaming responses. Default: `true`.
 - `maxTokensField` — `"max_completion_tokens"` or `"max_tokens"`. Default: auto.
-- `supportsToolChoice` — emit the `tool_choice` parameter when the caller forces a specific tool. Default: `true`. Set `false` for endpoints that 400 on `tool_choice` (e.g. DeepSeek when reasoning is on).
-- `supportsForcedToolChoice` — accept a forced `tool_choice` that requires a specific tool. Default: `true`. When `false`, a forced selector is downgraded to `auto` so the tool stays available for endpoints that reject forced tool calls (e.g. some thinking-required OpenAI-compatible models).
-- `disableReasoningOnForcedToolChoice` — drop `reasoning_effort` / OpenRouter `reasoning` whenever `tool_choice` forces a call. Default: auto (Kimi/Anthropic-fronted endpoints).
-- `disableReasoningOnToolChoice` — drop reasoning fields whenever any `tool_choice` is sent. Default: auto (DeepSeek reasoning models).
 - `alwaysSendMaxTokens` — always send a max-token field when the caller did not provide one. Default: auto (Kimi-family models derive TPM limits from `max_tokens`).
 - `strictResponsesPairing` — Responses-API tool-call/result history must be strictly paired. Default: auto (Azure OpenAI, GitHub Copilot).
 - `streamIdleTimeoutMs` — stream-watchdog idle-timeout floor in ms for slow reasoning hosts. Default: auto (GLM coding-plan hosts, direct DeepSeek reasoning).
@@ -553,42 +549,6 @@ Anthropic-side knobs are supplied by built-in catalog metadata and are not confi
 The same `compat` slot accepts `promptCacheMode` (`none`, `automatic`, or `explicit`),
 `supportsLongPromptCacheRetention`, `promptCacheMinimumTokens`, and
 `promptCacheMaximumCheckpoints` for Bedrock models.
-
-### Strict tool schemas (`disableStrictTools`)
-
-Anthropic's API supports a `strict` field on tool definitions that forces the model to always follow the provided schema exactly. OMP enables it by default for a small allowlist of high-frequency built-in `anthropic-messages` tools (`bash`, `python`, `edit`, and `find`) whose schemas fit Anthropic's strict grammar limits; other tools still send normalized schemas but omit `strict`.
-
-Third-party providers that front the Anthropic API (AWS Bedrock, Azure, self-hosted proxies) do not always implement this field and will reject requests that include it. Set `disableStrictTools: true` at the provider level to opt out of strict mode for the allowlisted tools:
-
-```yaml
-providers:
-  bedrock-anthropic:
-    baseUrl: https://bedrock-runtime.us-east-1.amazonaws.com/anthropic
-    apiKey: AWS_BEARER_TOKEN
-    api: anthropic-messages
-    disableStrictTools: true
-    models:
-      - id: claude-sonnet-4-20250514
-        name: Claude Sonnet 4 (Bedrock)
-        input: [text, image]
-        contextWindow: 200000
-        maxTokens: 16384
-        cost:
-          input: 3.00
-          output: 15.00
-          cacheRead: 0.30
-          cacheWrite: 3.75
-```
-
-`disableStrictTools` is a provider-level flag that applies to all models in the provider. It disables the Anthropic `strict` marker only for tools that OMP would otherwise mark strict; it does not change runtime tool argument validation. OMP can automatically retry without strict tools after Anthropic reports a strict-grammar-too-large error before the first streamed token, but proxies that reject the `strict` field for other reasons should set this flag explicitly.
-
-Tool schemas going on the wire are normalized by the unified flow in
-`packages/ai/src/utils/schema/normalize.ts` (Google/CCA/MCP dispatchers
-plus the OpenAI strict-mode sanitize+enforce pipeline). See
-[`ai-schema-normalize.md`](./ai-schema-normalize.md) for the strict-mode
-edge cases (local `$ref` inlining, single-item `allOf` collapse,
-`anyOf`-wrapper description hoist, enum/const primitive-type inference)
-and the per-provider dispatcher mapping.
 
 ## Practical examples
 

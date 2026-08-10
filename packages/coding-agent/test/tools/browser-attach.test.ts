@@ -1,20 +1,16 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-	pickElectronTarget,
-	shouldPreserveConnectedBrowserFocus,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import { describe, expect, test } from "bun:test";
+import type { Browser, Page, Target } from "puppeteer-core";
+import { pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "../../src/tools/browser/attach.js";
 import {
 	acquireBrowser,
 	type BrowserHandle,
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import type { Browser, Page, Target } from "puppeteer-core";
+} from "../../src/tools/browser/registry.js";
+import { acquireTab, releaseTab } from "../../src/tools/browser/tab-supervisor.js";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
-let sharedHeadless: BrowserHandle | undefined;
 
 interface FakePageOptions {
 	url: string;
@@ -38,15 +34,6 @@ function fakeTarget(type: string, page: Page | null): Target {
 }
 
 describe("pickElectronTarget", () => {
-	beforeAll(async () => {
-		if (!CHROMIUM_AVAILABLE) return;
-		sharedHeadless = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
-	});
-
-	afterAll(async () => {
-		if (sharedHeadless) await releaseBrowser(sharedHeadless, { kill: true });
-	});
-
 	test("uses discovered CDP page targets when browser.pages is empty", async () => {
 		const page = fakePage({ url: "https://www.google.com/", title: "Google" });
 		let pagesCalled = false;
@@ -123,8 +110,8 @@ describe("pickElectronTarget", () => {
 	test.skipIf(!CHROMIUM_AVAILABLE)(
 		"navigates a fresh attached tab to the requested URL",
 		async () => {
-			const launched = sharedHeadless;
-			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
 			const endpoint = new URL(launched.browser.wsEndpoint());
 			let attached: BrowserHandle | undefined;
 			let opened = false;
@@ -147,6 +134,7 @@ describe("pickElectronTarget", () => {
 			} finally {
 				if (opened) await releaseTab(tabName, { kill: false });
 				else if (attached) await releaseBrowser(attached, { kill: false });
+				await releaseBrowser(launched, { kill: true });
 			}
 		},
 		30_000,
@@ -163,8 +151,8 @@ describe("pickElectronTarget", () => {
 					return new Promise<Response>(() => {});
 				},
 			});
-			const launched = sharedHeadless;
-			if (!launched || !("browser" in launched)) throw new Error("Expected a shared Puppeteer browser");
+			const launched = await acquireBrowser({ kind: "headless", headless: true }, { cwd: process.cwd() });
+			if (!("browser" in launched)) throw new Error("Expected a Puppeteer browser");
 			const endpoint = new URL(launched.browser.wsEndpoint());
 			let attached: BrowserHandle | undefined;
 
@@ -185,6 +173,7 @@ describe("pickElectronTarget", () => {
 				expect(requestCount).toBe(1);
 			} finally {
 				if (attached && !attempted) await releaseBrowser(attached, { kill: false });
+				await releaseBrowser(launched, { kill: true });
 				await server.stop(true);
 			}
 		},

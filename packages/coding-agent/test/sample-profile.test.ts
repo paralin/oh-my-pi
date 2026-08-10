@@ -2,17 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import {
 	demangleSymbol,
 	parseSampleProfile,
 	renderSampleProfile,
 } from "@oh-my-pi/pi-coding-agent/utils/sample-profile";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../src/session/tool-session.js";
+import type { ReadResult } from "../src/tools/read.js";
+import { ReadService } from "../src/tools/read.js";
 
 const BOX_MEASURE = "_RNvNtCsfMEenOU8j5j_11slab_kernel6layout11box_measure";
 
@@ -129,7 +128,7 @@ describe("renderSampleProfile", () => {
 	});
 });
 
-describe("read tool .sample.txt dispatch", () => {
+describe("read service .sample.txt dispatch", () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
@@ -152,7 +151,7 @@ describe("read tool .sample.txt dispatch", () => {
 		};
 	}
 
-	function textOutput(result: AgentToolResult<ReadToolDetails>): string {
+	function textOutput(result: ReadResult): string {
 		return result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -163,13 +162,13 @@ describe("read tool .sample.txt dispatch", () => {
 		const filePath = path.join(tmpDir, "demo-42.sample.txt");
 		await fs.writeFile(filePath, FIXTURE);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const summary = textOutput(await tool.execute("read-sample", { path: filePath }));
+		const tool = new ReadService(createSession(tmpDir));
+		const summary = textOutput(await tool.read(filePath));
 		expect(summary).toContain("macOS sample profile: demo (pid 42)");
 		expect(summary).toContain("slab_kernel::layout::box_measure");
 		expect(summary).not.toContain(BOX_MEASURE);
 
-		const raw = textOutput(await tool.execute("read-sample-raw", { path: `${filePath}:raw` }));
+		const raw = textOutput(await tool.read(`${filePath}:raw`));
 		expect(raw).toContain("Call graph:");
 		expect(raw).toContain(BOX_MEASURE);
 	});
@@ -178,8 +177,8 @@ describe("read tool .sample.txt dispatch", () => {
 		const filePath = path.join(tmpDir, "notes.sample.txt");
 		await fs.writeFile(filePath, "these are just notes\nsecond line\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const output = textOutput(await tool.execute("read-notes", { path: filePath }));
+		const tool = new ReadService(createSession(tmpDir));
+		const output = textOutput(await tool.read(filePath));
 		expect(output).toContain("these are just notes");
 	});
 });

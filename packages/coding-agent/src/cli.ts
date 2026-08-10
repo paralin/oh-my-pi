@@ -14,6 +14,7 @@ try {
  * CLI entry point — registers all commands explicitly and delegates to the
  * lightweight CLI runner from pi-utils.
  */
+import * as path from "node:path";
 import { parentPort } from "node:worker_threads";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import {
@@ -24,17 +25,13 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
-import { startJsEvalProcess } from "./eval/js/process-entry";
-import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
-import { isExternalSubagentConfigured, runExternalSubagentMode } from "./modes/external-subagent-mode";
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
 import { smokeTestComputerWorker } from "./tools/computer/supervisor";
 import { startComputerWorker } from "./tools/computer/worker-entry";
@@ -86,13 +83,67 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
  * Wired into `scripts/install-tests/run-ci.sh` so binary / source-link /
  * tarball installs all exercise it on every CI run.
  */
+function assertStoppedIpythonProcesses(processIds: {
+	readonly controllerPid: number;
+	readonly kernelPid: number;
+}): void {
+	for (const pid of [processIds.controllerPid, processIds.kernelPid]) {
+		try {
+			process.kill(pid, 0);
+		} catch (error) {
+			if (typeof error === "object" && error !== null && "code" in error && error.code === "ESRCH") continue;
+			throw error;
+		}
+		throw new Error(`IPython smoke left process ${pid} running after disposal`);
+	}
+}
+
+/** Proves an installed CLI can bootstrap its bundled IPython assets and reuse the warm runtime without uv. */
+async function smokeTestIpythonRuntime(): Promise<void> {
+	const { IpythonKernelProvisioner } = await import("./ipython/provisioner");
+	const first = new IpythonKernelProvisioner({ cwd: process.cwd(), sessionId: "distribution-smoke-first" });
+	let processIds: { readonly controllerPid: number; readonly kernelPid: number } | undefined;
+	try {
+		const result = await first.execute("import omp, rlm; (6 * 7, omp.skill_path('edit').is_file(), callable(rlm))");
+		if (result.status !== "ok" || result.result !== "(42, True, True)") {
+			throw new Error(`IPython distribution smoke cell failed: ${result.stderr || result.result || result.status}`);
+		}
+		processIds = first.processIds;
+		if (!processIds) throw new Error("IPython distribution smoke started without controller process IDs");
+	} finally {
+		await first.dispose();
+	}
+	if (first.hasRunningKernel) throw new Error("IPython distribution smoke still has a controller after disposal");
+	assertStoppedIpythonProcesses(processIds!);
+
+	const warm = new IpythonKernelProvisioner({
+		cwd: process.cwd(),
+		sessionId: "distribution-smoke-warm",
+		runtime: { uvExecutable: path.join(process.cwd(), "omp-smoke-bootstrap-must-not-run") },
+	});
+	let warmProcessIds: { readonly controllerPid: number; readonly kernelPid: number } | undefined;
+	try {
+		const result = await warm.execute("6 * 7");
+		if (result.status !== "ok" || result.result !== "42") {
+			throw new Error(
+				`IPython warm distribution smoke cell failed: ${result.stderr || result.result || result.status}`,
+			);
+		}
+		warmProcessIds = warm.processIds;
+		if (!warmProcessIds) throw new Error("warm IPython distribution smoke started without controller process IDs");
+	} finally {
+		await warm.dispose();
+	}
+	if (warm.hasRunningKernel) throw new Error("warm IPython distribution smoke still has a controller after disposal");
+	assertStoppedIpythonProcesses(warmProcessIds!);
+}
+
 async function runSmokeTest(): Promise<void> {
 	const { smokeTestSyncWorker, startServer } = await import("@oh-my-pi/omp-stats");
 	const { smokeTestTinyTitleWorker } = await import("./tiny/title-client");
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
-	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
@@ -113,21 +164,19 @@ async function runSmokeTest(): Promise<void> {
 
 	await smokeTestTinyTitleWorker();
 	await smokeTestSttWorker();
-	await smokeTestJsEvalWorker();
 	await smokeTestComputerWorker();
 	await smokeTestTtsWorker();
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
 	await smokeTestTerminalOutputWorker();
+	await smokeTestIpythonRuntime();
 	process.stdout.write("smoke-test: ok\n");
 }
 
 const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 const STATS_SYNC_WORKER_ARG = "__omp_worker_stats_sync";
 const TAB_WORKER_ARG = "__omp_worker_tab";
-const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
-const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
 const STT_WORKER_ARG = "__omp_worker_stt";
 const TTS_WORKER_ARG = "__omp_worker_tts";
 const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
@@ -145,7 +194,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		// spawning (the smoke ping, the first parse request) would be dropped.
 		// Park early events and replay them once the module's handler is live.
 		// Worker-thread entries using `parentPort` need the same sync-prefix
-		// buffering; the computer/tab/eval cases install that inbox below.
+		// buffering; the computer/tab cases install that inbox below.
 		const scope = globalThis as unknown as {
 			onmessage: ((event: MessageEvent) => void) | null;
 		};
@@ -164,7 +213,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	// Bun flushes messages the parent posted before spawn once this entry's
 	// top-level evaluation completes. Install a buffering inbox synchronously
 	// before binding the selected worker's real handler so the parent's
-	// synchronous `init` survives. The dynamically imported tab/eval modules
+	// synchronous `init` survives. The dynamically imported tab modules
 	// consume the same inbox after their module evaluation begins.
 	if (arg === TAB_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
@@ -174,23 +223,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === COMPUTER_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
 		startComputerWorker();
-		return true;
-	}
-	if (arg === JS_EVAL_WORKER_ARG) {
-		if (parentPort) installWorkerInbox(parentPort);
-		await import("./eval/js/worker-entry");
-		return true;
-	}
-	if (arg === JS_EVAL_PROCESS_ARG) {
-		// The bootstrap-safe interceptor seam is linked statically so this selector
-		// cannot load profile-scoped environment state after dispatch has begun.
-		// The JS evaluator forwards user-controlled payloads (tool-call args,
-		// display outputs); a non-serializable one must fail that cell, not
-		// SIGKILL the kernel and erase the eval session's state.
-		await runIpcSubprocessWorker<JsWorkerInbound, JsWorkerOutbound>(
-			transport => startJsEvalProcess(transport, interceptUnhandledRejections),
-			{ rethrowConnectedSendErrors: true },
-		);
 		return true;
 	}
 	if (arg === STT_WORKER_ARG) {
@@ -396,14 +428,19 @@ export async function runCli(argv: string[]): Promise<void> {
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
 
-	if (isExternalSubagentConfigured(process.env)) {
+	if (process.env.OMP_PARENT_TASK_PROFILE?.trim()) {
+		const { runExternalSubagentMode } = await import("./modes/external-subagent-mode");
 		await runExternalSubagentMode(process.env);
 		return;
 	}
 
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
-		return;
+		// Bun can retain closed controller-pipe bookkeeping after both IPython
+		// processes have exited. This one-shot probe has no interactive state to
+		// preserve, so terminate only after every worker and IPython teardown check
+		// has passed instead of leaving an installed CLI hung on exit.
+		process.exit(0);
 	}
 	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
 		import("@oh-my-pi/pi-utils/cli"),

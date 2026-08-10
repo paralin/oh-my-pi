@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { DaemonBrokerClient } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
 import type { DaemonCompletionNotification, DaemonRpcResult } from "../../../src/launch/protocol";
-import type { ToolSession } from "../../../src/tools";
+import type { ToolSession } from "../../../src/session/tool-session";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 
 afterEach(() => {

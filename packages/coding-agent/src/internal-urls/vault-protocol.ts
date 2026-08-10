@@ -6,7 +6,7 @@ import { getDefault } from "../config/settings-schema";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { parseInternalUrl } from "./parse";
 import { validateRelativePath } from "./skill-protocol";
-import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, WriteContext } from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
 
 const DARWIN_OBSIDIAN_BINARY = "/Applications/Obsidian.app/Contents/MacOS/obsidian";
 const DEFAULT_OBSIDIAN_TIMEOUT_MS = 30_000;
@@ -429,9 +429,7 @@ export function resolveVaultUrlToPath(input: string | InternalUrl): string {
 
 	const cachedRoot = getCachedVaultRoot(parsed.ref);
 	if (!cachedRoot) {
-		throw new Error(
-			"vault:// path resolution requires a cached vault root; read vault:// first or use the write tool",
-		);
+		throw new Error("vault:// path resolution requires a cached vault root; resolve vault:// first");
 	}
 
 	const resolvedRoot = fs.realpathSync(cachedRoot);
@@ -448,21 +446,6 @@ export function resolveVaultUrlToPath(input: string | InternalUrl): string {
 	}
 
 	return targetPath;
-}
-
-async function findExistingAncestor(targetPath: string, rootPath: string): Promise<string> {
-	let current = targetPath;
-	while (true) {
-		ensureWithinRoot(current, rootPath);
-		try {
-			return await fs.promises.realpath(current);
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			const parent = path.dirname(current);
-			if (parent === current) throw error;
-			current = parent;
-		}
-	}
 }
 
 async function countVaultEntries(rootPath: string): Promise<VaultCounts> {
@@ -706,21 +689,12 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		}
 	}
 
-	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
-		if (!isVaultEnabled()) throw new VaultDisabledError();
-		const parsed = parseVaultUrl(url);
-		if (parsed.kind !== "fs-file") {
-			throw new Error("vault:// write only supports plain file paths");
-		}
-		await this.#writeFile(parsed, content, context);
-	}
-
-	async #spawn(args: string[], context?: ResolveContext | WriteContext): Promise<ObsidianSpawnResult> {
+	async #spawn(args: string[], context?: ResolveContext): Promise<ObsidianSpawnResult> {
 		const bin = requireObsidianBinary(this.#resolveObsidianBinary);
 		return this.#spawnObsidian(bin, args, context?.signal, DEFAULT_OBSIDIAN_TIMEOUT_MS);
 	}
 
-	async #loadVaultDirectory(context?: ResolveContext | WriteContext): Promise<Map<string, string>> {
+	async #loadVaultDirectory(context?: ResolveContext): Promise<Map<string, string>> {
 		if (cachedVaultDirectory) return cachedVaultDirectory;
 		const result = await this.#spawn(["vaults", "verbose"], context);
 		assertCliSuccess("vaults", result);
@@ -728,7 +702,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		return cachedVaultDirectory;
 	}
 
-	async #resolveVaultRoot(ref: VaultReference, context?: ResolveContext | WriteContext): Promise<string> {
+	async #resolveVaultRoot(ref: VaultReference, context?: ResolveContext): Promise<string> {
 		const cached = getCachedVaultRoot(ref);
 		if (cached) return cached;
 
@@ -787,7 +761,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		const cacheKey = parsed.ref.active ? "_" : (parsed.ref.vault ?? "_");
 		let cliInfo = cachedVaultInfo.get(cacheKey);
 		if (cliInfo === undefined) {
-			const result = await this.#spawn([...this.#vaultCliArg(parsed.ref), "vault", "info"], context);
+			const result = await this.#spawn(["vault", "info", ...this.#vaultCliArg(parsed.ref)], context);
 			assertCliSuccess("vault info", result);
 			cliInfo = result.stdout.trim();
 			cachedVaultInfo.set(cacheKey, cliInfo);
@@ -813,7 +787,7 @@ export class VaultProtocolHandler implements ProtocolHandler {
 
 	async #resolveFsTarget(
 		parsed: Extract<ParsedVaultUrl, { kind: "fs-dir" | "fs-file" }>,
-		context?: ResolveContext | WriteContext,
+		context?: ResolveContext,
 	): Promise<{ root: string; targetPath: string }> {
 		const root = await this.#resolveVaultRoot(parsed.ref, context);
 		const resolvedRoot = await fs.promises.realpath(root);
@@ -896,37 +870,12 @@ export class VaultProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async #writeFile(
-		parsed: Extract<ParsedVaultUrl, { kind: "fs-file" }>,
-		content: string,
-		context?: WriteContext,
-	): Promise<void> {
-		const { root, targetPath } = await this.#resolveFsTarget(parsed, context);
-		try {
-			const realTargetPath = await fs.promises.realpath(targetPath);
-			ensureWithinRoot(realTargetPath, root);
-			const stat = await fs.promises.stat(realTargetPath);
-			if (stat.isDirectory()) {
-				throw new Error(`vault:// URL must resolve to a file: ${parsed.url}`);
-			}
-		} catch (error) {
-			if (!isEnoent(error)) throw error;
-			const parentDir = path.dirname(targetPath);
-			const existingAncestor = await findExistingAncestor(parentDir, root);
-			ensureWithinRoot(existingAncestor, root);
-			await fs.promises.mkdir(parentDir, { recursive: true });
-			const realParent = await fs.promises.realpath(parentDir);
-			ensureWithinRoot(realParent, root);
-		}
-		await Bun.write(targetPath, content);
-	}
-
 	async #runCli(
 		parsed: Extract<ParsedVaultUrl, { kind: "file-op" | "vault-op" }>,
 		context?: ResolveContext,
 	): Promise<InternalResource> {
 		const invocation = buildObsidianCliInvocation(parsed);
-		const args = [...this.#vaultCliArg(parsed.ref), ...invocation.args];
+		const args = [...invocation.args, ...this.#vaultCliArg(parsed.ref)];
 		const result = await this.#spawn(args, context);
 		assertCliSuccess(invocation.opLabel, result);
 		return {

@@ -42,28 +42,7 @@ function encodeRelativeSessionDirName(prefix: string, relative: string): string 
 	return encoded ? (prefix.endsWith("-") ? `${prefix}${encoded}` : `${prefix}-${encoded}`) : prefix;
 }
 
-/**
- * Reconstruct the short-lived hashed session dir name used by 17.2.5-17.2.8
- * (reverted PR #7397): `<scope>-<readable>-<sha256hex>` keyed by the canonical
- * cwd. Kept only so {@link migrateHashedSessionDir} can recover sessions
- * stranded when 17.2.9 restored the legacy names without a reverse migration.
- */
-function encodeHashedSessionDirName(canonicalCwd: string, scope: "home" | "tmp" | "abs"): string {
-	const normalized = canonicalCwd.replaceAll("\\", "/");
-	const readable = path
-		.basename(canonicalCwd)
-		.replace(/[^a-zA-Z0-9._-]+/g, "-")
-		.replace(/^-+|-+$/g, "")
-		.slice(-80);
-	const digest = Bun.SHA256.hash(normalized, "hex");
-	return `${scope}-${readable || "project"}-${digest}`;
-}
-
-function getDefaultSessionDirName(cwd: string): {
-	encodedDirName: string;
-	hashedDirName: string;
-	resolvedCwd: string;
-} {
+function getDefaultSessionDirName(cwd: string): { encodedDirName: string; resolvedCwd: string } {
 	const resolvedCwd = path.resolve(cwd);
 	const canonicalCwd = resolveEquivalentPath(resolvedCwd);
 	const home = os.homedir();
@@ -72,19 +51,13 @@ function getDefaultSessionDirName(cwd: string): {
 	const canonicalTempRoot = resolveEquivalentPath(tempRoot);
 	const homeRelative = path.relative(canonicalHome, canonicalCwd);
 	const tempRelative = path.relative(canonicalTempRoot, canonicalCwd);
-	let encodedDirName: string;
-	let scope: "home" | "tmp" | "abs";
-	if (homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))) {
-		encodedDirName = encodeRelativeSessionDirName("-", homeRelative);
-		scope = "home";
-	} else if (tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))) {
-		encodedDirName = encodeRelativeSessionDirName("-tmp", tempRelative);
-		scope = "tmp";
-	} else {
-		encodedDirName = encodeLegacyAbsoluteSessionDirName(canonicalCwd);
-		scope = "abs";
-	}
-	return { encodedDirName, hashedDirName: encodeHashedSessionDirName(canonicalCwd, scope), resolvedCwd };
+	const encodedDirName =
+		homeRelative === "" || (!homeRelative.startsWith("..") && !path.isAbsolute(homeRelative))
+			? encodeRelativeSessionDirName("-", homeRelative)
+			: tempRelative === "" || (!tempRelative.startsWith("..") && !path.isAbsolute(tempRelative))
+				? encodeRelativeSessionDirName("-tmp", tempRelative)
+				: encodeLegacyAbsoluteSessionDirName(canonicalCwd);
+	return { encodedDirName, resolvedCwd };
 }
 
 /**
@@ -148,26 +121,6 @@ function migrateLegacyAbsoluteSessionDir(cwd: string, sessionDir: string, sessio
 	}
 }
 
-/**
- * Migrate a 17.2.5-17.2.8 hashed session dir back into its legacy path-based
- * directory. The 17.2.9 revert restored the legacy names but dropped migration,
- * stranding sessions written under the hashed scheme (issue #7677). Best-effort.
- */
-function migrateHashedSessionDir(hashedDirName: string, sessionDir: string, sessionsRoot: string): void {
-	const hashedDir = path.join(sessionsRoot, hashedDirName);
-	if (hashedDir === sessionDir || !fs.existsSync(hashedDir)) return;
-
-	try {
-		migrateSessionDirPath(hashedDir, sessionDir);
-	} catch (error) {
-		logger.warn("Failed to migrate hashed session directory", {
-			oldPath: hashedDir,
-			newPath: sessionDir,
-			error: String(error),
-		});
-	}
-}
-
 export function resolveManagedSessionRoot(sessionDir: string, cwd: string): string | undefined {
 	const currentDirName = path.basename(sessionDir);
 	const { encodedDirName } = getDefaultSessionDirName(cwd);
@@ -187,11 +140,10 @@ export function computeDefaultSessionDir(
 	storage: SessionStorage,
 	sessionsRoot: string = getSessionsDir(),
 ): string {
-	const { encodedDirName, hashedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
+	const { encodedDirName, resolvedCwd } = getDefaultSessionDirName(cwd);
 	migrateHomeSessionDirs(sessionsRoot);
 	const sessionDir = path.join(sessionsRoot, encodedDirName);
 	migrateLegacyAbsoluteSessionDir(resolvedCwd, sessionDir, sessionsRoot);
-	migrateHashedSessionDir(hashedDirName, sessionDir, sessionsRoot);
 	storage.ensureDirSync(sessionDir);
 	return sessionDir;
 }

@@ -12,18 +12,6 @@ export interface MCPTool {
 	inputSchema: TSchema;
 }
 
-/** Tool wrapper config for dynamic MCP tool creation */
-export interface MCPToolWrapperConfig {
-	/** Our tool name (e.g., "exa_search") */
-	name: string;
-	/** Display label for UI */
-	label: string;
-	/** MCP tool name to call (e.g., "web_search_exa") */
-	mcpToolName: string;
-	/** Whether this is a websets tool (uses different MCP endpoint) */
-	isWebsetsTool?: boolean;
-}
-
 /** MCP tools/list response */
 export interface MCPToolsResponse {
 	result?: {

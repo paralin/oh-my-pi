@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { type } from "@oh-my-pi/omptype";
+import * as arktype from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import * as zod from "@oh-my-pi/omptype/zod";
 import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
@@ -22,7 +22,7 @@ function createApi(): CustomCommandAPI {
 			killed: false,
 		}),
 		typebox: {} as unknown as typeof TypeBox,
-		arktype: Object.assign(Function.prototype.bind.call(type, undefined) as typeof type, type, { type }),
+		arktype,
 		zod,
 		pi: piCodingAgent,
 	};

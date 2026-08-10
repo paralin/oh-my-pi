@@ -202,7 +202,7 @@ my-plugin/
   commands/*.md                  ← slash commands
   agents/*.md                    ← subagent definitions
   hooks/pre/, hooks/post/        ← hooks
-  tools/                         ← custom tools
+  python/                        ← typed Python capability packages
   .mcp.json                      ← MCP server definitions (default location)
   .claude-plugin/plugin.json     ← optional paths for skills/commands and other manifest metadata
   package.json                   ← optional version and `omp.extensions`

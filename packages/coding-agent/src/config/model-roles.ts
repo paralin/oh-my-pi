@@ -19,17 +19,7 @@ export function formatModelRoleAlias(role: string): string {
 	return `${MODEL_ROLE_ALIAS_PREFIX}${role}`;
 }
 
-export type ModelRole =
-	| "default"
-	| "smol"
-	| "slow"
-	| "vision"
-	| "plan"
-	| "designer"
-	| "commit"
-	| "tiny"
-	| "task"
-	| "advisor";
+export type ModelRole = "default" | "smol" | "slow" | "vision" | "designer" | "commit" | "tiny" | "task" | "advisor";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -44,7 +34,6 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	smol: { tag: "SMOL", name: "Fast", color: "warning" },
 	slow: { tag: "SLOW", name: "Thinking", color: "accent" },
 	vision: { tag: "VISION", name: "Vision", color: "error" },
-	plan: { tag: "PLAN", name: "Architect", color: "muted" },
 	designer: { tag: "DESIGNER", name: "Designer", color: "muted" },
 	commit: { tag: "COMMIT", name: "Commit", color: "dim" },
 	tiny: { tag: "TINY", name: "Tiny", color: "dim" },
@@ -57,7 +46,6 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"smol",
 	"slow",
 	"vision",
-	"plan",
 	"designer",
 	"commit",
 	"tiny",

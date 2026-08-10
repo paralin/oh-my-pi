@@ -113,7 +113,6 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		proseOnlyThinking: true,
 		toolOutputExpanded: false,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		flushCompactionQueue: vi.fn(async () => {}),
 		showPinnedError,
 		clearPinnedError,
@@ -456,19 +455,6 @@ describe("EventController working loader reconciliation", () => {
 		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
 	});
 
-	it("self-heals missing working loader on live tool updates", async () => {
-		const { controller, ctx } = createFixture();
-		(ctx.viewSession as unknown as { isStreaming: boolean }).isStreaming = true;
-
-		await controller.handleEvent({
-			type: "tool_execution_update",
-			toolCallId: "missing",
-			partialResult: {},
-		} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
-
-		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
-	});
-
 	it("self-heals missing working loader when a task subagent finishes mid-turn (#3858)", async () => {
 		// `task` subagents run inside the parent's streaming turn. While the task is
 		// running a transient overlay (auto-compaction / auto-retry) can drop the
@@ -476,8 +462,8 @@ describe("EventController working loader reconciliation", () => {
 		// handler is the only restorer keyed off the missing loader. If the task
 		// finishes between the overlay's start and end (or any other branch where
 		// the loader was nulled without a follow-up overlay-end), `tool_execution_end`
-		// is the next streaming event that lands and must heal the loader, mirroring
-		// the `tool_execution_update` reconciler. Without this the spinner stays
+		// is the next event that lands and must heal the loader. Without this the
+		// spinner stays
 		// gone for the remainder of the parent turn even though the agent keeps
 		// streaming (the user-visible regression in #3858).
 		const { controller, ctx } = createFixture();
@@ -510,22 +496,6 @@ describe("EventController working loader reconciliation", () => {
 		expect(ctx.ensureLoadingAnimation).not.toHaveBeenCalled();
 	});
 
-	it("keeps transient retry status exclusive while a retry loader is visible", async () => {
-		const { controller, ctx } = createFixture();
-		ctx.retryLoader = { stop: vi.fn() } as unknown as InteractiveModeContext["retryLoader"];
-		(ctx.viewSession as unknown as { isStreaming: boolean }).isStreaming = true;
-
-		await controller.handleEvent({
-			type: "tool_execution_update",
-			toolCallId: "missing",
-			partialResult: {},
-		} as Extract<AgentSessionEvent, { type: "tool_execution_update" }>);
-
-		expect(ctx.ensureLoadingAnimation).not.toHaveBeenCalled();
-	});
-});
-
-describe("ErrorBannerComponent", () => {
 	it("renders the provider error message", () => {
 		const banner = new ErrorBannerComponent("Output blocked by content filtering policy");
 		const rendered = Bun.stripANSI(banner.render(120).join("\n"));

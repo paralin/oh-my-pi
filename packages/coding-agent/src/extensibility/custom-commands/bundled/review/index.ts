@@ -224,7 +224,7 @@ function getDiffPreview(hunks: string, maxLines: number): string {
 const MAX_DIFF_CHARS = 50_000; // Don't include diff above this
 const MAX_FILES_FOR_INLINE_DIFF = 20; // Don't include diff if more files than this
 const DEFAULT_LARGE_DIFF_INSTRUCTION = "MUST run `git diff`/`git show` for assigned files";
-const DEFAULT_CONTEXT_INSTRUCTION = "MAY read full file context as needed via `read`";
+const DEFAULT_CONTEXT_INSTRUCTION = "MAY inspect full file context with `Path.read_text()` in `ipython`";
 const GIT_UNCOMMITTED_DIFF_INSTRUCTION =
 	"MUST run both `git diff -- <path>` and `git diff --cached -- <path>` for assigned files";
 const JJ_UNCOMMITTED_DIFF_INSTRUCTION = "MUST run `jj --ignore-working-copy diff --git -- <path>` for assigned files";

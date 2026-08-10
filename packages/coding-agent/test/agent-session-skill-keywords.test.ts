@@ -1,12 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { WORKFLOW_NOTICE } from "@oh-my-pi/pi-coding-agent/modes/workflow";
+import { ORCHESTRATE_NOTICE } from "@oh-my-pi/pi-coding-agent/modes/orchestrate";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
@@ -20,24 +19,6 @@ import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 type ObservedSkillTurn = {
 	texts: string[];
-};
-
-// Workflowz requires active `task` and `eval` tools; keep both active so
-// keyword steering exercises the notice path.
-const mockTaskTool: AgentTool = {
-	name: "task",
-	label: "Task",
-	description: "Mock task tool",
-	parameters: type({}),
-	execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
-};
-
-const mockEvalTool: AgentTool = {
-	name: "eval",
-	label: "Eval",
-	description: "Mock eval tool",
-	parameters: type({}),
-	execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 };
 
 describe("AgentSession skill prompt keyword steering", () => {
@@ -61,7 +42,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 			initialState: {
 				model,
 				systemPrompt: ["Test"],
-				tools: [mockTaskTool, mockEvalTool],
+				tools: [],
 				messages: [],
 			},
 			convertToLlm,
@@ -110,7 +91,7 @@ describe("AgentSession skill prompt keyword steering", () => {
 		const details: SkillPromptDetails = {
 			name: "deep-research",
 			path: skillPath,
-			args: "workflowz +500k! compare these approaches",
+			args: "orchestrate +500k! compare these approaches",
 			lineCount: 1,
 		};
 		await session.promptCustomMessage({
@@ -125,7 +106,6 @@ describe("AgentSession skill prompt keyword steering", () => {
 		const observedTurn = observedTurns[0];
 		if (!observedTurn) throw new Error("Expected prompt context to be captured");
 		expect(observedTurn.texts).toContain(`Skill body\n\n---\n\nSkill: ${skillPath}\nUser: ${details.args}`);
-		expect(observedTurn.texts).toContain(WORKFLOW_NOTICE);
-		expect(session.sessionManager.getTurnBudget()).toEqual({ total: 500_000, spent: 0, hard: true });
+		expect(observedTurn.texts).toContain(ORCHESTRATE_NOTICE);
 	});
 });

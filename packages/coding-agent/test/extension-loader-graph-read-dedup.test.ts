@@ -73,14 +73,7 @@ describe("Extension Loader Graph Read Dedup", () => {
 		const entryPath = path.join(extDir, "index.ts");
 		const entryContent = `import "./mod-0.ts";
 export default function(pi) {
-    const { Type } = pi.typebox;
-    pi.registerTool({
-        name: "dedup-tool",
-        label: "dedup-tool",
-        description: "Test tool",
-        parameters: Type.Object({}),
-        execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
-    });
+    pi.registerCommand("dedup-command", { handler: async () => {} });
 }
 `;
 		fs.writeFileSync(entryPath, entryContent, "utf-8");
@@ -88,7 +81,7 @@ export default function(pi) {
 		const result = await loadExtensions([entryPath], cwd);
 
 		expect(result.errors).toHaveLength(0);
-		expect(result.extensions[0].tools.has("dedup-tool")).toBe(true);
+		expect(result.extensions[0].commands.has("dedup-command")).toBe(true);
 
 		const checkReadCount = (filePath: string) => {
 			const real = fs.existsSync(filePath) ? fs.realpathSync(filePath) : filePath;

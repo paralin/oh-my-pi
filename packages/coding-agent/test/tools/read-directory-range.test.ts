@@ -3,9 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -29,9 +29,9 @@ function makeSession(cwd: string): ToolSession {
 	};
 }
 
-describe("read tool directory listings honor line selectors (regression: was silently dropping offset)", () => {
+describe("read service directory listings honor line selectors (regression: was silently dropping offset)", () => {
 	let testDir: string;
-	let tool: ReadTool;
+	let tool: ReadService;
 
 	beforeEach(() => {
 		testDir = path.join(os.tmpdir(), `read-dir-range-${Snowflake.next()}`);
@@ -39,7 +39,7 @@ describe("read tool directory listings honor line selectors (regression: was sil
 		for (let i = 1; i <= 60; i++) {
 			fs.writeFileSync(path.join(testDir, `file-${String(i).padStart(3, "0")}.txt`), "");
 		}
-		tool = new ReadTool(makeSession(testDir));
+		tool = new ReadService(makeSession(testDir));
 	});
 
 	afterEach(() => {
@@ -47,7 +47,7 @@ describe("read tool directory listings honor line selectors (regression: was sil
 	});
 
 	it("returns the full listing when no selector is given", async () => {
-		const result = await tool.execute("call-bare", { path: testDir });
+		const result = await tool.read(testDir);
 		const output = getTextOutput(result);
 
 		expect(result.details?.isDirectory).toBe(true);
@@ -56,7 +56,7 @@ describe("read tool directory listings honor line selectors (regression: was sil
 	});
 
 	it("returns a slice of the listing for `:start-end`", async () => {
-		const result = await tool.execute("call-range", { path: `${testDir}:30-40` });
+		const result = await tool.read(`${testDir}:30-40`);
 		const output = getTextOutput(result);
 		const lines = output.split("\n").filter(line => line.includes("file-"));
 
@@ -68,7 +68,7 @@ describe("read tool directory listings honor line selectors (regression: was sil
 	});
 
 	it("returns from offset to end for `:start`", async () => {
-		const result = await tool.execute("call-offset", { path: `${testDir}:30` });
+		const result = await tool.read(`${testDir}:30`);
 		const output = getTextOutput(result);
 		const lines = output.split("\n").filter(line => line.includes("file-"));
 
@@ -79,7 +79,7 @@ describe("read tool directory listings honor line selectors (regression: was sil
 	});
 
 	it("emits a clear `beyond end` notice instead of returning an empty body", async () => {
-		const result = await tool.execute("call-beyond", { path: `${testDir}:9999` });
+		const result = await tool.read(`${testDir}:9999`);
 		const output = getTextOutput(result);
 
 		expect(output).toMatch(/Line 9999 is beyond end of listing/);

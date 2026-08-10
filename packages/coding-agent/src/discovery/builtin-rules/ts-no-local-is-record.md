@@ -3,7 +3,7 @@ description: "Never use isRecord"
 condition:
   - "\\bfunction\\s+isRecord(?:\\s*<[^>]*>)?\\s*\\("
   - "\\b(?:const|let|var)\\s+isRecord\\b\\s*(?::[\\s\\S]{0,300}?)?=\\s*(?:async\\s+)?(?:function\\b|(?:<[^>\\n]*>\\s*)?(?:\\([^)]*\\)|[A-Za-z_$][\\w$]*)\\s*(?::[\\s\\S]{0,300}?)?=>)"
-scope: "tool:edit(*.{ts,tsx,mts,cts}), tool:write(*.{ts,tsx,mts,cts})"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

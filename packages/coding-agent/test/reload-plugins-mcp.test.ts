@@ -1,45 +1,29 @@
 /**
- * Regressions for `/reload-plugins` runtime surfaces that must update without a
- * process restart: MCP reconnect/rebinding (#7189) and task-agent descriptions
- * published to existing tools (#7940).
+ * Regression: `/reload-plugins` is documented to reload MCP, so the TUI handler
+ * must reconnect servers and rebind the session's MCP tool registry — not just
+ * reset skill/command/capability caches. Before the fix it silently skipped
+ * MCP, leaving `.mcp.json` edits inactive until process restart (#7189).
  */
 import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 const originalProjectDir = getProjectDir();
 
-function agentDefinition(description: string): string {
-	return `---\nname: reload-agent\ndescription: ${description}\n---\nReload agent.\n`;
-}
-
-function createTaskSession(cwd: string): ToolSession {
-	return {
-		cwd,
-		hasUI: false,
-		settings: Settings.isolated({}),
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-	} as unknown as ToolSession;
-}
-
 function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}) {
-	const mcpTools = [{ name: "mcp__srv_do" }];
+	const mcpTools = [{ serverName: "srv", name: "do" }];
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async (_options?: unknown) => ({ errors: new Map<string, string>() })),
 		getTools: vi.fn(() => mcpTools),
 	};
 	const session = {
-		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
+		refreshMCPInstructions: vi.fn(async () => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};
 	const ctx = {
@@ -55,7 +39,7 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 	return { ctx, mcpManager, session, mcpTools };
 }
 
-describe("/reload-plugins runtime refresh", () => {
+describe("/reload-plugins MCP reconnect (#7189)", () => {
 	let projectDir = "";
 
 	beforeEach(async () => {
@@ -69,16 +53,16 @@ describe("/reload-plugins runtime refresh", () => {
 		await removeWithRetries(projectDir);
 	});
 
-	test("reconnects MCP servers, rebinds tools, and clears stale prompt commands", async () => {
-		const { ctx, mcpManager, session, mcpTools } = createFakeCtx(projectDir);
+	test("reconnects MCP servers, refreshes instructions, and clears stale prompt commands", async () => {
+		const { ctx, mcpManager, session } = createFakeCtx(projectDir);
 		const runtime: TuiSlashCommandRuntime = { ctx };
 
 		const result = await executeBuiltinSlashCommand("/reload-plugins", runtime);
 		expect(result).toBe(true);
 		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
 		expect(mcpManager.discoverAndConnect).toHaveBeenCalledTimes(1);
-		expect(session.refreshMCPTools).toHaveBeenCalledTimes(1);
-		expect(session.refreshMCPTools).toHaveBeenCalledWith(mcpTools);
+		expect(session.refreshMCPInstructions).toHaveBeenCalledTimes(1);
+		expect(session.refreshMCPInstructions).toHaveBeenCalledWith();
 		expect(session.setMCPPromptCommands).toHaveBeenCalledTimes(1);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledWith([]);
 	});
@@ -93,22 +77,5 @@ describe("/reload-plugins runtime refresh", () => {
 		expect(mcpManager.discoverAndConnect).toHaveBeenCalledWith(
 			expect.objectContaining({ enableProjectConfig: false }),
 		);
-	});
-
-	test("republishes edited agents to an existing task tool", async () => {
-		const agentDir = path.join(projectDir, ".omp", "agents");
-		const agentFile = path.join(agentDir, "reload-agent.md");
-		await fs.mkdir(agentDir, { recursive: true });
-		await Bun.write(agentFile, agentDefinition("VERSION_ONE"));
-		const taskTool = await TaskTool.create(createTaskSession(projectDir));
-		expect(taskTool.description).toContain("VERSION_ONE");
-
-		await Bun.write(agentFile, agentDefinition("VERSION_TWO"));
-		const { ctx } = createFakeCtx(projectDir);
-		const runtime: TuiSlashCommandRuntime = { ctx };
-		await executeBuiltinSlashCommand("/reload-plugins", runtime);
-
-		expect(taskTool.description).toContain("VERSION_TWO");
-		expect(taskTool.description).not.toContain("VERSION_ONE");
 	});
 });

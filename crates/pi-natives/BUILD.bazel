@@ -5,6 +5,12 @@ package(default_visibility = ["//visibility:public"])
 
 exports_files(["Cargo.toml"])
 
+config_setting(
+    name = "macos_sdk27",
+    constraint_values = ["@platforms//os:macos"],
+    values = {"define": "omp_macos_sdk27=1"},
+)
+
 # The NAPI cdylib. build.rs is intentionally not wired in: its only effects are
 # napi_build::setup() link args (hardcoded in linkopts below — see napi-build
 # src/lib.rs) and a vestigial no-op filter-defs scan that belongs to pi-shell.
@@ -34,6 +40,11 @@ rust_shared_library(
         # nothing — napi-sys v3 imports node.exe via raw-dylib.
         "@platforms//os:macos": ["-Clink-arg=-Wl,-undefined,dynamic_lookup"],
         "@platforms//os:linux": ["-Clink-arg=-Wl,-z,nodelete"],
+        "//conditions:default": [],
+    }) + select({
+        # SDK 27 dyld rejects the linker's 4-byte-aligned symbol strings. The
+        # build driver sets this define only for affected Darwin SDKs.
+        ":macos_sdk27": ["-Clink-arg=-Wl,-platform_version,macos,11.0,26.0"],
         "//conditions:default": [],
     }) + select({
         # musl defaults to +crt-static, under which rustc silently emits no

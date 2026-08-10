@@ -11,7 +11,8 @@ import { describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import type { Model, Usage } from "@oh-my-pi/pi-ai";
 import { formatSessionDumpText } from "@oh-my-pi/pi-coding-agent/session/session-dump-format";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import type { IpythonCellResult } from "../../src/ipython/cell.js";
+import { createIpythonCellJournalDetail, IPYTHON_JOURNAL_MESSAGE_TYPE } from "../../src/ipython/journal.js";
 
 const ZERO_USAGE: Usage = {
 	input: 0,
@@ -25,7 +26,7 @@ const ZERO_USAGE: Usage = {
 const HARMONY_MODEL = { provider: "openai", id: "gpt-5", name: "GPT-5" } as Model;
 
 describe("formatSessionDumpText tool parameters", () => {
-	it("renders arktype schemas as a TypeScript signature, not schema internals", () => {
+	it("renders a concise tool name and description without a provider inventory", () => {
 		const webSearchSchema = type({
 			"query /** search query */": "string",
 			"recency?": "'day' | 'week'",
@@ -35,26 +36,20 @@ describe("formatSessionDumpText tool parameters", () => {
 			messages: [],
 			tools: [
 				{
-					name: "web_search",
-					description: "Searches the web.",
+					name: "ipython",
+					description: "Executes one persistent Python cell.",
 					parameters: webSearchSchema,
 				},
 			],
 		});
 
-		expect(out).toContain("namespace functions {");
-		expect(out).toContain("type web_search = (_: {");
-		expect(out).toContain("// search query");
-		expect(out).toContain("query: string,");
-		expect(out).toContain('recency?: "day" | "week",');
-		// Arktype JSON Schema should not leak arktype internals into the dump.
+		expect(out).toContain("### ipython");
+		expect(out).toContain("Executes one persistent Python cell.");
+		expect(out).not.toContain("namespace functions {");
 		expect(out).not.toContain("_arktype");
-		expect(out).not.toContain("ArkType");
-		// Tool params are no longer emitted as XML <parameter> elements.
-		expect(out).not.toContain('<parameter name="type">');
 	});
 
-	it("passes plain JSON-Schema parameters through to a TypeScript signature", () => {
+	it("keeps JSON-schema internals out of the dump inventory", () => {
 		const out = formatSessionDumpText({
 			messages: [],
 			tools: [
@@ -70,52 +65,34 @@ describe("formatSessionDumpText tool parameters", () => {
 			],
 		});
 
-		expect(out).toContain("type legacy = (_: {");
-		expect(out).toContain("// a path");
-		expect(out).toContain("path: string,");
+		expect(out).toContain("### legacy");
+		expect(out).toContain("Legacy tool.");
+		expect(out).not.toContain("path: string");
 	});
 
 	it("includes tool examples in Python call syntax", () => {
-		const findSchema = type({ paths: "string[]" });
+		const ipythonSchema = type({ code: "string" });
 
 		const out = formatSessionDumpText({
 			messages: [],
 			tools: [
 				{
-					name: "glob",
-					description: "Globs files.",
-					parameters: findSchema,
-					examples: [{ call: { paths: ["src/**/*.ts"] } }],
+					name: "ipython",
+					description: "Executes one persistent Python cell.",
+					parameters: ipythonSchema,
 				},
 			],
 		});
 
 		expect(out).toContain("## Available Tools");
-		expect(out).toContain("@example");
-		expect(out).toContain('glob(paths=["src/**/*.ts"])');
-	});
-
-	it("omits the Available Tools section if inlineToolDescriptors is true", () => {
-		const out = formatSessionDumpText({
-			messages: [],
-			inlineToolDescriptors: true,
-			tools: [
-				{
-					name: "web_search",
-					description: "Searches the web.",
-					parameters: { type: "object" },
-				},
-			],
-		});
-
-		expect(out).not.toContain("## Available Tools");
+		expect(out).toContain("### ipython");
+		expect(out).toContain("Executes one persistent Python cell.");
 	});
 
 	it("does not falsely omit the Available Tools section even if systemPrompt contains tool headings", () => {
 		const out = formatSessionDumpText({
 			messages: [],
-			systemPrompt: ["# Inventory\nThis is a rule discussing # Tool: web_search.\nNever call it directly."],
-			inlineToolDescriptors: false,
+			systemPrompt: ["# Inventory\nThis is a rule discussing # Tool: ipython.\nUse it for ordinary work."],
 			tools: [
 				{
 					name: "web_search",
@@ -143,7 +120,7 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 							type: "toolCall",
 							id: "c1",
 							name: "read",
-							arguments: { [INTENT_FIELD]: "Reading the file", path: "src/foo.ts" },
+							arguments: { path: "src/foo.ts" },
 						},
 					],
 					api: "mock",
@@ -170,9 +147,6 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		expect(out).toContain("### Tool Result: read");
 		expect(out).toContain("### Tool Call: read");
 		expect(out).toContain("path: src/foo.ts");
-		// The `i` intent renders as a `//` comment under the heading, never inside the YAML args.
-		expect(out).toContain("// Reading the file");
-		expect(out).not.toContain(`${INTENT_FIELD}:`);
 		// Tool calls render as a readable heading + YAML, never the <invoke>/<parameter> XML.
 		expect(out).not.toContain("<invoke ");
 		expect(out).not.toContain("<parameter ");
@@ -226,5 +200,71 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		expect(out).toContain("<thinking>\nfirst\n</thinking>");
 		expect(out).toContain("<thinking>\nsecond\n</thinking>");
 		expect(out).not.toContain("<thinking>\n<thinking>");
+	});
+});
+
+describe("formatSessionDumpText IPython projection", () => {
+	it("renders the stored cell projection without evaluating rich MIME", () => {
+		const result: IpythonCellResult = {
+			cellId: "cell-dump",
+			executionId: "execute-dump",
+			sequence: 3,
+			origin: "model",
+			authority: "trusted-cell",
+			code: "display(html)",
+			status: "aborted",
+			requestedAt: 10,
+			startedAt: 12,
+			finishedAt: 37,
+			durationMs: 25,
+			stdout: "before\n",
+			stderr: "warning\n",
+			result: undefined,
+			events: [
+				{ kind: "stream", name: "stdout", text: "before\n" },
+				{ kind: "stream", name: "stderr", text: "warning\n" },
+				{
+					kind: "display",
+					data: { "text/html": "<script>unsafe()</script>" },
+					metadata: {},
+					transient: {},
+					update: false,
+					text: "[displayed MIME types: text/html]",
+				},
+			],
+			errors: [],
+			updates: [],
+			artifacts: [],
+			modelText: {
+				text: "before\nwarning\n[displayed MIME types: text/html]\n[IPython output truncated]",
+				truncated: true,
+				totalBytes: 4096,
+				outputBytes: 82,
+			},
+		};
+		const detail = createIpythonCellJournalDetail(result, [
+			{ path: "/tmp/cell-dump/display.html", mimeType: "text/html", bytes: 25, label: "display" },
+		]);
+		const out = formatSessionDumpText({
+			messages: [
+				{
+					role: "custom",
+					customType: IPYTHON_JOURNAL_MESSAGE_TYPE,
+					content: "",
+					display: true,
+					details: detail,
+					attribution: "agent",
+					timestamp: 37,
+				},
+			],
+		});
+
+		expect(out).toContain("## IPython");
+		expect(out).toContain("IPython cell 3 (model, aborted, 25ms)");
+		expect(out).toContain("before\nwarning");
+		expect(out).toContain("displayed MIME types: text/html");
+		expect(out).toContain("Artifact: display (text/html)");
+		expect(out).toContain("Output truncated from 4096 bytes.");
+		expect(out).not.toContain("<script>unsafe()</script>");
 	});
 });

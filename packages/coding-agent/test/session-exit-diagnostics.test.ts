@@ -67,7 +67,7 @@ describe("session exit diagnostics", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -116,15 +116,9 @@ describe("session exit diagnostics", () => {
 
 		await session.dispose();
 		session = undefined;
-		// dispose() released the in-memory transcript; the exit marker's contract
-		// is durability, so assert against the persisted file.
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		const reopened = await SessionManager.open(sessionFile, tempDir.path());
-		const exitEntry = reopened
+		const exitEntry = sessionManager
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
-		await reopened.close();
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
 		expect(exitEntry.data).toMatchObject({
 			reason: "dispose",
@@ -146,7 +140,7 @@ describe("session exit diagnostics", () => {
 		const modelRegistry = new ModelRegistry(authStorage);
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
-		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		const sessionManager = SessionManager.inMemory(tempDir.path());
 		const agent = new Agent({
 			initialState: {
 				model,
@@ -193,13 +187,9 @@ describe("session exit diagnostics", () => {
 		await teardown(postmortem.Reason.SIGTERM);
 		session = undefined;
 
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		const reopened = await SessionManager.open(sessionFile, tempDir.path());
-		const exitEntry = reopened
+		const exitEntry = sessionManager
 			.getEntries()
 			.find(entry => entry.type === "custom" && entry.customType === SESSION_EXIT_CUSTOM_TYPE);
-		await reopened.close();
 		if (exitEntry?.type !== "custom") throw new Error("Expected session exit marker");
 		expect(exitEntry.data).toMatchObject({
 			reason: "sigterm",

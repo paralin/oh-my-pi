@@ -107,8 +107,8 @@ function createMatchingMessages(): AgentMessage[] {
 			{
 				type: "toolCall",
 				id: "call-1",
-				name: "edit",
-				arguments: { path: "src/example.ts", content: "const value: any = input;" },
+				name: "ipython",
+				arguments: { code: "const value: any = input;" },
 			},
 		]),
 	];
@@ -173,7 +173,7 @@ afterEach(async () => {
 
 describe("OmfgController", () => {
 	it("saves a matching generated rule under project rules and registers it live", async () => {
-		const reply = createRule("ts-no-any", ": any|as any", "tool:edit(*.ts)");
+		const reply = createRule("ts-no-any", ": any|as any", "tool:ipython");
 		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async args => {
 			expect(args.dedupeReply).toBe(false);
 			args.onTextDelta?.(reply);
@@ -186,9 +186,7 @@ describe("OmfgController", () => {
 		const savedPath = path.join(harness.projectDir, ".omp", "rules", "ts-no-any.md");
 		await waitFor(() => harness.ttsrAddRule.mock.calls.length === 1);
 
-		expect(await Bun.file(savedPath).text()).toBe(
-			expectedRuleMarkdown("ts-no-any", ": any|as any", "tool:edit(*.ts)"),
-		);
+		expect(await Bun.file(savedPath).text()).toBe(expectedRuleMarkdown("ts-no-any", ": any|as any", "tool:ipython"));
 		expect(harness.showHookSelector.mock.calls[0]).toEqual([
 			"Save TTSR rule where?",
 			[PROJECT_OPTION, GLOBAL_OPTION, AMEND_OPTION],
@@ -206,7 +204,7 @@ describe("OmfgController", () => {
 
 	it("reiterates when the first valid rule does not match history", async () => {
 		const firstReply = createRule("wrong-pattern", "never-happened", "text");
-		const secondReply = createRule("ts-no-any", ": any|as any", "tool:edit(*.ts)");
+		const secondReply = createRule("ts-no-any", ": any|as any", "tool:ipython");
 		const runEphemeralTurn = vi
 			.fn<RunEphemeralTurn>()
 			.mockResolvedValueOnce({
@@ -252,8 +250,8 @@ describe("OmfgController", () => {
 	});
 
 	it("lets the user amend from the save selector before writing the rule", async () => {
-		const firstReply = createRule("ts-any-broad", ": any|as any", "tool:edit(*.ts)");
-		const secondReply = createRule("ts-no-explicit-any", ": any|as any", "tool:edit(*.ts)");
+		const firstReply = createRule("ts-any-broad", ": any|as any", "tool:ipython");
+		const secondReply = createRule("ts-no-explicit-any", ": any|as any", "tool:ipython");
 		const runEphemeralTurn = vi
 			.fn<RunEphemeralTurn>()
 			.mockResolvedValueOnce({
@@ -277,7 +275,7 @@ describe("OmfgController", () => {
 
 		expect(harness.showHookInput).toHaveBeenCalledWith(
 			"Amend TTSR rule",
-			"e.g. Make it specific to Ruby string eval in tool:write(*.rb)",
+			"e.g. Make it specific to Ruby string eval in tool:ipython",
 		);
 		expect(runEphemeralTurn.mock.calls[1]?.[0].promptText).toContain("User requested this amendment before saving:");
 		expect(runEphemeralTurn.mock.calls[1]?.[0].promptText).toContain(
@@ -289,7 +287,7 @@ describe("OmfgController", () => {
 		);
 	});
 	it("returns to save selection when amendment input is cancelled", async () => {
-		const reply = createRule("ts-no-any", ": any|as any", "tool:edit(*.ts)");
+		const reply = createRule("ts-no-any", ": any|as any", "tool:ipython");
 		const runEphemeralTurn = vi.fn<RunEphemeralTurn>(async () => ({
 			replyText: reply,
 			assistantMessage: createAssistantMessage([{ type: "text", text: reply }]),
@@ -311,9 +309,7 @@ describe("OmfgController", () => {
 			["Save TTSR rule where?", [PROJECT_OPTION, GLOBAL_OPTION, AMEND_OPTION]],
 		]);
 		expect(runEphemeralTurn).toHaveBeenCalledTimes(1);
-		expect(await Bun.file(savedPath).text()).toBe(
-			expectedRuleMarkdown("ts-no-any", ": any|as any", "tool:edit(*.ts)"),
-		);
+		expect(await Bun.file(savedPath).text()).toBe(expectedRuleMarkdown("ts-no-any", ": any|as any", "tool:ipython"));
 		expect(harness.ttsrAddRule.mock.calls[0]?.[0].path).toBe(savedPath);
 		expect(controller.hasActiveRequest()).toBe(true);
 		expect(controller.handleEscape()).toBe(true);

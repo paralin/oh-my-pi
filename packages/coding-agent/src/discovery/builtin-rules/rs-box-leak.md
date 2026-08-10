@@ -1,7 +1,7 @@
 ---
 description: Never use Box::leak - it intentionally leaks memory
 condition: "Box::leak"
-scope: "tool:edit(*.rs), tool:write(*.rs)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

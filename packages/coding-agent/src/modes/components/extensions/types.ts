@@ -10,7 +10,6 @@ export type ExtensionKind =
 	| "extension-module"
 	| "skill"
 	| "rule"
-	| "tool"
 	| "mcp"
 	| "prompt"
 	| "instruction"

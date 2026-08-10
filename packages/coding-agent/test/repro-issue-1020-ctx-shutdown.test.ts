@@ -51,7 +51,7 @@ describe("issue #1020 - ctx.shutdown() in interactive mode", () => {
 		expect(ctxStub.shutdownRequested).toBe(true);
 	});
 
-	test("initHooksAndCustomTools wires shutdown to set shutdownRequested", async () => {
+	test("initExtensions wires shutdown to set shutdownRequested", async () => {
 		let capturedContextActions: ExtensionContextActions | undefined;
 
 		const fakeExtensionRunner = {
@@ -85,7 +85,7 @@ describe("issue #1020 - ctx.shutdown() in interactive mode", () => {
 		} as unknown as InteractiveModeContext;
 
 		const controller = new ExtensionUiController(ctxStub);
-		await controller.initHooksAndCustomTools();
+		await controller.initExtensions();
 
 		expect(capturedContextActions).toBeDefined();
 		expect(typeof capturedContextActions?.shutdown).toBe("function");

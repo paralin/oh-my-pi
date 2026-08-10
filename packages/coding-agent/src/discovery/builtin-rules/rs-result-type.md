@@ -1,7 +1,7 @@
 ---
 description: Result type aliases must include a defaulted error type parameter
 condition: "type\\s+Result<[A-Za-z_]\\w*>\\s*="
-scope: "tool:edit(*.rs), tool:write(*.rs)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

@@ -4,23 +4,17 @@ import { type } from "@oh-my-pi/omptype";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { expandAtImports } from "../discovery/at-imports";
-import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
 /**
  * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
  * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
- * resolved exactly like any other model override; `tools` is a subset of
- * `BUILTIN_TOOL_NAMES` — any built-in name, including mutating tools such as
- * `edit`/`write`/`bash` (the advisor is a full agent). Omitted falls back to
- * the default `read`/`grep`/`glob` subset; an explicit empty list grants no
- * tools. `instructions` is the advisor's specialization, appended to the shared
- * baseline.
+ * resolved exactly like any other model override. Advisors return one host-validated JSON response and receive no tools.
+ * `instructions` is the advisor's specialization, appended to the shared baseline.
  */
 export interface AdvisorConfig {
 	name: string;
 	model?: string;
-	tools?: string[];
 	instructions?: string;
 	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
 	 *  stays in the roster but its runtime is never built — it shows `○` in
@@ -52,7 +46,6 @@ export interface DiscoveredAdvisors {
 const advisorEntrySchema = type({
 	name: "string",
 	"model?": "string",
-	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
 });
@@ -104,28 +97,6 @@ export function getOrCreateAdvisorProviderSessionId(
 	return next;
 }
 
-/** Built tool names, for validating an advisor's `tools` list. */
-const KNOWN_TOOL_NAMES = new Set<string>(BUILTIN_TOOL_NAMES);
-
-/**
- * Keep only valid tool names from an advisor's `tools` list, dropping unknowns
- * with a warning. The advisor is a full agent, so any built tool may be granted;
- * the runtime further filters to what's actually available this session.
- * `undefined` means "use the default subset" (read/grep/glob); only an explicit
- * raw empty list means "no tools".
- */
-function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): string[] | undefined {
-	if (tools === undefined) return undefined;
-	if (tools.length === 0) return [];
-	// Normalize legacy aliases (search→grep, find→glob) and dedupe before validating.
-	const filtered = normalizeToolNames(tools).filter(name => {
-		if (KNOWN_TOOL_NAMES.has(name)) return true;
-		logger.warn("Advisor config: dropping unknown tool", { path: sourcePath, tool: name });
-		return false;
-	});
-	return filtered.length > 0 ? filtered : undefined;
-}
-
 /**
  * Discover advisor configs from `WATCHDOG.yml`/`WATCHDOG.yaml` files on the same
  * user + project search path as `WATCHDOG.md`. Advisors are keyed by slug; a
@@ -170,7 +141,6 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 			advisors.set(slug, {
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
-				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
 				enabled: entry.enabled,
 			});
@@ -256,7 +226,6 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 	const advisors = (result.advisors ?? []).map(a => {
 		const advisor: AdvisorConfig = { name: a.name };
 		if (a.model?.trim()) advisor.model = a.model;
-		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
 		return advisor;
@@ -303,16 +272,6 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 		for (const advisor of doc.advisors) {
 			lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
 			if (advisor.model?.trim()) lines.push(`    model: ${YAML.stringify(advisor.model)}`);
-			if (advisor.tools !== undefined) {
-				if (advisor.tools.length === 0) {
-					lines.push("    tools: []");
-				} else {
-					lines.push("    tools:");
-					for (const tool of advisor.tools) {
-						lines.push(`      - ${YAML.stringify(tool)}`);
-					}
-				}
-			}
 			if (advisor.instructions?.trim()) {
 				appendYamlString(lines, "    ", "instructions", advisor.instructions);
 			}

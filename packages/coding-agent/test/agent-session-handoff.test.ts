@@ -1,9 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { Agent, type AgentMessage, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, Model, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -14,17 +13,56 @@ import {
 	loadExtensionFromFactory,
 	loadExtensions,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+import type { IpythonCellResult } from "../src/ipython/cell";
+import { createIpythonCellJournalDetail, IPYTHON_JOURNAL_MESSAGE_TYPE } from "../src/ipython/journal";
 
-const HANDOFF_SECRET = "HANDOFF_SECRET_TOKEN_12345";
 const UNRENDERABLE_SNAPCOMPACT_TEXT = "\uE000\uE001\uE002\uE003\uE004\uE005\uE006\uE007\uE008\uE009";
+
+function compactionCellDetail() {
+	const result: IpythonCellResult = {
+		cellId: "cell-compaction",
+		executionId: "execute-compaction",
+		sequence: 1,
+		origin: "direct",
+		authority: "trusted-cell",
+		code: "value = 42",
+		status: "ok",
+		requestedAt: 1,
+		startedAt: 2,
+		finishedAt: 3,
+		durationMs: 1,
+		stdout: "safe output\n",
+		stderr: "",
+		result: undefined,
+		events: [
+			{ kind: "stream", name: "stdout", text: "safe output\n" },
+			{
+				kind: "display",
+				data: { "text/html": "<script>unsafe()</script>" },
+				metadata: {},
+				transient: {},
+				update: false,
+				text: "[displayed MIME types: text/html]",
+			},
+		],
+		errors: [],
+		updates: [],
+		artifacts: [],
+		modelText: {
+			text: "safe output\n[displayed MIME types: text/html]",
+			truncated: false,
+			totalBytes: 48,
+			outputBytes: 48,
+		},
+	};
+	return createIpythonCellJournalDetail(result);
+}
 
 describe("AgentSession handoff", () => {
 	// Immutable across the whole file: the model registry's synchronous bundled-model
@@ -40,7 +78,6 @@ describe("AgentSession handoff", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
 	let events: AgentSessionEvent[];
-	let obfuscator: SecretObfuscator;
 
 	/** Poll `predicate` until it holds (returns as soon as the state is reached) or the
 	 *  deadline elapses. Replaces blind settle sleeps for tests with a positive signal. */
@@ -88,7 +125,6 @@ describe("AgentSession handoff", () => {
 		tempDir = TempDir.createSync("@pi-handoff-");
 		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
-		obfuscator = new SecretObfuscator([{ type: "plain", content: HANDOFF_SECRET }]);
 
 		const agent = new Agent({
 			initialState: {
@@ -107,7 +143,6 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 			}),
 			modelRegistry,
-			obfuscator,
 		});
 
 		session.subscribe(event => {
@@ -215,118 +250,7 @@ describe("AgentSession handoff", () => {
 		expect(userId.profile).toMatchObject({ t: 40_000, s: "context-full" });
 	});
 
-	it("reports the threshold that armed idle compaction after the idle gate changes", async () => {
-		session.settings.set("compaction.strategy", "context-full");
-		session.settings.set("compaction.thresholdTokens", 120_000);
-		session.settings.set("compaction.idleEnabled", true);
-		session.settings.set("compaction.idleThresholdTokens", 40_000);
-		const entries = sessionManager.getBranch();
-		const lastEntryId = entries[entries.length - 1]?.id;
-		if (!lastEntryId) throw new Error("Expected a seeded entry id");
-		const fixedPreparation: compactionModule.CompactionPreparation = {
-			firstKeptEntryId: lastEntryId,
-			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
-			turnPrefixMessages: [],
-			recentMessages: [],
-			isSplitTurn: false,
-			tokensBefore: 100,
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
-		};
-		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
-			summary: "compacted",
-			shortSummary: undefined,
-			firstKeptEntryId: lastEntryId,
-			tokensBefore: 100,
-			details: {},
-		});
-		// The idle timer armed on 40_000 and validated it as it fired; the user then
-		// retuned the gate before this run reached metadata. Re-reading settings here
-		// would report 90_000 — or 0 once idleEnabled flips off — for a request that
-		// 40_000 triggered.
-		session.settings.set("compaction.idleThresholdTokens", 90_000);
-		session.settings.set("compaction.idleEnabled", false);
-
-		await session.runIdleCompaction({ idleThreshold: { enabled: true, thresholdTokens: 40_000 } });
-
-		expect(compactSpy).toHaveBeenCalledTimes(1);
-		const userId = JSON.parse(String(compactSpy.mock.calls[0]?.[5]?.metadata?.user_id)) as {
-			profile: { t: number; s: string };
-		};
-		expect(userId.profile).toMatchObject({ t: 40_000, s: "context-full" });
-	});
-	it("labels an idle handoff request with the idle threshold while compaction is disabled", async () => {
-		session.settings.set("compaction.enabled", false);
-		session.settings.set("compaction.strategy", "handoff");
-		session.settings.set("compaction.thresholdTokens", 120_000);
-		session.settings.set("compaction.idleEnabled", true);
-		session.settings.set("compaction.idleThresholdTokens", 40_000);
-		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockResolvedValue("## Goal\nContinue from here");
-
-		await session.runIdleCompaction();
-
-		const call = generateHandoffSpy.mock.calls[0];
-		if (!call) throw new Error("Expected generateHandoffFromContext call");
-		const userId = JSON.parse(String(call[2].streamOptions.metadata?.user_id)) as {
-			profile: { t: number; s: string };
-		};
-		expect(userId.profile).toMatchObject({ t: 40_000, s: "handoff" });
-	});
-
-	it("clears staged preview state when handoff creates the replacement session", async () => {
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
-		session.toolChoiceQueue.registerPendingInvoker("old-session-preview", "ast_edit", async () => ({
-			content: [{ type: "text", text: "applied old preview" }],
-		}));
-		expect(session.peekPendingInvoker()).toBeDefined();
-		expect(session.nextToolChoiceDirective()).toBeDefined();
-
-		await session.handoff();
-
-		expect(session.peekPendingInvoker()).toBeUndefined();
-		expect(session.nextToolChoiceDirective()).toBeUndefined();
-	});
-
-	it("carries local:// artifacts into the handed-off session", async () => {
-		// Handoff is a continuity operation: the generated document references
-		// plans/scratch files the old session wrote under its local:// root. The
-		// fresh session mints a new local root, so the artifacts must be copied
-		// forward or every reference the handoff document carries dangles.
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue from here");
-		const localOptions = {
-			getArtifactsDir: () => sessionManager.getArtifactsDir(),
-			getSessionId: () => sessionManager.getSessionId(),
-		};
-		const oldLocalRoot = resolveLocalUrlToPath("local://", localOptions);
-		const oldPlanPath = resolveLocalUrlToPath("local://my-plan.md", localOptions);
-		const oldNestedPath = resolveLocalUrlToPath("local://research/notes.txt", localOptions);
-		await fs.mkdir(path.dirname(oldNestedPath), { recursive: true });
-		await Bun.write(oldPlanPath, "# Plan\n\nbody\n");
-		await Bun.write(oldNestedPath, "scratch notes");
-
-		await session.handoff();
-
-		const newLocalRoot = resolveLocalUrlToPath("local://", localOptions);
-		expect(newLocalRoot).not.toBe(oldLocalRoot);
-		expect(await Bun.file(resolveLocalUrlToPath("local://my-plan.md", localOptions)).text()).toBe("# Plan\n\nbody\n");
-		expect(await Bun.file(resolveLocalUrlToPath("local://research/notes.txt", localOptions)).text()).toBe(
-			"scratch notes",
-		);
-		// The source session's artifacts remain untouched on disk.
-		expect(await Bun.file(oldPlanPath).text()).toBe("# Plan\n\nbody\n");
-	});
-
 	it("emits handoff lifecycle hooks on the outgoing and replacement sessions", async () => {
-		// dispose() is terminal: it closes the manager and releases its in-memory
-		// transcript. Reopen the persisted session file for the replacement
-		// session, as production revival paths do.
-		await session.dispose();
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
 		const extensionsResult = await loadExtensions([], tempDir.path());
 		const extensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
@@ -361,6 +285,7 @@ describe("AgentSession handoff", () => {
 			return emit(event);
 		});
 
+		await session.dispose();
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -377,7 +302,6 @@ describe("AgentSession handoff", () => {
 			}),
 			modelRegistry,
 			extensionRunner,
-			obfuscator,
 		});
 		const previousSessionFile = session.sessionFile;
 		const generateHandoffSpy = vi
@@ -440,9 +364,6 @@ describe("AgentSession handoff", () => {
 			return stream;
 		};
 		await session.dispose();
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
 		session = new AgentSession({
 			agent: new Agent({
 				initialState: {
@@ -458,7 +379,6 @@ describe("AgentSession handoff", () => {
 				"compaction.autoContinue": false,
 			}),
 			modelRegistry,
-			obfuscator,
 			sideStreamFn,
 		});
 		const preHandoffSessionId = session.sessionId;
@@ -480,6 +400,128 @@ describe("AgentSession handoff", () => {
 		expect(result?.document).toBe(handoffText);
 		expect(sideStreamCalls).toBe(1);
 		expect(capturedSideSessionId).toStartWith(`${preHandoffSessionId}:side:`);
+	});
+
+	it("projects IPython journals into bounded safe text before compaction", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.idleEnabled", true);
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries.at(-1)?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [
+				{
+					role: "custom",
+					customType: IPYTHON_JOURNAL_MESSAGE_TYPE,
+					content: "",
+					display: true,
+					details: compactionCellDetail(),
+					attribution: "user",
+					timestamp: 3,
+				},
+			],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "compacted",
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+		});
+
+		await session.runIdleCompaction();
+
+		const projected = compactSpy.mock.calls[0]?.[0].messagesToSummarize[0];
+		expect(projected?.role).toBe("user");
+		const text =
+			projected?.role === "user" && Array.isArray(projected.content)
+				? (projected.content.find(part => part.type === "text")?.text ?? "")
+				: "";
+		expect(text).toContain("value = 42");
+		expect(text).toContain("safe output");
+		expect(text).not.toContain("<script>");
+	});
+
+	it("reports the threshold that armed idle compaction after the idle gate changes", async () => {
+		session.settings.set("compaction.strategy", "context-full");
+		session.settings.set("compaction.thresholdTokens", 120_000);
+		session.settings.set("compaction.idleEnabled", true);
+		session.settings.set("compaction.idleThresholdTokens", 40_000);
+		const entries = sessionManager.getBranch();
+		const lastEntryId = entries[entries.length - 1]?.id;
+		if (!lastEntryId) throw new Error("Expected a seeded entry id");
+		const fixedPreparation: compactionModule.CompactionPreparation = {
+			firstKeptEntryId: lastEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		};
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
+		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
+			summary: "compacted",
+			shortSummary: undefined,
+			firstKeptEntryId: lastEntryId,
+			tokensBefore: 100,
+			details: {},
+		});
+		// The idle timer armed on 40_000 and validated it as it fired; the user then
+		// retuned the gate before this run reached metadata. Re-reading settings here
+		// would report 90_000 — or 0 once idleEnabled flips off — for a request that
+		// 40_000 triggered.
+		session.settings.set("compaction.idleThresholdTokens", 90_000);
+		session.settings.set("compaction.idleEnabled", false);
+
+		await session.runIdleCompaction({ idleThreshold: { enabled: true, thresholdTokens: 40_000 } });
+
+		expect(compactSpy).toHaveBeenCalledTimes(1);
+		const userId = JSON.parse(String(compactSpy.mock.calls[0]?.[5]?.metadata?.user_id)) as {
+			profile: { t: number; s: string };
+		};
+		expect(userId.profile).toMatchObject({ t: 40_000, s: "context-full" });
+	});
+	it("labels an idle handoff request with the idle threshold while compaction is disabled", async () => {
+		session.settings.set("compaction.enabled", false);
+		session.settings.set("compaction.strategy", "handoff");
+		session.settings.set("compaction.thresholdTokens", 120_000);
+		session.settings.set("compaction.idleEnabled", true);
+		session.settings.set("compaction.idleThresholdTokens", 40_000);
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue from here");
+
+		await session.runIdleCompaction();
+
+		const call = generateHandoffSpy.mock.calls[0];
+		if (!call) throw new Error("Expected generateHandoffFromContext call");
+		const userId = JSON.parse(String(call[2].streamOptions.metadata?.user_id)) as {
+			profile: { t: number; s: string };
+		};
+		expect(userId.profile).toMatchObject({ t: 40_000, s: "handoff" });
+	});
+
+	it("projects IPython journals into the handoff side request without raw MIME", async () => {
+		sessionManager.appendCustomMessageEntry(IPYTHON_JOURNAL_MESSAGE_TYPE, "", true, compactionCellDetail(), "user");
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue safely");
+
+		await session.handoff();
+
+		const context = generateHandoffSpy.mock.calls[0]?.[0];
+		const serialized = JSON.stringify(context?.messages ?? []);
+		expect(serialized).toContain("value = 42");
+		expect(serialized).toContain("safe output");
+		expect(serialized).not.toContain("<script>");
 	});
 
 	it("preserves queued steering and follow-up messages across the handoff reset", async () => {
@@ -575,128 +617,6 @@ describe("AgentSession handoff", () => {
 
 		expect(session.agent.peekSteeringQueue().map(textOf)).toEqual(["inflight-steer"]);
 		expect(session.agent.peekFollowUpQueue().map(textOf)).toEqual(["inflight-followup"]);
-	});
-
-	it("obfuscates custom instructions before generating a handoff", async () => {
-		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
-		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockResolvedValue(`## Goal\nKeep ${placeholder}`);
-
-		const result = await session.handoff(`preserve ${HANDOFF_SECRET}`);
-
-		const handoffCall = generateHandoffSpy.mock.calls[0];
-		if (!handoffCall) throw new Error("Expected generateHandoffFromContext call");
-		// Custom instructions are obfuscated, rendered into the handoff prompt, and
-		// appended as the trailing context message — the raw secret never reaches
-		// the provider.
-		const trailing = handoffCall[0].messages.at(-1);
-		const trailingText =
-			typeof trailing?.content === "string"
-				? trailing.content
-				: (trailing?.content ?? []).map(block => (block.type === "text" ? block.text : "")).join("");
-		expect(trailingText).toContain(`preserve ${placeholder}`);
-		expect(trailingText).not.toContain(HANDOFF_SECRET);
-		expect(result?.document).toContain(HANDOFF_SECRET);
-		expect(result?.document).not.toContain(placeholder);
-	});
-
-	it("obfuscates the previous compaction summary but preserves opaque replay data", async () => {
-		session.settings.set("compaction.strategy", "context-full");
-		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
-		const entries = sessionManager.getBranch();
-		const lastEntryId = entries[entries.length - 1]?.id;
-		if (!lastEntryId) throw new Error("Expected a seeded entry id");
-		const fixedPreparation: compactionModule.CompactionPreparation = {
-			firstKeptEntryId: lastEntryId,
-			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
-			turnPrefixMessages: [],
-			recentMessages: [],
-			isSplitTurn: false,
-			tokensBefore: 100,
-			previousSummary: `summary ${HANDOFF_SECRET}`,
-			previousPreserveData: {
-				openaiRemoteCompaction: {
-					replacementHistory: [{ role: "user", content: `history ${HANDOFF_SECRET}` }],
-				},
-			},
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: compactionModule.DEFAULT_COMPACTION_SETTINGS,
-		};
-		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
-
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
-			summary: "new summary",
-			shortSummary: undefined,
-			firstKeptEntryId: lastEntryId,
-			tokensBefore: 100,
-			details: {},
-		});
-
-		await session.compact();
-
-		const call = compactSpy.mock.calls[0];
-		if (!call) throw new Error("Expected compact call");
-		expect(call[0].previousSummary).toBe(`summary ${placeholder}`);
-		expect(call[0].previousSummary).not.toContain(HANDOFF_SECRET);
-		// Opaque provider-replay state (encrypted_content / replacementHistory) must pass through
-		// byte-identical — rewriting it would corrupt OpenAI remote-compaction replay.
-		expect(call[0].previousPreserveData).toBe(fixedPreparation.previousPreserveData);
-	});
-
-	it("obfuscates migrated snapcompact archive text but preserves opaque replay data", async () => {
-		session.settings.set("compaction.strategy", "context-full");
-		const placeholder = obfuscator.obfuscate(HANDOFF_SECRET);
-		const entries = sessionManager.getBranch();
-		const lastEntryId = entries[entries.length - 1]?.id;
-		if (!lastEntryId) throw new Error("Expected a seeded entry id");
-		const replaySlot = {
-			replacementHistory: [{ role: "user", content: `history ${HANDOFF_SECRET}` }],
-		};
-		const fixedPreparation: compactionModule.CompactionPreparation = {
-			firstKeptEntryId: lastEntryId,
-			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
-			turnPrefixMessages: [],
-			recentMessages: [],
-			isSplitTurn: false,
-			tokensBefore: 100,
-			previousPreserveData: {
-				openaiRemoteCompaction: replaySlot,
-				[snapcompact.PRESERVE_KEY]: {
-					frames: [],
-					totalChars: 32,
-					truncatedChars: 0,
-					text: `archived ${HANDOFF_SECRET}`,
-					textHead: `head ${HANDOFF_SECRET}`,
-				},
-			},
-			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
-			settings: compactionModule.DEFAULT_COMPACTION_SETTINGS,
-		};
-		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(fixedPreparation);
-		const compactSpy = vi.spyOn(compactionModule, "compact").mockResolvedValue({
-			summary: "new summary",
-			shortSummary: undefined,
-			firstKeptEntryId: lastEntryId,
-			tokensBefore: 100,
-			details: {},
-		});
-
-		await session.compact();
-
-		const call = compactSpy.mock.calls[0];
-		if (!call) throw new Error("Expected compact call");
-		const preserve = call[0].previousPreserveData;
-		if (!preserve) throw new Error("Expected previousPreserveData");
-		// The archive plaintext that compact() migrates into the summary prompt is
-		// redacted, so the raw secret never reaches the provider.
-		const archive = preserve[snapcompact.PRESERVE_KEY] as { text: string; textHead: string };
-		expect(archive.text).toBe(`archived ${placeholder}`);
-		expect(archive.textHead).toBe(`head ${placeholder}`);
-		expect(JSON.stringify(archive)).not.toContain(HANDOFF_SECRET);
-		// Opaque provider-replay state stays byte-identical (same reference) — only the
-		// snapcompact slot's text is rewritten.
-		expect(preserve.openaiRemoteCompaction).toBe(replaySlot);
 	});
 
 	it("does not call the LLM summarizer when manual snapcompact preflight fails", async () => {
@@ -1361,59 +1281,6 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(mock.calls).toHaveLength(2);
 	});
-	it("does not run auto maintenance after final yield", async () => {
-		session.settings.set("compaction.strategy", "handoff");
-		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
-
-		const model = session.model;
-		if (!model) {
-			throw new Error("Expected model to be set");
-		}
-
-		const yieldCall: ToolCall = {
-			type: "toolCall",
-			id: "call_yield_done",
-			name: "yield",
-			arguments: { result: { data: { done: true } } },
-		};
-		const assistantMessage: AssistantMessage = {
-			role: "assistant",
-			content: [yieldCall],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			stopReason: "toolUse",
-			usage: {
-				input: 10_000,
-				output: 1_000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 11_000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		};
-
-		const handoffSpy = vi.spyOn(session, "handoff").mockResolvedValue({ document: "handoff document" });
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-		session.agent.emitExternalEvent({
-			type: "tool_execution_end",
-			toolCallId: yieldCall.id,
-			toolName: "yield",
-			result: {
-				content: [{ type: "text", text: "Result submitted." }],
-				details: { status: "success", data: { done: true } },
-			},
-			isError: false,
-		});
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
-		await drainMaintenance();
-
-		expect(handoffSpy).not.toHaveBeenCalled();
-		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
-		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
-	});
 
 	it("persists handoff session immediately with previous session as parent", async () => {
 		const previousSessionFile = session.sessionFile;
@@ -1883,94 +1750,6 @@ describe("AgentSession handoff", () => {
 		});
 	});
 
-	it("treats a vetoed auto-handoff switch as cancelled instead of falling back", async () => {
-		session.settings.set("compaction.strategy", "handoff");
-		session.settings.set("compaction.thresholdPercent", 1);
-		session.settings.set("contextPromotion.enabled", false);
-
-		const model = session.model;
-		if (!model) {
-			throw new Error("Expected model to be set");
-		}
-
-		// See "emits handoff lifecycle hooks": reopen the persisted transcript
-		// after the terminal dispose before wiring the replacement session.
-		await session.dispose();
-		const sessionFile = sessionManager.getSessionFile();
-		if (!sessionFile) throw new Error("Expected a persisted session file");
-		sessionManager = await SessionManager.open(sessionFile, tempDir.path());
-		const extensionsResult = await loadExtensions([], tempDir.path());
-		const extensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
-		);
-		vi.spyOn(extensionRunner, "hasHandlers").mockImplementation(eventName => eventName === "session_before_switch");
-		const emitSpy = vi.spyOn(extensionRunner, "emit").mockImplementation((async () => ({
-			cancel: true,
-		})) as ExtensionRunner["emit"]);
-
-		session = new AgentSession({
-			agent: new Agent({
-				initialState: {
-					model,
-					systemPrompt: ["Test"],
-					tools: [],
-					messages: [],
-				},
-			}),
-			sessionManager,
-			settings: session.settings,
-			modelRegistry,
-			extensionRunner,
-			obfuscator,
-		});
-		session.subscribe(event => {
-			events.push(event);
-		});
-		const previousSessionFile = session.sessionFile;
-		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockResolvedValue("## Goal\nContinue from here");
-		const assistantMessage: AssistantMessage = {
-			role: "assistant",
-			content: [{ type: "text", text: "maintenance trigger" }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			stopReason: "stop",
-			usage: {
-				input: 10_000,
-				output: 1_000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 11_000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		};
-
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
-		await waitFor(() => events.filter(event => event.type === "auto_compaction_end").length === 1);
-
-		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(emitSpy).toHaveBeenCalledWith({ type: "session_before_switch", reason: "handoff" });
-		expect(emitSpy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_switch" }));
-		expect(session.sessionFile).toBe(previousSessionFile);
-		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
-		const endEvents = events.filter(event => event.type === "auto_compaction_end");
-		expect(endEvents).toHaveLength(1);
-		expect(endEvents[0]).toMatchObject({
-			type: "auto_compaction_end",
-			action: "handoff",
-			aborted: true,
-			willRetry: false,
-		});
-	});
-
 	it("resets to the base system prompt before generating a handoff", async () => {
 		const model = session.model;
 		if (!model) {
@@ -2128,6 +1907,88 @@ describe("AgentSession handoff", () => {
 		expect(result?.savedPath).toBeUndefined();
 	});
 
+	it("treats a vetoed auto-handoff switch as cancelled instead of falling back", async () => {
+		session.settings.set("compaction.strategy", "handoff");
+		session.settings.set("compaction.thresholdPercent", 1);
+		session.settings.set("contextPromotion.enabled", false);
+
+		const model = session.model;
+		if (!model) {
+			throw new Error("Expected model to be set");
+		}
+
+		const extensionsResult = await loadExtensions([], tempDir.path());
+		const extensionRunner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		vi.spyOn(extensionRunner, "hasHandlers").mockImplementation(eventName => eventName === "session_before_switch");
+		const emitSpy = vi.spyOn(extensionRunner, "emit").mockImplementation((async () => ({
+			cancel: true,
+		})) as ExtensionRunner["emit"]);
+
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: [],
+				},
+			}),
+			sessionManager,
+			settings: session.settings,
+			modelRegistry,
+			extensionRunner,
+		});
+		session.subscribe(event => {
+			events.push(event);
+		});
+		const previousSessionFile = session.sessionFile;
+		const generateHandoffSpy = vi
+			.spyOn(compactionModule, "generateHandoffFromContext")
+			.mockResolvedValue("## Goal\nContinue from here");
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "maintenance trigger" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 10_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 11_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		await waitFor(() => events.filter(event => event.type === "auto_compaction_end").length === 1);
+
+		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
+		expect(emitSpy).toHaveBeenCalledWith({ type: "session_before_switch", reason: "handoff" });
+		expect(emitSpy).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_switch" }));
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
+		const endEvents = events.filter(event => event.type === "auto_compaction_end");
+		expect(endEvents).toHaveLength(1);
+		expect(endEvents[0]).toMatchObject({
+			type: "auto_compaction_end",
+			action: "handoff",
+			aborted: true,
+			willRetry: false,
+		});
+	});
+
 	it("does not start handoff prompt when provided signal is already cancelled", async () => {
 		const controller = new AbortController();
 		controller.abort();
@@ -2167,59 +2028,5 @@ describe("AgentSession handoff", () => {
 		await expect(handoffPromise).rejects.toThrow("Handoff cancelled");
 		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
 		expect(generateHandoffSpy.mock.calls[0]?.[2]?.streamOptions?.signal?.aborted).toBe(true);
-	});
-
-	it("surfaces the reason when the harness aborts an in-flight handoff", async () => {
-		const started = Promise.withResolvers<void>();
-		const cancelled = Promise.withResolvers<string>();
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockImplementation((_context, _model, options) => {
-			started.resolve();
-			options.streamOptions.signal?.addEventListener("abort", () => cancelled.reject(new Error("request aborted")), {
-				once: true,
-			});
-			return cancelled.promise;
-		});
-
-		const handoffPromise = session.handoff();
-		await started.promise;
-		await session.abort({ reason: "Harness stopped the session" });
-
-		await expect(handoffPromise).rejects.toThrow("Harness stopped the session");
-	});
-
-	it("surfaces the real error when generation fails without a user abort", async () => {
-		// Providers throw name==="AbortError" errors on non-user conditions (stalls,
-		// nested resolution failures). The handoff signal is never aborted here, so the
-		// failure must surface verbatim instead of being masked as "Handoff cancelled".
-		const providerError = new Error("Deepseek stream stalled");
-		providerError.name = "AbortError";
-		const generateHandoffSpy = vi
-			.spyOn(compactionModule, "generateHandoffFromContext")
-			.mockRejectedValue(providerError);
-
-		await expect(session.handoff()).rejects.toThrow("Deepseek stream stalled");
-		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(session.isGeneratingHandoff).toBe(false);
-	});
-
-	it("surfaces empty handoff generation as a failure, not a false cancel", async () => {
-		// Regression for #7993: the #7904 fix stopped masking provider errors as
-		// "Handoff cancelled", but an empty/whitespace-only generation still returned
-		// undefined, which the /handoff caller reported as "Handoff cancelled" with no
-		// detail. Empty output is a real failure and must surface as one.
-		const generateHandoffSpy = vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("   \n  ");
-
-		await expect(session.handoff()).rejects.toThrow("Handoff generation produced no content");
-		expect(generateHandoffSpy).toHaveBeenCalledTimes(1);
-		expect(session.isGeneratingHandoff).toBe(false);
-	});
-
-	it("auto-triggered handoff returns undefined on empty generation for context-full fallback", async () => {
-		// Auto-handoff is best-effort: an empty document must NOT throw so maintenance
-		// can fall back to context-full compaction (see runAutoCompaction).
-		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("");
-
-		const result = await session.handoff(undefined, { autoTriggered: true });
-		expect(result).toBeUndefined();
 	});
 });

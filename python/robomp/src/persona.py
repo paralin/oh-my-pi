@@ -92,40 +92,23 @@ def seed_phases(task_kind: str) -> list[dict[str, Any]]:
     return phases
 
 
-def _host_tool_entry(tool_name: str) -> Mapping[str, Any]:
-    return _require_mapping(
-        _load_toml("host_tools.toml").get(tool_name),
-        f"host_tools.toml[{tool_name!r}]",
-    )
-
-
-def host_tool_description(tool_name: str) -> str:
-    return _require_nonempty_str(
-        _host_tool_entry(tool_name).get("description"),
-        f"host_tools.toml[{tool_name!r}].description",
-    )
-
-
-def host_tool_parameter_description(tool_name: str, parameter_name: str) -> str:
-    parameters = _require_mapping(
-        _host_tool_entry(tool_name).get("parameters"),
-        f"host_tools.toml[{tool_name!r}].parameters",
-    )
-    return _require_nonempty_str(
-        parameters.get(parameter_name),
-        f"host_tools.toml[{tool_name!r}].parameters[{parameter_name!r}]",
-    )
+_CLASSIFY_NEXT_STEPS = {
+    "bug": "reproduce → diagnose → fix → PR",
+    "wontfix": "post one gh_post_comment explaining the design rationale or upstream cause and what evidence would change the assessment; no repro, no PR; the maintainer decides whether to close",
+    "documentation": "fix the docs and open a PR using the four-section template",
+    "question": "answer in a single gh_post_comment; no PR, no repro",
+    "enhancement": "post one thoughtful gh_post_comment on feasibility/scope; no PR",
+    "proposal": "post one thoughtful gh_post_comment on feasibility/scope; no PR",
+    "invalid": "post one explanatory gh_post_comment; no further action",
+    "duplicate": "post one explanatory gh_post_comment; no further action",
+}
 
 
 def classify_next_step(primary: str) -> str:
-    steps = _require_mapping(
-        _host_tool_entry("classify_issue").get("next_steps"),
-        "host_tools.toml['classify_issue'].next_steps",
-    )
-    return _require_nonempty_str(
-        steps.get(primary),
-        f"host_tools.toml['classify_issue'].next_steps[{primary!r}]",
-    )
+    try:
+        return _CLASSIFY_NEXT_STEPS[primary]
+    except KeyError as exc:
+        raise ValueError(f"unknown issue classification {primary!r}") from exc
 
 
 def system_append(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace, bot_login: str) -> str:
@@ -156,7 +139,7 @@ def resume_triage(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> 
 
 
 def completion_reminder(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> str:
-    """Reminder injected when a triage turn ends before a terminal tool fired."""
+    """Reminder injected when a triage turn ends before a terminal operation fired."""
     return render(_load("completion_reminder.md"), {"repo": repo, "issue": issue, "workspace": workspace})
 
 
@@ -391,8 +374,6 @@ __all__ = [
     "finalized_pr_comment",
     "followup_comment",
     "followup_review",
-    "host_tool_description",
-    "host_tool_parameter_description",
     "kickoff",
     "kickoff_directive",
     "kickoff_pr_review",

@@ -1,7 +1,7 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { type } from "@oh-my-pi/omptype";
+import { z } from "@oh-my-pi/omptype/zod";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ThinkingContent } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -14,7 +14,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
-const recordToolSchema = type({ value: type("string") });
+const recordToolSchema = z.object({ code: z.string() });
 
 type Harness = {
 	session: AgentSession;
@@ -34,21 +34,21 @@ afterAll(() => {
 });
 
 const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
-	name: "record",
+	name: "ipython",
 	label: "Record",
 	description: "Record a value",
 	parameters: recordToolSchema,
 	async execute(_toolCallId, params) {
 		return {
-			content: [{ type: "text", text: `recorded:${params.value}` }],
-			details: { value: params.value },
+			content: [{ type: "text", text: `recorded:${params.code}` }],
+			details: { value: params.code },
 		};
 	},
 };
 
 function recordCall(value: string, id: string): MockResponse {
 	return {
-		content: [{ type: "toolCall", id, name: "record", arguments: { value } }],
+		content: [{ type: "toolCall", id, name: "ipython", arguments: { value } }],
 		stopReason: "toolUse",
 	};
 }
@@ -114,7 +114,6 @@ async function createHarness(
 		"compaction.enabled": false,
 		"retry.enabled": false,
 		"todo.enabled": false,
-		"todo.eager": "default",
 		"todo.reminders": false,
 		...settingsOverrides,
 	});
@@ -141,7 +140,6 @@ async function createHarness(
 		sessionManager,
 		settings,
 		modelRegistry,
-		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 		extensionRunner: options.extensionRunner,
 	});
 	const harness = { session, tempDir };

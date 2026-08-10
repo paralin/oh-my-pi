@@ -61,14 +61,14 @@ describe("omfg rule parsing", () => {
 				name: "TypeScript Any Guard",
 				description: "No any",
 				condition: ": any|as any",
-				scope: ["tool:edit(*.ts)", "tool:write(*.ts)"],
+				scope: ["tool:ipython"],
 				body: "Use `unknown` instead.\n\n```typescript\nconst value: unknown = input;\n```",
 			}),
 		);
 
 		expect(result.rule.name).toBe("typescript-any-guard");
 		expect(result.rule.condition).toEqual([": any|as any"]);
-		expect(result.rule.scope).toEqual(["tool:edit(*.ts)", "tool:write(*.ts)"]);
+		expect(result.rule.scope).toEqual(["tool:ipython"]);
 		expect(result.fileContent).toStartWith("---");
 		expect(result.fileContent).toContain("```typescript");
 	});
@@ -110,15 +110,15 @@ describe("omfg rule parsing", () => {
 });
 
 describe("ruleMatchesAssistantHistory", () => {
-	it("matches edit tool arguments under a scoped TypeScript path", () => {
-		const { rule } = mustParse(ruleJson({ name: "ts-no-any", condition: ": any|as any", scope: "tool:edit(*.ts)" }));
+	it("matches IPython tool arguments", () => {
+		const { rule } = mustParse(ruleJson({ name: "ts-no-any", condition: ": any|as any", scope: "tool:ipython" }));
 		const messages: AgentMessage[] = [
 			createAssistantMessage([
 				{
 					type: "toolCall",
 					id: "call-1",
-					name: "edit",
-					arguments: { path: "src/example.ts", content: "const value: any = input;" },
+					name: "ipython",
+					arguments: { code: "const value: any = input;" },
 				},
 			]),
 		];
@@ -165,7 +165,7 @@ describe("ruleMatchesAssistantHistory", () => {
 			ruleJson({
 				name: "ruby-no-eval",
 				condition: "\\\\beval\\\\s*\\\\(",
-				scope: "tool:write(*.rb)",
+				scope: "tool:ipython",
 			}),
 		);
 		const messages: AgentMessage[] = [
@@ -173,8 +173,8 @@ describe("ruleMatchesAssistantHistory", () => {
 				{
 					type: "toolCall",
 					id: "call-1",
-					name: "write",
-					arguments: { path: "/tmp/bad_quality.rb", content: 'eval("@last_result = #{result}")' },
+					name: "ipython",
+					arguments: { code: 'eval("@last_result = #{result}")' },
 				},
 			]),
 		];

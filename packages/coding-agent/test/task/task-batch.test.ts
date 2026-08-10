@@ -14,17 +14,17 @@
  *    runtime for internal callers.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { arkToWireSchema } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -34,12 +34,7 @@ const taskAgent: AgentDefinition = {
 };
 
 function createSession(
-	options: {
-		manager?: AsyncJobManager;
-		settings?: Record<string, unknown>;
-		agentId?: string;
-		planMode?: boolean;
-	} = {},
+	options: { manager?: AsyncJobManager; settings?: Record<string, unknown>; agentId?: string } = {},
 ): ToolSession {
 	return {
 		cwd: "/tmp",
@@ -48,17 +43,17 @@ function createSession(
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		getAgentId: () => options.agentId ?? null,
-		getPlanModeState: options.planMode ? () => ({ enabled: true }) : undefined,
 		asyncJobManager: options.manager,
 	} as unknown as ToolSession;
 }
 
-function getSchemaProperties(tool: TaskTool): Record<string, unknown> {
-	const properties = toolWireSchema(tool).properties;
+function getSchemaProperties(tool: TaskService): Record<string, unknown> {
+	const schema = arkToWireSchema(tool.schema);
+	const properties = "properties" in schema ? schema.properties : undefined;
 	return isRecord(properties) ? properties : {};
 }
 
-function getBatchItemProperties(tool: TaskTool): Record<string, unknown> {
+function getBatchItemProperties(tool: TaskService): Record<string, unknown> {
 	const tasks = getSchemaProperties(tool).tasks;
 	if (!isRecord(tasks) || !isRecord(tasks.items) || !isRecord(tasks.items.properties)) return {};
 	return tasks.items.properties;
@@ -102,7 +97,7 @@ describe("task.batch schema gating", () => {
 	it("swaps between the flat and batch wire shapes", async () => {
 		mockDiscovery();
 
-		const off = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		const off = await TaskService.create(createSession({ settings: { "task.batch": false } }));
 		const offProperties = getSchemaProperties(off);
 		expect(offProperties.tasks).toBeUndefined();
 		expect(offProperties.context).toBeUndefined();
@@ -112,7 +107,7 @@ describe("task.batch schema gating", () => {
 		expect(typeof offProperties.outputSchema).toBe("object");
 		expect(offProperties.schemaMode).toBeDefined();
 
-		const on = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const on = await TaskService.create(createSession({ settings: { "task.batch": true } }));
 		const onProperties = getSchemaProperties(on);
 		expect(onProperties.tasks).toBeDefined();
 		expect(onProperties.context).toBeDefined();
@@ -136,28 +131,21 @@ describe("task.batch schema gating", () => {
 		mockDiscovery();
 
 		const flatSession = createSession({ settings: { "task.batch": false } });
-		const flat = await TaskTool.create(flatSession);
+		const flat = await TaskService.create(flatSession);
 		expect(getSchemaProperties(flat).effort).toBeUndefined();
-		expect(flat.description).not.toContain("`effort`");
-
 		flatSession.settings.override("task.enableEffort", true);
 		expect(getSchemaProperties(flat).effort).toBeDefined();
-		expect(flat.description).toContain("`effort`");
-
 		const batchSession = createSession({ settings: { "task.batch": true } });
-		const batch = await TaskTool.create(batchSession);
+		const batch = await TaskService.create(batchSession);
 		expect(getBatchItemProperties(batch).effort).toBeUndefined();
-		expect(batch.description).not.toContain("`effort`");
-
 		batchSession.settings.override("task.enableEffort", true);
 		expect(getBatchItemProperties(batch).effort).toBeDefined();
-		expect(batch.description).toContain("`effort`");
 	});
 
 	it("keeps isolation boolean-only in the batch item schema", async () => {
 		mockDiscovery();
 
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({ settings: { "task.batch": true, "task.isolation.mode": "auto" } }),
 		);
 		const properties = getSchemaProperties(tool);
@@ -171,27 +159,14 @@ describe("task.batch schema gating", () => {
 		expect(itemProperties.apply).toBeUndefined();
 	});
 
-	it("hides isolation from the dynamic batch schema in plan mode", async () => {
-		mockDiscovery();
-		const tool = await TaskTool.create(
-			createSession({
-				planMode: true,
-				settings: { "task.batch": true, "task.isolation.mode": "auto" },
-			}),
-		);
-		const itemProperties = getBatchItemProperties(tool);
-		expect(itemProperties.isolated).toBeUndefined();
-		expect(tool.description).not.toContain("`isolated`");
-	});
-
 	it("exposes outputSchema but never the stale schema field", async () => {
 		mockDiscovery();
 
-		const flat = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
+		const flat = await TaskService.create(createSession({ settings: { "task.batch": false } }));
 		expect(getSchemaProperties(flat).outputSchema).toBeDefined();
 		expect(getSchemaProperties(flat).schema).toBeUndefined();
 
-		const batch = await TaskTool.create(createSession({ settings: { "task.batch": true } }));
+		const batch = await TaskService.create(createSession({ settings: { "task.batch": true } }));
 		expect(getSchemaProperties(batch).schema).toBeUndefined();
 	});
 });
@@ -203,8 +178,8 @@ describe("task.batch validation", () => {
 
 	async function executeText(params: unknown, settings: Record<string, unknown> = {}): Promise<string> {
 		mockDiscovery();
-		const tool = await TaskTool.create(createSession({ settings }));
-		const result = await tool.execute("tool-call", params);
+		const tool = await TaskService.create(createSession({ settings }));
+		const result = await tool.spawn("tool-call", params);
 		return getFirstText(result);
 	}
 
@@ -256,26 +231,6 @@ describe("task.batch validation", () => {
 			{ "task.batch": true },
 		);
 		expect(text).toContain("Duplicate task name");
-	});
-
-	it("marks lenientArgValidation so execute() surfaces the actionable shape error", async () => {
-		// Regression (#6039): the flat single-spawn wire schema carries
-		// `"+": "delete"`, so a batch `{ context, tasks[] }` payload is stripped
-		// by arktype and rejected as `task must be a string (was missing)` in the
-		// agent loop — preempting the tool's own actionable message. The lenient
-		// flag makes the loop forward the raw args to execute() on that failure.
-		mockDiscovery();
-		const tool = await TaskTool.create(createSession({ settings: { "task.batch": false } }));
-		expect(tool.lenientArgValidation).toBe(true);
-
-		// The raw batch payload the loop would forward reaches execute() and
-		// yields the actionable reason, never arktype's misleading missing-`task`.
-		const text = await executeText(
-			{ context: "Background.", tasks: [{ name: "Alpha", task: "Work." }] },
-			{ "task.batch": false },
-		);
-		expect(text).toContain("task.batch is disabled");
-		expect(text).not.toContain("was missing");
 	});
 });
 
@@ -334,12 +289,12 @@ describe("task.batch spawning", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({ manager, agentId: "ParentA", settings: { "async.enabled": true, "task.batch": true } }),
 		);
 		const alphaSchema = { type: "object", properties: { alpha: { type: "string" } } };
 		const betaSchema = { type: "object", properties: { beta: { type: "number" } } };
-		const result = await tool.execute("tc-batch", {
+		const result = await tool.spawn("tc-batch", {
 			context: "# Goal\nShared background.",
 			tasks: [
 				{
@@ -431,10 +386,10 @@ describe("task.batch spawning", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
 		);
-		const result = await tool.execute("tc-mixed-agents", {
+		const result = await tool.spawn("tc-mixed-agents", {
 			context: "Shared routing context.",
 			tasks: [
 				{ name: "Scout", agent: "scout", task: "Investigate." },
@@ -476,11 +431,11 @@ describe("task.batch spawning", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({ manager, settings: { "async.enabled": true, "task.batch": true } }),
 		);
 
-		const result = await tool.execute("tc-single", {
+		const result = await tool.spawn("tc-single", {
 			context: "Shared notes.",
 			tasks: [{ name: "Solo", task: "Do the thing." }],
 		} as TaskParams);
@@ -521,7 +476,7 @@ describe("task.batch spawning", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({
 				manager,
 				settings: {
@@ -533,7 +488,7 @@ describe("task.batch spawning", () => {
 		);
 
 		const callerSchema = { type: "object", properties: { caller: { type: "number" } } };
-		const result = await tool.execute("tc-flat", {
+		const result = await tool.spawn("tc-flat", {
 			agent: "task",
 			name: "Flat",
 			task: "Do the thing.",
@@ -561,11 +516,11 @@ describe("task.batch spawning", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({ manager, settings: { "async.enabled": false, "task.batch": true } }),
 		);
 
-		const result = await tool.execute("tc-sync-batch", {
+		const result = await tool.spawn("tc-sync-batch", {
 			context: "# Goal\nShared synchronous context.",
 			tasks: [
 				{ name: "Alpha", task: "Do A." },
@@ -598,7 +553,7 @@ describe("task.batch spawning", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({
 				manager,
 				settings: { "async.enabled": true, "task.batch": true, "task.maxConcurrency": 1 },
@@ -606,7 +561,7 @@ describe("task.batch spawning", () => {
 		);
 
 		const updates: Array<{ async?: { state?: string }; progress?: Array<{ id: string; status: string }> }> = [];
-		const result = await tool.execute(
+		const result = await tool.spawn(
 			"tc-batch-cancel",
 			{
 				context: "ctx",

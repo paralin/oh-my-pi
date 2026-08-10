@@ -106,28 +106,19 @@
 		"command": "vscode-html-language-server",
 		"args": ["--stdio"],
 		"fileTypes": [".html", ".htm"],
-		"rootMarkers": ["package.json", ".git"],
-		"initOptions": {
-			"provideFormatter": true
-		}
+		"rootMarkers": ["package.json", ".git"]
 	},
 	"vscode-css-language-server": {
 		"command": "vscode-css-language-server",
 		"args": ["--stdio"],
 		"fileTypes": [".css", ".scss", ".sass", ".less"],
-		"rootMarkers": ["package.json", ".git"],
-		"initOptions": {
-			"provideFormatter": true
-		}
+		"rootMarkers": ["package.json", ".git"]
 	},
 	"vscode-json-language-server": {
 		"command": "vscode-json-language-server",
 		"args": ["--stdio"],
 		"fileTypes": [".json", ".jsonc"],
-		"rootMarkers": ["package.json", ".git"],
-		"initOptions": {
-			"provideFormatter": true
-		}
+		"rootMarkers": ["package.json", ".git"]
 	},
 	"tailwindcss": {
 		"command": "tailwindcss-language-server",
@@ -277,15 +268,11 @@
 		"args": ["stdio"],
 		"fileTypes": [".rb", ".rake", ".gemspec"],
 		"rootMarkers": ["Gemfile", ".solargraph.yml", "Rakefile"],
-		"initOptions": {
-			"formatting": true
-		},
 		"settings": {
 			"solargraph": {
 				"diagnostics": true,
 				"completion": true,
 				"hover": true,
-				"formatting": true,
 				"references": true,
 				"rename": true,
 				"symbols": true
@@ -296,10 +283,7 @@
 		"command": "ruby-lsp",
 		"args": [],
 		"fileTypes": [".rb", ".rake", ".gemspec", ".erb"],
-		"rootMarkers": ["Gemfile", ".ruby-version", ".ruby-gemset"],
-		"initOptions": {
-			"formatter": "auto"
-		}
+		"rootMarkers": ["Gemfile", ".ruby-version", ".ruby-gemset"]
 	},
 	"rubocop": {
 		"command": "rubocop",

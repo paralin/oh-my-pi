@@ -29,14 +29,6 @@ export interface StablePrefixSnapshot {
 	fingerprint: string;
 }
 
-/** Options threaded through `build()` so the snapshot reflects loop-time settings. */
-export interface BuildOptions {
-	/** Inject the `i` intent field into tool schemas (must match agent-loop's normalizeTools). */
-	intentTracing: boolean;
-	/** Strip tool descriptions from the provider-bound specs (must match normalizeTools). */
-	pruneToolDescriptions?: boolean;
-}
-
 /**
  * A frozen prefix (system prompt + tools) that produces stable byte
  * sequences across `build()` calls.
@@ -63,8 +55,8 @@ export class StablePrefix {
 	 * Build or rebuild from live context.
 	 * Returns `true` if the prefix actually changed (cache miss imminent).
 	 */
-	build(context: AgentContext, options: BuildOptions): boolean {
-		const snapshot = takeSnapshot(context, options);
+	build(context: AgentContext): boolean {
+		const snapshot = takeSnapshot(context);
 		if (this.#snapshot && this.#snapshot.fingerprint === snapshot.fingerprint) {
 			return false;
 		}
@@ -178,8 +170,8 @@ export class AppendOnlyContextManager {
 	 */
 	#messageDigests: number[] = [];
 
-	build(context: AgentContext, options: BuildOptions): Context {
-		this.prefix.build(context, options);
+	build(context: AgentContext): Context {
+		this.prefix.build(context);
 		const { systemPrompt, tools } = this.prefix.toContext();
 		return { systemPrompt, messages: this.log.toMessages(), tools };
 	}
@@ -261,12 +253,12 @@ export class AppendOnlyContextManager {
 		this.prefix.invalidate();
 	}
 
-	reset(context: AgentContext, options: BuildOptions): void {
+	reset(context: AgentContext): void {
 		this.prefix.invalidate();
 		this.log.clear();
 		this.#lastSyncCount = 0;
 		this.#messageDigests = [];
-		this.prefix.build(context, options);
+		this.prefix.build(context);
 	}
 
 	/** Index of the first message whose serialized bytes differ from the
@@ -312,21 +304,17 @@ export class AppendOnlyContextManager {
 // Snapshot helpers
 // ---------------------------------------------------------------------------
 
-function takeSnapshot(context: AgentContext, options: BuildOptions): StablePrefixSnapshot {
+function takeSnapshot(context: AgentContext): StablePrefixSnapshot {
 	const systemPrompt = [...context.systemPrompt];
-	const tools =
-		normalizeTools(context.tools, {
-			injectIntent: options.intentTracing,
-			pruneDescriptions: options.pruneToolDescriptions,
-		}) ?? [];
+	const tools = normalizeTools(context.tools) ?? [];
 	return {
 		systemPrompt,
 		tools,
-		fingerprint: computeFingerprint(systemPrompt, tools, options),
+		fingerprint: computeFingerprint(systemPrompt, tools),
 	};
 }
 
-function computeFingerprint(systemPrompt: string[], tools: Tool[], options: BuildOptions): string {
+function computeFingerprint(systemPrompt: string[], tools: Tool[]): string {
 	const payload = JSON.stringify({
 		s: systemPrompt,
 		t: tools.map(t => ({
@@ -335,10 +323,7 @@ function computeFingerprint(systemPrompt: string[], tools: Tool[], options: Buil
 			p: t.parameters,
 			s: t.strict,
 			cf: t.customFormat,
-			cw: t.customWireName,
 		})),
-		i: options.intentTracing,
-		pd: options.pruneToolDescriptions,
 	});
 	let hash = 0;
 	for (let i = 0; i < payload.length; i++) {

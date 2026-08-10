@@ -15,7 +15,7 @@ import {
 	__resetAutoQaConsentForTests,
 	resolveAutoQaConsent,
 	setAutoQaConsentHandler,
-} from "@oh-my-pi/pi-coding-agent/tools/report-tool-issue";
+} from "../../src/tools/report-tool-issue.js";
 
 afterEach(() => {
 	__resetAutoQaConsentForTests();

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import * as vm from "node:vm";
-import { type Element, parseHTML } from "@oh-my-pi/pi-utils/dom";
-import { Marked } from "@oh-my-pi/pi-utils/marked";
+import { parseHTML } from "linkedom";
+import { Marked } from "marked";
 
 const [templateHtml, templateJs] = await Promise.all([
 	Bun.file(new URL("../src/export/html/template.html", import.meta.url)).text(),
@@ -20,6 +20,17 @@ interface MinimalMessageEntry {
 	};
 }
 
+interface MinimalCustomEntry {
+	type: "custom_message";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	customType: "ipython-cell";
+	content: string;
+	display: true;
+	details: Record<string, unknown>;
+}
+
 interface MinimalSession {
 	header: {
 		type: "session";
@@ -28,7 +39,7 @@ interface MinimalSession {
 		timestamp: string;
 		cwd: string;
 	};
-	entries: MinimalMessageEntry[];
+	entries: Array<MinimalMessageEntry | MinimalCustomEntry>;
 	leafId: string;
 }
 
@@ -82,7 +93,11 @@ function renderSession(session: MinimalSession) {
 	return document;
 }
 
-function createSession(entries: MinimalMessageEntry[], leafId: string, id: string): MinimalSession {
+function createSession(
+	entries: Array<MinimalMessageEntry | MinimalCustomEntry>,
+	leafId: string,
+	id: string,
+): MinimalSession {
 	return {
 		header: {
 			type: "session",
@@ -161,6 +176,54 @@ describe("HTML export Markdown", () => {
 		expect(rendered.querySelector("ul > li > em")?.textContent).toBe("italic");
 		expect(rendered.querySelector("ul > li > code")?.textContent).toBe("code");
 		expect(rendered.querySelector("ol > li > strong")?.textContent).toBe("nested");
+	});
+
+	test("renders IPython journals with safe text, images, diffs, and artifact references without evaluating HTML", () => {
+		const entry: MinimalCustomEntry = {
+			type: "custom_message",
+			id: "ipython-1",
+			parentId: null,
+			timestamp: "2026-01-01T00:00:00.000Z",
+			customType: "ipython-cell",
+			content: "",
+			display: true,
+			details: {
+				version: 1,
+				kind: "cell",
+				cellId: "cell-1",
+				sequence: 7,
+				origin: "direct",
+				authority: "trusted-cell",
+				code: "print('<safe>')",
+				status: "ok",
+				safeText: "<safe>\n",
+				events: [
+					{
+						kind: "display",
+						data: {
+							"text/html": "<script>globalThis.unsafe = true</script>",
+							"image/png": "cG5n",
+							"application/vnd.omp.diff+json": {
+								path: "src/file.ts",
+								diff: "@@ -1 +1 @@\n-old\n+new",
+							},
+						},
+					},
+				],
+				artifacts: [{ path: "/tmp/result.txt", mimeType: "text/plain", label: "result" }],
+			},
+		};
+		const document = renderSession(createSession([entry], entry.id, "ipython-export"));
+		const cell = document.querySelector(".ipython-cell");
+		expect(cell?.getAttribute("data-ipython-status")).toBe("ok");
+		expect(cell?.querySelector(".ipython-code")?.textContent).toContain("print('<safe>')");
+		expect(cell?.querySelector(".ipython-output")?.textContent).toBe("<safe>\n");
+		expect(cell?.querySelector(".ipython-image")?.getAttribute("src")).toBe("data:image/png;base64,cG5n");
+		expect(cell?.querySelector(".ipython-diff")?.textContent).toContain("-old\n+new");
+		expect(cell?.querySelector(".ipython-artifacts")?.textContent).toContain("/tmp/result.txt");
+		expect(cell?.querySelector("script")).toBeNull();
+		expect(cell?.textContent).not.toContain("globalThis.unsafe");
+		expect(document.querySelector(".tree-node")?.textContent).toContain("IPython ok");
 	});
 
 	test("renders a deep valid conversation tree without overflowing the call stack", () => {

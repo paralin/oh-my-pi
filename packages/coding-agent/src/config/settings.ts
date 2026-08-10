@@ -15,7 +15,6 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
 	getAgentDbPath,
@@ -39,11 +38,8 @@ import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { AgentStorage } from "../session/agent-storage";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
-import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
-import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import {
-	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
 	getDefault,
@@ -271,11 +267,6 @@ function modelRoleValueFromUnknown(value: unknown): string | undefined {
 	return entries.length === value.length ? entries.join(",") : undefined;
 }
 
-type EditVariantEntry = {
-	patternLower: string;
-	mode: EditMode;
-};
-
 function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, cwd: string): string[] | undefined {
 	if (!PATH_SCOPED_ARRAY_SETTINGS.has(settingPath) || !Array.isArray(value)) return undefined;
 
@@ -345,7 +336,6 @@ export class Settings {
 	#merged: RawSettings = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
-	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
@@ -364,6 +354,10 @@ export class Settings {
 
 	/** Legacy `lastChangelogVersion` captured from config.yml during migration (now a marker file). */
 	#legacyLastChangelogVersion?: string;
+	/** Whether this instance has reported discarded legacy secret settings. */
+	#reportedLegacySecretSettings = false;
+	/** Startup warnings that the interactive host renders after initializing its terminal. */
+	#startupWarnings: string[] = [];
 
 	/** Pending save (debounced) */
 	#saveTimer?: NodeJS.Timeout;
@@ -447,15 +441,11 @@ export class Settings {
 	}
 
 	/**
-	 * Create an in-memory settings instance without affecting the global singleton.
-	 * A supplied storage handle remains shared for runtime data while setting overrides stay non-persistent.
+	 * Create an isolated instance for testing.
+	 * Does not affect the global singleton.
 	 */
-	static isolated(
-		overrides: Partial<Record<SettingPath, unknown>> = {},
-		options: { storage?: AgentStorage | null } = {},
-	): Settings {
+	static isolated(overrides: Partial<Record<SettingPath, unknown>> = {}): Settings {
 		const instance = new Settings({ inMemory: true, overrides });
-		instance.#storage = options.storage ?? null;
 		instance.#rebuildMerged();
 		return instance;
 	}
@@ -830,57 +820,6 @@ export class Settings {
 		return result as unknown as GroupTypeMap[G];
 	}
 
-	/**
-	 * Get the edit variant for a specific model.
-	 * Returns "patch", "replace", "hashline", "apply_patch", or null (use global default).
-	 */
-	getEditVariantForModel(model: string | undefined): EditMode | null {
-		if (!model) return null;
-		const variants = this.#getEditVariantEntries();
-		if (variants.length === 0) return null;
-
-		const modelLower = model.toLowerCase();
-
-		for (let i = 0; i < variants.length; i++) {
-			const variant = variants[i];
-			if (modelLower.includes(variant.patternLower)) {
-				return variant.mode;
-			}
-		}
-		return null;
-	}
-
-	#getEditVariantEntries(): readonly EditVariantEntry[] {
-		if (this.#editVariantCache !== undefined) return this.#editVariantCache;
-
-		const value = getByPath(this.#merged, ["edit", "modelVariants"]);
-		if (!isRecord(value)) {
-			this.#editVariantCache = [];
-			return this.#editVariantCache;
-		}
-
-		const variants: EditVariantEntry[] = [];
-		for (const pattern in value) {
-			if (!Object.hasOwn(value, pattern)) continue;
-			const rawMode = value[pattern];
-			if (typeof rawMode !== "string") continue;
-			const mode = normalizeEditMode(rawMode);
-			if (mode) {
-				variants.push({ patternLower: pattern.toLowerCase(), mode });
-			}
-		}
-
-		this.#editVariantCache = variants;
-		return variants;
-	}
-
-	/**
-	 * Get bash interceptor rules (typed accessor for complex array config).
-	 */
-	getBashInterceptorRules(): BashInterceptorRule[] {
-		return this.get("bashInterceptor.patterns");
-	}
-
 	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
 		const value = getByPath(layer, ["modelRoles"]);
 		if (!isRecord(value)) return {};
@@ -1158,6 +1097,11 @@ export class Settings {
 	 */
 	setDisabledProviders(ids: string[]): void {
 		this.set("disabledProviders", ids);
+	}
+
+	/** Consume warnings produced while loading settings before the terminal exists. */
+	takeStartupWarnings(): string[] {
+		return this.#startupWarnings.splice(0);
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -1522,41 +1466,6 @@ export class Settings {
 				raw.theme = { [slot]: oldTheme };
 			}
 		}
-
-		// inspect_image.enabled (boolean) -> inspect_image.mode (enum). Explicit
-		// user choices are preserved: true -> "on", false -> "off". Configs with
-		// no legacy key get the new "auto" default, which hides the tool for
-		// models with native image input. Handles nested and quoted-dotted
-		// ("inspect_image.enabled") sources; the target is always the nested
-		// form, which is the only shape the resolver reads.
-		const inspectImageObj = isRecord(raw.inspect_image) ? (raw.inspect_image as Record<string, unknown>) : undefined;
-		const legacyEnabled =
-			typeof inspectImageObj?.enabled === "boolean"
-				? inspectImageObj.enabled
-				: typeof raw["inspect_image.enabled"] === "boolean"
-					? (raw["inspect_image.enabled"] as boolean)
-					: undefined;
-		if (legacyEnabled !== undefined) {
-			if (!inspectImageObj) {
-				raw.inspect_image = {};
-			}
-			const target = raw.inspect_image as Record<string, unknown>;
-			const flatMode = raw["inspect_image.mode"];
-			if (target.mode === undefined) {
-				// A quoted-dotted explicit mode wins over the legacy boolean but
-				// must be normalized into the nested form the resolver reads.
-				target.mode =
-					typeof flatMode === "string" && (INSPECT_IMAGE_MODES as readonly string[]).includes(flatMode)
-						? flatMode
-						: legacyEnabled
-							? "on"
-							: "off";
-			}
-			delete target.enabled;
-			delete raw["inspect_image.enabled"];
-			delete raw["inspect_image.mode"];
-		}
-
 		// task.isolation.enabled (boolean) -> task.isolation.mode (enum)
 		const taskObj = raw.task as Record<string, unknown> | undefined;
 		const isolationObj = taskObj?.isolation as Record<string, unknown> | undefined;
@@ -1565,23 +1474,6 @@ export class Settings {
 				isolationObj.mode = isolationObj.enabled ? "auto" : "none";
 			}
 			delete isolationObj.enabled;
-		}
-
-		// task.simple: removed — the task tool no longer accepts a per-call
-		// schema (workflows drive structured output via eval agent()) and the
-		// batch/context shape is gated by task.batch instead.
-		if (taskObj && "simple" in taskObj) {
-			delete taskObj.simple;
-		}
-
-		// task.eager / todo.eager: boolean -> enum (default | preferred | always).
-		// `true` reproduced the previous "on" behavior, which is now `always`.
-		if (taskObj && typeof taskObj.eager === "boolean") {
-			taskObj.eager = taskObj.eager ? "always" : "default";
-		}
-		const todoObj = raw.todo as Record<string, unknown> | undefined;
-		if (todoObj && typeof todoObj.eager === "boolean") {
-			todoObj.eager = todoObj.eager ? "always" : "default";
 		}
 
 		// task.isolation.mode: legacy values from before the pi-iso PAL refactor.
@@ -1601,25 +1493,6 @@ export class Settings {
 			}
 		}
 
-		// edit.mode: removed "atom" and "vim" variants map back to "hashline"
-		const editObj = raw.edit as Record<string, unknown> | undefined;
-		if (editObj) {
-			if (editObj.mode === "atom" || editObj.mode === "vim") {
-				editObj.mode = "hashline";
-			}
-			const modelVariants = editObj.modelVariants as Record<string, unknown> | undefined;
-			if (modelVariants && typeof modelVariants === "object" && !Array.isArray(modelVariants)) {
-				for (const [pattern, variant] of Object.entries(modelVariants)) {
-					if (variant === "atom" || variant === "vim") {
-						modelVariants[pattern] = "hashline";
-					}
-				}
-			}
-		}
-		if (raw["edit.mode"] === "atom" || raw["edit.mode"] === "vim") {
-			raw["edit.mode"] = "hashline";
-		}
-
 		// compaction.strategy: removed local-model shake-summary mode; plain shake
 		// keeps the same mechanical artifact-backed reduction without background CPU.
 		const compactionObj = raw.compaction as Record<string, unknown> | undefined;
@@ -1637,30 +1510,6 @@ export class Settings {
 		}
 		if (typeof raw["snapcompact.systemPrompt"] === "boolean") {
 			raw["snapcompact.systemPrompt"] = raw["snapcompact.systemPrompt"] ? "all" : "none";
-		}
-
-		// inlineToolDescriptors: boolean -> enum (auto | on | off). The old
-		// `true`/`false` mapped directly onto inline-on/inline-off, so preserve
-		// the user's explicit choice; new installs get the `auto` default that
-		// turns it on only for Gemini models.
-		if (typeof raw.inlineToolDescriptors === "boolean") {
-			raw.inlineToolDescriptors = raw.inlineToolDescriptors ? "on" : "off";
-		}
-
-		// statusLine: rename "plan_mode" segment to "mode"
-		const statusLineObj = raw.statusLine as Record<string, unknown> | undefined;
-		if (statusLineObj) {
-			for (const key of ["leftSegments", "rightSegments"] as const) {
-				const segments = statusLineObj[key];
-				if (Array.isArray(segments)) {
-					statusLineObj[key] = segments.map(seg => (seg === "plan_mode" ? "mode" : seg));
-				}
-			}
-			const segmentOptions = statusLineObj.segmentOptions as Record<string, unknown> | undefined;
-			if (segmentOptions && "plan_mode" in segmentOptions && !("mode" in segmentOptions)) {
-				segmentOptions.mode = segmentOptions.plan_mode;
-				delete segmentOptions.plan_mode;
-			}
 		}
 
 		// providers.parallelFetch (boolean) replaced by the providers.fetch reader
@@ -1780,91 +1629,45 @@ export class Settings {
 			delete raw["power.preventDisplaySleep"];
 		}
 
-		// Migration for renamed settings grep.* and glob.* from search.* and find.*:
-		// 1. Nested settings: find -> glob, search -> grep (per-property merge to avoid clobbering)
-		const ensureRawObject = (key: "glob" | "grep"): Record<string, unknown> => {
-			const current = raw[key];
-			if (isRecord(current)) {
-				return current;
+		// Secret substitution and share redaction were removed. Discard their
+		// configuration instead of reviving a path that changes exported bytes.
+		const shareObj = isRecord(raw.share) ? (raw.share as Record<string, unknown>) : undefined;
+		const hasLegacySecretSettings =
+			"secrets" in raw ||
+			"secrets.enabled" in raw ||
+			"share.redactSecrets" in raw ||
+			(shareObj !== undefined && Object.hasOwn(shareObj, "redactSecrets"));
+		if (hasLegacySecretSettings) {
+			if (!this.#reportedLegacySecretSettings) {
+				this.#startupWarnings.push(
+					"Settings: removed legacy secret substitution; secrets.enabled and share.redactSecrets are ignored and exports preserve content verbatim",
+				);
+				this.#reportedLegacySecretSettings = true;
 			}
-			const created: Record<string, unknown> = {};
-			raw[key] = created;
-			return created;
-		};
-
-		if ("find" in raw) {
-			const findObj = raw.find;
-			if (isRecord(findObj)) {
-				const globObj = ensureRawObject("glob");
-				const findKeys: Array<"enabled"> = ["enabled"];
-				for (const key of findKeys) {
-					if (key in findObj && !(key in globObj)) {
-						globObj[key] = findObj[key];
-					}
-				}
+			delete raw.secrets;
+			delete raw["secrets.enabled"];
+			delete raw["share.redactSecrets"];
+			if (shareObj) {
+				delete shareObj.redactSecrets;
+				if (Object.keys(shareObj).length === 0) delete raw.share;
 			}
-			delete raw.find;
 		}
 
-		if ("search" in raw) {
-			const searchObj = raw.search;
-			if (isRecord(searchObj)) {
-				const grepObj = ensureRawObject("grep");
-				const searchKeys: Array<"enabled" | "contextBefore" | "contextAfter"> = [
-					"enabled",
-					"contextBefore",
-					"contextAfter",
-				];
-				for (const key of searchKeys) {
-					if (key in searchObj && !(key in grepObj)) {
-						grepObj[key] = searchObj[key];
-					}
-				}
-			}
-			delete raw.search;
-		}
-
-		// 2. Flat settings keys: map them to the proper nested target so get/set resolves them correctly
-		if ("find.enabled" in raw) {
-			const globObj = ensureRawObject("glob");
-			if (!("enabled" in globObj)) {
-				globObj.enabled = raw["find.enabled"];
-			}
-			delete raw["find.enabled"];
-		}
-		if ("search.enabled" in raw) {
-			const grepObj = ensureRawObject("grep");
-			if (!("enabled" in grepObj)) {
-				grepObj.enabled = raw["search.enabled"];
-			}
-			delete raw["search.enabled"];
-		}
-		if ("search.contextBefore" in raw) {
-			const grepObj = ensureRawObject("grep");
-			if (!("contextBefore" in grepObj)) {
-				grepObj.contextBefore = raw["search.contextBefore"];
-			}
-			delete raw["search.contextBefore"];
-		}
-		if ("search.contextAfter" in raw) {
-			const grepObj = ensureRawObject("grep");
-			if (!("contextAfter" in grepObj)) {
-				grepObj.contextAfter = raw["search.contextAfter"];
-			}
-			delete raw["search.contextAfter"];
-		}
-
-		// Also clean up any empty nested objects we might have created or left behind
-		if (raw.glob && typeof raw.glob === "object" && Object.keys(raw.glob).length === 0) {
-			delete raw.glob;
-		}
-		if (raw.grep && typeof raw.grep === "object" && Object.keys(raw.grep).length === 0) {
-			delete raw.grep;
-		}
-		// readHashLines: removed. Hashline anchors are now driven solely by
-		// edit.mode === "hashline"; the separate read toggle only ever produced
-		// the incoherent "hashline edits without addressable anchors" state.
-		delete raw.readHashLines;
+		// Removed search/find/glob/grep provider-tool settings are discarded rather
+		// than migrated into another executable compatibility surface.
+		delete raw.find;
+		delete raw.search;
+		delete raw.glob;
+		delete raw.grep;
+		delete raw.web_search;
+		delete raw["find.enabled"];
+		delete raw["search.enabled"];
+		delete raw["search.contextBefore"];
+		delete raw["search.contextAfter"];
+		delete raw["glob.enabled"];
+		delete raw["grep.enabled"];
+		delete raw["grep.contextBefore"];
+		delete raw["grep.contextAfter"];
 
 		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
 		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
@@ -1953,25 +1756,6 @@ export class Settings {
 			value => typeof value === "number" && Number.isFinite(value),
 		);
 
-		// BM25 tool discovery removal: tools.discoveryMode / tools.essentialOverride /
-		// mcp.discoveryMode / mcp.discoveryDefaultServers are gone with no
-		// replacement (`tools.xdev` stays at its own default). Dead keys are
-		// deleted so they stop lingering in config.yml.
-		const toolsObj = raw.tools as Record<string, unknown> | undefined;
-		if (toolsObj) {
-			delete toolsObj.discoveryMode;
-			delete toolsObj.essentialOverride;
-		}
-		delete raw["tools.discoveryMode"];
-		delete raw["tools.essentialOverride"];
-		const mcpObj = raw.mcp as Record<string, unknown> | undefined;
-		if (mcpObj) {
-			delete mcpObj.discoveryMode;
-			delete mcpObj.discoveryDefaultServers;
-		}
-		delete raw["mcp.discoveryMode"];
-		delete raw["mcp.discoveryDefaultServers"];
-
 		// providers.webSearch / providers.image (single preferred provider) →
 		// providers.webSearchOrder / providers.imageOrder (priority lists). A
 		// concrete legacy choice becomes the head of the new list with every
@@ -2010,52 +1794,6 @@ export class Settings {
 				? [value, ...AUTO_IMAGE_PROVIDER_ORDER.filter(id => id !== value)]
 				: undefined,
 		);
-
-		// Consolidate the retired Exa suite toggles onto the sole remaining
-		// provider switch. The old runtime required both `enabled` and
-		// `enableSearch`, so preserve that AND semantics when both are present.
-		// Researcher and Websets were removed with the standalone Exa tools.
-		const exaObj = isRecord(raw.exa) ? raw.exa : undefined;
-		const exaEnabledValues = [
-			exaObj?.enabled,
-			raw["exa.enabled"],
-			exaObj?.enableSearch,
-			raw["exa.enableSearch"],
-		].filter((value): value is boolean => typeof value === "boolean");
-		const hasFlatExaSetting =
-			"exa.enabled" in raw ||
-			"exa.enableSearch" in raw ||
-			"exa.enableResearcher" in raw ||
-			"exa.enableWebsets" in raw;
-		if (exaObj || hasFlatExaSetting) {
-			const exaRoot = exaObj ?? {};
-			if (exaEnabledValues.length > 0) {
-				exaRoot.enabled = exaEnabledValues.every(Boolean);
-			}
-			delete exaRoot.enableSearch;
-			delete exaRoot.enableResearcher;
-			delete exaRoot.enableWebsets;
-			if (Object.keys(exaRoot).length > 0) {
-				raw.exa = exaRoot;
-			} else {
-				delete raw.exa;
-			}
-			delete raw["exa.enabled"];
-			delete raw["exa.enableSearch"];
-			delete raw["exa.enableResearcher"];
-			delete raw["exa.enableWebsets"];
-		}
-
-		// computer.backend and model-specific controller routing were removed
-		// when the computer tool moved to one native desktop implementation.
-		const computerObj = isRecord(raw.computer) ? raw.computer : undefined;
-		if (computerObj && "backend" in computerObj) {
-			delete computerObj.backend;
-			if (Object.keys(computerObj).length === 0) {
-				delete raw.computer;
-			}
-		}
-		delete raw["computer.backend"];
 
 		return raw;
 	}
@@ -2342,7 +2080,6 @@ export class Settings {
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
 		this.#resolvedCache.clear();
-		this.#editVariantCache = undefined;
 	}
 
 	#fireAllHooks(): void {
@@ -2458,9 +2195,6 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
 	},
-	"secrets.enabled": value => {
-		configureCredentialRedaction(value === true);
-	},
 	"hindsight.bankId": () => hindsightScopeSignal.fire(),
 	"hindsight.bankIdPrefix": () => hindsightScopeSignal.fire(),
 	"hindsight.scoping": () => hindsightScopeSignal.fire(),
@@ -2558,7 +2292,6 @@ export function resetSettingsForTest(): void {
 	globalInstancePromise = null;
 	clearBoundSettingsMethods();
 	configureProviderMaxInFlightRequests(undefined);
-	configureCredentialRedaction(false);
 }
 
 /**

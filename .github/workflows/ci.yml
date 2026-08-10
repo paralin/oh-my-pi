@@ -48,8 +48,19 @@ on:
          - "package.json"
          - "patches/**"
          - ".github/**"
+   # A manual binary proof is deliberately nonpublishing. Dispatch from a branch
+   # that contains this workflow, then select a committed branch or SHA with
+   # `build_ref` to run all seven release binary build and runtime-smoke legs.
    workflow_dispatch:
       inputs:
+         build_binaries:
+            description: "Build and smoke all release binaries without publishing"
+            type: boolean
+            default: false
+         build_ref:
+            description: "Committed branch or SHA to build (blank uses the dispatch ref)"
+            type: string
+            default: ""
          skip_npm:
             description: "Skip npm publish"
             type: boolean
@@ -69,6 +80,7 @@ concurrency:
 
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+   UV_VERSION: "0.12.3"
 
 permissions:
    contents: read
@@ -83,7 +95,8 @@ jobs:
    # `release_metadata` resolves that tag once so downstream jobs switch on
    # `is-release` and address the tag by name — `github.ref` is
    # `refs/heads/main` here, not the tag. A `workflow_dispatch` from a `v*` tag
-   # ref (or from a tagged main HEAD) is also treated as a release.
+   # ref (or from a tagged main HEAD) is also treated as a release unless the
+   # explicit nonpublishing binary-proof input is enabled.
    release_metadata:
       name: Resolve release metadata
       # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
@@ -108,16 +121,18 @@ jobs:
            run: |
               is_release=false
               release_tag=""
-              case "${{ github.ref }}" in
-                refs/tags/v[0-9]*)
-                  release_tag="${{ github.ref_name }}"
-                  ;;
-                refs/heads/main)
-                  if [ "${{ github.event_name }}" != "pull_request" ]; then
-                    release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
-                  fi
-                  ;;
-              esac
+              if [ "${{ github.event_name }}" != "workflow_dispatch" ] || [ "${{ inputs.build_binaries }}" != "true" ]; then
+                case "${{ github.ref }}" in
+                  refs/tags/v[0-9]*)
+                    release_tag="${{ github.ref_name }}"
+                    ;;
+                  refs/heads/main)
+                    if [ "${{ github.event_name }}" != "pull_request" ]; then
+                      release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
+                    fi
+                    ;;
+                esac
+              fi
               if [ -n "$release_tag" ]; then
                 echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
                 is_release=true
@@ -129,6 +144,7 @@ jobs:
 
    check:
       name: Lint, type check & web build
+      if: ${{ !inputs.build_binaries }}
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
@@ -145,7 +161,7 @@ jobs:
    # release. A skipped required check still satisfies branch protection.
    rust_validate:
       name: Validate Rust workspace (bazel)
-      if: github.event_name != 'pull_request'
+      if: github.event_name != 'pull_request' && !inputs.build_binaries
       runs-on: omp-kata
       steps:
          - uses: actions/checkout@v4
@@ -192,9 +208,18 @@ jobs:
    # bazel. Job name says "bazel" for continuity with required checks.
    native_addons:
       name: Build native addons (bazel)
-      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      runs-on: ${{ (github.event_name == 'pull_request' || inputs.build_binaries) && 'ubuntu-22.04' || 'omp-kata' }}
       steps:
          - uses: actions/checkout@v4
+           with:
+              ref: ${{ inputs.build_ref || github.sha }}
+         - name: Install Bazelisk for hosted binary proof
+           if: inputs.build_binaries
+           shell: bash
+           run: |
+              curl -fsSL -o "$RUNNER_TEMP/bazelisk" https://github.com/bazelbuild/bazelisk/releases/download/v1.29.0/bazelisk-linux-amd64
+              echo "5a408715e932c0250d28bd84555f12edbf70117de42f9181691c736eacc4a992  $RUNNER_TEMP/bazelisk" | sha256sum -c -
+              sudo install -m 0755 "$RUNNER_TEMP/bazelisk" /usr/local/bin/bazelisk
 
          # ---- PR path: latest release addons from npm ----
          - name: Fetch release native addons (npm)
@@ -302,7 +327,7 @@ jobs:
       name: Test TS workspace fast
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
       steps:
          - uses: actions/checkout@v4
@@ -319,13 +344,13 @@ jobs:
               # Not `test:scripts`: scripts/musl-release.test.ts fails on main
               # (its install.sh smoke-check executes a fake binary), so running
               # the whole group here would red this job on an unrelated break.
-              bun test scripts/release.test.ts
+              bun test scripts/release.test.ts scripts/ci-workflow.test.ts
 
    test_coding_agent_singleton:
       name: Test coding-agent singleton/global-state (TS)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 20
       steps:
          - uses: actions/checkout@v4
@@ -343,7 +368,7 @@ jobs:
       name: Test TS native/integration packages
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
       steps:
          - uses: actions/checkout@v4
@@ -361,7 +386,7 @@ jobs:
       name: Test coding-agent UI/TUI (TS)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
       steps:
          - uses: actions/checkout@v4
@@ -379,7 +404,7 @@ jobs:
       name: Test coding-agent runtime/session (TS)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
       steps:
          - uses: actions/checkout@v4
@@ -399,7 +424,7 @@ jobs:
       name: Test coding-agent native/unit (TS)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 25
       steps:
          - uses: actions/checkout@v4
@@ -423,7 +448,7 @@ jobs:
       name: Test CLI smoke (TS)
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       timeout-minutes: 15
       steps:
          - uses: actions/checkout@v4
@@ -439,7 +464,7 @@ jobs:
       name: Install method smoke tests
       runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
       needs: [native_addons]
-      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      if: ${{ !inputs.build_binaries && !cancelled() && needs.native_addons.result == 'success' }}
       steps:
          - uses: actions/checkout@v4
          - uses: ./.github/actions/setup-system-deps
@@ -474,14 +499,15 @@ jobs:
          - run: echo "release validation green"
 
    # Builds (does not publish) the Linux-hosted release binaries in parallel
-   # with the test fan-out; the single need is native_addons, whose artifact
+   # with the test fan-out, or on an explicit manual binary proof; the single
+   # need is native_addons, whose artifact
    # supplies their addons. Darwin builds live in release_binary_darwin so
    # they start at release_metadata time instead. Publishing (npm leaves,
    # GitHub release, core npm) is gated on release_gate downstream.
    release_binary:
       name: "Release binary: ${{ matrix.target_id }}"
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
-         needs.native_addons.result == 'success' }}
+      if: ${{ (needs.release_metadata.outputs.is-release == 'true' || inputs.build_binaries) &&
+         !cancelled() && needs.native_addons.result == 'success' }}
       needs: [release_metadata, native_addons]
       strategy:
          fail-fast: false
@@ -534,9 +560,15 @@ jobs:
          contents: read
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ inputs.build_ref || github.sha }}
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
            with:
               bun-version: "1.3"
+         # --smoke-test provisions IPython through uv on a clean runtime home.
+         - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+           with:
+              version: ${{ env.UV_VERSION }}
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -568,8 +600,15 @@ jobs:
               binary="$(realpath "${{ matrix.binary_path }}")"
               # Bun's musl-target binaries link libstdc++/libgcc dynamically;
               # Alpine users install them alongside the binary (same as bun itself).
-              docker run --rm -v "$binary:/usr/local/bin/omp:ro" alpine:3.22 sh -ec '
-                apk add --no-cache libstdc++ libgcc >/dev/null
+              docker run --rm -e UV_VERSION -v "$binary:/usr/local/bin/omp:ro" alpine:3.22 sh -ec '
+                apk add --no-cache curl libstdc++ libgcc >/dev/null
+                case "$(uname -m)" in
+                  x86_64) uv_arch=x86_64 ;;
+                  aarch64) uv_arch=aarch64 ;;
+                  *) echo "unsupported uv architecture: $(uname -m)" >&2; exit 1 ;;
+                esac
+                curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}-unknown-linux-musl.tar.gz" \
+                  | tar -xz -C /usr/local/bin --strip-components=1
                 runtime_dir="$(mktemp -d)"
                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --version
                 HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --smoke-test
@@ -580,13 +619,42 @@ jobs:
               name: omp-binary-${{ matrix.target_id }}
               path: ${{ matrix.binary_path }}
 
+   # The win32 artifact is cross-compiled on Linux. Manual binary proofs also
+   # execute that exact artifact on Windows, so every selected target gets a
+   # runtime smoke rather than merely a compile check.
+   smoke_release_binary_windows:
+      name: "Smoke release binary: win32-x64"
+      if: ${{ inputs.build_binaries && !cancelled() && needs.release_binary.result == 'success' }}
+      needs: [release_binary]
+      runs-on: windows-2022
+      steps:
+         - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+           with:
+              version: ${{ env.UV_VERSION }}
+         - name: Download Windows release binary
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              name: omp-binary-win32-x64
+              path: ${{ runner.temp }}/omp-binary-win32-x64
+         - name: Smoke Windows release binary
+           shell: pwsh
+           run: |
+              $binary = Get-ChildItem -Path "$env:RUNNER_TEMP/omp-binary-win32-x64" -Recurse -Filter omp-windows-x64.exe | Select-Object -First 1
+              if ($null -eq $binary) { throw "Windows release binary artifact is missing" }
+              $runtimeDir = Join-Path $env:RUNNER_TEMP "omp-smoke-$([guid]::NewGuid())"
+              New-Item -ItemType Directory -Force -Path "$runtimeDir/home", "$runtimeDir/xdg" | Out-Null
+              $env:HOME = "$runtimeDir/home"
+              $env:XDG_DATA_HOME = "$runtimeDir/xdg"
+              & $binary.FullName --version
+              & $binary.FullName --smoke-test
+
    # Darwin release builds are the longest leg of a release (bazel-built
    # addons on macOS runners), build their own addons, and touch nothing from
-   # native_addons — so they gate on release_metadata alone and start the
-   # moment the release run is detected, fully overlapped with the tests.
+   # native_addons — so they start with release detection or an explicit manual
+   # binary proof, fully overlapped with the tests.
    release_binary_darwin:
       name: "Release binary: ${{ matrix.target_id }}"
-      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() }}
+      if: ${{ (needs.release_metadata.outputs.is-release == 'true' || inputs.build_binaries) && !cancelled() }}
       needs: [release_metadata]
       strategy:
          fail-fast: false
@@ -611,9 +679,15 @@ jobs:
          MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
       steps:
          - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              ref: ${{ inputs.build_ref || github.sha }}
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
            with:
               bun-version: "1.3"
+         # --smoke-test provisions IPython through uv on a clean runtime home.
+         - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9 # v7
+           with:
+              version: ${{ env.UV_VERSION }}
          - name: Cache bun dependencies
            uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
            with:
@@ -637,7 +711,7 @@ jobs:
            # one (+JIT/library-validation entitlements; omp dlopens its
            # runtime-extracted native addon, which has a different Team ID) and
            # notarizes. Auto-skips until the APPLE_* secrets are configured.
-           if: env.MACOS_SIGNING == 'true'
+           if: needs.release_metadata.outputs.is-release == 'true' && env.MACOS_SIGNING == 'true'
            env:
               APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
               APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}

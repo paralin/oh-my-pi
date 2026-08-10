@@ -108,7 +108,7 @@ function buildNonTextLocalResource(url: InternalUrl, filePath: string, size: num
 }
 
 function buildLargeLocalTextResource(url: InternalUrl, filePath: string, size: number): InternalResource {
-	const content = `[Cannot materialize local:// file '${url.href}' as an internal text resource (${formatLocalByteSize(size)} exceeds ${formatLocalByteSize(LOCAL_TEXT_RESOURCE_MAX_BYTES)}). Use the read tool's filesystem path handling or a line selector so content is streamed with file-size safeguards.]`;
+	const content = `[Cannot materialize local:// file '${url.href}' as an internal text resource (${formatLocalByteSize(size)} exceeds ${formatLocalByteSize(LOCAL_TEXT_RESOURCE_MAX_BYTES)}). Use the workspace read service's filesystem path handling or a line selector so content is streamed with file-size safeguards.]`;
 	return {
 		url: url.href,
 		content,
@@ -324,10 +324,6 @@ export function resolveLocalUrlToPath(
  * shape is a map so additional file-backed schemes can be added without
  * re-plumbing the worker boundary.
  */
-export function buildEvalUrlRoots(options: LocalProtocolOptions): Record<string, string> {
-	return { local: resolveLocalRoot(options) };
-}
-
 const LOCAL_WRITE_NOTE = "Use write path local://<file> to persist large intermediate artifacts across turns.";
 
 type ResolvedLocalTarget =
@@ -404,7 +400,7 @@ async function resolveLocalTarget(url: InternalUrl, opts: LocalProtocolOptions):
  *
  * Options are resolved via {@link LocalProtocolHandler.resolveOptions} so the
  * caller-options → override → registry order matches router resolution exactly.
- * The read tool uses this to detect and emit image files from their real path
+ * The workspace read service uses this to detect and emit image files from their real path
  * before the text-only resource contract would decode the binary into mojibake.
  */
 export async function resolveLocalUrlToFile(

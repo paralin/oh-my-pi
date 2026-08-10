@@ -345,7 +345,6 @@ export class StatusLineComponent implements Component {
 	 * round-trips because the same {@link AgentSession} ref is reused.
 	 */
 	#activeMeters: WeakMap<AgentSession, ActiveMeter> = new WeakMap();
-	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#vibeModeStatus: { enabled: boolean } | null = null;
@@ -593,10 +592,6 @@ export class StatusLineComponent implements Component {
 			this.#activeMeters.set(this.session, meter);
 		}
 		return meter;
-	}
-
-	setPlanModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
-		this.#planModeStatus = status ?? null;
 	}
 
 	setLoopModeStatus(status: NonNullable<SegmentContext["loopMode"]> | undefined): void {
@@ -1602,17 +1597,11 @@ export class StatusLineComponent implements Component {
 		return {
 			session: this.session,
 			focusedAgentId: this.#focusedAgentId,
-			sessionAccent: this.#resolveSettings().sessionAccent !== false,
 			activeRepo: activeRepoCache.activeRepo,
 			width,
 			options: segmentOptions ?? {},
 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
-			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
-			prewalk:
-				typeof this.session.getPrewalkState === "function" && this.session.getPrewalkState()
-					? { enabled: true }
-					: null,
 			goalMode: this.#goalModeStatus,
 			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,

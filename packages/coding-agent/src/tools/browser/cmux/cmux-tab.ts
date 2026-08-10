@@ -2,10 +2,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, postmortem, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
-import { JsRuntime, type RuntimeHooks } from "../../../eval/js/shared/runtime";
-import { callSessionTool } from "../../../eval/js/tool-bridge";
+import { JsRuntime, type RuntimeHooks } from "../../../javascript-runtime/runtime";
 import { resizeImage } from "../../../utils/image-resize";
-import type { ToolSession } from "../../index";
 import { resolveToCwd } from "../../path-utils";
 import { formatScreenshot } from "../../render-utils";
 import {
@@ -259,7 +257,6 @@ export interface RunCmuxCodeOptions {
 	code: string;
 	timeoutMs: number;
 	signal?: AbortSignal;
-	session: ToolSession;
 	snapshot: SessionSnapshot;
 }
 
@@ -1470,10 +1467,6 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 			onDisplay: displayed => {
 				throwIfAborted(signal);
 				output.pushDisplay(displayed);
-			},
-			callTool: (name, args) => {
-				throwIfAborted(signal);
-				return callSessionTool(name, args, { session: opts.session, signal });
 			},
 		};
 		// Like the inline worker fallback, cmux runs user JS in-process: awaited cmux/tool calls

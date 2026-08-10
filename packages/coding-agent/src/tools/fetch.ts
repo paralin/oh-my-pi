@@ -2,20 +2,14 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
-import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
+import { $which, ptree } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import { readEditableNotebookText } from "../edit/notebook";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { type Theme, theme } from "../modes/theme/theme";
-import type { ToolSession } from "../sdk";
 import type { AgentStorage } from "../session/agent-storage";
 import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
-import { renderStatusLine, urlHyperlink } from "../tui";
-import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
+import type { ToolSession } from "../session/tool-session";
 import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
@@ -23,16 +17,14 @@ import { ensureTool } from "../utils/tools-manager";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "../utils/zip";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
-import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
+import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES } from "../web/scrapers/types";
 import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { applyListLimit } from "./list-limit";
-import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
+import { clampTimeout } from "./operation-timeouts";
 import { isReadableUrlPath, type LineRange, parseLineRanges } from "./path-utils";
-import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
+import { formatBytes } from "./render-utils";
 import { listTables, looksLikeSqlite, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
-import { toolResult } from "./tool-result";
-import { clampTimeout } from "./tool-timeouts";
 
 // =============================================================================
 // Types and Constants
@@ -516,7 +508,7 @@ function cleanFeedText(text: string): string {
  * Parse RSS/Atom feed to markdown
  */
 async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<string> {
-	const { parseHTML } = await import("@oh-my-pi/pi-utils/dom");
+	const { parseHTML } = await import("linkedom");
 	try {
 		const doc = parseHTML(content).document;
 
@@ -1557,7 +1549,7 @@ async function renderUrl(
 // Tool Definition
 // =============================================================================
 
-export interface ReadUrlToolDetails {
+export interface ReadUrlDetails {
 	kind: "url";
 	url: string;
 	finalUrl: string;
@@ -1565,13 +1557,12 @@ export interface ReadUrlToolDetails {
 	method: string;
 	truncated: boolean;
 	notes: string[];
-	meta?: OutputMeta;
 }
 
 interface ReadUrlEntry {
 	artifactId?: string;
 	artifactPath?: string;
-	details: ReadUrlToolDetails;
+	details: ReadUrlDetails;
 	image?: FetchImagePayload;
 	output: string;
 	content: string;
@@ -1684,7 +1675,7 @@ export async function materializeReadUrlToFile(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
-): Promise<{ path: string; details: ReadUrlToolDetails }> {
+): Promise<{ path: string; details: ReadUrlDetails }> {
 	if (!session.settings.get("fetch.enabled")) {
 		throw new ToolError("URL reads are disabled by settings.");
 	}
@@ -1706,11 +1697,11 @@ function buildUrlReadOutput(result: FetchRenderResult, content: string): string 
 	return output;
 }
 
-export async function executeReadUrl(
+export async function readUrl(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
-): Promise<AgentToolResult<ReadUrlToolDetails>> {
+): Promise<{ content: Array<TextContent | ImageContent>; details: ReadUrlDetails }> {
 	let entry = await fetchReadUrl(session, params, signal);
 	const truncation = truncateHead(entry.output, {
 		maxBytes: DEFAULT_MAX_BYTES,
@@ -1721,7 +1712,7 @@ export async function executeReadUrl(
 		entry = await ensureReadUrlArtifact(session, entry);
 	}
 	const output = needsArtifact ? truncation.content : entry.output;
-	const details: ReadUrlToolDetails = {
+	const details: ReadUrlDetails = {
 		...entry.details,
 		truncated: Boolean(entry.details.truncated || needsArtifact),
 	};
@@ -1731,178 +1722,5 @@ export async function executeReadUrl(
 		contentBlocks.push({ type: "image", data: entry.image.data, mimeType: entry.image.mimeType });
 	}
 
-	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
-	if (needsArtifact) {
-		resultBuilder.truncation(truncation, { direction: "head", artifactId: entry.artifactId });
-	} else if (entry.details.truncated) {
-		const outputLines = entry.output.split("\n").length;
-		const outputBytes = Buffer.byteLength(entry.output, "utf-8");
-		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
-		const totalLines = outputLines + 1;
-		resultBuilder.truncationFromText(entry.output, {
-			direction: "tail",
-			totalLines,
-			totalBytes,
-			maxBytes: MAX_OUTPUT_CHARS,
-		});
-	}
-
-	return resultBuilder.done();
-}
-
-// =============================================================================
-// TUI Rendering
-// =============================================================================
-
-/** Count non-empty lines */
-function countNonEmptyLines(text: string): number {
-	return text.split("\n").filter(l => l.trim()).length;
-}
-
-function readUrlLinkTarget(input: string): string {
-	try {
-		return parseReadUrlTarget(input)?.path ?? input;
-	} catch {
-		return input;
-	}
-}
-
-function formatReadUrlDescription(input: string): string {
-	const target = readUrlLinkTarget(input);
-	const displayUrl = target.match(/^www\./i) ? `https://${target}` : target;
-	const domain = getDomain(displayUrl);
-	const urlPath = truncate(displayUrl.replace(/^https?:\/\/[^/]+/, ""), 50, "…");
-	const label = `${domain}${urlPath ? ` ${urlPath}` : ""}`.trim();
-	return urlHyperlink(target, label);
-}
-
-function formatReadUrlMetadataValue(url: string, uiTheme: Theme): string {
-	return urlHyperlink(url, uiTheme.fg("mdLinkUrl", url));
-}
-
-/** Render URL read call (URL preview) */
-export function renderReadUrlCall(
-	args: { path?: string; url?: string; raw?: boolean },
-	_options: RenderResultOptions,
-	uiTheme: Theme = theme,
-): Component {
-	const url = args.path ?? args.url ?? "";
-	const description = formatReadUrlDescription(url);
-	const meta: string[] = [];
-	if (args.raw) meta.push("raw");
-	const text = renderStatusLine({ icon: "pending", title: "Read", description, meta }, uiTheme);
-	return new Text(text, 0, 0);
-}
-
-/** Render URL read result with tree-based layout */
-export function renderReadUrlResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: ReadUrlToolDetails; isError?: boolean },
-	options: RenderResultOptions,
-	uiTheme: Theme = theme,
-): Component {
-	const details = result.details;
-
-	if (result.isError || !details) {
-		const rawErrorText = result.content?.find(c => c.type === "text")?.text ?? "";
-		const errorText = (rawErrorText || "No response data").replace(/^Error:\s*/, "");
-		const urlText = details?.finalUrl ?? details?.url ?? "";
-		const description = urlText ? formatReadUrlDescription(urlText) : undefined;
-		const header = renderStatusLine({ icon: "error", title: "Read", description }, uiTheme);
-		const errorLines = errorText.split("\n").map(line => uiTheme.fg("error", replaceTabs(line)));
-		const outputBlock = new CachedOutputBlock();
-		return markFramedBlockComponent({
-			render: (width: number) =>
-				outputBlock.render({ header, state: "error", sections: [{ lines: errorLines }], width }, uiTheme),
-			invalidate: () => outputBlock.invalidate(),
-		});
-	}
-
-	const description = formatReadUrlDescription(details.finalUrl);
-	const hasRedirect = details.url !== details.finalUrl;
-	const hasNotes = details.notes.length > 0;
-	const truncation = details.meta?.truncation;
-	const truncated = Boolean(details.truncated || truncation);
-
-	const header = renderStatusLine(
-		{
-			icon: truncated ? "warning" : "success",
-			title: "Read",
-			description,
-		},
-		uiTheme,
-	);
-
-	const contentText = result.content[0]?.text ?? "";
-	const contentBody = contentText.includes("---\n\n")
-		? contentText.split("---\n\n").slice(1).join("---\n\n")
-		: contentText;
-	const lineCount = countNonEmptyLines(contentBody);
-	const charCount = contentBody.trim().length;
-	const contentLines = contentBody.split("\n").filter(l => l.trim());
-
-	const metadataLines: string[] = [
-		`${uiTheme.fg("muted", "Content-Type:")} ${details.contentType || "unknown"}`,
-		`${uiTheme.fg("muted", "Method:")} ${details.method}`,
-	];
-	if (hasRedirect) {
-		metadataLines.push(
-			`${uiTheme.fg("muted", "Final URL:")} ${formatReadUrlMetadataValue(details.finalUrl, uiTheme)}`,
-		);
-	}
-	const lineLabel = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
-	metadataLines.push(`${uiTheme.fg("muted", "Lines:")} ${lineLabel}`);
-	metadataLines.push(`${uiTheme.fg("muted", "Chars:")} ${charCount}`);
-	if (truncated) {
-		metadataLines.push(uiTheme.fg("warning", `${uiTheme.status.warning} Output truncated`));
-		if (truncation?.artifactId) metadataLines.push(formatStyledArtifactReference(truncation.artifactId, uiTheme));
-	}
-	if (hasNotes) {
-		metadataLines.push(`${uiTheme.fg("muted", "Notes:")} ${details.notes.join("; ")}`);
-	}
-
-	const outputBlock = new CachedOutputBlock();
-	let lastExpanded: boolean | undefined;
-	let contentPreviewLines: string[] | undefined;
-
-	return markFramedBlockComponent({
-		render: (width: number) => {
-			const { expanded } = options;
-
-			if (contentPreviewLines === undefined || lastExpanded !== expanded) {
-				const previewLimit = expanded ? 12 : 3;
-				const previewList = applyListLimit(contentLines, { headLimit: previewLimit });
-				const previewLines = previewList.items.map(line => line.trimEnd());
-				const remaining = Math.max(0, contentLines.length - previewList.items.length);
-				contentPreviewLines =
-					previewLines.length > 0
-						? previewLines.map(line => uiTheme.fg("dim", line))
-						: [uiTheme.fg("dim", "(no content)")];
-				if (remaining > 0) {
-					const hint = formatExpandHint(uiTheme, expanded, true);
-					contentPreviewLines.push(uiTheme.fg("muted", `… ${remaining} more lines${hint ? ` ${hint}` : ""}`));
-				}
-				lastExpanded = expanded;
-				outputBlock.invalidate();
-			}
-
-			return outputBlock.render(
-				{
-					header,
-					state: truncated ? "warning" : "success",
-					sections: [
-						{ label: uiTheme.fg("toolTitle", "Metadata"), lines: metadataLines },
-						{ label: uiTheme.fg("toolTitle", "Content Preview"), lines: contentPreviewLines },
-					],
-					width,
-					applyBg: false,
-				},
-				uiTheme,
-			);
-		},
-		invalidate: () => {
-			outputBlock.invalidate();
-			contentPreviewLines = undefined;
-			lastExpanded = undefined;
-		},
-	});
+	return { content: contentBlocks, details };
 }

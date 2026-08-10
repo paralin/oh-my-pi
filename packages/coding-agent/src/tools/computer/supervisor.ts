@@ -3,7 +3,6 @@ import { withTimeout } from "@oh-my-pi/pi-utils/async";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
 import { workerHostEntry } from "@oh-my-pi/pi-utils/worker-host";
-import type { ToolSession } from "../index";
 import { ToolAbortError, ToolError } from "../tool-errors";
 import {
 	COMPUTER_WORKER_ARG,
@@ -51,13 +50,6 @@ const DEFAULT_TIMEOUTS: ComputerSupervisorTimeouts = {
 	closeMs: CLOSE_TIMEOUT_MS,
 };
 
-/** Dispatches a tool call requested from desktop JavaScript. */
-export type ComputerSessionToolCaller = (
-	name: string,
-	args: unknown,
-	options: { session: ToolSession; signal?: AbortSignal; emitStatus?: () => void },
-) => Promise<unknown>;
-
 /** Creates an isolated computer worker handle. */
 export type ComputerWorkerFactory = () => ComputerWorkerHandle;
 
@@ -65,7 +57,6 @@ interface PendingRun {
 	resolve(value: ComputerRunOk): void;
 	reject(error: unknown): void;
 	signal?: AbortSignal;
-	toolCalls: Map<string, AbortController>;
 }
 
 function wrapWorker(worker: Worker): ComputerWorkerHandle {
@@ -119,24 +110,9 @@ function errorFromPayload(payload: RunErrorPayload): Error {
 	return error;
 }
 
-function toErrorPayload(error: unknown): RunErrorPayload {
-	if (error instanceof Error) {
-		return {
-			name: error.name,
-			message: error.message,
-			stack: error.stack,
-			isAbort: error.name === "AbortError" || error.name === "ToolAbortError",
-			isToolError: error instanceof ToolError || error.name === "ToolError",
-		};
-	}
-	return { name: "Error", message: String(error), isAbort: false, isToolError: false };
-}
-
 /** Supervises one lazy, crash-isolated computer worker per agent session. */
 export class ComputerSupervisor implements ComputerController {
-	readonly #session: ToolSession;
 	readonly #createWorker: ComputerWorkerFactory;
-	readonly #callSessionTool: ComputerSessionToolCaller;
 	readonly #timeouts: ComputerSupervisorTimeouts;
 	#worker?: ComputerWorkerHandle;
 	#startPromise?: Promise<void>;
@@ -150,17 +126,11 @@ export class ComputerSupervisor implements ComputerController {
 	#unsubscribeError?: () => void;
 
 	constructor(
-		session: ToolSession,
 		createWorker: ComputerWorkerFactory = spawnComputerWorker,
 		timeouts: ComputerSupervisorTimeouts = DEFAULT_TIMEOUTS,
-		callSessionTool: ComputerSessionToolCaller = async () => {
-			throw new ToolError("Computer session tool bridge is unavailable");
-		},
 	) {
-		this.#session = session;
 		this.#createWorker = createWorker;
 		this.#timeouts = timeouts;
-		this.#callSessionTool = callSessionTool;
 	}
 
 	async capabilities(): Promise<DesktopCapabilities | undefined> {
@@ -180,11 +150,10 @@ export class ComputerSupervisor implements ComputerController {
 
 		const id = `computer-${++this.#nextId}`;
 		const { promise, resolve, reject } = Promise.withResolvers<ComputerRunOk>();
-		const pending: PendingRun = { resolve, reject, signal, toolCalls: new Map() };
+		const pending: PendingRun = { resolve, reject, signal };
 		this.#pending.set(id, pending);
 		const abort = (): void => {
 			this.#safeSend({ type: "abort", id });
-			for (const controller of pending.toolCalls.values()) controller.abort(signal?.reason);
 		};
 		if (signal?.aborted) abort();
 		else signal?.addEventListener("abort", abort, { once: true });
@@ -244,42 +213,6 @@ export class ComputerSupervisor implements ComputerController {
 			}
 			return;
 		}
-		if (message.type === "tool-call") {
-			void this.#dispatchToolCall(message);
-		}
-	}
-
-	async #dispatchToolCall(message: Extract<ComputerWorkerOutbound, { type: "tool-call" }>): Promise<void> {
-		const pending = this.#pending.get(message.runId);
-		if (!pending) {
-			this.#safeSend({
-				type: "tool-reply",
-				id: message.id,
-				reply: {
-					ok: false,
-					error: { name: "ToolError", message: "No active run for tool call", isToolError: true, isAbort: false },
-				},
-			});
-			return;
-		}
-		const controller = new AbortController();
-		pending.toolCalls.set(message.id, controller);
-		const onParentAbort = (): void => controller.abort(pending.signal?.reason);
-		if (pending.signal?.aborted) onParentAbort();
-		else pending.signal?.addEventListener("abort", onParentAbort, { once: true });
-		try {
-			const value = await this.#callSessionTool(message.name, message.args, {
-				session: this.#session,
-				signal: controller.signal,
-				emitStatus: () => {},
-			});
-			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: true, value } });
-		} catch (error) {
-			this.#safeSend({ type: "tool-reply", id: message.id, reply: { ok: false, error: toErrorPayload(error) } });
-		} finally {
-			pending.toolCalls.delete(message.id);
-			pending.signal?.removeEventListener("abort", onParentAbort);
-		}
 	}
 
 	#safeSend(message: ComputerWorkerInbound): void {
@@ -324,7 +257,6 @@ export class ComputerSupervisor implements ComputerController {
 		this.#unsubscribeError?.();
 		this.#unsubscribeError = undefined;
 		for (const pending of this.#pending.values()) {
-			for (const controller of pending.toolCalls.values()) controller.abort(reason);
 			pending.reject(reason);
 		}
 		this.#pending.clear();

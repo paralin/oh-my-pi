@@ -926,8 +926,7 @@ function getModelRoleAlias(value: string, settings?: ModelRoleLookup): string | 
 	return undefined;
 }
 
-/** Normalize comma-separated or array model selectors into an ordered pattern list. */
-export function normalizeModelPatternList(value: string | string[] | undefined): string[] {
+function normalizeModelPatternList(value: string | string[] | undefined): string[] {
 	if (!value) return [];
 	const patterns = Array.isArray(value) ? value.flatMap(pattern => pattern.split(",")) : value.split(",");
 	return patterns.map(pattern => pattern.trim()).filter(Boolean);
@@ -1139,96 +1138,13 @@ function resolveEffectiveAgentModelSelection(
 	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
 }
 
-/** Effective agent model patterns paired with the pre-expansion role alias behind them. */
-export interface AgentModelSelection {
-	/** Expanded model patterns to spawn with. */
-	patterns: string[];
-	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
-	role: string | undefined;
+/** Return the raw selector source that supplies the effective agent patterns. */
+export function resolveAgentModelSource(options: AgentModelPatternResolutionOptions): string | string[] | undefined {
+	return resolveEffectiveAgentModelSelection(options).source;
 }
 
-/**
- * Resolve an agent's model patterns together with the role identity they were
- * expanded from. Spawn paths MUST take both from this single call: the child's
- * inherited retry-fallback chain is keyed off the role, which the expansion
- * discards, and deriving the two halves separately is how they drift apart.
- */
-export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
-	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
-	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
-}
-
-/** Effective agent model patterns alone, for callers with no interest in role identity. */
 export function resolveAgentModelPatterns(options: AgentModelPatternResolutionOptions): string[] {
 	return resolveEffectiveAgentModelSelection(options).patterns;
-}
-
-/** Default prewalk hand-off target when no explicit target is configured. */
-export const DEFAULT_PREWALK_TARGET = "@smol";
-
-export interface AgentPrewalkResolutionOptions {
-	/** `task.agentPrewalk` settings value for this agent: `"on"`, `"off"`, or a model pattern. */
-	settingsOverride?: string;
-	/** Agent definition `prewalk` frontmatter: `true` = default target, string = custom target pattern. */
-	agentPrewalk?: boolean | string;
-}
-
-/**
- * Effective prewalk target pattern for a subagent, or `undefined` when prewalk
- * is disabled. The settings override decides enablement first ("off" wins,
- * "on" enables with the agent's own target or {@link DEFAULT_PREWALK_TARGET},
- * any other value is a custom target pattern); otherwise the agent
- * definition's `prewalk` field applies. Role aliases in the returned pattern
- * are expanded later by {@link resolveModelOverride}.
- */
-export function resolveAgentPrewalkPattern(options: AgentPrewalkResolutionOptions): string | undefined {
-	const agentPattern =
-		typeof options.agentPrewalk === "string" && options.agentPrewalk.trim() ? options.agentPrewalk.trim() : undefined;
-	const override = options.settingsOverride?.trim();
-	if (override) {
-		const lowered = override.toLowerCase();
-		if (lowered === "off" || lowered === "false") return undefined;
-		if (lowered === "on" || lowered === "true") return agentPattern ?? DEFAULT_PREWALK_TARGET;
-		return override;
-	}
-	if (options.agentPrewalk === true) return DEFAULT_PREWALK_TARGET;
-	return agentPattern;
-}
-
-export interface AgentAdvisorResolutionOptions {
-	/** `task.agentAdvisor` settings value for this agent: `"on"`, `"off"`, or a model pattern. */
-	settingsOverride?: string;
-	/** Agent definition `advisor` frontmatter: `true` = default advisor-role model, string = custom model pattern. */
-	agentAdvisor?: boolean | string;
-}
-
-/** Effective advisor for one spawned agent: absent `model` resolves through the `advisor` role. */
-export interface AgentAdvisorSelection {
-	model?: string;
-}
-
-/**
- * Effective advisor selection for a subagent, or `undefined` when the agent
- * runs unadvised. The settings override decides enablement first ("off" wins,
- * "on" enables with the agent's own model pattern or the `advisor` role, any
- * other value is a custom model pattern); otherwise the agent definition's
- * `advisor` field applies. A returned pattern lands on the spawned session's
- * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
- */
-export function resolveAgentAdvisorSelection(
-	options: AgentAdvisorResolutionOptions,
-): AgentAdvisorSelection | undefined {
-	const agentPattern =
-		typeof options.agentAdvisor === "string" && options.agentAdvisor.trim() ? options.agentAdvisor.trim() : undefined;
-	const override = options.settingsOverride?.trim();
-	if (override) {
-		const lowered = override.toLowerCase();
-		if (lowered === "off" || lowered === "false") return undefined;
-		if (lowered === "on" || lowered === "true") return { model: agentPattern };
-		return { model: override };
-	}
-	if (options.agentAdvisor === true) return {};
-	return agentPattern ? { model: agentPattern } : undefined;
 }
 
 /**

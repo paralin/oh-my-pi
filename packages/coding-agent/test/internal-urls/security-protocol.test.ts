@@ -84,12 +84,6 @@ describe("security://", () => {
 		expect(resource.content).not.toContain("\u001b");
 	});
 
-	test("write is rejected as read-only", async () => {
-		await expect(
-			InternalUrlRouter.instance().write("security://scans/secscan_codexfixture", "mutate", { cwd: repositoryRoot }),
-		).rejects.toThrow("read-only");
-	});
-
 	test("completion includes scan resources", async () => {
 		const completions = await InternalUrlRouter.instance().complete("security", "", { cwd: repositoryRoot });
 		expect(completions?.some(item => item.value === "scans/secscan_codexfixture/findings")).toBeTrue();

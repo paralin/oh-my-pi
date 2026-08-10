@@ -1902,7 +1902,6 @@ function mapOptionsForApi<TApi extends Api>(
 		onPayload: options?.onPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
-		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,
 		fallbacks: options?.fallbacks,
 		acceptEmptyResponse: options?.acceptEmptyResponse,
@@ -2281,15 +2280,8 @@ function mapOptionsForApi<TApi extends Api>(
 				toolChoice: options?.toolChoice,
 			});
 
-		case "cursor-agent": {
-			const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
-			const onToolResult = options?.cursorOnToolResult ?? execHandlers?.onToolResult;
-			return castApi<"cursor-agent">({
-				...base,
-				execHandlers,
-				onToolResult,
-			});
-		}
+		case "cursor-agent":
+			return castApi<"cursor-agent">({ ...base, cwd: options?.cwd });
 
 		case "gitlab-duo-agent":
 			return castApi<"gitlab-duo-agent">({

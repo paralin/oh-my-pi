@@ -153,9 +153,6 @@ const agent = new Agent({
 
   // Dynamic model-scoped API key resolution (for expiring OAuth tokens)
   getApiKey: async (model) => tokenForModel(model),
-
-  // Tool execution context (late-bound UI/session access)
-  getToolContext: () => ({ /* app-defined */ }),
 });
 ```
 

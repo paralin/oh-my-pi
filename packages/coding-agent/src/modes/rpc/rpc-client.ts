@@ -5,12 +5,11 @@
  */
 
 import { isPromise } from "node:util/types";
-import type { AgentEvent, AgentMessage, AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { isRecord, ptree, readJsonl } from "@oh-my-pi/pi-utils";
 import type { FileSink } from "bun";
-import type { BashResult } from "../../exec/bash-executor";
 import type { SessionStats } from "../../session/agent-session";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameDecoder, type RpcProtocolVersion } from "./rpc-frame";
 import {
@@ -27,11 +26,6 @@ import type {
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHandoffResult,
-	RpcHostToolCallRequest,
-	RpcHostToolCancelRequest,
-	RpcHostToolDefinition,
-	RpcHostToolResult,
-	RpcHostToolUpdate,
 	RpcPublishedAgentEvent,
 	RpcResponse,
 	RpcSessionEventFrame,
@@ -68,10 +62,6 @@ export interface RpcClientOptions {
 	sessionDir?: string;
 	/** Additional CLI arguments */
 	args?: string[];
-	/** Grace period before escalating process termination (default: process utility default, 1000ms) */
-	terminationGraceMs?: number;
-	/** Custom tools owned by the embedding host and exposed over the RPC transport */
-	customTools?: RpcClientCustomTool[];
 }
 
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
@@ -83,32 +73,6 @@ export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["pa
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
 
-export interface RpcClientToolContext<TDetails = unknown> {
-	toolCallId: string;
-	signal: AbortSignal;
-	sendUpdate(partialResult: RpcClientToolResult<TDetails>): void;
-}
-
-export type RpcClientToolResult<TDetails = unknown> = AgentToolResult<TDetails> | string;
-
-export interface RpcClientCustomTool<
-	TParams extends Record<string, unknown> = Record<string, unknown>,
-	TDetails = unknown,
-> extends Omit<RpcHostToolDefinition, "parameters"> {
-	parameters: Record<string, unknown>;
-	execute(
-		params: TParams,
-		context: RpcClientToolContext<TDetails>,
-	): Promise<RpcClientToolResult<TDetails>> | RpcClientToolResult<TDetails>;
-}
-
-export function defineRpcClientTool<
-	TParams extends Record<string, unknown> = Record<string, unknown>,
-	TDetails = unknown,
->(tool: RpcClientCustomTool<TParams, TDetails>): RpcClientCustomTool<TParams, TDetails> {
-	return tool;
-}
-
 const agentEventTypes = new Set<AgentEvent["type"]>([
 	"agent_start",
 	"agent_end",
@@ -117,13 +81,13 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"message_start",
 	"message_update",
 	"message_end",
-	"tool_execution_start",
-	"tool_execution_update",
-	"tool_execution_end",
 ]);
 
 const sessionEventTypes = new Set<RpcAgentEventPayload["type"]>([
 	...agentEventTypes,
+	"ipython_cell_start",
+	"ipython_cell_update",
+	"ipython_cell_end",
 	"auto_compaction_start",
 	"auto_compaction_end",
 	"llm_usage",
@@ -206,34 +170,9 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
-function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
-	if (!isRecord(value)) return false;
-	return (
-		value.type === "host_tool_call" &&
-		typeof value.id === "string" &&
-		typeof value.toolCallId === "string" &&
-		typeof value.toolName === "string" &&
-		isRecord(value.arguments)
-	);
-}
-
-function isRpcHostToolCancelRequest(value: unknown): value is RpcHostToolCancelRequest {
-	if (!isRecord(value)) return false;
-	return value.type === "host_tool_cancel" && typeof value.id === "string" && typeof value.targetId === "string";
-}
-
 function isRpcExtensionUiRequest(value: unknown): value is RpcExtensionUIRequest {
 	if (!isRecord(value)) return false;
 	return value.type === "extension_ui_request" && typeof value.id === "string" && typeof value.method === "string";
-}
-
-function normalizeToolResult<TDetails>(result: RpcClientToolResult<TDetails>): AgentToolResult<TDetails> {
-	if (typeof result === "string") {
-		return {
-			content: [{ type: "text", text: result }],
-		};
-	}
-	return result;
 }
 
 /** Failed RPC command; `code` mirrors the server's machine-readable error code when present. */
@@ -271,16 +210,12 @@ export class RpcClient {
 	#availableCommandsUpdateListeners = new Set<RpcAvailableCommandsUpdateListener>();
 	#pendingRequests: Map<string, { resolve: (response: RpcResponse) => void; reject: (error: Error) => void }> =
 		new Map();
-	#customTools: RpcClientCustomTool[] = [];
-	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
 	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
 	#abortController = new AbortController();
 
-	constructor(private options: RpcClientOptions = {}) {
-		this.#customTools = [...(options.customTools ?? [])];
-	}
+	constructor(private options: RpcClientOptions = {}) {}
 
 	/**
 	 * Start the RPC agent process.
@@ -338,11 +273,9 @@ export class RpcClient {
 			this.#abortController.abort(error);
 			const pendingRequests = Array.from(this.#pendingRequests.values());
 			this.#pendingRequests.clear();
-			for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
-			this.#pendingHostToolCalls.clear();
 
 			try {
-				child.kill(undefined, this.options.terminationGraceMs);
+				child.kill();
 			} catch {
 				// The process may already have exited.
 			}
@@ -369,13 +302,6 @@ export class RpcClient {
 			// failures are reaped by the readyPromise catch below; established
 			// workers are reaped here so pending requests cannot hang indefinitely.
 			if (!readySettled) {
-				// Stdout can close before the exit reaper finishes draining stderr.
-				// child.exited settles only after the stderr tail is complete (for
-				// nonzero exits), so give it a bounded head start: the exit watcher
-				// below was registered first and rejects with the real stderr text
-				// instead of an empty "Stderr:" (flaked under full-suite load).
-				await Promise.race([child.exited.catch(() => {}), Bun.sleep(250)]);
-				if (readySettled) return;
 				readySettled = true;
 				readyReject(new Error(`Agent output stream ended before ready. Stderr: ${child.peekStderr()}`));
 				return;
@@ -443,9 +369,6 @@ export class RpcClient {
 					throw new Error("RPC protocol v2 negotiation failed");
 				this.#protocolVersion = 2;
 			}
-			if (this.#customTools.length > 0) {
-				await this.setCustomTools(this.#customTools);
-			}
 		} catch (cause) {
 			// Startup failed after spawning the child. Reap it before returning
 			// so a retry cannot inherit a live worker or its session lock.
@@ -465,15 +388,11 @@ export class RpcClient {
 
 		const error = new Error("Client stopped");
 		const child = this.#process;
-		child.kill(undefined, this.options.terminationGraceMs);
+		child.kill();
 		this.#abortController.abort(error);
 		this.#process = null;
 		for (const request of this.#pendingRequests.values()) request.reject(error);
 		this.#pendingRequests.clear();
-		for (const pendingCall of this.#pendingHostToolCalls.values()) {
-			pendingCall.controller.abort(error);
-		}
-		this.#pendingHostToolCalls.clear();
 		return this.#waitForExit(child);
 	}
 
@@ -826,21 +745,6 @@ export class RpcClient {
 	}
 
 	/**
-	 * Execute a bash command.
-	 */
-	async bash(command: string): Promise<BashResult> {
-		const response = await this.#send({ type: "bash", command });
-		return this.#getData(response);
-	}
-
-	/**
-	 * Abort running bash command.
-	 */
-	async abortBash(): Promise<void> {
-		await this.#send({ type: "abort_bash" });
-	}
-
-	/**
 	 * Get session statistics.
 	 */
 	async getSessionStats(): Promise<SessionStats> {
@@ -1005,27 +909,6 @@ export class RpcClient {
 		}
 	}
 
-	/**
-	 * Replace the host-owned custom tools exposed to the RPC session.
-	 * Changes take effect before the next model call.
-	 */
-	async setCustomTools(tools: RpcClientCustomTool[]): Promise<string[]> {
-		this.#customTools = [...tools];
-		if (!this.#process) {
-			return this.#customTools.map(tool => tool.name);
-		}
-		const definitions: RpcHostToolDefinition[] = this.#customTools.map(tool => ({
-			name: tool.name,
-			label: tool.label,
-			description: tool.description,
-			parameters: tool.parameters,
-			hidden: tool.hidden,
-			loadMode: tool.loadMode,
-		}));
-		const response = await this.#send({ type: "set_host_tools", tools: definitions });
-		return this.#getData<{ toolNames: string[] }>(response).toolNames;
-	}
-
 	// =========================================================================
 	// Helpers
 	// =========================================================================
@@ -1106,20 +989,10 @@ export class RpcClient {
 			}
 		}
 
-		if (isRpcHostToolCallRequest(data)) {
-			void this.#handleHostToolCall(data);
-			return;
-		}
-
 		if (isRpcExtensionUiRequest(data)) {
 			for (const listener of this.#extensionUiListeners) {
 				listener(data);
 			}
-			return;
-		}
-
-		if (isRpcHostToolCancelRequest(data)) {
-			this.#pendingHostToolCalls.get(data.targetId)?.controller.abort();
 			return;
 		}
 
@@ -1212,65 +1085,7 @@ export class RpcClient {
 		return promise;
 	}
 
-	async #handleHostToolCall(request: RpcHostToolCallRequest): Promise<void> {
-		const tool = this.#customTools.find(candidate => candidate.name === request.toolName);
-		if (!tool) {
-			this.#writeFrame({
-				type: "host_tool_result",
-				id: request.id,
-				result: {
-					content: [{ type: "text", text: `Host tool "${request.toolName}" is not registered` }],
-					details: {},
-				},
-				isError: true,
-			} satisfies RpcHostToolResult);
-			return;
-		}
-
-		const controller = new AbortController();
-		this.#pendingHostToolCalls.set(request.id, { controller });
-
-		const sendUpdate = (partialResult: RpcClientToolResult<unknown>): void => {
-			if (controller.signal.aborted) return;
-			this.#writeFrame({
-				type: "host_tool_update",
-				id: request.id,
-				partialResult: normalizeToolResult(partialResult),
-			} satisfies RpcHostToolUpdate);
-		};
-
-		try {
-			const result = await tool.execute(request.arguments, {
-				toolCallId: request.toolCallId,
-				signal: controller.signal,
-				sendUpdate,
-			});
-			if (controller.signal.aborted) return;
-			this.#writeFrame({
-				type: "host_tool_result",
-				id: request.id,
-				result: normalizeToolResult(result),
-			} satisfies RpcHostToolResult);
-		} catch (error) {
-			if (controller.signal.aborted) return;
-			this.#writeFrame({
-				type: "host_tool_result",
-				id: request.id,
-				result: {
-					content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-					details: {},
-				},
-				isError: true,
-			} satisfies RpcHostToolResult);
-		} finally {
-			this.#pendingHostToolCalls.delete(request.id);
-		}
-	}
-
-	#writeFrame(
-		frame: RpcCommand | RpcExtensionUIResponse | RpcHostToolResult | RpcHostToolUpdate,
-		onError?: (error: Error) => void,
-	): void {
+	#writeFrame(frame: RpcCommand | RpcExtensionUIResponse, onError?: (error: Error) => void): void {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}

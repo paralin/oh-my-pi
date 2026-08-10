@@ -1,7 +1,7 @@
 ---
 description: "Prefer runtime.AddCleanup over runtime.SetFinalizer for new code (Go 1.24)"
 condition: 'runtime\.SetFinalizer'
-scope: "tool:edit(*.go), tool:write(*.go)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

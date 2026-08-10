@@ -65,14 +65,11 @@ describe("ModelRegistry default custom models config", () => {
 			modelId: "us.anthropic.claude-opus-4-8",
 		});
 
-		expect(model?.compat).toEqual({
+		expect(model?.compat).toMatchObject({
 			promptCacheMode: "explicit",
 			supportsLongPromptCacheRetention: false,
 			promptCacheMinimumTokens: 1024,
 			promptCacheMaximumCheckpoints: 4,
-			// Reasoning-tier Bedrock stream-stall watchdog widening applies to
-			// overrides too (model compat generation).
-			streamIdleTimeoutMs: 900000,
 		});
 	});
 
@@ -147,7 +144,6 @@ interface ModelSnapshot {
 		supportsLongPromptCacheRetention: boolean;
 		promptCacheMinimumTokens: number;
 		promptCacheMaximumCheckpoints: number;
-		streamIdleTimeoutMs?: number;
 	};
 }
 

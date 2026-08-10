@@ -9,10 +9,8 @@ import {
 	parseModelPattern,
 	parseModelString,
 	pickDefaultAvailableModel,
-	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
-	resolveAgentModelSelection,
-	resolveAgentPrewalkPattern,
+	resolveAgentModelSource,
 	resolveAllowedModels,
 	resolveCliModel,
 	resolveExplicitModelRole,
@@ -819,64 +817,8 @@ describe("resolveModelRoleValue", () => {
 		expect(result.explicitThinkingLevel).toBe(true);
 	});
 });
-describe("resolveAgentPrewalkPattern", () => {
-	test("agent definition alone decides: true → default target, pattern → custom, false/absent → off", () => {
-		expect(resolveAgentPrewalkPattern({ agentPrewalk: true })).toBe("@smol");
-		expect(resolveAgentPrewalkPattern({ agentPrewalk: "@very-smol" })).toBe("@very-smol");
-		expect(resolveAgentPrewalkPattern({ agentPrewalk: false })).toBeUndefined();
-		expect(resolveAgentPrewalkPattern({})).toBeUndefined();
-	});
-
-	test("settings override wins over the agent definition", () => {
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "off", agentPrewalk: true })).toBeUndefined();
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "off", agentPrewalk: "@very-smol" })).toBeUndefined();
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "on", agentPrewalk: false })).toBe("@smol");
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "openai/gpt-4o", agentPrewalk: false })).toBe(
-			"openai/gpt-4o",
-		);
-	});
-
-	test("override 'on' keeps the agent's custom target when one is defined", () => {
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "on", agentPrewalk: "@very-smol" })).toBe("@very-smol");
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "on" })).toBe("@smol");
-	});
-
-	test("blank override falls through to the agent definition", () => {
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "  ", agentPrewalk: true })).toBe("@smol");
-		expect(resolveAgentPrewalkPattern({ settingsOverride: "", agentPrewalk: false })).toBeUndefined();
-	});
-});
-describe("resolveAgentAdvisorSelection", () => {
-	test("agent definition alone decides: true → advisor role, pattern → custom model, false/absent → off", () => {
-		expect(resolveAgentAdvisorSelection({ agentAdvisor: true })).toEqual({});
-		expect(resolveAgentAdvisorSelection({ agentAdvisor: "moonshot/k3" })).toEqual({ model: "moonshot/k3" });
-		expect(resolveAgentAdvisorSelection({ agentAdvisor: false })).toBeUndefined();
-		expect(resolveAgentAdvisorSelection({})).toBeUndefined();
-	});
-
-	test("settings override wins over the agent definition", () => {
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "off", agentAdvisor: true })).toBeUndefined();
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "off", agentAdvisor: "moonshot/k3" })).toBeUndefined();
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "on", agentAdvisor: false })).toEqual({});
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "openai/gpt-4o", agentAdvisor: false })).toEqual({
-			model: "openai/gpt-4o",
-		});
-	});
-
-	test("override 'on' keeps the agent's custom advisor model when one is defined", () => {
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "on", agentAdvisor: "moonshot/k3" })).toEqual({
-			model: "moonshot/k3",
-		});
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "on" })).toEqual({});
-	});
-
-	test("blank override falls through to the agent definition", () => {
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "  ", agentAdvisor: true })).toEqual({});
-		expect(resolveAgentAdvisorSelection({ settingsOverride: "", agentAdvisor: false })).toBeUndefined();
-	});
-});
 describe("resolveAgentModelPatterns", () => {
-	test("pairs the first non-empty source's role with its patterns, skipping aliases with no patterns", () => {
+	test("selects the first non-empty source and skips aliases with no patterns", () => {
 		const settings = Settings.isolated({
 			modelRoles: {
 				empty: "",
@@ -885,34 +827,32 @@ describe("resolveAgentModelPatterns", () => {
 			},
 		});
 
-		expect(
-			resolveAgentModelSelection({
-				requestModel: "",
-				settingsOverride: "@override",
-				agentModel: ["@definition"],
-				settings,
-			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: "override" });
+		const emptyRequest = {
+			requestModel: "",
+			settingsOverride: "@override",
+			agentModel: ["@definition"],
+			settings,
+		};
+		expect(resolveAgentModelPatterns(emptyRequest)).toEqual(["openai/gpt-4o"]);
+		expect(resolveAgentModelSource(emptyRequest)).toBe("@override");
 
-		expect(
-			resolveAgentModelSelection({
-				requestModel: "@empty",
-				settingsOverride: ",,",
-				agentModel: ["@definition"],
-				settings,
-			}),
-		).toEqual({ patterns: ["anthropic/claude-sonnet-4-5"], role: "definition" });
+		const emptyAlias = {
+			requestModel: "@empty",
+			settingsOverride: ",,",
+			agentModel: ["@definition"],
+			settings,
+		};
+		expect(resolveAgentModelPatterns(emptyAlias)).toEqual(["anthropic/claude-sonnet-4-5"]);
+		expect(resolveAgentModelSource(emptyAlias)).toEqual(["@definition"]);
 
-		// An explicit selector carries no role identity, so the child must not
-		// capture the routing of a role that happens to name the same model.
-		expect(
-			resolveAgentModelSelection({
-				requestModel: "openai/gpt-4o",
-				settingsOverride: "@override",
-				agentModel: ["@definition"],
-				settings,
-			}),
-		).toEqual({ patterns: ["openai/gpt-4o"], role: undefined });
+		const concreteRequest = {
+			requestModel: "openai/gpt-4o",
+			settingsOverride: "@override",
+			agentModel: ["@definition"],
+			settings,
+		};
+		expect(resolveAgentModelSource(concreteRequest)).toBe("openai/gpt-4o");
+		expect(resolveExplicitModelRole(resolveAgentModelSource(concreteRequest), settings)).toBeUndefined();
 	});
 
 	test("falls back to the active session model when @task is unset", () => {

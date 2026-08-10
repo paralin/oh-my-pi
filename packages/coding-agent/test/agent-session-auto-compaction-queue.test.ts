@@ -1,18 +1,18 @@
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
-import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import * as logger from "@oh-my-pi/pi-utils/logger";
+import { getProjectAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -36,56 +36,65 @@ describe("AgentSession auto-compaction queue resume", () => {
 	let sessionManager: SessionManager;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
-	beforeAll(async () => {
-		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
-		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		modelRegistry = new ModelRegistry(authStorage);
-	});
 
 	beforeEach(async () => {
+		tempDir = TempDir.createSync("@pi-auto-compaction-queue-");
 		vi.useFakeTimers();
 
-		// Install the short-circuit extension directly. Loading a generated
-		// TypeScript file here used to compile the same fixture for every test.
-		const runtime = new ExtensionRuntime();
-		const extension = await loadExtensionFromFactory(
-			pi => {
-				pi.on("session_before_compact", async event => {
-					getRuntimeSignals().push("before_compact:enter");
-					const gate = (globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> })
-						.__ompManualCompactGate;
-					if (gate) await gate;
-					return {
-						compaction: {
-							summary: "compacted",
-							shortSummary: undefined,
-							firstKeptEntryId: event.preparation.firstKeptEntryId,
-							tokensBefore: event.preparation.tokensBefore,
-							details: {},
-						},
-					};
-				});
-				pi.on("auto_compaction_start", event => {
-					getRuntimeSignals().push(`compaction:start:${event.reason}`);
-				});
-				pi.on("auto_compaction_end", event => {
-					getRuntimeSignals().push(`compaction:end:${event.aborted ? "aborted" : "ok"}`);
-				});
-				pi.on("todo_reminder", event => {
-					getRuntimeSignals().push(`todo:${event.attempt}/${event.maxAttempts}`);
-				});
-			},
-			tempDir.path(),
-			new EventBus(),
-			runtime,
-			"compaction-short-circuit",
+		// Provide an extension that short-circuits compaction so the test doesn't
+		// make any LLM calls.
+		const extensionsDir = path.join(getProjectAgentDir(tempDir.path()), "extensions");
+		fs.mkdirSync(extensionsDir, { recursive: true });
+		const extensionPath = path.join(extensionsDir, "compaction-short-circuit.ts");
+		fs.writeFileSync(
+			extensionPath,
+			[
+				"export default function(pi) {",
+				'\tpi.on("session_before_compact", async (event) => {',
+				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
+				'\t\tsignals.push("before_compact:enter");',
+				"\t\tconst gate = globalThis.__ompManualCompactGate;",
+				"\t\tif (gate) await gate;",
+				"\t\treturn {",
+				"\t\t\tcompaction: {",
+				'\t\t\t\tsummary: "compacted",',
+				"\t\t\t\tshortSummary: undefined,",
+				"\t\t\t\tfirstKeptEntryId: event.preparation.firstKeptEntryId,",
+				"\t\t\t\ttokensBefore: event.preparation.tokensBefore,",
+				"\t\t\t\tdetails: {},",
+				"\t\t\t},",
+				"\t\t};",
+				"\t});",
+				'\tpi.on("auto_compaction_start", async (event) => {',
+				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
+				'\t\tsignals.push("compaction:start:" + event.reason);',
+				"\t});",
+				'\tpi.on("auto_compaction_end", async (event) => {',
+				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
+				'\t\tsignals.push("compaction:end:" + (event.aborted ? "aborted" : "ok"));',
+				"\t});",
+				'\tpi.on("todo_reminder", async (event) => {',
+				`\t\tconst signals = globalThis.${runtimeSignalStoreKey} ?? (globalThis.${runtimeSignalStoreKey} = []);`,
+				'\t\tsignals.push("todo:" + event.attempt + "/" + event.maxAttempts);',
+				"\t});",
+				"}",
+			].join("\n"),
 		);
 
-		sessionManager = SessionManager.inMemory(tempDir.path());
+		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		getRuntimeSignals().length = 0;
 
-		const extensionRunner = new ExtensionRunner([extension], runtime, tempDir.path(), sessionManager, modelRegistry);
+		const extensionsResult = await loadExtensions([extensionPath], tempDir.path());
+		const extensionRunner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
 
 		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!bundled) {
@@ -130,8 +139,10 @@ describe("AgentSession auto-compaction queue resume", () => {
 			await session?.dispose();
 		} finally {
 			try {
+				authStorage?.close();
 				vi.useRealTimers();
 				await Bun.sleep(0);
+				await tempDir?.remove();
 			} finally {
 				getRuntimeSignals().length = 0;
 				(globalThis as typeof globalThis & { __ompManualCompactGate?: Promise<void> }).__ompManualCompactGate =
@@ -139,10 +150,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 				vi.restoreAllMocks();
 			}
 		}
-	});
-	afterAll(() => {
-		authStorage.close();
-		tempDir.removeSync();
 	});
 
 	it("resumes after threshold compaction when only agent-level queued messages exist", async () => {
@@ -269,7 +276,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// listener before `await abort()`, so the abort-finally stranded-message
 		// drain is suppressed while disconnected. Unlike /new (which resets the
 		// queue), compaction preserves the agent queues, so a steer/follow-up that
-		// arrives mid-compaction (async IRC, an xd:// mount notice, an SDK steer)
+		// arrives mid-compaction (async IRC or an SDK steer)
 		// would hang until the next explicit prompt unless compact() re-drains
 		// after reconnecting.
 		session.settings.set("compaction.keepRecentTokens", 1);
@@ -384,153 +391,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(appendCompactionSpy).not.toHaveBeenCalled();
 	});
 
-	it("runs threshold compaction for active goal turns that end with yield", async () => {
-		const now = Date.now();
-		session.setGoalModeState({
-			enabled: true,
-			mode: "active",
-			goal: {
-				id: "goal-threshold",
-				objective: "continue until compacted",
-				status: "active",
-				tokensUsed: 0,
-				timeUsedSeconds: 0,
-				createdAt: now,
-				updatedAt: now,
-			},
-		});
-
-		const yieldCall = {
-			type: "toolCall" as const,
-			id: "call_goal_yield",
-			name: "yield",
-			arguments: { status: "progress" },
-		};
-		const assistantMsg = {
-			role: "assistant" as const,
-			content: [yieldCall],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "toolUse" as const,
-			usage: {
-				input: 190000,
-				output: 1000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: now,
-		};
-
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({
-			type: "tool_execution_end",
-			toolCallId: yieldCall.id,
-			toolName: "yield",
-			isError: false,
-			result: {
-				content: [{ type: "text" as const, text: "Yielded." }],
-				details: { status: "success" },
-			},
-		});
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
-
-		await session.waitForIdle();
-
-		const runtimeSignals = getRuntimeSignals();
-		expect(runtimeSignals).toContain("compaction:start:threshold");
-		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
-	});
-
-	it("runs active-goal threshold compaction after yield followed by a trailing empty stop", async () => {
-		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
-
-		const now = Date.now();
-		session.setGoalModeState({
-			enabled: true,
-			mode: "active",
-			goal: {
-				id: "goal-yield-empty-stop-threshold",
-				objective: "continue after compacting",
-				status: "active",
-				tokensUsed: 0,
-				timeUsedSeconds: 0,
-				createdAt: now,
-				updatedAt: now,
-			},
-		});
-
-		const yieldCall = {
-			type: "toolCall" as const,
-			id: "call_goal_yield_then_empty",
-			name: "yield",
-			arguments: { status: "progress" },
-		};
-		const yieldMsg = {
-			role: "assistant" as const,
-			content: [yieldCall],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "toolUse" as const,
-			usage: {
-				input: 190000,
-				output: 1000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: now,
-		};
-		const trailingEmptyStop = {
-			role: "assistant" as const,
-			content: [],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "stop" as const,
-			usage: {
-				input: 191000,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191001,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: now + 1,
-		};
-
-		session.agent.emitExternalEvent({ type: "message_end", message: yieldMsg });
-		session.agent.emitExternalEvent({
-			type: "tool_execution_end",
-			toolCallId: yieldCall.id,
-			toolName: "yield",
-			isError: false,
-			result: {
-				content: [{ type: "text" as const, text: "Yielded." }],
-				details: { status: "success" },
-			},
-		});
-		session.agent.emitExternalEvent({ type: "message_end", message: trailingEmptyStop });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [yieldMsg, trailingEmptyStop] });
-
-		await session.waitForIdle();
-
-		const runtimeSignals = getRuntimeSignals();
-		expect(runtimeSignals).toContain("compaction:start:threshold");
-		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
-		expect(
-			debugSpy.mock.calls.some(([message, context]) => {
-				if (message !== "agent_end maintenance routing") return false;
-				if (context?.route !== "post-yield-trailing-stop-active-goal-checkCompaction") return false;
-				return context.successfulYield === true;
-			}),
-		).toBe(true);
-	});
-
 	it("triggers threshold compaction in active goals even when per-turn pruning shaves the post-prune estimate below threshold", async () => {
 		// Regression for #3174. Goal mode is the most common scenario: the agent
 		// runs many tool-result-heavy turns and the per-turn "useless" /
@@ -641,7 +501,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("compaction.thresholdPercent", -1);
 		session.settings.set("compaction.strategy", "context-full");
 		session.settings.set("compaction.dropUseless", true);
-		session.settings.set("compaction.supersedeReads", true);
 		session.settings.set("compaction.keepRecentTokens", 10000);
 		session.settings.set("compaction.reserveTokens", 16384);
 

@@ -282,30 +282,6 @@ describe("streaming reveal", () => {
 		expect(textAt(latestMessage(component), 0)).toBe(lastText);
 	});
 
-	it("snaps to full text when a tool call arrives", () => {
-		vi.useFakeTimers();
-		const requestRender = vi.fn();
-		const { component, controller } = makeController({ requestRender });
-
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]));
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-		expect(textAt(latestMessage(component), 0)).toBe("abc");
-
-		controller.setTarget(
-			makeMessage([
-				{ type: "text", text: "abcdefghi" },
-				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
-			]),
-		);
-		const updates = component.messages.length;
-		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 10);
-
-		expect(textAt(latestMessage(component), 0)).toBe("abcdefghi");
-		expect(component.messages).toHaveLength(updates);
-		expect(requestRender).toHaveBeenCalledTimes(1);
-	});
-
 	it("passes the bound component to requestRender on each smooth tick", () => {
 		// The controller must hand its component to `requestRender` so the caller
 		// scopes the render to that subtree via `TUI.requestComponentRender`

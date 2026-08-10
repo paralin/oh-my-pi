@@ -127,7 +127,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 
 /**
  * Whether an assistant turn has visible text, thinking, or image content — i.e.
- * content that closes the current read-tool run.
+ * content that closes the current read request.
  */
 export function assistantHasVisibleContent(message: AssistantAgentMessage): boolean {
 	return message.content.some(
@@ -141,7 +141,7 @@ export function assistantHasVisibleContent(message: AssistantAgentMessage): bool
 /**
  * Split mixed assistant turns into visible text before tool execution and
  * visible text segments that must render immediately after the preceding tool.
- * Cursor can return intro text, tool calls, progress text, and the final answer
+ * A provider can return intro text, tool calls, progress text, and the final answer
  * in one assistant message; keeping every text block in the leading assistant
  * block buries post-tool text above tool results in the transcript.
  */
@@ -212,15 +212,13 @@ function sanitizeRecoveredRetryNote(note: string): string {
 
 /**
  * Resolve the turn-ending assistant error presentation, if any.
- * Silent and user-interrupt aborts yield no label. Recovered retry attempts
- * render a compact note; attempts superseded by an exhausted budget are hidden
- * while the final terminal error keeps its full presentation.
+ * Silent and user-interrupt aborts yield no label. Recovered auto-retry errors
+ * collapse to a single non-error note; terminal errors keep the full red presentation.
  */
 export function resolveAssistantErrorPresentation(
 	message: AssistantAgentMessage,
 	retryAttempt = 0,
 ): AssistantErrorPresentation {
-	if (message.retryRecovery?.status === "superseded") return { kind: "none" };
 	if (message.retryRecovery?.status === "recovered") {
 		return {
 			kind: "compact-recovered",

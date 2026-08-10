@@ -1,6 +1,6 @@
 <todo_context>
-Persisted todos: live progress state for current goal, not old transcript decoration; goal continuations lack visible user nudge → treat as live state.
-Before substantial work: compare next action with todos. If item stale, already finished, or no longer active pointer, call `todo` first: mark done or rewrite list. Do not leave stale in_progress while working on later phases.
+Current persisted todo state for this goal follows. Goal continuations do not get a visible user nudge, so treat this as live progress state, not old transcript decoration.
+Before continuing substantial work, compare your next action with these todos. If an item is stale, already finished, or no longer the active pointer, update it first with `await omp.harness.todo(operation, payload)`. Do not leave a stale in_progress item while working on later phases.
 
 Overall: {{closed}}/{{total}} done, {{open}} open.
 {{#each phases}}

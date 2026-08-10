@@ -114,7 +114,6 @@ function createContext(overrides?: {
 		sessionId: "parent-session",
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
-		getActiveToolNames: vi.fn(() => ["read", "bash"]),
 		modelRegistry: { authStorage: { marker: "auth" } },
 		getAgentId: vi.fn(() => overrides?.agentId),
 		sendCustomMessage: vi.fn(async () => {
@@ -394,7 +393,7 @@ describe("TanCommandController", () => {
 		expect(appendSessionInit).toHaveBeenCalledWith({
 			systemPrompt: "system prompt",
 			task: "park me",
-			tools: ["read", "bash"],
+			tools: ["ipython"],
 		});
 		// Parked (not unregistered) before dispose, then the disposed session is nulled
 		// out — the hub keeps the ref and reads its transcript from the session file.

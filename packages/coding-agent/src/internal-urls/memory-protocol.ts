@@ -298,10 +298,6 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
-		const backend = memoryBackendFromContext(context);
-		if (backend === "off") {
-			throw new Error("Unknown protocol: memory://");
-		}
 		const namespace = url.rawHost || url.hostname;
 		if (!namespace) {
 			throw new Error("memory:// URL requires a namespace: memory://root or memory://<memory-id>");
@@ -322,7 +318,8 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 					const getState = session.getHindsightSessionState;
 					return typeof getState === "function" && getState.call(session) !== undefined;
 				});
-			const hindsightActive = backend === "hindsight" || (mnemopiStates.length === 0 && registryHasHindsight);
+			const hindsightActive =
+				memoryBackendFromContext(context) === "hindsight" || (mnemopiStates.length === 0 && registryHasHindsight);
 			if (hindsightActive) {
 				// Hindsight keeps memories server-side and exposes no
 				// `memory://<id>` addressing, yet the shared `recall` tool

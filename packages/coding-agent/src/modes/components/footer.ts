@@ -194,7 +194,9 @@ export class FooterComponent implements Component {
 				rightSide = `${modelName} • ${resolved ? resolved : `${theme.thinking.autoPending} auto`}`;
 			} else {
 				const thinkingLevel = state.thinkingLevel ?? ThinkingLevel.Off;
-				rightSide = `${modelName} • ${thinkingLevel}`;
+				if (thinkingLevel !== ThinkingLevel.Off) {
+					rightSide = `${modelName} • ${thinkingLevel}`;
+				}
 			}
 		}
 

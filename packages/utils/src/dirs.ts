@@ -620,6 +620,11 @@ export function getPythonEnvDir(): string {
 	return dirs.rootSubdir("python-env", "data");
 }
 
+/** Get the content-versioned IPython runtime cache (~/.omp/cache/ipython-runtime). */
+export function getIpythonRuntimeDir(): string {
+	return dirs.rootSubdir(path.join("cache", "ipython-runtime"), "cache");
+}
+
 /** Get the shared Python gateway state directory (~/.omp/agent/python-gateway; XDG default: $XDG_STATE_HOME/omp/python-gateway). */
 export function getPythonGatewayDir(): string {
 	return dirs.agentSubdir(undefined, "python-gateway", "state");
@@ -831,8 +836,7 @@ export function getDebugLogPath(agentDir?: string): string {
 /**
  * Best-effort one-time copy of a legacy config-root file to its redirected XDG
  * location. Existing installs that enable XDG after the file was created keep
- * their data (e.g. a placeholder key whose loss would break deobfuscation of
- * persisted transcripts). The legacy file is left in place for older omp
+ * their data. The legacy file is left in place for older omp
  * versions sharing the profile.
  */
 function adoptLegacyFile(legacyPath: string, targetPath: string): void {
@@ -845,13 +849,6 @@ function adoptLegacyFile(legacyPath: string, targetPath: string): void {
 		// Opportunistic: a copy race or unwritable XDG dir falls back to a fresh
 		// file at the new path — the pre-adoption behavior.
 	}
-}
-
-/** Get the secret placeholder key path (~/.omp/agent/secret-placeholder.key; XDG default: $XDG_STATE_HOME/omp/secret-placeholder.key). Adopts a legacy key on first XDG resolution. */
-export function getSecretPlaceholderKeyPath(): string {
-	const keyPath = dirs.agentSubdir(undefined, "secret-placeholder.key", "state");
-	adoptLegacyFile(path.join(dirs.agentDir, "secret-placeholder.key"), keyPath);
-	return keyPath;
 }
 
 /** Get the daemon runtime directory for a project (~/.omp/run/daemons/<hash>; XDG default: $XDG_STATE_HOME/omp/run/daemons/<hash>). */

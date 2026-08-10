@@ -9,7 +9,6 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Container, Markdown, Text } from "@oh-my-pi/pi-tui";
 import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
-import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import { stripGeneratedOutputNotice, stripRawOutputArtifactNotice } from "../tools/output-meta";
@@ -34,13 +33,14 @@ import {
 	parseFindingDetails,
 	type SubmitReviewDetails,
 } from "../tools/review";
+import type { ToolRenderOptions } from "../tools/tool-types";
 import { framedBlock, renderStatusLine } from "../tui";
 import { repairDoubleEncodedJsonString } from "./repair-args";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
-import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskToolDetails, YieldItem } from "./types";
+import type { AgentProgress, SingleResult, TaskItem, TaskParams, TaskRunDetails, YieldItem } from "./types";
 import { assembleYieldResult } from "./yield-assembly";
 
-/** Render context threaded in from `ToolExecutionComponent.#buildRenderContext`. */
+/** Render context for task result presentation. */
 interface TaskRenderContext {
 	hasResult?: boolean;
 	/**
@@ -57,7 +57,7 @@ interface TaskRenderContext {
 	 */
 	nowMs?: number;
 }
-type TaskRenderOptions = RenderResultOptions & { renderContext?: TaskRenderContext };
+type TaskRenderOptions = ToolRenderOptions & { renderContext?: TaskRenderContext };
 
 const MAX_NESTED_TASK_RENDER_DEPTH = 8;
 
@@ -1075,7 +1075,7 @@ function renderAgentProgress(
 	// the in-flight snapshot (if any). Surfacing this in the live view means
 	// the user sees deep-tree progress without waiting for this agent to finish
 	// its own turn.
-	const completedTaskCalls = (progress.extractedToolData?.task as TaskToolDetails[] | undefined) ?? [];
+	const completedTaskCalls = (progress.extractedToolData?.task as TaskRunDetails[] | undefined) ?? [];
 	const inflight = progress.inflightTaskDetails;
 	if (completedTaskCalls.length > 0 || inflight) {
 		const snapshots = inflight ? [...completedTaskCalls, inflight] : completedTaskCalls;
@@ -1328,10 +1328,10 @@ function renderAgentResult(
 				continue;
 			}
 
-			const isTaskTool = toolName === "task";
-			if (isTaskTool && (dataArray as unknown[]).length > 0) {
+			const isTaskService = toolName === "task";
+			if (isTaskService && (dataArray as unknown[]).length > 0) {
 				for (const line of renderNestedTaskResults(
-					dataArray as TaskToolDetails[],
+					dataArray as TaskRunDetails[],
 					expanded,
 					theme,
 					seenNestedTasks,
@@ -1346,7 +1346,7 @@ function renderAgentResult(
 			if (handler?.renderFinal && (dataArray as unknown[]).length > 0) {
 				const component = handler.renderFinal(dataArray as unknown[], theme, expanded);
 				const target = lines;
-				if (!isTaskTool) {
+				if (!isTaskService) {
 					hasCustomRendering = true;
 					target.push(`${continuePrefix}${theme.fg("dim", `Tool: ${toolName}`)}`);
 				}
@@ -1481,7 +1481,7 @@ function selectCollapsedResults(ordered: readonly SingleResult[]): readonly Sing
  * Render the tool result.
  */
 export function renderResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: TaskToolDetails; isError?: boolean },
+	result: { content: Array<{ type: string; text?: string }>; details?: TaskRunDetails; isError?: boolean },
 	options: TaskRenderOptions,
 	theme: Theme,
 	args?: TaskParams,
@@ -1628,7 +1628,7 @@ export function renderResult(
 			if (totalRequests > 0) summaryParts.push(theme.fg("dim", `${formatNumber(totalRequests)} req`));
 			summaryParts.push(theme.fg("dim", formatDuration(details.totalDurationMs)));
 			// Wrap the run summary in the theme's bracket glyphs (dim chrome, colored
-			// counts) to match the bash tool's `[Wall: … | Exit: …]` footer.
+			// counts) to match the shell execution `[Wall: … | Exit: …]` footer.
 			lines.push(
 				theme.fg("dim", theme.format.bracketLeft) +
 					summaryParts.join(theme.fg("dim", theme.sep.dot)) +
@@ -1686,12 +1686,12 @@ export function renderResult(
 	});
 }
 
-function isTaskToolDetails(value: unknown): value is TaskToolDetails {
+function isTaskRunDetails(value: unknown): value is TaskRunDetails {
 	return (
 		Boolean(value) &&
 		typeof value === "object" &&
-		"results" in (value as TaskToolDetails) &&
-		Array.isArray((value as TaskToolDetails).results)
+		"results" in (value as TaskRunDetails) &&
+		Array.isArray((value as TaskRunDetails).results)
 	);
 }
 
@@ -1706,7 +1706,7 @@ function nestedMarkers(isLast: boolean, theme: Theme): { prefix: string; continu
 }
 
 function renderNestedTaskResults(
-	detailsList: TaskToolDetails[],
+	detailsList: TaskRunDetails[],
 	expanded: boolean,
 	theme: Theme,
 	seen: WeakSet<object> = new WeakSet<object>(),
@@ -1744,12 +1744,12 @@ function renderNestedTaskResults(
 }
 
 /**
- * Render a list of `TaskToolDetails` snapshots — completed (`results[]`) or
+ * Render a list of `TaskRunDetails` snapshots — completed (`results[]`) or
  * in-flight (`progress[]`) — as an interleaved tree. Used by the live progress
  * view to surface nested subagent activity while this agent is still running.
  */
 function renderNestedTaskTree(
-	detailsList: TaskToolDetails[],
+	detailsList: TaskRunDetails[],
 	expanded: boolean,
 	theme: Theme,
 	spinnerFrame?: number,
@@ -1818,10 +1818,10 @@ function renderNestedTaskTree(
 }
 
 // Register task tool subprocess handler
-subprocessToolRegistry.register<TaskToolDetails>("task", {
+subprocessToolRegistry.register<TaskRunDetails>("task", {
 	extractData: event => {
 		const details = event.result?.details;
-		return isTaskToolDetails(details) ? details : undefined;
+		return isTaskRunDetails(details) ? details : undefined;
 	},
 	renderFinal: (allData, theme, expanded) => {
 		const lines = renderNestedTaskResults(allData, expanded, theme);

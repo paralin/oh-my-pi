@@ -455,11 +455,6 @@ function createCommandHarness(
 			command = { name, ...options };
 		},
 		registerShortcut(): void {},
-		registerTool(): void {},
-		getActiveTools(): string[] {
-			return [];
-		},
-		setActiveTools: async (): Promise<void> => {},
 		sendUserMessage(content: string | unknown[]): void {
 			if (typeof content !== "string") {
 				throw new Error("Expected autoresearch command to send plain text");
@@ -605,11 +600,6 @@ describe("autoresearch tool-call hook", () => {
 			},
 			registerCommand(): void {},
 			registerShortcut(): void {},
-			registerTool(): void {},
-			getActiveTools(): string[] {
-				return [];
-			},
-			async setActiveTools(): Promise<void> {},
 			sendMessage(): void {},
 			sendUserMessage(): void {},
 		} as unknown as ExtensionAPI;

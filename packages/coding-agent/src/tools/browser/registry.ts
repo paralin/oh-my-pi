@@ -112,9 +112,9 @@ export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOpti
 			await disposeBrowserHandle(existing, { kill: false });
 			continue;
 		}
-		// Short-circuit before launching: the tool wrapper's `untilAborted` only
-		// rejects its outer promise on abort; without this check `openBrowserHandle`
-		// would still fire and its result would land in `browsers` below.
+		// Short-circuit before launching: caller cancellation may reject its outer
+		// promise without stopping `openBrowserHandle`, whose result would otherwise
+		// land in `browsers` below.
 		if (opts.signal?.aborted) throw new ToolAbortError("Browser open aborted");
 
 		// Single-flight per key: a concurrent caller already opening this browser

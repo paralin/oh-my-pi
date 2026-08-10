@@ -83,7 +83,7 @@ Normalization points:
 Tool-call argument streaming:
 
 - same `partialJson` accumulation pattern as Anthropic for function-call JSON arguments
-- custom tools stream raw string input and expose final arguments as `{ input: <raw> }`
+- raw-input function calls stream string input and expose final arguments as `{ input: <raw> }`
 - providers that send only `response.function_call_arguments.done` still populate final args
 - tool call IDs are normalized as `"<call_id>|<item_id>"`
 
@@ -187,7 +187,7 @@ Current design favors responsiveness and simple ordering over bounded-buffer flo
 `AgentSession` then consumes those events for session-level behaviors:
 
 - TTSR watches `message_update.assistantMessageEvent` for `text_delta`, `thinking_delta`, and `toolcall_delta`
-- streaming edit guard inspects `toolcall_delta`/`toolcall_end` on `edit` calls and can abort early
+- the agent loop incrementally parses the fixed `ipython` call and executes only a complete admitted cell
 - persistence writes finalized messages at `message_end`
 - auto-retry examines assistant `stopReason === "error"` plus `errorMessage` heuristics
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import type { IpythonCompletedCellPresentation } from "../src/ipython/projection";
 import {
 	encodeRpcFrame,
 	MAX_RPC_FRAME_BYTES,
@@ -279,6 +280,85 @@ describe("RPC frame encoding", () => {
 			success: false,
 			error: "RPC response exceeded the transport limit",
 		});
+	});
+
+	it("keeps typed IPython terminal detail and artifact references while bounding rich binary frames", () => {
+		const binary = "a".repeat(MAX_RPC_FRAME_BYTES * 2);
+		const presentation = {
+			kind: "cell",
+			phase: "complete",
+			cellId: "cell-rpc",
+			executionId: "execute-rpc",
+			sequence: 1,
+			origin: "model",
+			authority: "trusted-cell",
+			code: "display(image)",
+			status: "ok",
+			requestedAt: 1,
+			startedAt: 2,
+			finishedAt: 3,
+			durationMs: 1,
+			stdout: "",
+			stderr: "",
+			result: undefined,
+			events: [{ kind: "result", data: { "text/plain": "image", "image/png": binary } }],
+			errors: [],
+			updates: [],
+			startupProgress: [],
+			safeText: { text: "image\n", truncated: false, totalBytes: 6, outputBytes: 6 },
+			artifacts: [{ path: "/tmp/ipython/image.png", mimeType: "image/png", bytes: 1024, label: "image" }],
+		} satisfies IpythonCompletedCellPresentation;
+		const encoded = encodeRpcFrame({ type: "ipython_cell_end", presentation });
+		expect(Buffer.byteLength(encoded, "utf8")).toBeLessThanOrEqual(MAX_RPC_FRAME_BYTES);
+		const frame = decode(encoded) as {
+			type: string;
+			presentation: {
+				phase: string;
+				artifacts: Array<{ path: string }>;
+				events: Array<{ data: Record<string, unknown> }>;
+			};
+		};
+		expect(frame.type).toBe("ipython_cell_end");
+		expect(frame.presentation.phase).toBe("complete");
+		expect(frame.presentation.artifacts).toEqual([expect.objectContaining({ path: "/tmp/ipython/image.png" })]);
+		expect(String(frame.presentation.events[0]?.data["image/png"])).toContain("elided for RPC frame");
+
+		const encoder = new RpcFrameEncoder();
+		encoder.setProtocolVersion(2);
+		const lines = [...encoder.encodeFrames({ type: "ipython_cell_end", presentation })];
+		expect(lines.length).toBeGreaterThan(1);
+		expect(lines.every(line => Buffer.byteLength(line, "utf8") <= MAX_RPC_FRAME_BYTES)).toBe(true);
+		const decoder = new RpcFrameDecoder();
+		let decoded: object | undefined;
+		for (const line of lines) decoded = decoder.push(JSON.parse(line));
+		expect(decoded).toMatchObject({
+			type: "ipython_cell_end",
+			presentation: { artifacts: [{ path: "/tmp/ipython/image.png" }] },
+		});
+	});
+
+	it("preserves bounded Act events without a private transcript or done value", () => {
+		const event = {
+			type: "act_event",
+			actId: "act-rpc",
+			outerToolCallId: "cell-root",
+			sequence: 4,
+			event: "cell_terminal",
+			cellId: "act-cell",
+			status: "ok",
+			stdout: "bounded stdout",
+			stdoutTruncated: false,
+			stderr: "",
+			stderrTruncated: false,
+			result: "bounded result",
+			resultTruncated: false,
+			errorTruncated: false,
+		};
+		const encoded = encodeRpcFrame(event);
+		expect(Buffer.byteLength(encoded, "utf8")).toBeLessThanOrEqual(MAX_RPC_FRAME_BYTES);
+		expect(decode(encoded)).toEqual(event);
+		expect(encoded).not.toContain("private transcript");
+		expect(encoded).not.toContain("done_value");
 	});
 
 	it("rejects interrupted protocol v2 chunk sequences", () => {

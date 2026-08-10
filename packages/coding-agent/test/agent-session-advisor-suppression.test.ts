@@ -17,10 +17,8 @@
  *     (which converts to `developer`) would send an invalid provider tail, so the
  *     follow-up stays queued for the next explicit resume rather than auto-running.
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { type } from "@oh-my-pi/omptype";
-import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { ToolCall } from "@oh-my-pi/pi-ai";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -31,17 +29,6 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake, TempDir } from "@oh-my-pi/pi-utils";
-
-interface MockYieldDetails {
-	status: "success";
-	data?: unknown;
-	type?: string | string[];
-}
-
-const mockYieldParameters = type({
-	result: "unknown",
-	"type?": "unknown",
-});
 
 const ADVISOR_TYPE = "advisor";
 
@@ -72,7 +59,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	let session: AgentSession;
 	const authStorages: AuthStorage[] = [];
 
-	beforeAll(() => {
+	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-advisor-suppress-");
 	});
 
@@ -82,11 +69,9 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			await session?.dispose();
 		} finally {
 			for (const authStorage of authStorages.splice(0)) authStorage.close();
+			await Bun.sleep(0);
+			await tempDir?.remove();
 		}
-	});
-
-	afterAll(async () => {
-		await tempDir?.remove();
 	});
 
 	/**
@@ -114,62 +99,12 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		const authStorage = await AuthStorage.create(":memory:");
+		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		return { session, sessionManager, mock, streamStarted: started.promise };
-	}
-
-	function readYieldResultData(result: unknown): unknown {
-		if (!result || typeof result !== "object" || !("data" in result)) return undefined;
-		return result.data;
-	}
-
-	function isYieldType(value: unknown): value is string | string[] {
-		return (
-			typeof value === "string" ||
-			(Array.isArray(value) && value.length > 0 && value.every(item => typeof item === "string"))
-		);
-	}
-
-	function createMockYieldTool(): AgentTool<typeof mockYieldParameters, MockYieldDetails> {
-		return {
-			name: "yield",
-			label: "Yield",
-			description: "Mock yield tool",
-			parameters: mockYieldParameters,
-			execute: async (_toolCallId, params) => {
-				const details: MockYieldDetails = { status: "success", data: readYieldResultData(params.result) };
-				if (isYieldType(params.type)) details.type = params.type;
-				return {
-					content: [{ type: "text", text: "Result submitted." }],
-					details,
-				};
-			},
-		};
-	}
-
-	function createYieldMockResponse(args: { result: { data: unknown }; type?: string | string[] }): MockResponse {
-		const toolCall: ToolCall = {
-			type: "toolCall",
-			id: `call_yield_${Snowflake.next()}`,
-			name: "yield",
-			arguments: args,
-		};
-		return {
-			content: [toolCall],
-			stopReason: "toolUse",
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-		};
 	}
 
 	async function createCompletedAdvisorSession(
@@ -186,13 +121,8 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const advisorMock = createMockModel({
 			responses: [
 				{
-					content: [
-						{
-							type: "toolCall",
-							name: "advise",
-							arguments: { note: "Fixture verdict confirmed", severity },
-						},
-					],
+					content: [JSON.stringify({ note: "Fixture verdict confirmed", severity })],
+					stopReason: "stop",
 				},
 				{ content: [], stopReason: "stop" },
 			],
@@ -205,7 +135,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
-		const authStorage = await AuthStorage.create(":memory:");
+		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -214,10 +144,10 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 			extensionRunner: extensionRunner as never,
 		});
+		expect(session.getAdvisorAgent()?.state.tools).toBeUndefined();
 		return { session, sessionManager, mock, advisorMock };
 	}
 
@@ -600,41 +530,6 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		);
 		expect(sawIrc).toBe(true);
 		expect(mock.calls.length).toBe(2);
-	});
-
-	it("stops an idle IRC wake after a terminal yield", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
-		let providerCalls = 0;
-		const mock = createMockModel({
-			handler: () => {
-				providerCalls++;
-				if (providerCalls > 1) {
-					throw new Error("terminal yield must not start a second provider call");
-				}
-				return createYieldMockResponse({ result: { data: { ok: true } } });
-			},
-		});
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [createMockYieldTool()] },
-			streamFn: mock.stream,
-		});
-		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated({ "compaction.enabled": false });
-		const authStorage = await AuthStorage.create(":memory:");
-		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
-		const msg: IrcMessage = { id: "m-yield", from: "peer", to: "me", body: "status?", ts: Date.now() };
-
-		const outcome = await session.deliverIrcMessage(msg);
-		await session.waitForIdle();
-
-		expect(outcome).toBe("woken");
-		expect(providerCalls).toBe(1);
-		expect(mock.calls.length).toBe(1);
 	});
 
 	it("flushes an accepted IRC aside on dispose instead of dropping it", async () => {

@@ -4,10 +4,9 @@
  * Commands are sent as JSON lines on stdin.
  * Responses and events are emitted as JSON lines on stdout.
  */
-import type { AgentMessage, AgentToolResult, ThinkingLevel, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort, ImageContent, Model, ToolExample } from "@oh-my-pi/pi-ai";
-import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { AgentSessionEvent, SessionStats } from "../../session/agent-session";
 import type { FileEntry } from "../../session/session-entries";
@@ -50,8 +49,6 @@ export type RpcCommand =
 	| { id?: string; type: "set_fast_mode"; enabled: boolean }
 	| { id?: string; type: "get_available_commands" }
 	| { id?: string; type: "set_todos"; phases: TodoPhase[] }
-	| { id?: string; type: "set_host_tools"; tools: RpcHostToolDefinition[] }
-	| { id?: string; type: "set_host_uri_schemes"; schemes: RpcHostUriSchemeDefinition[] }
 	| { id?: string; type: "set_subagent_subscription"; level: RpcSubagentSubscriptionLevel }
 	| { id?: string; type: "get_subagents" }
 	| { id?: string; type: "get_subagent_messages"; subagentId?: string; sessionFile?: string; fromByte?: number }
@@ -77,10 +74,6 @@ export type RpcCommand =
 	// Retry
 	| { id?: string; type: "set_auto_retry"; enabled: boolean }
 	| { id?: string; type: "abort_retry" }
-
-	// Bash
-	| { id?: string; type: "bash"; command: string }
-	| { id?: string; type: "abort_bash" }
 
 	// Session
 	| { id?: string; type: "get_session_stats" }
@@ -277,8 +270,6 @@ export type RpcResponse =
 			data: { commands: RpcAvailableSlashCommand[] };
 	  }
 	| { id?: string; type: "response"; command: "set_todos"; success: true; data: { todoPhases: TodoPhase[] } }
-	| { id?: string; type: "response"; command: "set_host_tools"; success: true; data: { toolNames: string[] } }
-	| { id?: string; type: "response"; command: "set_host_uri_schemes"; success: true; data: { schemes: string[] } }
 	| {
 			id?: string;
 			type: "response";
@@ -346,10 +337,6 @@ export type RpcResponse =
 	// Retry
 	| { id?: string; type: "response"; command: "set_auto_retry"; success: true }
 	| { id?: string; type: "response"; command: "abort_retry"; success: true }
-
-	// Bash
-	| { id?: string; type: "response"; command: "bash"; success: true; data: BashResult }
-	| { id?: string; type: "response"; command: "abort_bash"; success: true }
 
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
@@ -522,106 +509,6 @@ export type RpcExtensionUIRequest =
 			launchUrl?: string;
 			instructions?: string;
 	  };
-
-// ============================================================================
-// Host Tool Frames (bidirectional)
-// ============================================================================
-
-export interface RpcHostToolDefinition {
-	name: string;
-	label?: string;
-	description: string;
-	parameters: Record<string, unknown>;
-	hidden?: boolean;
-	/** How this host tool is presented when enabled; omission normalizes to `"discoverable"` at the adapter boundary. */
-	loadMode?: ToolLoadMode;
-}
-
-/** Emitted by the RPC server when it needs the host to execute a registered tool. */
-export interface RpcHostToolCallRequest {
-	type: "host_tool_call";
-	id: string;
-	toolCallId: string;
-	toolName: string;
-	arguments: Record<string, unknown>;
-}
-
-/** Emitted by the RPC server when a pending host tool call should be aborted. */
-export interface RpcHostToolCancelRequest {
-	type: "host_tool_cancel";
-	id: string;
-	targetId: string;
-}
-
-/** Sent by the host to stream partial tool updates back to the RPC server. */
-export interface RpcHostToolUpdate {
-	type: "host_tool_update";
-	id: string;
-	partialResult: AgentToolResult<unknown>;
-}
-
-/** Sent by the host to complete a pending tool call. */
-export interface RpcHostToolResult {
-	type: "host_tool_result";
-	id: string;
-	result: AgentToolResult<unknown>;
-	isError?: boolean;
-}
-
-// ============================================================================
-// Host URI Frames (bidirectional)
-// ============================================================================
-
-export interface RpcHostUriSchemeDefinition {
-	/** URL scheme without trailing `://` (e.g. `db`, `notion`). */
-	scheme: string;
-	/** Optional human-readable description for logs/diagnostics. */
-	description?: string;
-	/** When true, the write tool is allowed to dispatch writes to this scheme. */
-	writable?: boolean;
-	/** When true, downstream callers suppress hashline anchors for resolved content. */
-	immutable?: boolean;
-}
-
-export type RpcHostUriOperation = "read" | "write";
-
-/** Emitted by the RPC server when it needs the host to satisfy a URI operation. */
-export interface RpcHostUriRequest {
-	type: "host_uri_request";
-	id: string;
-	operation: RpcHostUriOperation;
-	url: string;
-	/** Present for write operations. */
-	content?: string;
-}
-
-/** Emitted by the RPC server when a pending URI request should be aborted. */
-export interface RpcHostUriCancelRequest {
-	type: "host_uri_cancel";
-	id: string;
-	targetId: string;
-}
-
-/** Sent by the host to complete a pending URI request. */
-export interface RpcHostUriResult {
-	type: "host_uri_result";
-	id: string;
-	/**
-	 * Required for successful `read` results. Ignored for `write` success.
-	 * Set on errors when a textual explanation accompanies `isError`.
-	 */
-	content?: string;
-	/** Defaults to `text/plain` when omitted. */
-	contentType?: "text/markdown" | "application/json" | "text/plain";
-	/** Optional resolution notes propagated to the read tool. */
-	notes?: string[];
-	/** Overrides the scheme-level `immutable` flag for this single resolution. */
-	immutable?: boolean;
-	/** When true, surface the result content as an error to the caller. */
-	isError?: boolean;
-	/** Optional error message; preferred over `content` for error surfacing. */
-	error?: string;
-}
 
 // ============================================================================
 // Extension UI Commands (stdin)

@@ -1,5 +1,5 @@
 /**
- * Shared types for the hub tool — the merged agent-coordination surface
+ * Shared types for the Hub operation service — the merged agent-coordination surface
  * covering peer messaging (IRC bus), background-job control, and supervised
  * long-running processes (launch).
  */
@@ -7,7 +7,7 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { ParentFailureCode } from "../../parent/generated/parent-environment.pb";
-import type { LaunchParams, LaunchToolDetails } from "./launch";
+import type { LaunchToolDetails } from "./launch";
 
 /**
  * Hub operations: messaging (`send`/`wait`/`inbox`/`list`), jobs
@@ -106,19 +106,6 @@ export interface CoordinationDetails {
 
 /** Hub result details: coordination snapshots or launch (process) state. */
 export type HubDetails = CoordinationDetails | LaunchToolDetails;
-
-/** Partially-streamed hub call arguments, as seen by the renderers. */
-export type HubRenderArgs = {
-	op?: string;
-	to?: string;
-	message?: string;
-	replyTo?: string;
-	await?: boolean;
-	from?: string;
-	timeoutMs?: number;
-	peek?: boolean;
-	ids?: string[];
-} & Partial<Omit<LaunchParams, "op">>;
 
 export function hubErrorResult(text: string, details: CoordinationDetails): AgentToolResult<HubDetails> {
 	return {

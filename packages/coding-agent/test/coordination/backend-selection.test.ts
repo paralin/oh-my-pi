@@ -4,11 +4,11 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { createParentCoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/parent";
 import { PARENT_SESSION_ENV, PARENT_SOCKET_ENV } from "@oh-my-pi/pi-coding-agent/parent/config";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const nativeAgent: AgentDefinition = {
 	name: "task",
@@ -95,16 +95,16 @@ describe("coordination backend selection", () => {
 		});
 		const run = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
 
-		const isolatedTool = await TaskTool.create(session({ "task.isolation.mode": "auto" }));
-		const isolated = await isolatedTool.execute("isolated", {
+		const isolatedTool = await TaskService.create(session({ "task.isolation.mode": "auto" }));
+		const isolated = await isolatedTool.spawn("isolated", {
 			agent: "task",
 			task: "work",
 			isolated: true,
 		});
 		expect(textOf(isolated)).toContain("unsupported_parent_runtime");
 
-		const claudeTool = await TaskTool.create(session());
-		const claude = await claudeTool.execute("claude", {
+		const claudeTool = await TaskService.create(session());
+		const claude = await claudeTool.spawn("claude", {
 			agent: "claude",
 			task: "work",
 		});
@@ -129,8 +129,8 @@ describe("coordination backend selection", () => {
 				temporaryArtifacts: request.temporaryArtifacts,
 			}),
 		}));
-		const tool = await TaskTool.create(session());
-		await tool.execute("native", { agent: "task", task: "work" });
+		const tool = await TaskService.create(session());
+		await tool.spawn("native", { agent: "task", task: "work" });
 		expect(spawn).toHaveBeenCalledTimes(1);
 		expect(spawn.mock.calls[0]?.[0].request.session.coordinationBackend).toBe(backend);
 		expect(localRun).not.toHaveBeenCalled();
@@ -167,11 +167,11 @@ describe("coordination backend selection", () => {
 			};
 		});
 		try {
-			const tool = await TaskTool.create({
+			const tool = await TaskService.create({
 				...session({ "async.enabled": true }),
 				asyncJobManager: manager,
 			});
-			const started = await tool.execute("parent-async", { agent: "task", name: "ExactPeer", task: "work" });
+			const started = await tool.spawn("parent-async", { agent: "task", name: "ExactPeer", task: "work" });
 			const jobId = started.details?.async?.jobId;
 			if (!jobId) throw new Error("Parent Task did not register a local job");
 			await admitted.promise;
@@ -224,11 +224,11 @@ describe("coordination backend selection", () => {
 			};
 		});
 		try {
-			const tool = await TaskTool.create({
+			const tool = await TaskService.create({
 				...session({ "async.enabled": true }),
 				asyncJobManager: manager,
 			});
-			const started = await tool.execute("parent-cancel", { agent: "task", name: "Cancelable", task: "work" });
+			const started = await tool.spawn("parent-cancel", { agent: "task", name: "Cancelable", task: "work" });
 			const jobId = started.details?.async?.jobId;
 			if (!jobId) throw new Error("Parent Task did not register a local job");
 			await admitted.promise;

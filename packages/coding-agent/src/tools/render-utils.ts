@@ -7,7 +7,6 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
@@ -898,29 +897,4 @@ export function formatParseErrorsCountLabel(parseErrors: readonly string[], tota
 	return fullCount > PARSE_ERRORS_LIMIT
 		? `${PARSE_ERRORS_LIMIT} / ${fullCount} parse issues`
 		: `${fullCount} parse issue${fullCount !== 1 ? "s" : ""}`;
-}
-
-// =============================================================================
-// LSP Batching
-// =============================================================================
-
-const LSP_BATCH_TOOLS = new Set(["edit", "write"]);
-
-export interface LspBatchRequest {
-	id: string;
-	flush: boolean;
-}
-
-export function getLspBatchRequest(toolCall: ToolCallContext | undefined): LspBatchRequest | undefined {
-	if (!toolCall) {
-		return undefined;
-	}
-	const hasOtherWrites = toolCall.toolCalls.some(
-		(call, index) => index !== toolCall.index && LSP_BATCH_TOOLS.has(call.name),
-	);
-	if (!hasOtherWrites) {
-		return undefined;
-	}
-	const hasLaterWrites = toolCall.toolCalls.slice(toolCall.index + 1).some(call => LSP_BATCH_TOOLS.has(call.name));
-	return { id: toolCall.batchId, flush: !hasLaterWrites };
 }

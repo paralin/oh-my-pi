@@ -11,7 +11,7 @@ export interface AggregateMetrics extends AgentMetrics {
 	activeDurationAgents: number;
 }
 
-interface AgentTreeProjection {
+export interface AgentTreeProjection {
 	rows: AgentRef[];
 	depthById: Map<string, number>;
 	parentById: Map<string, string>;

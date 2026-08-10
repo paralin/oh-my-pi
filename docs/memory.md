@@ -28,13 +28,13 @@ At session start, if a consolidated summary or manually captured lesson exists f
 
 ### Reading memory artifacts
 
-The agent can read memory files directly using `memory://` URLs with the `read` tool:
+The agent can read memory files through the typed workspace service, for example `await omp.files.read("memory://root")`:
 
 | URL                                    | Content                              |
 | -------------------------------------- | ------------------------------------ |
 | `memory://root`                        | Compact summary injected at startup  |
 | `memory://root/MEMORY.md`              | Full long-term memory document       |
-| `memory://root/learned.md`             | Lessons captured by the `learn` tool |
+| `memory://root/learned.md`             | Legacy captured lessons              |
 | `memory://root/skills/<name>/SKILL.md` | A generated skill playbook           |
 
 ### `/memory` slash command
@@ -47,16 +47,29 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 | `clear` / `reset`     | Delete active backend memory data/artifacts               |
 | `enqueue` / `rebuild` | Force consolidation/retention work for the active backend |
 
-### Capturing lessons
+### Capturing records
 
-Enable `autolearn.enabled` to make the `learn` tool available:
+`omp.memory` manages continual-harness records. Create a durable session-local
+or global harness record with it, and use `omp.skills` for a reusable harness
+skill:
 
-```yaml
-autolearn:
-  enabled: true
+```python
+import omp
+
+await omp.memory.create("project-convention", "Prefer Bun APIs in this repository.")
+await omp.skills.create("bun-workflow", "Use Bun for package scripts and checks.")
 ```
 
-With the local backend active, `learn` saves explicit durable lessons to the project's `learned.md`. Lessons are newest-first, deduplicated, secret-redacted, capped at 100 entries, and injected starting with the next session; a `learn` call does not mutate the active session's prompt-cache prefix. Each lesson's content is capped at 2,000 characters and optional context at 400 characters. Structured memory search, `recall`, `retain`, `reflect`, and `memory_edit` are not available for the local backend.
+These records are host-managed. They default to the session-local harness
+sidecar; pass `global_=True` only when a record should be available to future
+sessions. They do not change the active provider prompt mid-session or search
+or change the configured long-term-memory backend.
+
+For Hindsight or Mnemopi, use `omp.long_term_memory.retain`, `recall`, and
+`reflect`; Mnemopi also supports `update`, `forget`, and `invalidate`. When
+`autolearn.enabled` is set, `omp.long_term_memory.learn` stores a lesson and
+can include an optional managed-skill mutation. Its result reports
+`partial=True` if the lesson persisted but that skill mutation failed.
 
 ## How it works
 
@@ -74,7 +87,7 @@ The separately maintained `learned.md` is not overwritten by consolidation.
 
 Phase 2 uses a lease and heartbeat to prevent double-running when multiple processes start simultaneously. Stale skill directories from prior runs are pruned automatically.
 
-Consolidated output is redacted for common secret/token patterns before `MEMORY.md`, `memory_summary.md`, or generated skills are written to disk.
+Memory content is not automatically redacted: secret-looking text is retained verbatim in `MEMORY.md`, `memory_summary.md`, generated skills, and learned lessons. JSON/data validation, output bounds, skill-path validation, and prompt-structure neutralization for learned lessons still apply.
 
 ### Extraction behavior
 

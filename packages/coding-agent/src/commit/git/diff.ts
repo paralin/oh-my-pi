@@ -27,7 +27,7 @@ export function parseFileDiffs(diff: string): FileDiff[] {
 		if (!part.trim()) continue;
 		const lines = part.split("\n");
 		const header = lines[0] ?? "";
-		const match = header.match(/diff --git a\/(.+?) b\/(.+)$/);
+		const match = header.match(/diff --git [^\s/]+\/(.+?) [^\s/]+\/(.+)$/);
 		if (!match) continue;
 		const filename = match[2];
 		const content = part;

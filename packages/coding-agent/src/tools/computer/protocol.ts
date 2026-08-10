@@ -14,15 +14,11 @@ export interface ComputerSessionSnapshot {
 	readOnly: boolean;
 }
 
-/** Reply envelope for a session tool invoked by desktop JavaScript. */
-export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
-
 /** Commands accepted by the persistent computer worker. */
 export type ComputerWorkerInbound =
 	| { type: "ping"; id: string }
 	| { type: "run"; id: string; code: string; timeoutMs: number; session: ComputerSessionSnapshot }
 	| { type: "abort"; id: string }
-	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 
 /** Successful computer run output returned to the tool supervisor. */
@@ -58,7 +54,6 @@ export type ComputerWorkerOutbound =
 	| { type: "pong"; id: string }
 	| { type: "result"; id: string; ok: true; payload: ComputerRunOk }
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
-	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "closed" };
 
 /** Transport used by the worker core in Bun workers and tests. */

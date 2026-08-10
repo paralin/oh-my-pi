@@ -74,7 +74,7 @@ describe("issue #956: interactive /mcp test", () => {
 		const showStatus = vi.fn();
 		const requestRender = vi.fn();
 		const addChild = vi.fn();
-		const refreshMCPTools = vi.fn();
+		const refreshMCPInstructions = vi.fn();
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		const listTools = vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		const disconnectServer = vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
@@ -92,7 +92,7 @@ describe("issue #956: interactive /mcp test", () => {
 			editor: {},
 			showError,
 			showStatus,
-			session: { refreshMCPTools },
+			session: { refreshMCPInstructions },
 			mcpManager: {
 				prepareConfig: vi.fn(async config => config),
 				getConnectionStatus: vi.fn(() => "connected"),

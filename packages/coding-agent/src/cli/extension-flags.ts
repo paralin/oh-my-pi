@@ -24,8 +24,7 @@ export interface ExtensionFlagSink {
  * `--flag=value`).
  *
  * {@link parseArgs} lets a registered flag shadow a same-named built-in, so even
- * a built-in-colliding flag (e.g. plan-mode's boolean `--plan`, which would
- * otherwise hit the built-in plan-model branch) is parsed with the extension's
+ * a built-in-colliding flag is parsed with the extension's
  * semantics and surfaces in `unknownFlags` — without consuming the following
  * message or overwriting the built-in field. No built-in name list to maintain.
  *

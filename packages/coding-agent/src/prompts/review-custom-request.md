@@ -1,18 +1,21 @@
 ## Code Review Request
 
-Mode: custom instructions.
+### Mode
 
-## Distribution
+Custom review instructions
 
-Use `task`: `agent: "reviewer"`, `tasks` array. Create exactly **1 reviewer task**; assignment MUST include custom instructions.
+### Distribution Guidelines
 
-## Reviewer Instructions
+From IPython, admit reviewer children with `await rlm(...)`; make independent admissions together and collect their replies through `agent_message`.
+Create exactly **1 reviewer task**. Its assignment MUST include the custom instructions below.
+
+### Reviewer Instructions
 
 Reviewer MUST:
-1. Follow custom instructions.
-2. Read referenced files/workspace context needed to evaluate them.
-3. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool.
+1. Follow the custom instructions below
+2. Read the referenced files or workspace context needed to evaluate them
+3. Use incremental `yield` sections for findings and verdict fields; do NOT call a separate finding tool
 
-## Custom Instructions
+### Custom Instructions
 
 {{instructions}}

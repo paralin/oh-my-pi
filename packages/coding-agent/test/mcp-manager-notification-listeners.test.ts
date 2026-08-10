@@ -180,7 +180,7 @@ describe("MCPManager notification listeners", () => {
 
 	it("refreshServerTools awaits an async setOnToolsChanged handler before resolving", async () => {
 		// Verifies the second-layer guarantee (issue raised in review):
-		// #onToolsChanged in the sdk.ts wiring calls session.refreshMCPTools()
+		// #onToolsChanged in the sdk.ts wiring calls session.refreshMCPInstructions()
 		// asynchronously. If refreshServerTools does not await the callback,
 		// a mcp_notification listener acting on tools/list_changed can call
 		// getAllTools() on the session before its registry has been rebound.

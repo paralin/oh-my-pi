@@ -4,7 +4,6 @@ description: MUST be used for exploratory codebase research, rapid code analysis
 tools: read, grep, glob, web_search
 model: "@smol"
 thinking-level: medium
-read-summarize: false
 output:
   properties:
     summary:
@@ -41,13 +40,13 @@ Investigate the codebase rapidly. Return structured findings another agent can u
 <thoroughness>
 You MUST infer the thoroughness from the task; default to medium:
 - **Quick**: Targeted lookups, key files only
-- **Medium**: Follow imports, read critical sections
+- **Medium**: Follow imports and inspect critical sections
 - **Thorough**: Trace all dependencies, check tests/types.
 </thoroughness>
 
 <procedure>
 1. Locate relevant code using tools.
-2. Read key sections. NEVER read full files unless they're tiny.
+2. Inspect key sections. NEVER load full files unless they're tiny.
 3. Identify types/interfaces/key functions.
 4. Note dependencies between files.
 </procedure>

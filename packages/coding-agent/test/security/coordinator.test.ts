@@ -116,24 +116,25 @@ describe("native security coordinator", () => {
 				content: [
 					{
 						type: "toolCall",
-						name: "security_publish",
+						name: "ipython",
 						arguments: {
-							findings: [
-								{
-									rule_id: "fixture.command-injection",
-									title: "Untrusted command reaches a shell",
-									summary: "A fixture value is interpolated into a shell command.",
-									severity: "high",
-									confidence: "high",
-									category: "command-injection",
-									locations: [{ path: "src/app.ts", start_line: 1, role: "sink" }],
-									evidence: [{ label: "shell sink", explanation: "Fixture evidence" }],
-									remediation: "Use an argument-vector API.",
-									validation: "validated",
-								},
-							],
-							coverage: { completeness: "complete" },
-							report: "# Fixture security report\n\nOne validated finding.\n",
+							code: `import omp
+await omp.security.publish(
+    findings=[{
+        "rule_id": "fixture.command-injection",
+        "title": "Untrusted command reaches a shell",
+        "summary": "A fixture value is interpolated into a shell command.",
+        "severity": "high",
+        "confidence": "high",
+        "category": "command-injection",
+        "locations": [{"path": "src/app.ts", "start_line": 1, "role": "sink"}],
+        "evidence": [{"label": "shell sink", "explanation": "Fixture evidence"}],
+        "remediation": "Use an argument-vector API.",
+        "validation": "validated",
+    }],
+    coverage={"completeness": "complete"},
+    report="# Fixture security report\\n\\nOne validated finding.\\n",
+)`,
 						},
 					},
 				],
@@ -154,7 +155,7 @@ describe("native security coordinator", () => {
 			initialCwd: repositoryRoot,
 		});
 		expect(reopened.getSessionId()).toBeTruthy();
-	});
+	}, 30_000);
 
 	test("records a terminal failure when initial scan persistence fails", async () => {
 		const mock = createMockModel({ id: "security-mock", provider: "openai-codex" });

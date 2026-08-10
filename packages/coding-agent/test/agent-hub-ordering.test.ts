@@ -524,8 +524,8 @@ describe("Agent hub row ordering", () => {
 	it("retains the live thinking level unless progress has an explicit suffix", () => {
 		geometry = stubStdoutGeometry(140);
 		const agents = new AgentRegistry();
-		const inheritedSession = { thinkingLevel: ThinkingLevel.High } as unknown as AgentSession;
-		const explicitSession = { thinkingLevel: ThinkingLevel.High } as unknown as AgentSession;
+		const inheritedSession = { subscribe() {}, thinkingLevel: ThinkingLevel.High } as unknown as AgentSession;
+		const explicitSession = { subscribe() {}, thinkingLevel: ThinkingLevel.High } as unknown as AgentSession;
 		agents.register({
 			id: "InheritedLevel",
 			displayName: "Inherited level",

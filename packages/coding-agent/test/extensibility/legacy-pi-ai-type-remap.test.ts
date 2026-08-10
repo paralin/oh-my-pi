@@ -97,14 +97,33 @@ describe("legacy-pi @(scope)/pi-ai root `Type` remap (issue #1437)", () => {
 		expect(loaded.probe).toBe(TypeBoxShimType);
 	});
 
+	it("preserves canonical pi-ai exports alongside the shimmed Type (z is still re-exported)", async () => {
+		const entry = await writeFixtureExtension(
+			[
+				'import { Type, z } from "@earendil-works/pi-ai";',
+				"export const obj = Type.Object({ name: Type.String() });",
+				"export const zodObj = z.object({ name: z.string() });",
+			].join("\n"),
+		);
+
+		const loaded = (await loadLegacyPiModule(entry)) as {
+			obj: { safeParse: (input: unknown) => { success: boolean } };
+			zodObj: { safeParse: (input: unknown) => { success: boolean } };
+		};
+
+		expect(loaded.obj.safeParse({ name: "ok" }).success).toBe(true);
+		expect(loaded.zodObj.safeParse({ name: "ok" }).success).toBe(true);
+		expect(loaded.zodObj.safeParse({}).success).toBe(false);
+	});
+
 	it("does not redirect subpath imports such as @oh-my-pi/pi-ai/utils/schema", async () => {
 		const entry = await writeFixtureExtension(
 			[
-				// `arkToWireSchema` is only exported from the subpath, not the root,
+				// `toolWireSchema` is only exported from the subpath, not the root,
 				// so a successful import proves the subpath still resolves directly
 				// against the bundled pi-ai package rather than the shim.
-				'import { arkToWireSchema } from "@oh-my-pi/pi-ai/utils/schema";',
-				"export const fn = arkToWireSchema;",
+				'import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";',
+				"export const fn = toolWireSchema;",
 			].join("\n"),
 		);
 
@@ -241,48 +260,6 @@ describe("legacy pi package root remaps (issue #1474)", () => {
 		expect(["kitty", "iterm2", null]).toContain(loaded.capabilities.images);
 		expect(typeof loaded.capabilities.trueColor).toBe("boolean");
 		expect(typeof loaded.capabilities.hyperlinks).toBe("boolean");
-	});
-
-	it("preserves legacy defineTool root imports and usable coding tools", async () => {
-		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-legacy-coding-tools-"));
-		tempRoots.push(dir);
-		await fs.writeFile(path.join(dir, "sample.txt"), "legacy read body", "utf8");
-		const entry = path.join(dir, "index.ts");
-		await fs.writeFile(
-			entry,
-			[
-				'import { dirname } from "node:path";',
-				'import { fileURLToPath } from "node:url";',
-				'import { createCodingTools, defineTool, Type } from "@earendil-works/pi-coding-agent";',
-				"const definition = {",
-				'\tname: "legacy_define_tool",',
-				'\tlabel: "Legacy Define Tool",',
-				'\tdescription: "legacy helper probe",',
-				"\tparameters: Type.Object({}),",
-				'\texecute: async () => ({ content: [{ type: "text", text: "ok" }] }),',
-				"};",
-				"const cwd = dirname(fileURLToPath(import.meta.url));",
-				"const codingTools = createCodingTools(cwd);",
-				"const readTool = codingTools.find(tool => tool.name === 'read');",
-				"export const tool = defineTool(definition);",
-				"export const sameReference = tool === definition;",
-				"export const codingToolNames = codingTools.map(tool => tool.name);",
-				"export const readResult = await readTool?.execute('legacy-read', { path: 'sample.txt' });",
-			].join("\n"),
-			"utf8",
-		);
-
-		const loaded = (await loadLegacyPiModule(entry)) as {
-			tool: { name: string; parameters: { safeParse: (input: unknown) => { success: boolean } } };
-			sameReference: boolean;
-			codingToolNames: string[];
-			readResult: { content: Array<{ type: string; text?: string }> };
-		};
-
-		expect(loaded.sameReference).toBe(true);
-		expect(loaded.tool.name).toBe("legacy_define_tool");
-		expect(loaded.codingToolNames).toEqual(["read", "bash", "edit", "write"]);
-		expect(loaded.readResult.content[0]?.text).toContain("legacy read body");
 	});
 
 	it("preserves legacy frontmatter helper root imports", async () => {

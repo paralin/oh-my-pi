@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { IpythonCellResult } from "@oh-my-pi/pi-coding-agent/ipython/cell";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import { isQueuedMessageList, splitQueuedMessages } from "@oh-my-pi/pi-coding-agent/modes/queue-input";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -16,6 +17,9 @@ function makeCtx(isStreaming = false) {
 	const followUp = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const steer = vi.fn(async (_text: string, _images?: ImageContent[]) => {});
 	const prompt = vi.fn(async () => false);
+	const executeIpythonCell = vi.fn(
+		async (_request: { code: string; origin: "model" | "direct" }) => ({}) as IpythonCellResult,
+	);
 	const onInputCallback = vi.fn();
 	let text = "";
 	const editor = {
@@ -46,6 +50,7 @@ function makeCtx(isStreaming = false) {
 			followUp,
 			steer,
 			prompt,
+			executeIpythonCell,
 		},
 		focusedAgentId: undefined,
 		collabGuest: undefined,
@@ -78,6 +83,7 @@ function makeCtx(isStreaming = false) {
 		handleMCPCommand,
 		showStatus: ctx.showStatus,
 		prompt,
+		executeIpythonCell,
 	};
 }
 
@@ -89,6 +95,25 @@ function controllerFor(ctx: InteractiveModeContext) {
 }
 
 describe("input controller — slash command history (#3148)", () => {
+	it("runs a $ entry as a direct cell in the model cell namespace", async () => {
+		const namespace = new Map<string, number>();
+		let directResult: IpythonCellResult | undefined;
+		const { ctx, editor, executeIpythonCell } = makeCtx();
+		executeIpythonCell.mockImplementation(async ({ code, origin }: { code: string; origin: "model" | "direct" }) => {
+			if (code === "shared = 41") namespace.set("shared", 41);
+			const result = { origin, result: String(namespace.get(code)) } as IpythonCellResult;
+			if (origin === "direct") directResult = result;
+			return result;
+		});
+		await ctx.session.executeIpythonCell({ code: "shared = 41", origin: "model" });
+		controllerFor(ctx);
+
+		await editor.onSubmit?.("$ shared");
+
+		expect(executeIpythonCell).toHaveBeenLastCalledWith({ code: "shared", origin: "direct" });
+		expect(directResult?.result).toBe("41");
+	});
+
 	it("records a plain handled command (/hotkeys) that has no per-handler history call", async () => {
 		const { ctx, editor, addToHistory } = makeCtx();
 		controllerFor(ctx);

@@ -113,9 +113,7 @@ function createHarness(): Harness {
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
-		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		ui: { requestRender: vi.fn() },
 		resetTranscript: () => ctx.chatContainer.clear(),
 		isBackgrounded: false,
@@ -195,7 +193,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 	test("renders the custom message exactly once after the initial transcript render", async () => {
 		const marker = "issue-1955-marker-text";
 		const harness = createHarness();
-		await harness.controller.initHooksAndCustomTools();
+		await harness.controller.initExtensions();
 
 		const actions = harness.getActions();
 		expect(actions).toBeDefined();
@@ -228,7 +226,7 @@ describe("issue #1955 — sendMessage(display:true) during session_start", () =>
 	test("after the initial render, sendMessage(display:true) still renders the message", async () => {
 		const marker = "issue-1955-late-marker";
 		const harness = createHarness();
-		await harness.controller.initHooksAndCustomTools();
+		await harness.controller.initExtensions();
 
 		// Establish the initial render — the host's `renderInitialMessages`
 		// flips `initialChatRendered` so subsequent extension sends can rebuild.

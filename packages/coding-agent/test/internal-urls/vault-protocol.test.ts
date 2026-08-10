@@ -106,7 +106,7 @@ describe("VaultProtocolHandler", () => {
 		expect(() => parseVaultUrl("vault://Work?op=eval")).toThrow("Unsupported vault:// vault op: eval");
 	});
 
-	it("rejects traversal and symlink escapes for reads and writes", async () => {
+	it("rejects traversal and symlink escapes for reads", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
 			await fs.mkdir(root, { recursive: true });
@@ -119,9 +119,6 @@ describe("VaultProtocolHandler", () => {
 			await expect(handler.resolve(resourceUrl("vault://Work/%2E%2E/secret.md"))).rejects.toThrow(
 				"Path traversal (..) is not allowed in vault:// URLs",
 			);
-			await expect(handler.write(resourceUrl("vault://Work//absolute.md"), "x")).rejects.toThrow(
-				"Absolute paths are not allowed in vault:// URLs",
-			);
 
 			if (process.platform === "win32") return;
 
@@ -131,9 +128,6 @@ describe("VaultProtocolHandler", () => {
 			await fs.symlink(outside, path.join(root, "linked"));
 
 			await expect(handler.resolve(resourceUrl("vault://Work/linked/secret.md"))).rejects.toThrow(
-				"vault:// URL escapes vault root",
-			);
-			await expect(handler.write(resourceUrl("vault://Work/linked/new.md"), "new")).rejects.toThrow(
 				"vault:// URL escapes vault root",
 			);
 		});
@@ -183,47 +177,15 @@ describe("VaultProtocolHandler", () => {
 			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault", "info", "path"]);
 		});
 	});
-
-	it("targets a named vault by prepending vault= before the vault info subcommand", async () => {
-		await withTempDir(async tempDir => {
-			const root = path.join(tempDir, "work-vault");
-			await fs.mkdir(root, { recursive: true });
-			await Bun.write(path.join(root, "note.md"), "note");
-			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
-			const spawnSpy = vi.spyOn(vaultProtocol, "spawnObsidian").mockResolvedValue({
-				stdout: `name\tWork\npath\t${root}\n`,
-				stderr: "",
-				exitCode: 0,
-			});
-			const handler = testHandler(vaultProtocol.spawnObsidian);
-
-			await handler.resolve(resourceUrl("vault://Work"));
-
-			expect(spawnSpy).toHaveBeenCalledTimes(1);
-			expect(spawnSpy.mock.calls[0][1]).toEqual(["vault=Work", "vault", "info"]);
-		});
-	});
-	it("writes files through the protocol hook and resolves cached vault paths for edit plumbing", async () => {
+	it("resolves cached vault paths for workspace filesystem operations", async () => {
 		await withTempDir(async tempDir => {
 			const root = path.join(tempDir, "vault");
+			const note = path.join(root, "scratch.md");
 			await fs.mkdir(root, { recursive: true });
+			await Bun.write(note, "new body");
 			VaultProtocolHandler.setVaultDirectoryForTests({ Work: root });
-			const spawnSpy = vi.spyOn(vaultProtocol, "spawnObsidian").mockResolvedValue({
-				stdout: "",
-				stderr: "",
-				exitCode: 0,
-			});
-			const handler = testHandler(vaultProtocol.spawnObsidian);
 
-			await handler.write(resourceUrl("vault://Work/scratch.md"), "new body");
-			const resource = await handler.resolve(resourceUrl("vault://Work/scratch.md"));
-
-			expect(await Bun.file(path.join(root, "scratch.md")).text()).toBe("new body");
-			expect(resource.content).toBe("new body");
-			expect(resolveVaultUrlToPath("vault://Work/scratch.md")).toBe(
-				await fs.realpath(path.join(root, "scratch.md")),
-			);
-			expect(spawnSpy).not.toHaveBeenCalled();
+			expect(resolveVaultUrlToPath("vault://Work/scratch.md")).toBe(await fs.realpath(note));
 		});
 	});
 
@@ -310,31 +272,31 @@ describe("VaultProtocolHandler", () => {
 		}
 
 		expect(calls).toEqual({
-			outline: ["vault=Work", "outline", "path=Note.md", "format=md"],
-			backlinks: ["vault=Work", "backlinks", "path=Note.md", "counts", "format=tsv"],
-			links: ["vault=Work", "links", "path=Note.md"],
-			fileTags: ["vault=Work", "tags", "path=Note.md", "counts", "format=json"],
-			fileProperties: ["vault=Work", "properties", "path=Note.md", "format=yaml"],
-			fileTasks: ["vault=Work", "tasks", "path=Note.md", "verbose", "format=json"],
-			wordcount: ["vault=Work", "wordcount", "path=Note.md"],
-			history: ["vault=Work", "history", "path=Note.md"],
-			base: ["vault=Work", "base:query", "path=Note.md", "view=Main", "format=md"],
-			search: ["vault=Work", "search:context", "query=plan", "path=Folder", "limit=5", "case", "format=json"],
-			daily: ["vault=Work", "daily:read"],
-			dailyPath: ["vault=Work", "daily:path"],
-			vaultTags: ["vault=Work", "tags", "counts", "format=json"],
-			tag: ["vault=Work", "tag", "name=#todo", "verbose"],
-			vaultTasks: ["vault=Work", "tasks", "todo", "verbose", "format=json"],
-			orphans: ["vault=Work", "orphans"],
-			unresolved: ["vault=Work", "unresolved", "counts", "verbose", "format=json"],
-			deadends: ["vault=Work", "deadends"],
-			bases: ["vault=Work", "bases"],
-			bookmarks: ["vault=Work", "bookmarks", "verbose", "format=json"],
-			recents: ["vault=Work", "recents"],
-			templates: ["vault=Work", "templates"],
-			aliases: ["vault=Work", "aliases", "verbose", "format=json"],
-			vaultProperties: ["vault=Work", "properties", "counts", "format=yaml"],
-			property: ["vault=Work", "property:read", "name=status", "path=Note.md"],
+			outline: ["outline", "path=Note.md", "format=md", "vault=Work"],
+			backlinks: ["backlinks", "path=Note.md", "counts", "format=tsv", "vault=Work"],
+			links: ["links", "path=Note.md", "vault=Work"],
+			fileTags: ["tags", "path=Note.md", "counts", "format=json", "vault=Work"],
+			fileProperties: ["properties", "path=Note.md", "format=yaml", "vault=Work"],
+			fileTasks: ["tasks", "path=Note.md", "verbose", "format=json", "vault=Work"],
+			wordcount: ["wordcount", "path=Note.md", "vault=Work"],
+			history: ["history", "path=Note.md", "vault=Work"],
+			base: ["base:query", "path=Note.md", "view=Main", "format=md", "vault=Work"],
+			search: ["search:context", "query=plan", "path=Folder", "limit=5", "case", "format=json", "vault=Work"],
+			daily: ["daily:read", "vault=Work"],
+			dailyPath: ["daily:path", "vault=Work"],
+			vaultTags: ["tags", "counts", "format=json", "vault=Work"],
+			tag: ["tag", "name=#todo", "verbose", "vault=Work"],
+			vaultTasks: ["tasks", "todo", "verbose", "format=json", "vault=Work"],
+			orphans: ["orphans", "vault=Work"],
+			unresolved: ["unresolved", "counts", "verbose", "format=json", "vault=Work"],
+			deadends: ["deadends", "vault=Work"],
+			bases: ["bases", "vault=Work"],
+			bookmarks: ["bookmarks", "verbose", "format=json", "vault=Work"],
+			recents: ["recents", "vault=Work"],
+			templates: ["templates", "vault=Work"],
+			aliases: ["aliases", "verbose", "format=json", "vault=Work"],
+			vaultProperties: ["properties", "counts", "format=yaml", "vault=Work"],
+			property: ["property:read", "name=status", "path=Note.md", "vault=Work"],
 		});
 	});
 
@@ -410,14 +372,11 @@ describe("VaultProtocolHandler", () => {
 		});
 	});
 
-	it("refuses resolve, write, and path resolution when vault.enabled is false", async () => {
+	it("refuses resolve and path resolution when vault.enabled is false", async () => {
 		vi.spyOn(vaultProtocol, "isVaultEnabled").mockReturnValue(false);
 		const handler = testHandler(vaultProtocol.spawnObsidian);
 
 		await expect(handler.resolve(resourceUrl("vault://Work/foo.md"))).rejects.toThrow(
-			vaultProtocol.VaultDisabledError,
-		);
-		await expect(handler.write(resourceUrl("vault://Work/foo.md"), "body")).rejects.toThrow(
 			vaultProtocol.VaultDisabledError,
 		);
 		expect(() => resolveVaultUrlToPath("vault://Work/foo.md")).toThrow(vaultProtocol.VaultDisabledError);

@@ -1,11 +1,4 @@
-import type {
-	Agent,
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	StreamFn,
-	ThinkingLevel,
-} from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
 	Effort,
@@ -16,7 +9,6 @@ import type {
 	OAuthAccountSummary,
 	ServiceTierByFamily,
 	SimpleStreamOptions,
-	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
 import type { AdvisorConfig } from "../advisor";
@@ -26,19 +18,32 @@ import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import type { SettingValue } from "../config/settings-schema";
 import type { CoordinationLifecycle } from "../coordination/backend";
-import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
-import type { ExtensionRunner } from "../extensibility/extensions";
+import type { Extension, ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { AgentFamilyService } from "../ipython/agent-family";
+import type { IpythonAskService } from "../ipython/ask-service";
+import type { IpythonAutoQaService } from "../ipython/autoqa-service";
+import type { IpythonBrowserService } from "../ipython/browser-service";
+import type { IpythonComputerService } from "../ipython/computer-service";
+import type { IpythonCronService } from "../ipython/cron-service";
+import type { IpythonGithubService } from "../ipython/github-service";
+import type { IpythonImageService } from "../ipython/image-service";
+import type { PythonSkillPackage } from "../ipython/python-packages";
+import type { IpythonSecurityService } from "../ipython/security-service";
+import type { IpythonVibeService } from "../ipython/vibe-service";
+import type { IpythonWebService } from "../ipython/web-service";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
-import type { SecretObfuscator } from "../secrets/obfuscator";
+import type { MCPManager } from "../mcp/manager";
+import type { TaskAdmissionService } from "../task/admission";
 import type { ConfiguredThinkingLevel } from "../thinking";
-import type { XdevState } from "../tools/xdev";
+import type { ActPrivateSession } from "./act-lane";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { IpythonSessionGenerationFactory } from "./ipython-session";
 import type { SessionManager } from "./session-manager";
 import type { EffectiveIdleThreshold } from "./session-metadata";
 
@@ -48,12 +53,6 @@ export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
 	mnemopiConsolidateTimeoutMs?: number;
-	/**
-	 * Deadline for the settle/drain wait before the terminal memory release
-	 * (default 5s). The bounded-teardown paths (signal handlers, tests) may
-	 * shorten it; late event handlers are still finalized after they settle.
-	 */
-	drainTimeoutMs?: number;
 	/**
 	 * Postmortem reason that triggered this dispose (signal/fatal teardown
 	 * paths). When set, the persisted `session_exit` diagnostic records it
@@ -76,24 +75,6 @@ export interface AsyncJobSnapshot {
 }
 
 export type { ShakeMode, ShakeResult } from "./shake-types";
-
-/**
- * Prewalk switches an active session one-way from its starting model to a
- * fast/cheap target after implementation begins.
- */
-export interface Prewalk {
-	target: Model;
-	thinkingLevel?: ConfiguredThinkingLevel;
-}
-
-/**
- * PlanYolo starts in read-only plan mode, auto-approves the proposal, then
- * switches to a target model for implementation.
- */
-export interface PlanYolo {
-	target: Model;
-	thinkingLevel?: ConfiguredThinkingLevel;
-}
 
 /** Details shown when confirming a usage-reserve-triggered model fallback. */
 export interface UsageFallbackConfirmation {
@@ -123,6 +104,14 @@ export interface InitialRetryFallbackState {
 }
 
 /** Dependencies and initial state used to construct an AgentSession. */
+export type ActPrivateSessionFactory = (options: {
+	model: Model;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	tool: AgentTool;
+	sessionKey: string;
+	signal: AbortSignal;
+}) => Promise<ActPrivateSession>;
+
 export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
@@ -143,22 +132,22 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
-	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
-	prewalk?: Prewalk;
-	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
-	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
 	serviceTierByFamily?: ServiceTierByFamily;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion. */
 	slashCommands?: FileSlashCommand[];
-	/** Extension runner created with wrapped tools. */
+	/** Extension runner created for this session. */
 	extensionRunner?: ExtensionRunner;
+	/** Rebuilds file and inline extension definitions into the existing runtime. */
+	reloadExtensions?: () => Promise<Extension[]>;
 	/** Loaded skills already discovered by the SDK. */
 	skills?: Skill[];
 	/** Skill loading warnings already captured by the SDK. */
 	skillWarnings?: SkillWarning[];
+	/** Validated Python skill packages accepted by the managed IPython runtime. */
+	pythonPackages?: PythonSkillPackage[];
 	/** Whether runtime reloads may rediscover disk-backed skills. */
 	skillsReloadable?: boolean;
 	/** Custom TypeScript slash commands. */
@@ -168,28 +157,30 @@ export interface AgentSessionConfig {
 	memoryAgentDir?: string;
 	/** Recursion depth used to suppress live backend replacement in subagents. */
 	memoryTaskDepth?: number;
-	/** Creates built-in memory tools for the current backend. */
-	createMemoryTools?: () => Promise<AgentTool[]>;
-	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
-	createComputerTool?: () => Promise<AgentTool | null>;
-	/** Creates the private `think` scratchpad tool for runtime setting changes. */
-	createThinkTool?: () => Promise<AgentTool | null>;
-	/** Creates the built-in `inspect_image` tool for session-scoped runtime enablement (see {@link AgentSession.setInspectImageMode}). */
-	createInspectImageTool?: () => Promise<AgentTool | null>;
+	/** Binds structured questions to this session's interactive UI. */
+	createIpythonAskService?: () => IpythonAskService;
+	/** Binds typed Auto-QA reports to the host-owned consent and storage owner. */
+	createIpythonAutoQaService?: () => IpythonAutoQaService;
+	/** Binds typed Vibe worker operations to the task-backed session registry. */
+	createIpythonVibeService?: () => IpythonVibeService;
+	/** Binds web search and fetch owners to this session's tool context. */
+	createIpythonWebService?: () => IpythonWebService;
+	/** Binds scheduled prompts to this session's CronManager. */
+	createIpythonCronService?: () => IpythonCronService;
+	/** Binds GitHub command and cache owners to this session's tool context. */
+	createIpythonGithubService?: () => IpythonGithubService;
+	/** Binds image providers and attachment metadata to this session. */
+	createIpythonImageService?: () => IpythonImageService;
+	/** Binds native security coordination and public provenance to this session. */
+	createIpythonSecurityService?: () => IpythonSecurityService;
+	/** Binds browser supervisor and tab registry to this session. */
+	createIpythonBrowserService?: () => IpythonBrowserService;
+	/** Binds computer supervisor and desktop session to this session. */
+	createIpythonComputerService?: () => IpythonComputerService;
 	/** Model registry for API key resolution and model discovery. */
 	modelRegistry: ModelRegistry;
-	/** Tool registry for LSP and settings. */
-	toolRegistry?: Map<string, AgentTool>;
-	/** Creates tools registered only while vibe mode is active. */
-	createVibeTools?: () => AgentTool[];
-	/** Names whose current registry entry is the built-in implementation. */
-	builtInToolNames?: Iterable<string>;
-	/** MCP names whose initial registry entries came from the manager snapshot. */
-	mcpManagerToolNames?: Iterable<string>;
-	/** Updates tool-session predicates from the live active tool set. */
-	setActiveToolNames?: (names: Iterable<string>) => void;
-	/** Registers the write transport when runtime xdev mounts first need it. */
-	ensureWriteRegistered?: () => Promise<boolean>;
+	/** The sole provider-facing IPython tool for this session. */
+	ipythonTool?: AgentTool;
 	/** Refreshes session-bound services after a logical session transition. */
 	onSessionTransition?: () => void;
 	/** Suspends session-bound services before a fork changes the live session path. */
@@ -223,29 +214,22 @@ export interface AgentSessionConfig {
 	rawSseDebugBuffer?: RawSseDebugBuffer;
 	/** Current session message-to-LLM conversion pipeline. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
-	/** System prompt builder that can consider tool availability. */
-	rebuildSystemPrompt?: (
-		toolNames: string[],
-		tools: Map<string, AgentTool>,
-	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
+	/** Builds the fixed IPython provider prompt. */
+	rebuildSystemPrompt?: () => Promise<{ systemPrompt: string[] }>;
 	/** Local calendar date provider used by prompt-cache invalidation. */
 	getLocalCalendarDate?: () => string;
-	/** Tools mounted under `xd://`, for `/tools` display. */
-	getXdevToolEntries?: () => Array<{ name: string; summary: string }>;
-	/** `xd://` presentation state backed by the canonical tool map. */
-	xdev?: XdevState;
-	/** Names pinned top-level during runtime repartitioning. */
-	presentationPinnedToolNames?: ReadonlySet<string>;
-	/** Accessor for live MCP server instructions. */
-	getMcpServerInstructions?: () => Map<string, string> | undefined;
+	/** Host-owned MCP transport, credential, resource, prompt, and tool service. */
+	mcpManager?: MCPManager;
 	/** Time-traveling stream-rule manager. */
 	ttsrManager?: TtsrManager;
-	/** Secret obfuscator for provider and edit content. */
-	obfuscator?: SecretObfuscator;
-	/** Inherited eval executor session id from a parent agent. */
-	parentEvalSessionId?: string;
-	/** Logical owner for retained eval kernels created by this session. */
-	evalKernelOwnerId?: string;
+	/** Test and embedding seam for the session-owned IPython process generation. */
+	createIpythonSessionGeneration?: IpythonSessionGenerationFactory;
+	/** Existing Task lifecycle owner exposed to the Python RLM admission bridge. */
+	taskAdmissionService?: TaskAdmissionService;
+	/** Test-only override for constructing the retained private Act actor. */
+	createActPrivateSession?: ActPrivateSessionFactory;
+	/** Existing registry, IRC, transcript, and observer services exposed to focused Python skills. */
+	agentFamilyService?: AgentFamilyService;
 	/** Async job manager owned and disposed by this session. */
 	ownedAsyncJobManager?: AsyncJobManager;
 	/** Async job manager visible to this session. */
@@ -264,37 +248,6 @@ export interface AgentSessionConfig {
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
-	/** Full advisor toolset built against an advisor-scoped tool session. */
-	advisorTools?: AgentTool[];
-	/**
-	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
-	 * match cap, against the advisor-scoped tool session. Without it an advisor
-	 * running on Cursor silently drops both fields.
-	 */
-	advisorCreateGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
-	/**
-	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs, against the
-	 * advisor-scoped tool session. The advisor's ordinary instance follows the
-	 * configured `edit.mode` and rejects the frame's `old_string`/`new_string` args.
-	 */
-	advisorCreateEditTool?(): AgentTool | undefined;
-	/**
-	 * The execute-time context the advisor's bridge tools resolve approval from.
-	 *
-	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
-	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
-	 * with none it defaults to `yolo` with empty policies, so a bridge tool would
-	 * run a native frame the user configured `ask` or `deny` for.
-	 */
-	advisorGetToolContext?: () => AgentToolContext | undefined;
-	/**
-	 * The live MCP connections the advisor's Cursor resource frames answer from.
-	 *
-	 * Advisors share the session's connections and may be granted tools from
-	 * those same servers; without this their `list_mcp_resources` reports an
-	 * empty catalog and every `read_mcp_resource` a `not_found`.
-	 */
-	advisorMcpResources?: CursorMcpResourceAdapter;
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
 	/** Shared advisor instructions loaded from WATCHDOG.yml. */
@@ -303,8 +256,6 @@ export interface AgentSessionConfig {
 	advisorContextPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
-	/** Strip tool descriptions from provider-bound side-request tool specs. */
-	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
 	/** System prompt used by automatic session-title generation. */
@@ -319,8 +270,6 @@ export interface PromptOptions {
 	images?: ImageContent[];
 	/** Queue behavior while streaming. */
 	streamingBehavior?: "steer" | "followUp";
-	/** Optional tool choice override for the next LLM call. */
-	toolChoice?: ToolChoice;
 	/** Send as a developer/system message instead of user. */
 	synthetic?: boolean;
 	/** Whether this prompt is a deliberate user action. */

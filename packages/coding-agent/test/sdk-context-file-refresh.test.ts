@@ -27,7 +27,7 @@ async function createContextSession(
 		settings.set("advisor.enabled", true);
 		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 	}
-	const modelRegistry = new ModelRegistry(authStorage, `${cwd}/models.json`);
+	const modelRegistry = new ModelRegistry(authStorage);
 	const sessionManager = SessionManager.inMemory(cwd);
 	const { session } = await createAgentSession({
 		cwd,
@@ -41,9 +41,6 @@ async function createContextSession(
 		slashCommands: [],
 		enableMCP: false,
 		enableLsp: false,
-		toolNames: [],
-		restrictToolNames: true,
-		skipPythonPreflight: true,
 	});
 	return { session, authStorage, sessionManager };
 }
@@ -142,19 +139,21 @@ describe("context-file prompt refresh", () => {
 		using tempDir = TempDir.createSync("@omp-context-refresh-cwd-");
 		const cwdA = tempDir.join("cwd-a");
 		const cwdB = tempDir.join("cwd-b");
-		fs.mkdirSync(path.join(cwdA, "old-repo", ".git"), { recursive: true });
-		fs.mkdirSync(path.join(cwdB, "new-repo", ".git"), { recursive: true });
+		fs.mkdirSync(cwdA, { recursive: true });
+		fs.mkdirSync(cwdB, { recursive: true });
+		fs.writeFileSync(path.join(cwdA, "AGENTS.md"), "OLD PROJECT INSTRUCTIONS\n");
+		fs.writeFileSync(path.join(cwdB, "AGENTS.md"), "NEW PROJECT INSTRUCTIONS\n");
 		const { session, authStorage, sessionManager } = await createContextSession(cwdA, Settings.isolated({}));
 
 		try {
-			expect(session.systemPrompt.join("\n")).toContain("old-repo");
+			expect(session.systemPrompt.join("\n")).toContain("OLD PROJECT INSTRUCTIONS");
 
 			await sessionManager.moveTo(cwdB);
 			await session.refreshSkills();
 
 			const refreshedPrompt = session.systemPrompt.join("\n");
-			expect(refreshedPrompt).toContain("new-repo");
-			expect(refreshedPrompt).not.toContain("old-repo");
+			expect(refreshedPrompt).toContain("NEW PROJECT INSTRUCTIONS");
+			expect(refreshedPrompt).not.toContain("OLD PROJECT INSTRUCTIONS");
 		} finally {
 			await session.dispose();
 			authStorage.close();

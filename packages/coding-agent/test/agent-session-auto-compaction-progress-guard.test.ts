@@ -1095,7 +1095,6 @@ describe("AgentSession auto-compaction progress guard", () => {
 		session.settings.set("compaction.thresholdPercent", -1);
 		session.settings.set("compaction.strategy", "context-full");
 		session.settings.set("compaction.dropUseless", true);
-		session.settings.set("compaction.supersedeReads", true);
 		session.settings.set("compaction.keepRecentTokens", 10000);
 		session.settings.set("compaction.reserveTokens", 16384);
 		seedPrunableMaintenance(now);

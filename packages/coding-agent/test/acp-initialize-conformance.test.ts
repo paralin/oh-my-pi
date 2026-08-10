@@ -84,7 +84,7 @@ class FakeAgentSession {
 	}
 	async prompt(): Promise<void> {}
 	async abort(): Promise<void> {}
-	async refreshMCPTools(): Promise<void> {}
+	async refreshMCPInstructions(): Promise<void> {}
 	getContextUsage(): undefined {
 		return undefined;
 	}
@@ -105,18 +105,7 @@ class FakeAgentSession {
 	async navigateTree(): Promise<{ cancelled: boolean }> {
 		return { cancelled: false };
 	}
-	getActiveToolNames(): string[] {
-		return [];
-	}
-	getAllToolNames(): string[] {
-		return [];
-	}
-	setActiveToolsByName(): void {}
 	setClientBridge(): void {}
-	getPlanModeState(): undefined {
-		return undefined;
-	}
-	setPlanModeState(): void {}
 	async sendCustomMessage(): Promise<void> {}
 	async sendUserMessage(): Promise<void> {}
 	async compact(): Promise<void> {}

@@ -552,3 +552,80 @@ describe("goal runtime", () => {
 		expect(state?.goal.status).toBe("complete");
 	});
 });
+
+describe("goal pause/resume owner semantics and lifecycle non-regression", () => {
+	it("pauseGoal on an active goal pauses and preserves accounting and budget", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ status: "active", tokenBudget: 100, tokensUsed: 30 }),
+			},
+			usage: createUsage({ input: 30, output: 0, cacheRead: 0, cacheWrite: 0 }),
+		});
+		const paused = await harness.runtime.pauseGoal("waiting for review");
+		expect(paused?.enabled).toBe(false);
+		expect(paused?.goal.status).toBe("paused");
+		expect(paused?.goal.tokensUsed).toBe(30);
+		expect(paused?.reason).toBe("waiting for review");
+		expect(harness.persists.at(-1)?.mode).toBe("goal_paused");
+	});
+
+	it("lifecycle onThreadResumed still pauses an active goal (non-regression)", async () => {
+		let state: GoalModeState | undefined = {
+			enabled: true,
+			mode: "active",
+			goal: createGoal({ status: "active", tokensUsed: 10 }),
+		};
+		const usage = createUsage({ input: 10, output: 0, cacheRead: 0, cacheWrite: 0 });
+		const host: GoalRuntimeHost = {
+			getState: () => state && { ...state, goal: { ...state.goal } },
+			setState: next => {
+				state = next ? { ...next, goal: { ...next.goal } } : undefined;
+			},
+			getCurrentUsage: () => usage,
+			emit: async () => {},
+			persist: () => {},
+			sendHiddenMessage: async () => {},
+			now: () => 0,
+		};
+		const runtime = new GoalRuntime(host);
+		const resumed = await runtime.onThreadResumed();
+		expect(resumed?.enabled).toBe(false);
+		expect(resumed?.goal.status).toBe("paused");
+	});
+
+	it("lifecycle onTaskAborted interrupted still pauses an active goal (non-regression)", async () => {
+		let state: GoalModeState | undefined = {
+			enabled: true,
+			mode: "active",
+			goal: createGoal({ status: "active", tokensUsed: 5 }),
+		};
+		const usage = createUsage({ input: 5, output: 0, cacheRead: 0, cacheWrite: 0 });
+		const host: GoalRuntimeHost = {
+			getState: () => state && { ...state, goal: { ...state.goal } },
+			setState: next => {
+				state = next ? { ...next, goal: { ...next.goal } } : undefined;
+			},
+			getCurrentUsage: () => usage,
+			emit: async () => {},
+			persist: () => {},
+			sendHiddenMessage: async () => {},
+			now: () => 0,
+		};
+		const runtime = new GoalRuntime(host);
+		await runtime.onTaskAborted({ reason: "interrupted" });
+		expect(state?.goal.status).toBe("paused");
+	});
+
+	it("strict resume still rejects a goal that is not paused", async () => {
+		const harness = createHarness({
+			state: {
+				enabled: true,
+				mode: "active",
+				goal: createGoal({ status: "active" }),
+			},
+		});
+		await expect(harness.runtime.resumeGoal()).rejects.toThrow("No paused goal.");
+	});
+});

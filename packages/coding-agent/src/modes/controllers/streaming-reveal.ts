@@ -261,15 +261,6 @@ export class StreamingRevealController {
 			return;
 		}
 		const total = this.#visibleUnits(message);
-		if (message.content.some(block => block.type === "toolCall")) {
-			// A tool call is a transcript-order boundary: finish any leading
-			// assistant text before EventController renders the separate tool card.
-			this.#revealed = total;
-			component.updateContent(this.#build(message, this.#revealed), {
-				transient: true,
-			});
-			return;
-		}
 		this.#renderCurrent();
 		this.#syncTimer(total);
 	}
@@ -286,16 +277,6 @@ export class StreamingRevealController {
 			return;
 		}
 		const total = this.#visibleUnits(message);
-		if (message.content.some(block => block.type === "toolCall")) {
-			// A tool call is a transcript-order boundary: finish any leading
-			// assistant text before EventController renders the separate tool card.
-			this.#revealed = total;
-			this.#stopTimer();
-			this.#component.updateContent(this.#build(message, this.#revealed), {
-				transient: true,
-			});
-			return;
-		}
 		if (this.#revealed > total) {
 			this.#revealed = total;
 		}

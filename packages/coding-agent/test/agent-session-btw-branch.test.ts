@@ -405,27 +405,6 @@ describe("AgentSession.branchFromBtw", () => {
 		await bashPromise.catch(() => undefined);
 	});
 
-	it("refuses to branch /btw while user Python work is still running", async () => {
-		const activeSession = await createSession();
-		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });
-		await activeSession.sessionManager.flush();
-		const abortController = new AbortController();
-		const execution = Promise.withResolvers<void>().promise;
-		activeSession.trackEvalExecution(execution, abortController).catch(() => undefined);
-		expect(activeSession.isEvalRunning).toBe(true);
-
-		await expect(
-			activeSession.branchFromBtw(
-				"question",
-				createBtwAssistant(),
-				requiredLeafId(activeSession),
-				activeSession.sessionManager.getSessionId(),
-			),
-		).rejects.toThrow("Cannot branch /btw while session maintenance or user work is still running");
-
-		abortController.abort();
-	});
-
 	it("refuses to branch /btw while context maintenance is running", async () => {
 		const activeSession = await createSession();
 		activeSession.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() });

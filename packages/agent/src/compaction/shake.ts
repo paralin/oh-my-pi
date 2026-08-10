@@ -20,7 +20,6 @@ import {
 	collectToolCallsById,
 	isArtifactRecoveryToolResult,
 	isProtectedToolResult,
-	isSkillReadToolResult,
 	type ProtectedToolMatcher,
 } from "./tool-protection";
 
@@ -47,7 +46,7 @@ export interface ShakeConfig {
 export const DEFAULT_SHAKE_CONFIG: ShakeConfig = {
 	protectTokens: 16_000,
 	minSavings: 4_000,
-	protectedTools: ["skill", isSkillReadToolResult, isArtifactRecoveryToolResult],
+	protectedTools: [isArtifactRecoveryToolResult],
 	fenceMinTokens: 400,
 };
 
@@ -60,7 +59,7 @@ export const DEFAULT_SHAKE_CONFIG: ShakeConfig = {
 export const AGGRESSIVE_SHAKE_CONFIG: ShakeConfig = {
 	protectTokens: 4_000,
 	minSavings: 0,
-	protectedTools: ["skill", isSkillReadToolResult],
+	protectedTools: [],
 	fenceMinTokens: 400,
 };
 

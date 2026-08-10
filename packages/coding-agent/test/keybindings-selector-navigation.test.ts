@@ -78,7 +78,7 @@ function createAgentMessageNode(id: string, parentId: string | null, message: Ag
 function createExtension(id: string, displayName: string): Extension {
 	return {
 		id,
-		kind: "tool",
+		kind: "skill",
 		name: id,
 		displayName,
 		description: displayName,

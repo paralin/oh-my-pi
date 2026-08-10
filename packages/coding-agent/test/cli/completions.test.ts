@@ -18,7 +18,6 @@ const spec: CompletionSpec = {
 				value: { kind: "enum", values: ["low", "high"] },
 				repeatable: false,
 			},
-			{ name: "tools", description: "Tools", value: { kind: "list", values: ["read", "bash"] }, repeatable: false },
 			{ name: "resume", char: "r", description: "Resume", value: { kind: "sessions" }, repeatable: false },
 			{ name: "print", char: "p", description: "Print", value: { kind: "flag" }, repeatable: false },
 			{ name: "extension", char: "e", description: "Ext", value: { kind: "file" }, repeatable: true },
@@ -54,13 +53,11 @@ describe("generateCompletion — bash", () => {
 		expect(out).toContain("worktree|wt)");
 	});
 
-	it("completes enum, dynamic, and comma-list flag values by previous flag", () => {
+	it("completes enum and dynamic flag values by previous flag", () => {
 		expect(out).toContain('--thinking)\n\t\t\tCOMPREPLY=( $(compgen -W "low high"');
 		expect(out).toContain('--model)\n\t\t\tCOMPREPLY=( $(compgen -W "$(command omp __complete models -- "$cur"');
 		expect(out).toContain("--resume|-r)");
 		expect(out).toContain("command omp __complete sessions");
-		// static comma list routes through the comma-aware helper
-		expect(out).toContain('--tools)\n\t\t\t_omp_comma "read bash"');
 		// multiple-value models flag also uses the comma helper
 		expect(out).toContain("--models)\n\t\t\t_omp_comma");
 	});
@@ -90,13 +87,10 @@ describe("generateCompletion — zsh", () => {
 		expect(out).toContain("'--model[Model to use]:model:_omp_call models'");
 		expect(out).toContain("'--models[Model list]:models:_omp_models_list'");
 		expect(out).toContain("'--thinking[Effort]:value:(low high)'");
-		expect(out).toContain("'--tools[Tools]:value:_omp_tools'");
 		expect(out).toContain("'(-r --resume)'{-r,--resume}'[Resume]:session:_omp_call sessions'");
 		expect(out).toContain("'--session-dir[Dir]:dir:_files -/'");
 		// repeatable short+long flag uses the `*{...}` form
 		expect(out).toContain("'*'{-e,--extension}'[Ext]:file:_files'");
-		// the static tool list helper is baked
-		expect(out).toContain("_omp_tools() { _values -s , 'tools' read bash }");
 	});
 
 	it("dispatches aliased subcommands and completes positional enums", () => {
@@ -121,7 +115,6 @@ describe("generateCompletion — fish", () => {
 	it("maps value sources to fish completion args", () => {
 		expect(out).toContain("-l model -d 'Model to use' -x -a '(command omp __complete models -- (commandline -ct))'");
 		expect(out).toContain("-l thinking -d 'Effort' -x -a 'low high'");
-		expect(out).toContain("-l tools -d 'Tools' -x -a 'read bash'");
 		expect(out).toContain("-s r -l resume -d 'Resume' -x -a '(command omp __complete sessions");
 		// a bare boolean flag takes no value
 		expect(out).toContain("-s p -l print -d 'Print'");
@@ -168,7 +161,6 @@ describe("buildSpec", () => {
 						flags: {
 							model: { kind: "string" },
 							thinking: { kind: "string", options: ["low", "high"] },
-							"no-tools": { kind: "boolean" },
 							"session-dir": { kind: "string" },
 						},
 						args: {},
@@ -180,7 +172,6 @@ describe("buildSpec", () => {
 		const byName = new Map(root.flags.map(f => [f.name, f.value.kind]));
 		expect(byName.get("model")).toBe("models");
 		expect(byName.get("thinking")).toBe("enum");
-		expect(byName.get("no-tools")).toBe("flag");
 		expect(byName.get("session-dir")).toBe("dir");
 	});
 });
@@ -192,7 +183,7 @@ describe("live completion surface", () => {
 		// Real top-level flags from launch's static `flags` table. Flags with a
 		// short char render as `{-r,--resume}`, so only assert the bracket form for
 		// the long-only ones and check the char-paired form separately.
-		for (const flag of ["--model", "--thinking", "--mode", "--approval-mode", "--tools", "--no-tools"]) {
+		for (const flag of ["--model", "--thinking", "--mode", "--approval-mode"]) {
 			expect(stdout).toContain(`${flag}[`);
 		}
 		expect(stdout).toContain("{-r,--resume}");

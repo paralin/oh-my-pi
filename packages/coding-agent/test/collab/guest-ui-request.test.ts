@@ -11,7 +11,7 @@
  * drives a real CollabGuestLink over the in-memory relay so every guest→host
  * frame is observable.
  */
-import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
@@ -30,6 +30,8 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionUiController } from "@oh-my-pi/pi-coding-agent/modes/controllers/extension-ui-controller";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: shared FakeWebSocket + InMemoryRelay harness (see
@@ -63,6 +65,11 @@ interface GuestUiHarness {
 	dialogLog: DialogStub[];
 	/** Every ui-response the scripted host ever received, in order. */
 	uiResponses: UiResponseRecord[];
+	events: AgentSessionEvent[];
+	statusMessages: string[];
+	executeIpythonCell: ReturnType<typeof mock>;
+	switchSession: ReturnType<typeof mock>;
+	renderInitialMessages: ReturnType<typeof mock>;
 	nextDialog(): Promise<DialogStub>;
 	nextUiResponse(): Promise<UiResponseRecord>;
 	/**
@@ -73,6 +80,7 @@ interface GuestUiHarness {
 	barrier(): Promise<void>;
 	/** Re-send the welcome (resync); the guest clears stale presentations on it. */
 	sendWelcome(): void;
+	sendSnapshot(entries: SessionEntry[], readOnly?: boolean): void;
 	cleanup(): Promise<void>;
 }
 
@@ -173,6 +181,18 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 			readOnly: opts?.readOnly ? true : undefined,
 		});
 	};
+	const sendSnapshot = (entries: SessionEntry[], readOnly = false): void => {
+		hostSocket.send({
+			t: "welcome",
+			proto: COLLAB_PROTO,
+			header: { type: "session", id: "remote-session", timestamp: "2026-06-30T00:00:00Z", cwd: "/tmp" },
+			state: makeState(),
+			agents: [],
+			entryCount: entries.length,
+			readOnly: readOnly || undefined,
+		});
+		hostSocket.send({ t: "snapshot-chunk", entries, final: true });
+	};
 	hostSocket.onOpen = () => hostOpen.resolve();
 	hostSocket.onFrame = frame => {
 		if (frame.t === "hello") sendWelcome();
@@ -187,6 +207,13 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 	hostSocket.connect();
 	await hostOpen.promise;
 
+	const events: AgentSessionEvent[] = [];
+	const statusMessages: string[] = [];
+	const executeIpythonCell = mock(async () => {
+		throw new Error("collaboration guest must not execute an IPython cell");
+	});
+	const switchSession = mock(async () => undefined);
+	const renderInitialMessages = mock();
 	const ctx = {
 		collabGuest: undefined as CollabGuestLink | undefined,
 		settings: { get: () => "" },
@@ -197,7 +224,8 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		},
 		session: {
 			messages: [],
-			switchSession: () => Promise.resolve(),
+			switchSession,
+			executeIpythonCell,
 			newSession: () => Promise.resolve(),
 			agent: {
 				state: { model: undefined },
@@ -212,7 +240,6 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},
@@ -224,9 +251,11 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		ui: { requestRender: () => {} },
 		chatContainer: { clear: () => {} },
 		resetObserverRegistry: () => {},
-		renderInitialMessages: () => {},
+		renderInitialMessages,
 		reloadTodos: () => Promise.resolve(),
-		showStatus: () => {},
+		showStatus: (message: string) => {
+			statusMessages.push(message);
+		},
 		showError: (message: string) => {
 			// The guest prefixes host error frames ("Collab host: <message>");
 			// match the embedded sentinel.
@@ -240,7 +269,12 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		},
 		updateEditorTopBorder: () => {},
 		updateEditorBorderColor: () => {},
-		eventController: { handleEvent: () => Promise.resolve() },
+		eventController: {
+			handleEvent: (event: AgentSessionEvent) => {
+				events.push(event);
+				return Promise.resolve();
+			},
+		},
 		syncRunningSubagentBadge: () => {},
 		showHookSelector: (
 			title: string,
@@ -262,10 +296,16 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 		hostSocket,
 		dialogLog,
 		uiResponses,
+		events,
+		statusMessages,
+		executeIpythonCell,
+		switchSession,
+		renderInitialMessages,
 		nextDialog,
 		nextUiResponse,
 		barrier,
 		sendWelcome,
+		sendSnapshot,
 		cleanup: async () => {
 			await guest.leave("test cleanup").catch(() => {});
 			hostSocket.close();
@@ -276,7 +316,7 @@ async function makeHarness(opts?: { readOnly?: boolean }): Promise<GuestUiHarnes
 // ── Lifecycle ───────────────────────────────────────────────────────────────
 
 const harnessCleanups: (() => Promise<void>)[] = [];
-let writeSpy: { mockRestore(): void } | null = null;
+let writeSpy: ReturnType<typeof spyOn> | null = null;
 
 beforeEach(() => {
 	installInMemoryRelay();
@@ -518,6 +558,131 @@ async function joinRawGuest(
 	return { socket, nextFrame };
 }
 
+describe("collab IPython cell replication", () => {
+	it("delivers ordered rich cell projections to the guest renderer without executing a guest kernel", async () => {
+		const h = await openHarness({ readOnly: true });
+		const display = {
+			kind: "display" as const,
+			data: {
+				"text/html": "<script>unsafe()</script>",
+				"image/png": "cG5n",
+				"application/vnd.omp.diff+json": { path: "src/file.ts", diff: "@@ -1 +1 @@\n-old\n+new" },
+			},
+			metadata: {},
+			transient: {},
+			update: false,
+			text: "[displayed MIME types]",
+		};
+		const live = {
+			kind: "cell" as const,
+			phase: "live" as const,
+			cellId: "cell-collab",
+			origin: "model" as const,
+			code: "display(result)",
+			status: "running" as const,
+			events: [display],
+			errors: [],
+			updates: [{ kind: "execution" as const, cellId: "cell-collab", origin: "model" as const, event: display }],
+			startupProgress: [],
+			safeText: { text: "[displayed MIME types]\n", truncated: false, totalBytes: 23, outputBytes: 23 },
+			artifacts: [],
+		};
+		const complete = {
+			...live,
+			phase: "complete" as const,
+			executionId: "execution-collab",
+			sequence: 2,
+			authority: "trusted-cell" as const,
+			status: "ok" as const,
+			requestedAt: 1,
+			startedAt: 2,
+			finishedAt: 4,
+			durationMs: 2,
+			stdout: "",
+			stderr: "",
+			result: undefined,
+			artifacts: [{ path: "/tmp/result.png", mimeType: "image/png", bytes: 3, label: "result" }],
+		};
+		h.hostSocket.send({ t: "event", event: { type: "ipython_cell_start", presentation: live } });
+		h.hostSocket.send({ t: "event", event: { type: "ipython_cell_update", presentation: live } });
+		h.hostSocket.send({ t: "event", event: { type: "ipython_cell_end", presentation: complete } });
+		await h.barrier();
+
+		expect(h.events.map(event => event.type)).toEqual([
+			"ipython_cell_start",
+			"ipython_cell_update",
+			"ipython_cell_end",
+		]);
+		const terminal = h.events.at(-1);
+		if (terminal?.type !== "ipython_cell_end") throw new Error("missing replicated IPython terminal");
+		expect(terminal.presentation.events[0]).toEqual(display);
+		expect(terminal.presentation.artifacts).toEqual(complete.artifacts);
+		expect(h.executeIpythonCell).not.toHaveBeenCalled();
+	});
+
+	it("replays a read-only reconnect snapshot with version-1 cell detail and no guest execution", async () => {
+		const h = await openHarness({ readOnly: true });
+		const entry = {
+			type: "custom_message" as const,
+			id: "ipython-entry",
+			parentId: null,
+			timestamp: "2026-06-30T00:00:01Z",
+			customType: "ipython-cell",
+			content: "",
+			display: true,
+			details: {
+				version: 1,
+				kind: "cell",
+				cellId: "cell-snapshot",
+				executionId: "execution-snapshot",
+				sequence: 3,
+				origin: "direct",
+				authority: "trusted-cell",
+				code: "print('snapshot')",
+				status: "ok",
+				requestedAt: 1,
+				startedAt: 2,
+				finishedAt: 3,
+				durationMs: 1,
+				stdout: "snapshot\n",
+				stderr: "",
+				result: undefined,
+				events: [
+					{
+						kind: "display",
+						data: { "image/png": "cG5n", "application/vnd.omp.diff+json": { path: "x", diff: "-a\n+b" } },
+						metadata: {},
+						transient: {},
+						update: false,
+						text: "[displayed MIME types]",
+					},
+				],
+				errors: [],
+				updates: [],
+				safeText: "snapshot\n[displayed MIME types]\n",
+				safeTextTruncated: false,
+				totalOutputBytes: 34,
+				artifacts: [{ path: "/tmp/snapshot.png", mimeType: "image/png", bytes: 3, label: "snapshot" }],
+			},
+		} satisfies SessionEntry;
+		h.sendSnapshot([entry], true);
+		await h.barrier();
+
+		expect(h.switchSession).toHaveBeenCalled();
+		expect(h.renderInitialMessages).toHaveBeenCalled();
+		expect(h.statusMessages.at(-1)).toContain("Reconnected to collab session (read-only)");
+		const writes = (writeSpy?.mock.calls ?? []) as unknown[][];
+		const snapshotText = writes
+			.map((call: unknown[]) => String(call[1] ?? ""))
+			.find((text: string) => text.includes("ipython-entry"));
+		expect(snapshotText).toContain('"customType":"ipython-cell"');
+		expect(snapshotText).toContain('"image/png":"cG5n"');
+		expect(snapshotText).toContain('"application/vnd.omp.diff+json"');
+		expect(snapshotText).toContain('"path":"/tmp/snapshot.png"');
+		expect(h.executeIpythonCell).not.toHaveBeenCalled();
+	});
+});
+
 describe("collab proto handshake (#4049)", () => {
 	it("host rejects a stale-proto hello with a protocol-mismatch error and never welcomes or admits the guest", async () => {
 		const host = new CollabHost(makeHostContext());
@@ -539,14 +704,15 @@ describe("collab proto handshake (#4049)", () => {
 		}
 	});
 
-	it("welcomes a current-proto guest at v3 and round-trips a ui-request", async () => {
+	it("welcomes a current-proto guest at v4 and round-trips a ui-request", async () => {
 		const host = new CollabHost(makeHostContext());
 		await host.start("ws://localhost:8787");
 		const guest = await joinRawGuest(host.link, COLLAB_PROTO);
 		try {
 			const welcome = await guest.nextFrame();
 			if (welcome.t !== "welcome") throw new Error(`expected welcome, got ${welcome.t}`);
-			expect(welcome.proto).toBe(3);
+			expect(welcome.proto).toBe(COLLAB_PROTO);
+			expect(welcome.proto).toBe(4);
 
 			const pending = host.requestGuestUi({ kind: "select", title: "Continue?", options: ["Yes"] });
 			if (!pending) throw new Error("expected writable guest UI request");
@@ -836,6 +1002,9 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			const first = await nextUiRequest(guest);
 			const firstLabels = selectLabels(first);
 			expect(firstLabels).not.toContain("Next →");
+			expect(firstLabels).toContain("Option A");
+			expect(firstLabels).toContain("Other (type your own)");
+			expect(firstLabels).toContain("Chat about this");
 
 			// Guest toggles Option A — a real answer, not Next/Other/Chat.
 			guest.socket.send({ t: "ui-response", reqId: first.request.reqId, value: "Option A" });
@@ -844,6 +1013,7 @@ describe("guest ask multi-select Next gating (#4375 PRRT_kwDOQxs0bc6OFbDW)", () 
 			const second = await nextUiRequest(guest);
 			const secondLabels = selectLabels(second);
 			expect(secondLabels).toContain("Next →");
+			expect(secondLabels).toContain("Option A");
 
 			// Guest selects Next to submit.
 			guest.socket.send({ t: "ui-response", reqId: second.request.reqId, value: "Next →" });

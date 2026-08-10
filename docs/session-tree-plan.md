@@ -192,33 +192,6 @@ Adjacent but related lifecycle hooks:
 - In-memory sessions never return a branch file path from `createBranchedSession`, though their in-memory entries are replaced.
 - Tree context reconstruction includes role models, configured/effective thinking, per-family service tiers, mode data, and injected TTSR state; state entries do not themselves become LLM messages.
 
-## Plan approval session naming
-
-When a user approves a plan from plan mode (`InteractiveMode.#approvePlan`), the dispatch path seeds the session name from the plan's title so the resulting fresh, preserved, or compacted session does not stay unnamed.
-
-Trigger:
-
-- Plan approval reaches `#approvePlan(...)` with `options.title` populated from the plan-approval details.
-- This applies to each approval choice that reaches execution dispatch. If approval-time compaction is explicitly cancelled, execution is not dispatched and the naming block is not reached; the next operator turn continues from the preserved plan reference.
-
-Naming source:
-
-- The normalized plan title is humanized via `humanizePlanTitle(title)` (`packages/coding-agent/src/plan-mode/approved-plan.ts`):
-  - replaces runs of `-`/`_` with a single space
-  - trims whitespace
-  - capitalizes the first character
-  - returns `""` for whitespace-only / separator-only input
-- The humanized name is applied only when the current session has no name (`!sessionManager.getSessionName()`). It then calls `sessionManager.setSessionName(name, "auto")`, which also refuses to overwrite user-named sessions.
-- On successful apply, the terminal title (`setSessionTerminalTitle`) and the editor border color are refreshed to reflect the new name.
-
-Examples (from `humanizePlanTitle`):
-
-- `migrate-mcp-loader` → `Migrate mcp loader`
-- `fix_session_naming` → `Fix session naming`
-- `foo--bar__baz` → `Foo bar baz`
-- `RefactorRouter` → `RefactorRouter` (no separators to expand)
-- `""` / `"---"` → `""` (no name applied)
-
 ## Legacy compatibility still present
 
 Session migrations still run on load:

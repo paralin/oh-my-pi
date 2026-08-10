@@ -191,19 +191,6 @@ const CLIENT_CAPABILITIES = {
 	},
 };
 
-/** LSP `FileChangeType` values for workspace/didChangeWatchedFiles notifications. */
-export enum FileChangeType {
-	Created = 1,
-	Changed = 2,
-	Deleted = 3,
-}
-
-/** Filesystem change authored by the harness and announced to active LSP clients. */
-export interface WatchedFileChange {
-	filePath: string;
-	type: FileChangeType;
-}
-
 // =============================================================================
 // LSP Message Protocol
 // =============================================================================
@@ -980,7 +967,7 @@ export async function getOrCreateClient(
 			proc.kill();
 			const message = err instanceof Error ? err.message : String(err);
 			// Negative-cache deterministic failures. Timeouts under a
-			// caller-shortened deadline (warmup/writethrough) and caller-signal
+			// caller-shortened deadline (for example, warmup) and caller-signal
 			// aborts are transient — the server may simply be slow or the user may
 			// have cancelled, so a later call with a fresh deadline should retry.
 			if (!signal?.aborted && !(initTimeoutMs !== undefined && message.includes("timed out"))) {
@@ -1103,79 +1090,7 @@ export async function waitForProjectLoaded(client: LspClient, signal?: AbortSign
 	}
 }
 
-/**
- * Sync in-memory content to the LSP client without reading from disk.
- * Use this to provide instant feedback during edits before the file is saved.
- */
-export async function syncContent(
-	client: LspClient,
-	filePath: string,
-	content: string,
-	signal?: AbortSignal,
-): Promise<void> {
-	const uri = fileToUri(filePath);
-	const lockKey = `${client.name}:${uri}`;
-	throwIfAborted(signal);
-
-	const existingLock = fileOperationLocks.get(lockKey);
-	if (existingLock) {
-		await untilAborted(signal, () => existingLock);
-	}
-
-	const syncPromise = (async () => {
-		// Clear stale diagnostics before syncing new content
-		client.diagnostics.delete(uri);
-
-		const info = client.openFiles.get(uri);
-
-		if (!info) {
-			// Open file with provided content instead of reading from disk
-			const languageId = client.config.languageId ?? detectLanguageId(filePath);
-			throwIfAborted(signal);
-			await sendNotification(
-				client,
-				"textDocument/didOpen",
-				{
-					textDocument: {
-						uri,
-						languageId,
-						version: 1,
-						text: content,
-					},
-				},
-				signal,
-			);
-			client.openFiles.set(uri, { version: 1, languageId });
-			client.lastActivity = Date.now();
-			return;
-		}
-
-		const version = ++info.version;
-		throwIfAborted(signal);
-		await sendNotification(
-			client,
-			"textDocument/didChange",
-			{
-				textDocument: { uri, version },
-				contentChanges: [{ text: content }],
-			},
-			signal,
-		);
-		client.lastActivity = Date.now();
-	})();
-
-	fileOperationLocks.set(lockKey, syncPromise);
-	try {
-		await syncPromise;
-	} finally {
-		fileOperationLocks.delete(lockKey);
-	}
-}
-
-/**
- * Notify LSP that a file was saved.
- * Assumes content was already synced via syncContent - just sends didSave.
- */
+/** Notify the LSP server that an already-open file was saved. */
 export async function notifySaved(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
 	const uri = fileToUri(filePath);
 	const info = client.openFiles.get(uri);
@@ -1191,63 +1106,6 @@ export async function notifySaved(client: LspClient, filePath: string, signal?: 
 		signal,
 	);
 	client.lastActivity = Date.now();
-}
-
-function isPathInsideWorkspace(filePath: string, workspace: string): boolean {
-	const relative = path.relative(workspace, path.resolve(filePath));
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-/** Budget for the one-way watched-files notification: a wedged server that
- *  stops draining stdin must never hang the filesystem mutation that
- *  triggered it. Failures degrade to a debug log below. */
-const WATCHED_FILES_NOTIFY_TIMEOUT_MS = 2_000;
-
-/**
- * Announce harness-authored filesystem changes to active LSP clients for `cwd`.
- *
- * This covers sibling files that are not open text documents, such as generated
- * CSS modules or type files that another edited document imports immediately.
- *
- * The underlying stdin write drain is self-bounded by
- * {@link WATCHED_FILES_NOTIFY_TIMEOUT_MS}; only an abort of the caller's
- * `signal` rejects.
- */
-export async function notifyWorkspaceWatchedFiles(
-	cwd: string,
-	changes: readonly WatchedFileChange[],
-	signal?: AbortSignal,
-): Promise<void> {
-	throwIfAborted(signal);
-	if (changes.length === 0) return;
-
-	const workspace = path.resolve(cwd);
-	const activeClients = Array.from(clients.values()).filter(
-		client => client.status === "ready" && path.resolve(client.cwd) === workspace,
-	);
-	if (activeClients.length === 0) return;
-
-	const timeoutSignal = AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS);
-	const sendSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-	const results = await Promise.allSettled(
-		activeClients.map(async client => {
-			const clientChanges = changes
-				.filter(change => isPathInsideWorkspace(change.filePath, workspace))
-				.map(change => {
-					const uri = fileToUri(change.filePath);
-					client.diagnostics.delete(uri);
-					return { uri, type: change.type };
-				});
-			if (clientChanges.length === 0) return;
-			await sendNotification(client, "workspace/didChangeWatchedFiles", { changes: clientChanges }, sendSignal);
-		}),
-	);
-	throwIfAborted(signal);
-	for (const result of results) {
-		if (result.status === "rejected") {
-			logger.debug("LSP watched-files notification failed", { cwd, error: String(result.reason) });
-		}
-	}
 }
 
 /**
@@ -1389,7 +1247,7 @@ const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
  * - If `timeoutMs` is explicitly provided, that value is used.
  * - Else, if `signal` is provided, no internal timer is installed (the caller
  *   owns the deadline via the signal — typically a wall-clock `AbortSignal.timeout`
- *   from the LSP tool). Installing a second hard-coded 30s timer here used to
+ *   from the LSP service). Installing a second hard-coded 30s timer here used to
  *   cause "timed out after 30000ms" errors even when the caller had requested
  *   `timeout: 60`.
  * - Else (no signal, no explicit timeout), fall back to `DEFAULT_REQUEST_TIMEOUT_MS`

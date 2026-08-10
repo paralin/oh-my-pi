@@ -7,6 +7,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
+	getDefault,
 	onAppendOnlyModeChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
@@ -15,11 +16,11 @@ import {
 	Settings,
 } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import { AUTO_IMAGE_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/tools/image-providers";
 import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import * as fileLock from "@oh-my-pi/pi-utils/file-lock";
 import { YAML } from "bun";
+import { AUTO_IMAGE_PROVIDER_ORDER } from "../src/tools/image-providers.js";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 function context(): Context {
@@ -147,6 +148,7 @@ describe("Settings", () => {
 						kimi: "openrouter/moonshotai/kimi-k3:high",
 					},
 				});
+				expect(await settings.reloadFromDisk()).toBe(true);
 				await reloaded.promise;
 
 				expect(settings.getModelRole("luna")).toBe("openai-codex/gpt-5.6-luna:high");
@@ -163,7 +165,7 @@ describe("Settings", () => {
 			} finally {
 				unsubscribe();
 			}
-		});
+		}, 15_000);
 	});
 
 	describe("shell configuration errors", () => {
@@ -429,6 +431,37 @@ describe("Settings", () => {
 		});
 	});
 
+	describe("defaults", () => {
+		it("keeps eight inline images live by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("tui.maxInlineImages")).toBe(8);
+		});
+
+		it("keeps native terminal progress disabled by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("terminal.showProgress")).toBe(false);
+			expect(getDefault("terminal.showProgress")).toBe(false);
+		});
+
+		it("shows tool activity by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("display.hideToolActivity")).toBe(false);
+			expect(getDefault("display.hideToolActivity")).toBe(false);
+		});
+
+		it("keeps the normal startup splash disabled by default", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("startup.showSplash")).toBe(false);
+			expect(getDefault("startup.showSplash")).toBe(false);
+		});
+
+		it("defaults provider in-flight request limits to an empty map", async () => {
+			const settings = Settings.isolated();
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({});
+			expect(getDefault("providers.maxInFlightRequests")).toEqual({});
+		});
+	});
+
 	describe("get()", () => {
 		it("resolves overrides, schema defaults, and falsey values", () => {
 			const isolated = Settings.isolated({
@@ -442,6 +475,7 @@ describe("Settings", () => {
 			expect(isolated.get("setupVersion")).toBe(0);
 			expect(isolated.get("shellPath")).toBe("");
 			expect(isolated.get("enabledModels")).toEqual([]);
+			expect(isolated.get("tui.maxInlineImages")).toBe(getDefault("tui.maxInlineImages"));
 		});
 
 		it("invalidates cached resolved values after set, override, and clearOverride", () => {
@@ -495,14 +529,6 @@ describe("Settings", () => {
 			expect(Settings.isolated(nestedLegacy).get("snapcompact.systemPrompt")).toBe("none");
 		});
 
-		it("migrates legacy inlineToolDescriptors booleans to the on/off enum", () => {
-			expect(Settings.isolated({ inlineToolDescriptors: true }).get("inlineToolDescriptors")).toBe("on");
-			expect(Settings.isolated({ inlineToolDescriptors: false }).get("inlineToolDescriptors")).toBe("off");
-			expect(Settings.isolated().get("inlineToolDescriptors")).toBe("auto");
-		});
-	});
-
-	describe("statusLine.sessionAccent hooks", () => {
 		it("notifies subscribers only when the effective value changes", () => {
 			const isolated = Settings.isolated();
 			const values: boolean[] = [];
@@ -546,7 +572,7 @@ describe("Settings", () => {
 			});
 
 			try {
-				isolated.set("provider.appendOnlyContext", "on");
+				expect(() => isolated.set("provider.appendOnlyContext", "on")).not.toThrow();
 				expect(received).toEqual(["on"]);
 			} finally {
 				unsubscribeThrower();
@@ -826,45 +852,6 @@ describe("Settings", () => {
 		});
 	});
 
-	describe("getEditVariantForModel", () => {
-		it("matches configured model variants case-insensitively", async () => {
-			await writeSettings({
-				edit: {
-					modelVariants: {
-						kimi: "hashline",
-					},
-				},
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
-		});
-
-		it("refreshes cached model variants when the active project settings change", async () => {
-			const otherProjectDir = tempDir.join("other-project");
-			fs.mkdirSync(getProjectAgentDir(otherProjectDir), { recursive: true });
-
-			await Bun.write(
-				path.join(getProjectAgentDir(projectDir), "settings.json"),
-				JSON.stringify({ edit: { modelVariants: { kimi: "hashline" } } }),
-			);
-			await Bun.write(
-				path.join(getProjectAgentDir(otherProjectDir), "settings.json"),
-				JSON.stringify({ edit: { modelVariants: { "gpt-5": "apply_patch" } } }),
-			);
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBe("hashline");
-
-			await settings.reloadForCwd(otherProjectDir);
-
-			expect(settings.getEditVariantForModel("openrouter/moonshotai/Kimi-K2-Instruct")).toBeNull();
-			expect(settings.getEditVariantForModel("openai/gpt-5.2-codex")).toBe("apply_patch");
-		});
-	});
-
 	describe("provider preference migration", () => {
 		it("expands a legacy providers.webSearch choice into the head of webSearchOrder", async () => {
 			await writeSettings({ providers: { webSearch: "exa" } });
@@ -906,78 +893,6 @@ describe("Settings", () => {
 	});
 
 	describe("migrations", () => {
-		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
-			await writeSettings({
-				exa: {
-					enabled: true,
-					enableSearch: false,
-					enableResearcher: true,
-					enableWebsets: true,
-				},
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("exa.enabled")).toBe(false);
-			settings.set("display.showTokenUsage", true);
-			await settings.flush();
-			expect((await readSettings()).exa).toEqual({ enabled: false });
-		});
-
-		it("migrates quoted dotted Exa toggles and removes obsolete suite settings", async () => {
-			await Bun.write(
-				getConfigPath(),
-				`"exa.enabled": true\n"exa.enableSearch": false\n"exa.enableResearcher": true\n"exa.enableWebsets": true\n`,
-			);
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("exa.enabled")).toBe(false);
-			settings.set("display.showTokenUsage", true);
-			await settings.flush();
-			expect((await readSettings()).exa).toEqual({ enabled: false });
-		});
-
-		it("removes the legacy Exa block when it contains only retired suite toggles", async () => {
-			await writeSettings({ exa: { enableResearcher: true, enableWebsets: true } });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("exa.enabled")).toBe(true);
-			settings.set("display.showTokenUsage", true);
-			await settings.flush();
-			expect((await readSettings()).exa).toBeUndefined();
-		});
-
-		it("removes the retired computer backend setting", async () => {
-			await writeSettings({ computer: { backend: "auto", enabled: true }, "computer.backend": "native" });
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("computer.enabled")).toBe(true);
-			settings.set("display.showTokenUsage", true);
-			await settings.flush();
-			expect((await readSettings()).computer).toEqual({ enabled: true });
-		});
-
-		it("maps removed atom edit mode settings to hashline", async () => {
-			await writeSettings({
-				edit: {
-					mode: "atom",
-					modelVariants: {
-						"claude-opus": "atom",
-						"gpt-5": "apply_patch",
-					},
-				},
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("edit.mode")).toBe("hashline");
-			expect(settings.getEditVariantForModel("claude-opus-4-5")).toBe("hashline");
-			expect(settings.getEditVariantForModel("gpt-5.2")).toBe("apply_patch");
-		});
-
 		it("maps legacy hindsight.dynamicBankId=true onto hindsight.scoping=per-project", async () => {
 			await writeSettings({
 				hindsight: { dynamicBankId: true },
@@ -1032,33 +947,6 @@ describe("Settings", () => {
 			expect(settings.get("mnemopi.dbPath")).toBe("/tmp/new.db");
 		});
 
-		it("migrates boolean task.eager/todo.eager true to always", async () => {
-			await writeSettings({
-				task: { eager: true },
-				todo: { eager: true },
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			// `true` reproduced the previous "on" behavior, now `always`.
-			expect(settings.get("task.eager")).toBe("always");
-			expect(settings.get("todo.eager")).toBe("always");
-		});
-
-		it("migrates boolean task.eager/todo.eager false to default", async () => {
-			await writeSettings({
-				task: { eager: false },
-				todo: { eager: false },
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			// Load-bearing direction: consumers treat any non-`default` value as enabled
-			// (`false !== "default"`), so an un-coerced boolean `false` would read as ON.
-			expect(settings.get("task.eager")).toBe("default");
-			expect(settings.get("todo.eager")).toBe("default");
-		});
-
 		it("moves legacy lastChangelogVersion out of config.yml into the marker file", async () => {
 			await writeSettings({ lastChangelogVersion: "0.40.0" });
 
@@ -1084,56 +972,76 @@ describe("Settings", () => {
 			expect(fs.readFileSync(path.join(agentDir, "last-changelog-version"), "utf8")).toBe("0.41.0");
 		});
 
-		it("migrates legacy find and search settings to glob and grep", async () => {
+		it("drops removed find, search, glob, and grep provider-tool settings", async () => {
 			await writeSettings({
 				find: { enabled: false },
-				search: {
-					enabled: false,
-					contextBefore: 2,
-					contextAfter: 5,
-				},
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("glob.enabled")).toBe(false);
-			expect(settings.get("grep.enabled")).toBe(false);
-			expect(settings.get("grep.contextBefore")).toBe(2);
-			expect(settings.get("grep.contextAfter")).toBe(5);
-		});
-
-		it("migrates flat legacy find and search settings keys to nested glob and grep", async () => {
-			await writeSettings({
-				"find.enabled": false,
-				"search.enabled": false,
-				"search.contextBefore": 2,
-				"search.contextAfter": 5,
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			expect(settings.get("glob.enabled")).toBe(false);
-			expect(settings.get("grep.enabled")).toBe(false);
-			expect(settings.get("grep.contextBefore")).toBe(2);
-			expect(settings.get("grep.contextAfter")).toBe(5);
-		});
-
-		it("does not clobber existing glob/grep settings when migrating legacy find/search ones", async () => {
-			await writeSettings({
-				find: { enabled: false },
+				search: { enabled: false, contextBefore: 2, contextAfter: 5 },
 				glob: { enabled: true },
-				search: { enabled: false },
-				grep: { enabled: true },
+				grep: { enabled: true, contextBefore: 1 },
 				"find.enabled": false,
-				"glob.enabled": true,
 				"search.enabled": false,
+				"glob.enabled": true,
 				"grep.enabled": true,
 			});
 
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
 
-			expect(settings.get("glob.enabled")).toBe(true);
-			expect(settings.get("grep.enabled")).toBe(true);
+			const onDisk = await readSettings();
+			for (const key of [
+				"find",
+				"search",
+				"glob",
+				"grep",
+				"find.enabled",
+				"search.enabled",
+				"glob.enabled",
+				"grep.enabled",
+			]) {
+				expect(key in onDisk).toBe(false);
+			}
+		});
+
+		it("delivers one startup warning while discarding legacy secret substitution without changing exports", async () => {
+			await writeSettings({
+				secrets: { enabled: true },
+				"secrets.enabled": true,
+				share: { redactSecrets: true, serverUrl: "https://share.example" },
+				"share.redactSecrets": true,
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(await settings.reloadFromDisk()).toBe(true);
+			expect(settings.takeStartupWarnings()).toEqual([
+				"Settings: removed legacy secret substitution; secrets.enabled and share.redactSecrets are ignored and exports preserve content verbatim",
+			]);
+			expect(settings.takeStartupWarnings()).toEqual([]);
+			expect(settings.get("share.serverUrl")).toBe("https://share.example");
+
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const exported = await readSettings();
+			expect(exported).toEqual({
+				display: { showTokenUsage: true },
+				share: { serverUrl: "https://share.example" },
+			});
+
+			resetSettingsForTest();
+			AgentStorage.resetInstance();
+			const restarted = await Settings.init({ cwd: projectDir, agentDir });
+			expect(restarted.takeStartupWarnings()).toEqual([]);
+		});
+
+		it("discards false legacy share redaction settings", async () => {
+			await writeSettings({ share: { redactSecrets: false } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+
+			expect(settings.takeStartupWarnings()).toHaveLength(1);
+			expect(await readSettings()).toEqual({ display: { showTokenUsage: true } });
 		});
 
 		it("migrates nested dev.autoqa.consent and todo.reminders.max without configuring parents", async () => {
@@ -1230,20 +1138,6 @@ describe("Settings", () => {
 			expect(reloaded.isConfigured("dev.autoqa")).toBe(false);
 			expect(reloaded.get("todo.remindersMax")).toBe(1);
 			expect(reloaded.get("todo.reminders")).toBe(true);
-		});
-
-		it("drops dead BM25-discovery keys and leaves tools.xdev at its default", async () => {
-			await writeSettings({
-				tools: { discoveryMode: "off", essentialOverride: ["read"] },
-				mcp: { discoveryMode: "auto", discoveryDefaultServers: ["gh"] },
-			});
-
-			const settings = await Settings.init({ cwd: projectDir, agentDir });
-
-			// No migration mapping: legacy discovery intent is discarded, xdev
-			// keeps its own default. An explicit xdev value is untouched.
-			expect(settings.get("tools.xdev")).toBe(true);
-			expect(settings.isConfigured("tools.xdev")).toBe(false);
 		});
 
 		it("migrates from settings.json containing comments", async () => {

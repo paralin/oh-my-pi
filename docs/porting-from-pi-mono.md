@@ -104,7 +104,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "myapp-"));
 
 ## 5) Prefer Bun embeds (no copying)
 
-Do not add new runtime asset copy steps. Keep assets in repo and prefer Bun embeds/imports; preserve existing explicit generation workflows such as `packages/coding-agent/src/export/html/tool-views.generated.js` (built from collab-web sources via `bun run gen:tool-views`).
+Do not add new runtime asset copy steps. Keep assets in the repository and prefer Bun embeds or imports.
 
 - If upstream copies assets into a dist folder, replace with Bun-friendly embeds.
 - Prompts are static `.md` files; use Bun text imports (`with { type: "text" }`) and Handlebars instead of inline prompt strings.
@@ -177,7 +177,7 @@ the improvements and add explicit checks so they don’t get lost in the merge.
 
 - **Freeze the expected behavior**: add a short “before/after” note for each improvement (inputs, outputs,
   defaults, edge cases). This prevents silent rollback.
-- **Map old → new APIs**: if upstream renamed concepts (hooks → extensions, custom tools → tools, etc.),
+- **Map old → new APIs**: if upstream renamed concepts (hooks → extensions, or tool APIs → typed Python capabilities, etc.),
   ensure every old entry point still wires through. One missed flag or export equals lost functionality.
 - **Verify exports**: check `package.json` `exports`, public types, and barrel files. Upstream ports often
   forget to re-export local additions.
@@ -209,7 +209,7 @@ Note: interactive mode was recently split into controllers/utils/types. When bac
 
 1. **Defaults change silently** - A new variable `defaultFoo = [a, b]` may replace an old `getAllFoo()` that returned `[a, b, c, d, e]`.
 
-2. **API options get dropped** - When systems merge (e.g., `hooks` + `customTools` → `extensions`), old options may not wire through to the new implementation.
+2. **API options get dropped** - When systems merge (e.g., `hooks` + legacy capability modules → `extensions`), old options may not wire through to the new implementation.
 
 3. **Code paths go stale** - A renamed concept (e.g., `hookMessage` → `custom`) needs updates in every switch statement, type guard, and handler—not just the definition.
 
@@ -349,8 +349,8 @@ Our fork has architectural decisions that differ from upstream. **Do not port th
 
 | Upstream                            | Our Fork                                                                                                      | Notes                                                     |
 | ----------------------------------- | ------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| `createTool(cwd: string, options?)` | `createTools(session: ToolSession)` via `BUILTIN_TOOLS` registry                                              | Tool factories accept `ToolSession` and can return `null` |
-| Per-tool `*Operations` interfaces   | Only current per-tool override interfaces remain (for example `FindOperations`)                               | Used for SSH/remote overrides where present               |
+| `createTool(cwd: string, options?)` | One fixed IPython provider tool with `{ code: string }` input                                                      | Provider calls execute one complete cell |
+| Per-tool `*Operations` interfaces   | Host capability modules called from one IPython cell                                                        | Typed requests keep authority at the host boundary       |
 | Node.js `fs/promises` everywhere    | Bun file APIs for simple file writes/reads, `node:fs/promises` for dirs, selected sync `node:fs` where needed | Prefer Bun APIs when they simplify                        |
 
 ### Auth Storage
@@ -387,6 +387,4 @@ These exist in our fork but not upstream. **Never overwrite:**
 - Multi-credential auth with session affinity
 - Capability-based discovery system (`defineCapability`, `registerProvider`, `loadCapability`, `skillCapability`, etc.)
 - MCP/Exa/SSH integrations
-- LSP writethrough for format-on-save
-- Bash interception (`checkBashInterception`)
-- Fuzzy path suggestions in read tool
+- Fuzzy path suggestions in the workspace read service

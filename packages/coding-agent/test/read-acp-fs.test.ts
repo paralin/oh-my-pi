@@ -2,17 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../src/session/tool-session.js";
+import type { ReadResult } from "../src/tools/read.js";
+import { ReadService } from "../src/tools/read.js";
 
 const BRIDGE_CONTENT = "// content from editor buffer\nexport function greet() { return 'bridge'; }\n";
 
-function textOutput(result: AgentToolResult<ReadToolDetails>): string {
+function textOutput(result: ReadResult): string {
 	return result.content
 		.filter(c => c.type === "text")
 		.map(c => c.text)
@@ -32,7 +31,7 @@ function createSession(cwd: string, bridge?: ClientBridge): ToolSession {
 	};
 }
 
-describe("read tool ACP fs routing", () => {
+describe("read service ACP fs routing", () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
@@ -71,9 +70,9 @@ describe("read tool ACP fs routing", () => {
 
 		try {
 			const session = createSession(tmpDir, bridge);
-			const tool = new ReadTool(session);
+			const tool = new ReadService(session);
 
-			const result = await tool.execute("call-1", { path: filePath });
+			const result = await tool.read(filePath);
 			const text = textOutput(result);
 
 			// Bridge content should appear in output
@@ -102,9 +101,9 @@ describe("read tool ACP fs routing", () => {
 		};
 
 		const session = createSession(tmpDir, bridge);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 
-		const result = await tool.execute("call-range", { path: `${filePath}:2+1` });
+		const result = await tool.read(`${filePath}:2+1`);
 		const text = textOutput(result);
 
 		expect(text).toContain("bridge two");

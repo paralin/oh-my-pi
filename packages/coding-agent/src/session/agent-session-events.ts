@@ -9,17 +9,41 @@ import type {
 	MaintenanceTraceEndEvent,
 	MaintenanceTracePhaseEvent,
 	MaintenanceTraceStartEvent,
-	RetryErrorUpdate,
+	RecoveredRetryError,
 } from "../extensibility/shared-events";
 import type { Goal, GoalModeState } from "../goals/state";
+import type { IpythonCompletedCellPresentation, IpythonLiveCellPresentation } from "../ipython/projection";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { TodoItem } from "../tools/todo";
+import type { ActProjectionEvent } from "./act-events";
 import type { CompactionMeasurementEvent, LlmUsageEvent } from "./measurement-events";
 import type { CustomMessage } from "./messages";
 
+/** A live projection of one admitted IPython cell. */
+export type IpythonCellStartEvent = {
+	type: "ipython_cell_start";
+	presentation: IpythonLiveCellPresentation;
+};
+
+/** An ordered update of one live IPython cell projection. */
+export type IpythonCellUpdateEvent = {
+	type: "ipython_cell_update";
+	presentation: IpythonLiveCellPresentation;
+};
+
+/** The sole terminal projection for one admitted IPython cell. */
+export type IpythonCellEndEvent = {
+	type: "ipython_cell_end";
+	presentation: IpythonCompletedCellPresentation;
+};
+
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
+	| ActProjectionEvent
 	| Exclude<AgentEvent, { type: "agent_end" }>
+	| IpythonCellStartEvent
+	| IpythonCellUpdateEvent
+	| IpythonCellEndEvent
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;
@@ -63,7 +87,7 @@ export type AgentSessionEvent =
 			success: boolean;
 			attempt: number;
 			finalError?: string;
-			retryErrors?: RetryErrorUpdate[];
+			recoveredErrors?: RecoveredRetryError[];
 	  }
 	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }

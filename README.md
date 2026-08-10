@@ -24,7 +24,7 @@
 
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
-**60+** providers · **31** built-in tools · **14** lsp ops · **28** dap ops · **~80k** lines of Rust core.
+**60+** providers · **one fixed IPython provider interface** · **~80k** lines of Rust core.
 
 > [!NOTE]
 > Pull requests are **temporarily open to everyone** as a trial. We previously
@@ -95,246 +95,78 @@ macOS · Linux · Windows · bun ≥ 1.3.14
 
 ### Shell completions
 
-`omp` generates its own completion scripts for **bash**, **zsh**, and **fish** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`, `--plan`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
+`omp` generates its own completion scripts for **bash**, **zsh**, and **fish** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
 
 ```sh
 # zsh — add to ~/.zshrc (or write the output into a file on your $fpath)
-eval "$(omp completions zsh)"
+source <(omp completions zsh)
 
 # bash — add to ~/.bashrc
-eval "$(omp completions bash)"
+source <(omp completions bash)
 
 # fish
 omp completions fish > ~/.config/fish/completions/omp.fish
 ```
 
-## Every tool, _benchmaxxed_.
-
-Edits that land on the first attempt. Reads that summarize files instead of dumping their content. Searches that return instantly. Pick any model — omp will get it right.
-
-| model            | metric       | what                                                                  |
-| ---------------- | ------------ | --------------------------------------------------------------------- |
-| Grok Code Fast 1 | 6.7% → 68.3% | Tenfold lift the moment the edit format stops eating the model alive. |
-| Gemini 3 Flash   | +5 pp        | Over str_replace — beats Google's own best attempt at the format.     |
-| Grok 4 Fast      | −61% tokens  | Output collapses once the retry loop on bad diffs disappears.         |
-| MiniMax          | 2.1×         | Pass rate more than doubles. Same weights, same prompt.               |
-
-- `read` : summarized snippets · ideal defaults · selector hit rate
-- `grep` : fastest in the west
-- `lsp` : everything your IDE knows, the agent knows
-- `prompts` : adjusted relentlessly for each model
-
-[Read the full post ↗](https://blog.can.ac/2026/02/12/the-harness-problem/)
-
-## The Pi _you love_, with **batteries included**.
-
-Originally built on [Mario Zechner](https://github.com/mariozechner)'s wonderful [Pi](https://github.com/badlogic/pi-mono), omp adds everything you're missing.
-
-### 01 · Code execution w/ tool-calling
-
-Most harnesses give the agent a Python sandbox and call it done. Ours runs persistent Python and a Bun worker, and either kernel can call back into the agent's own tools — read, search, task — over a loopback bridge. The agent loads a CSV with tool.read from inside Python, charts it from JavaScript, and never leaves the cell.
-
-![omp TUI: a single eval session with `[1/2] pandas describe` (Python) printing a real DataFrame.describe() table, followed by `[2/2] top scorer` (JavaScript) running a reduce. Footer: 'Both kernels ran in one session.'](https://omp.sh/captures/eval.webp)
-
-### 02 · LSP wired into every write
-
-Ask for a rename and you get a rename. The call goes through workspace/willRenameFiles, so re-exports, barrel files, and aliased imports update before the file moves. Everything your IDE knows, the agent knows.
-
-![omp TUI: `LSP references` returns five hits across three files for the symbol `formatBytes`, then `LSP rename` applies the change with edits to format.ts/report.ts/cli.ts, then a `Search formatBytes 0 matches` confirmation. Final line: 'Rename complete. Five edits across three files…'.](https://omp.sh/captures/lsp.webp)
-
-_[Read the LSP config docs](docs/lsp-config.md)_
-
-### 03 · Drives a real debugger
-
-A C binary segfaults: the agent attaches lldb, steps to the bad pointer, reads the frame. A Go service hangs: it attaches dlv and walks the goroutines. A Python process is wedged: debugpy, pause, inspect, evaluate. Most agents are still sprinkling print statements.
-
-![omp TUI: a live lldb-dap session against a native binary at /tmp/omp-native/demo. Adapter=lldb-dap, Status=stopped, Frame=xorshift32, Instruction pointer 0x10000055C, Location demo.c:6:10. Debug scopes and Debug variables cards show locals (x = 57351) and the agent confirms the math: x went from 7 → 57351 (= 7 ^ (7<<13)).](https://omp.sh/clips/dap-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/dap.mp4)_
-
-### 04 · Time-traveling stream rules
-
-Your rules sit dormant until the model goes off-script. A regex match aborts the stream mid-token, injects the rule as a system reminder, and retries from the same point. You get course-correction without paying context tax on every turn. Injections survive compaction, so the fix sticks.
-
-![omp TUI: agent reading src.rs and about to write Box::leak when the request aborts (red `Error: Request was aborted`), an amber `⚠ Injecting rule: box-leak` card injects the rule body `Don't reach for Box::leak in production code paths`, and the agent then course-corrects by proposing `Arc<str>` and asking the user to confirm.](https://omp.sh/clips/ttsr-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/ttsr.mp4)_
-
-### 05 · First-class subagents
-
-Split a job across workers and get typed results back. task fans out into isolated worktrees, each worker runs its own tool surface, and the final yield is a schema-validated object the parent reads directly. No prose to parse, no merge conflicts between siblings, no orphaned edits.
-
-![omp TUI showing `task` spawning two subagents `ComponentsExports` and `RoutesExports`, the constraints block requiring an IRC DM between peers, the per-subagent status cards with cost and duration, and a final Findings section listing both exports plus an honest 'IRC coordination note' about a one-sided handshake.](https://omp.sh/clips/irc-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/irc.mp4)_
-
-Watch the fan-out while it runs: `Alt+A` opens [Agent Hub](docs/agent-hub.md), where the roster shows current activity and usage for every subagent. Open one to read its live transcript, type a steering message, revive a parked worker, or kill a stuck one without aborting the parent session.
-
-### 06 · A second model, watching every turn.
-
-Pair a reviewer model to the 'advisor' role and it reads every turn the main agent takes, injecting notes inline — a quiet aside, a concern, or a hard blocker. It runs on its own context and its own model, so it catches what the doer rushed past. The main agent sees the note and course-corrects, or tells you why it won't.
-
-![omp TUI: /advisor status shows the advisor running on openai-codex/gpt-5.5; after the main agent scopes a catch to ENOENT instead of swallowing every error, an amber 'Advisor 1 note (concern)' card warns the fix no longer matches the user's literal acceptance criterion.](https://omp.sh/clips/advisor-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/advisor.mp4)_
-
-### 07 · Hand someone the link, they're in.
-
-/collab puts your live session on a relay and hands back a link — and a QR. A teammate joins from another terminal with omp join, or just opens it in a browser. Share read-write to pair on the same agent, or /collab view for a read-only link anyone can watch but no one can steer. Frames are sealed client-side; the relay never sees your keys.
-
-![omp TUI: /collab view prints 'Collab session started!' with an omp join command, a my.omp.sh browser link, the note 'Anyone with this link can watch the session but cannot prompt the agent', and a large scannable QR code.](https://omp.sh/clips/collab-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/collab.mp4)_
-
-### 08 · Read a pdf on arxiv, why not?
-
-web_search chains twenty-three ranked providers and hands whatever URLs it finds straight to read. Arxiv PDFs, GitHub pages, Stack Overflow threads come back as structured markdown with anchors intact — the same tool surface you use on local files. Cite, follow, quote, never lose where you came from.
-
-![omp TUI: web_search returns 10 ranked Perplexity sources for inference-time compute scaling, the agent picks an arxiv paper, calls read https://arxiv.org/pdf/2604.10739v1, and summarizes the paper's headline result with real numbers.](https://omp.sh/clips/web-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/web.mp4)_
-
-### 09 · Unapologetically native. Even on Windows.
-
-Other agents shell out to rg, grep, find, and bash. On many machines those binaries don't exist, and on the ones where they do, every call costs a fork-exec round-trip. omp links the real implementations into the process. ripgrep, glob, find: in-process. brush is the bash — with sessions that survive across calls, and 58 command-line utilities (ls, sed, sort, xargs, even jq) ported into the builtins crate and run in-process, zero fork/exec. The same omp binary runs on macOS, Linux, and Windows — no WSL bridge.
-
-### 10 · Code review with priorities and a verdict
-
-Get a clear verdict on whether the change ships, with every issue ranked P0 through P3 and scored for confidence. /review spawns dedicated reviewer subagents that sweep branches, single commits, or uncommitted work in parallel. You tackle what blocks release first; nothing important hides in a wall of prose.
-
-### 11 · Hashline: edit by content hash
-
-Perfect edits, fewer tokens. The model points at anchors instead of retyping the lines it wants to change, so whitespace battles and string-not-found loops just stop happening. Edit a stale file and the anchors diverge — we reject the patch before it corrupts anything. Grok 4 Fast spends 61% fewer output tokens on the same work.
-
-### 12 · GitHub is just another filesystem
-
-Other harnesses bolt on gh_issue_view, gh_pr_view, gh_search — each with its own parameters the agent has to learn and you have to debug. We skipped that. read already handles paths; PRs are paths. One interface to teach the model, one surface to keep correct.
-
-### 13 · Memory the agent curates
-
-The agent remembers your codebase between sessions. It writes facts mid-run with retain, captures reusable lessons with learn, pulls them back with recall, and compresses each session into a mental model that loads on the first turn of the next one. Pick the engine with `memory.backend` — local, Hindsight, or Mnemopi. Project-scoped by default, so what it learns about this repo stays with this repo.
-
-### 14 · ACP: editor-drivable agent
-
-Run omp inside Zed and you get the same agent you drive from the terminal — reading the buffer you're actually looking at, writing through the editor's save path, spawning shells in the editor's terminal. Destructive tools pause for a permission prompt you can answer once and forget. No bridge, no plugin, no second brain to keep in sync.
-
-### 15 · Inherits what your other tools already wrote
-
-Every other agent ships an importer and expects you to convert. omp reads the eight formats already on disk in their native shape — Cursor MDC, Cline .clinerules, Codex AGENTS.md, Copilot applyTo, and the rest. No migration script, no YAML-to-TOML port, no "supported subset" footnotes. The config your team wrote last quarter still works tonight.
-
-### 16 · omp commit: atomic splits, validated messages
-
-omp reads the working tree through git_overview, git_file_diff, and git_hunk, then splits unrelated changes into atomic commits ordered by their dependencies. Cycles are rejected before anything is written. Source files score above tests, docs, and configs, so the headline commit is the one that matters. Lock files are excluded from analysis entirely.
-
-### 17 · Read PRs. _Walk skills._ Pull JSON out of subagents.
-
-Sixteen internal schemes — `pr://`, `issue://`, `agent://`, `skill://`, `ssh://`, and the rest — resolve transparently inside every FS-shaped tool the agent already calls. `read pr://1428` returns the same shape as `read src/foo.ts`. `grep` walks a diff like a directory. `agent://<id>/findings.0.path` pulls a field out of a subagent's output by path.
-
-![omp TUI reading pr://can1357/oh-my-pi/1063 and then /diff/1, showing hunk headers, added lines, and a [MODIFIED] (+12 -0) summary.](https://omp.sh/captures/pr.webp)
-
-### 18 · Conflict resolution, made easy.
-
-Each merge conflict becomes one URL. The agent writes `@theirs`, `@ours`, or `@base` to `conflict://N` and the file resolves cleanly. Bulk form: `conflict://*`.
-
-![omp TUI: ✓ Read src/session.ts (⚠ 1 conflict), then ✓ Write conflict://1 · 1 line with content @theirs, then a confirmation 'Resolved.'](https://omp.sh/clips/conflict-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/conflict.mp4)_
-
-### 19 · Preview, then accept.
-
-`ast_edit` returns a _(proposed)_ card with the replacement count. The change is staged. The agent writes a one-line reason to `xd://resolve`; the TUI turns it into an **Accept** card and the disk move happens — atomic, all or nothing.
-
-![omp TUI: ✓ AST Edit: console.log($X) (proposed) 3 replacements · 1 file, then ✓ Accept: 3 replacements in 1 file (AST Edit), followed by 'Applied 3 replacements in src/auth.ts.'](https://omp.sh/clips/codemod-poster.webp)
-
-_[Watch the capture ↗](https://omp.sh/clips/codemod.mp4)_
-
-### 20 · Drives a _real browser_. _Or your Slack?_
-
-Stealth's on by default, so pages see a normal user instead of a headless bot. The same API drives any Electron app in place — point it at Slack and the agent reads your DMs the way it reads the web. Or skip the sandbox entirely: the browser relay extension lets the agent adopt the Chrome tabs you already have open, without stealing focus.
-
-![omp TUI driving the browser tool against DuckDuckGo](https://omp.sh/captures/browser.webp)
-
-### 21 · Hands on the desktop itself
-
-`computer` runs persistent JavaScript against the real host: enumerate windows and displays, capture screenshots, send native input, walk the OS accessibility tree, touch the clipboard. Not the browser tool, no DOM — the same desktop you're looking at.
-
-## Whatever the task needs, _it's already in the box_.
-
-31 tools live in the same namespace as `read` and `bash`. Pin the active set with `--tools read,edit,bash,…`; rarely used discoverable tools stay behind `xd://` devices. `read xd://` lists them, and `write xd://<tool>` runs one when `tools.xdev` is enabled.
-
-**Files & search**
-
-- `read` — files, dirs, archives, SQLite, PDFs, notebooks, URLs, remote `ssh://` paths, and internal `://` schemes through one path.
-- `write` — create or overwrite a file, archive entry, or SQLite row.
-- `edit` — hashline patches with content-hash anchors and stale-anchor recovery.
-- `ast_edit` — structural rewrites previewed before apply, via ast-grep.
-- `ast_grep` — structural code queries over 50+ tree-sitter grammars.
-- `grep` — regex over files, globs, and internal URLs.
-- `glob` — glob-based path lookup; reach for `grep` when you need content matches.
-
-**Runtime**
-
-- `bash` — workspace shell with 46 in-process coreutils, optional PTY, and background-job dispatch.
-- `eval` — persistent Python and JavaScript cells with shared prelude and tool re-entry.
-
-**Code intelligence**
-
-- `lsp` — diagnostics, navigation, symbols, renames, code actions, raw requests.
-- `debug` — drive a DAP session — breakpoints, stepping, threads, stack, variables.
-- `security_scan` — plan and run native security reviews; drives Codex Security cloud scans.
-
-**Coordination**
-
-- `task` — fan out subagents in parallel, optionally workspace-isolated.
-- `hub` — message live agents, wait on or cancel background jobs, and supervise long-running processes.
-- `todo` — ordered mutations over the session todo list with phase tracking.
-- `ask` — structured follow-up questions for interactive runs.
-
-**Desktop & web**
-
-- `browser` — Puppeteer tabs over headless Chromium, CDP-attached apps, or your own Chrome via the relay.
-- `computer` — persistent JS against the host desktop: windows, screenshots, native input, AX tree, clipboard.
-- `web_search` — one query across configured providers, returning answer plus citations.
-- `github` — GitHub CLI ops — repo, PR, issues, code search, Actions run-watch.
-- `generate_image` — generate or edit raster images via Gemini, GPT, or xAI Grok image models.
-- `inspect_image` — vision-model analysis of a local image file.
-- `tts` — text-to-speech via xAI Grok Voice — five built-in voices, WAV or MP3.
-
-**Memory & skills**
-
-- `checkpoint` — mark conversation state for a later collapse-and-report.
-- `rewind` — prune exploratory context, keep a concise report.
-- `retain` — queue durable facts into the active memory bank.
-- `recall` — search the memory bank for raw memories.
-- `reflect` — synthesize an answer over the bank.
-- `memory_edit` — update, forget, or invalidate stored memories by id.
-- `learn` — capture a reusable lesson; optionally promote it into a managed skill.
-- `manage_skill` — create, update, or delete an isolated managed skill.
-
-Setting-gated, off by default: `github`, `security_scan`, `generate_image`, `tts`, `checkpoint`, `rewind`, and the memory tools (`retain`/`recall`/`reflect`/`memory_edit`, per `memory.backend`). `inspect_image` activates automatically when the active model can't see.
-
-[Full reference →](https://omp.sh/docs/tools)
-
-### Prompt controls
-
-Three standalone, lowercase words opt a turn into specialized agent behavior:
-
-- `ultrathink` — request careful multi-step reasoning and the highest supported automatic thinking effort.
-- `orchestrate` — run substantial independent work through parallel subagents and verify each phase.
-- `workflowz` — build a deterministic multi-subagent workflow with the active `task` tool.
-
-They trigger only in prose, not inside code spans, fenced code blocks, XML/HTML sections, identifiers, or paths. See [Magic keywords](docs/magic-keywords.md) for exact matching rules and configuration.
-
-### Session controls
-
-Slash commands shift how a whole session runs:
-
-- `/vibe` — enter [Vibe mode](docs/vibe-mode.md): act as a director driving persistent `fast`/`good` worker sessions with a `read`-only toolset.
-- `/fresh` — reset the provider stream state (stale prompt cache, wedged stream) without changing the local transcript. See [Session operations](docs/session-operations-export-share-fork-resume.md#fresh).
+## One stable provider interface
+
+OMP gives every model the same single function: `ipython`. A call runs one
+complete Python or `%%bash` cell in the session's persistent IPython process.
+Cells are serialized, so imports, variables, the working directory, and useful
+intermediate results remain available to later cells in the same session.
+
+```python
+from pathlib import Path
+
+paths = list(Path(".").glob("*.ts"))
+print([path.name for path in paths])
+```
+
+The provider no longer receives a changing catalog of filesystem, shell,
+browser, subagent, or extension functions. This makes the provider boundary
+stable across models and host applications.
+
+### Typed host capabilities
+
+Python handles ordinary computation and workspace work. For operations that
+must remain in the host, import a typed async capability from `omp` or a focused
+skill package. The host validates the request, applies its authority policy,
+and returns structured data to the active cell.
+
+```python
+import omp
+
+symbols = await omp.code.symbols("packages/coding-agent/src/main.ts")
+tabs = await omp.browser.tabs()
+```
+
+The typed domains cover language intelligence, debugging, browser and computer
+control, project-scoped long-lived processes, speech-file synthesis, web and GitHub
+access, remote connections, MCP, memory, skills, rules, images, cron, security,
+Vibe workers, and World operations. `rlm` and its
+companion skill packages provide retained task, communication, image,
+compaction, editing, goal, and web-search operations.
+
+A model-originated cell is one exec-level action. `tools.approvalMode` controls
+whether OMP runs, prompts for, or rejects the
+whole cell. Direct cells remain operator actions. Read the [persistent IPython
+runtime reference](docs/ipython.md) for lifecycle, authority, and capability
+details.
+
+### Sessions and integration
+
+The TUI renders IPython cells as they start, produce progress, finish, fail, or
+are cancelled. RPC and ACP control the same session and retain the same fixed
+provider interface. Session history records bounded cell output and host-service
+results, so a resumed session has a clear execution trail.
+
+OMP still discovers rules, skills, extensions, model providers, and MCP
+configuration. Those integrations change the host-side Python capability layer
+or prompt context; they do not add provider-callable functions.
 
 ## Sixty-plus providers, a thousand models, _one /model away_.
 
-Ten roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Plus `vision`, `designer`, `task`, `advisor`, and `tiny` for their namesakes. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
+Model roles route work by intent. `default` handles normal turns, `smol` supports inexpensive subagent work, and `slow` supports deeper reasoning. Other configured roles such as `vision`, `designer`, `task`, `advisor`, and `tiny` serve their corresponding host capabilities. Override `smol` or `slow` at launch, cycle configured models with `Ctrl+P`, or select the active model with `/model`.
 
 Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
 
@@ -391,9 +223,9 @@ modelRoles:
 
 Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
 
-## Twenty-three backends. _One tool the agent already knows_.
+## Twenty-three backends. _One host capability_.
 
-`web_search` is built in, not bolted on. `auto` walks a twenty-three-provider chain; pin one by name if you already pay for it. Behind every hit, site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown — anchors and link targets survive.
+`omp.web.search()` is a typed host capability. `provider="auto"` walks the configured provider chain; pin one by name when you already pay for it. Site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown while preserving anchors and link targets.
 
 ### Search providers
 
@@ -448,13 +280,13 @@ Vuln lookups answer with vendor data, not blog summaries.
 - **OSV** — open source vuln feed
 - **CISA KEV** — known exploited vulns
 
-[`web_search` reference ↗](https://omp.sh/docs/tools#web_search)
+[Persistent IPython runtime reference ↗](docs/ipython.md)
 
 ## Roughly **~80,000** lines of Rust, doing the work other harnesses shell out for.
 
-Six crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY, desktop control, image decode, BPE counting — all in-process on the libuv pool. No fork/exec on the hot path. Another ~80k lines ride along vendored: the brush bash fork, plus 58 command-line utilities — coreutils, findutils, sed, jq, ripgrep-backed grep, fd, diff, moreutils — ported into the builtins crate and compiled straight into the shell.
+Nine crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY, desktop control, image decode, BPE counting — all in-process on the libuv pool. No fork/exec on the hot path. Another ~77k lines ride along vendored: the brush bash fork, a jq engine (jaq), and 46 uutils coreutils compiled straight into the shell.
 
-- Crates: `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`, `pi-voice`, `pi-walker`
+- Crates: `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`, `pi-voice`, `pi-walker`, `pi-uu-grep`, `pi-uu-diff`, `pi-uutils-ctx`
 - Platforms: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64` — x64 ships dual AVX2 and baseline binaries
 
 Per crate, code lines only:
@@ -465,8 +297,11 @@ Per crate, code lines only:
 | pi-natives    | The N-API surface — every module in the table below                                    | 25,000 |
 | pi-walker     | Parallel ignore-aware walker + scan cache shared by grep · glob · workspace · shell    |  5,200 |
 | pi-iso        | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
+| pi-uu-grep    | ripgrep-backed grep, run as an in-process shell builtin                                |  3,300 |
 | pi-ast        | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
 | pi-voice      | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
+| pi-uu-diff    | Structured diff builtin backed by similar                                              |    500 |
+| pi-uutils-ctx | Thread-local stdio/cwd/env so builtins run concurrently without a fork                 |    300 |
 
 Inside `pi-natives`, the per-module breakdown (glue and tests omitted):
 
@@ -502,11 +337,9 @@ Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt
 
 ### Interactive — when in doubt, the agent asks
 
-The TUI is the default surface. Tool calls render as cards, edits preview before they land, and ambiguity routes through the `ask` tool — a structured option picker the agent can call mid-turn. The keyboard handles the rest.
+The TUI is the default surface. Model work runs as persistent IPython cells, with ordered output, rich displays, progress, and artifacts rendered from the session journal. When a decision needs user input, Python calls the typed `omp.ask` host service.
 
-The same prompt cards surface over ACP, so editors get the picker without writing one.
-
-![omp TUI: the ask tool renders an option picker with three choices, a (Recommended) badge on the first, and 'up/down navigate · enter select · esc cancel' footer.](https://omp.sh/captures/ask.webp)
+The same question cards surface over ACP, so editors get the picker without implementing another prompt protocol.
 
 ### SDK — embed in Node
 
@@ -651,12 +484,11 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[@oh-my-pi/omptype](packages/omptype)**                                     | ArkType-compatible schema validation with lazy JIT compilation              |
 | **[@oh-my-pi/pi-utils](packages/utils)**                                      | Shared utilities (logging, streams, dirs/env/process helpers)               |
 | **[@oh-my-pi/pi-wire](packages/wire)**                                        | Shared collab live-session protocol types and relay constants               |
-| **[@oh-my-pi/hashline](packages/hashline)**                                   | Line-anchored patch language and applier behind the `edit` tool             |
+| **[@oh-my-pi/hashline](packages/hashline)**                                   | Standalone line-anchored patch language and applier             |
 | **[@oh-my-pi/pi-mnemopi](packages/mnemopi)**                                  | Local SQLite memory engine for Oh My Pi agents                              |
-| **[@oh-my-pi/snapcompact](packages/snapcompact)**                             | Bitmap-frame context compression package and SQuAD eval suite               |
+| **[@oh-my-pi/snapcompact](packages/snapcompact)**                             | Bitmap-frame context compression package and SQuAD benchmark suite               |
 | **[@oh-my-pi/browser-relay](packages/browser-relay)**                         | Chrome extension that lets the browser tool drive your existing tabs        |
 | **[@oh-my-pi/pi-metaharness](packages/metaharness)**                          | Unified benchmark runners, Harbor run storage, REST/SSE API, live dashboard |
-| **[@oh-my-pi/typescript-edit-benchmark](packages/typescript-edit-benchmark)** | Edit benchmark suite built on TypeScript source mutations                   |
 
 ### Rust Crates
 
@@ -668,8 +500,13 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[pi-iso](crates/pi-iso)**                        | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy          |
 | **[pi-voice](crates/pi-voice)**                    | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                           |
 | **[pi-walker](crates/pi-walker)**                  | Parallel ignore-aware filesystem walker with the scan cache shared by grep, glob, and workspace     |
+| **[pi-uu-grep](crates/pi-uu-grep)**                | ripgrep-library-backed grep executed as an in-process shell builtin                                 |
+| **[pi-uu-diff](crates/pi-uu-diff)**                | Structured diff builtin backed by the similar crate                                                 |
+| **[pi-uutils-ctx](crates/pi-uutils-ctx)**          | Thread-local stdio/cwd/env context so in-process builtins run concurrently                          |
 | **[brush-core](crates/vendor/brush-core)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
-| **[pi-builtins](crates/pi-builtins)**              | Bash builtins (cd, echo, test, printf, read, export, …) plus 67 in-process command-line utilities |
+| **[brush-builtins](crates/vendor/brush-builtins)** | Vendored bash builtins (cd, echo, test, printf, read, export, etc.)                                 |
+| **[jaq](crates/vendor/jaq)**                       | Vendored jq-compatible JSON query engine, run as an in-process builtin                              |
+| **uu-\* family** ([crates/vendor](crates/vendor))  | 46 vendored uutils coreutils (ls, sed, sort, xargs, …) executed in-process, no fork/exec            |
 
 ## Contributing
 

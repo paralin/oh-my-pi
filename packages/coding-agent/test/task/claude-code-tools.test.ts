@@ -147,7 +147,7 @@ describe("Claude Code OMP tools", () => {
 		expect(session.additionalDirectories).toBeUndefined();
 	});
 
-	it("delegates synchronous nested work through TaskTool with Claude ownership and depth", async () => {
+	it("delegates synchronous nested work through TaskService with Claude ownership and depth", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [TASK_AGENT], projectAgentsDir: null });
 		const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async nested => result(nested.id));
 		const controller = new AbortController();

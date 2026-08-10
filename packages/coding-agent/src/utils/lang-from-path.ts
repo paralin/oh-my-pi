@@ -202,7 +202,7 @@ function lspExtensionKey(filePath: string): string {
 }
 
 /**
- * Language id for syntax highlighting and UI (icons, read tool), or undefined if unknown.
+ * Language id for syntax highlighting and UI (icons, workspace read service), or undefined if unknown.
  */
 export function getLanguageFromPath(filePath: string): string | undefined {
 	const baseName = path.basename(filePath).toLowerCase();

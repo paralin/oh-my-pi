@@ -15,7 +15,7 @@ import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-co
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 
 // In-memory transport: FakeWebSocket + InMemoryRelay (see ./helpers/in-memory-relay)
@@ -30,6 +30,7 @@ interface HostHarness {
 	aborts: { count: number };
 	/** Resolves on the next promptCustomMessage call — no polling. */
 	nextPrompt(): Promise<{ from?: string }>;
+	emitSessionEvent(event: AgentSessionEvent): void;
 }
 
 /** Minimal InteractiveModeContext double: only the members CollabHost touches. */
@@ -37,6 +38,7 @@ function makeHostContext(): HostHarness {
 	const prompts: { from?: string }[] = [];
 	const aborts = { count: 0 };
 	const promptWaiters: ((details: { from?: string }) => void)[] = [];
+	const sessionListeners = new Set<(event: AgentSessionEvent) => void>();
 	const ctx = {
 		settings: { get: () => "" },
 		sessionManager: {
@@ -54,7 +56,10 @@ function makeHostContext(): HostHarness {
 			sessionName: "test",
 			model: undefined,
 			thinkingLevel: undefined,
-			subscribe: () => () => {},
+			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+				sessionListeners.add(listener);
+				return () => sessionListeners.delete(listener);
+			},
 			emitNotice: () => {},
 			promptCustomMessage: (message: { details?: { from?: string } }) => {
 				const details = message.details ?? {};
@@ -82,12 +87,21 @@ function makeHostContext(): HostHarness {
 		promptWaiters.push(resolve);
 		return promise;
 	};
-	return { ctx, prompts, aborts, nextPrompt };
+	return {
+		ctx,
+		prompts,
+		aborts,
+		nextPrompt,
+		emitSessionEvent: event => {
+			for (const listener of sessionListeners) listener(event);
+		},
+	};
 }
 
 interface TestGuest {
 	socket: CollabSocket;
 	nextFrame(): Promise<CollabFrame>;
+	nextEvent(): Promise<Extract<CollabFrame, { t: "event" }>>;
 }
 
 /**
@@ -120,7 +134,14 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 	const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
 	const queue: CollabFrame[] = [];
 	const waiters: ((frame: CollabFrame) => void)[] = [];
+	const eventQueue: Array<Extract<CollabFrame, { t: "event" }>> = [];
+	const eventWaiters: Array<(frame: Extract<CollabFrame, { t: "event" }>) => void> = [];
 	socket.onFrame = frame => {
+		if (frame.t === "event") {
+			const eventWaiter = eventWaiters.shift();
+			if (eventWaiter) eventWaiter(frame);
+			else eventQueue.push(frame);
+		}
 		if (FILTERED_FRAME_TYPES[frame.t]) return;
 		const waiter = waiters.shift();
 		if (waiter) waiter(frame);
@@ -135,7 +156,14 @@ async function joinAsGuest(link: string, name: string, writeTokenOverride?: stri
 		waiters.push(resolve);
 		return promise;
 	};
-	return { socket, nextFrame };
+	const nextEvent = (): Promise<Extract<CollabFrame, { t: "event" }>> => {
+		const queued = eventQueue.shift();
+		if (queued) return Promise.resolve(queued);
+		const { promise, resolve } = Promise.withResolvers<Extract<CollabFrame, { t: "event" }>>();
+		eventWaiters.push(resolve);
+		return promise;
+	};
+	return { socket, nextFrame, nextEvent };
 }
 
 // ── Shared host/relay, booted once ──────────────────────────────────────────
@@ -169,6 +197,43 @@ afterAll(async () => {
 });
 
 describe("collab read-only links", () => {
+	it("broadcasts typed rich IPython projections through the encrypted host link", async () => {
+		const guest = await joinAsGuest(host.viewLink, "ipython-viewer");
+		guestCleanups.push(() => guest.socket.close());
+		const welcome = await guest.nextFrame();
+		if (welcome.t !== "welcome") throw new Error("expected welcome");
+		const presentation = {
+			kind: "cell" as const,
+			phase: "live" as const,
+			cellId: "cell-host-broadcast",
+			origin: "model" as const,
+			code: "display(result)",
+			status: "running" as const,
+			events: [
+				{
+					kind: "display" as const,
+					data: {
+						"image/png": "cG5n",
+						"application/vnd.omp.diff+json": { path: "src/file.ts", diff: "-old\n+new" },
+					},
+					metadata: {},
+					transient: {},
+					update: false,
+					text: "[displayed MIME types]",
+				},
+			],
+			errors: [],
+			updates: [],
+			startupProgress: [],
+			safeText: { text: "[displayed MIME types]\n", truncated: false, totalBytes: 23, outputBytes: 23 },
+			artifacts: [{ path: "/tmp/result.png", mimeType: "image/png", bytes: 3, label: "result" }],
+		};
+		harness.emitSessionEvent({ type: "ipython_cell_update", presentation });
+
+		const frame = await guest.nextEvent();
+		expect(frame.event).toEqual({ type: "ipython_cell_update", presentation });
+	});
+
 	it("welcomes view-link guests read-only and refuses their mutating frames", async () => {
 		const { prompts, aborts } = harness;
 		expect(host.viewLink).not.toBe(host.link);

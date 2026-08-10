@@ -39,11 +39,10 @@
     "fix": "biome check --write --unsafe . && bun run format-prompts",
     "fmt": "biome format --write . && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",
-    "gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
     "gen:bundle": "bun scripts/bundle-dist.ts",
     "gen:native": "bun --cwd=../natives run gen:native",
     "gen:native:reset": "bun --cwd=../natives run gen:native:reset",
-    "prepack": "bun run gen:tool-views && bun run gen:bundle",
+    "prepack": "bun run gen:bundle",
     "bench:guard": "bun scripts/bench-guard.ts",
     "gen:parent": "bun scripts/generate-parent-protocol.ts"
   },
@@ -51,6 +50,7 @@
     "@anthropic-ai/claude-agent-sdk": "catalog:",
     "@aptre/protobuf-es-lite": "catalog:",
     "@babel/parser": "catalog:",
+    "@mozilla/readability": "catalog:",
     "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
@@ -74,16 +74,24 @@
     "@opentelemetry/sdk-metrics": "catalog:",
     "@opentelemetry/sdk-trace-base": "catalog:",
     "@opentelemetry/sdk-trace-node": "catalog:",
+    "@puppeteer/browsers": "catalog:",
+    "@xterm/headless": "catalog:",
+    "fast-xml-parser": "catalog:",
+    "header-generator": "catalog:",
+    "linkedom": "catalog:",
+    "mammoth": "catalog:",
     "mupdf": "catalog:",
     "puppeteer-core": "catalog:",
-    "starpc": "catalog:"
+    "starpc": "catalog:",
+    "zod": "catalog:"
   },
   "optionalDependencies": {
     "@huggingface/transformers": "catalog:",
     "sherpa-onnx-node": "1.13.2"
   },
   "devDependencies": {
-    "@types/bun": "catalog:"
+    "@types/bun": "catalog:",
+    "marked": "catalog:"
   },
   "engines": {
     "bun": ">=1.3.14"
@@ -128,10 +136,6 @@
       "types": "./src/autoresearch/*.ts",
       "import": "./src/autoresearch/*.ts"
     },
-    "./autoresearch/tools/*": {
-      "types": "./src/autoresearch/tools/*.ts",
-      "import": "./src/autoresearch/tools/*.ts"
-    },
     "./capability": {
       "types": "./src/capability/index.ts",
       "import": "./src/capability/index.ts"
@@ -143,14 +147,6 @@
     "./cli/*": {
       "types": "./src/cli/*.ts",
       "import": "./src/cli/*.ts"
-    },
-    "./cli/gallery-fixtures": {
-      "types": "./src/cli/gallery-fixtures/index.ts",
-      "import": "./src/cli/gallery-fixtures/index.ts"
-    },
-    "./cli/gallery-fixtures/*": {
-      "types": "./src/cli/gallery-fixtures/*.ts",
-      "import": "./src/cli/gallery-fixtures/*.ts"
     },
     "./cli/commands/*": {
       "types": "./src/cli/commands/*.ts",
@@ -175,14 +171,6 @@
     "./commit/agentic/*": {
       "types": "./src/commit/agentic/*.ts",
       "import": "./src/commit/agentic/*.ts"
-    },
-    "./commit/agentic/tools": {
-      "types": "./src/commit/agentic/tools/index.ts",
-      "import": "./src/commit/agentic/tools/index.ts"
-    },
-    "./commit/agentic/tools/*": {
-      "types": "./src/commit/agentic/tools/*.ts",
-      "import": "./src/commit/agentic/tools/*.ts"
     },
     "./commit/analysis": {
       "types": "./src/commit/analysis/index.ts",
@@ -244,17 +232,9 @@
       "types": "./src/discovery/*.ts",
       "import": "./src/discovery/*.ts"
     },
-    "./edit": {
-      "types": "./src/edit/index.ts",
-      "import": "./src/edit/index.ts"
-    },
     "./edit/*": {
       "types": "./src/edit/*.ts",
       "import": "./src/edit/*.ts"
-    },
-    "./edit/modes/*": {
-      "types": "./src/edit/modes/*.ts",
-      "import": "./src/edit/modes/*.ts"
     },
     "./exa": {
       "types": "./src/exa/index.ts",
@@ -300,14 +280,6 @@
       "types": "./src/extensibility/custom-commands/bundled/review/index.ts",
       "import": "./src/extensibility/custom-commands/bundled/review/index.ts"
     },
-    "./extensibility/custom-tools": {
-      "types": "./src/extensibility/custom-tools/index.ts",
-      "import": "./src/extensibility/custom-tools/index.ts"
-    },
-    "./extensibility/custom-tools/*": {
-      "types": "./src/extensibility/custom-tools/*.ts",
-      "import": "./src/extensibility/custom-tools/*.ts"
-    },
     "./extensibility/extensions": {
       "types": "./src/extensibility/extensions/index.ts",
       "import": "./src/extensibility/extensions/index.ts"
@@ -347,18 +319,6 @@
     "./internal-urls/*": {
       "types": "./src/internal-urls/*.ts",
       "import": "./src/internal-urls/*.ts"
-    },
-    "./eval": {
-      "types": "./src/eval/index.ts",
-      "import": "./src/eval/index.ts"
-    },
-    "./eval/js/*": {
-      "types": "./src/eval/js/*.ts",
-      "import": "./src/eval/js/*.ts"
-    },
-    "./eval/py/*": {
-      "types": "./src/eval/py/*.ts",
-      "import": "./src/eval/py/*.ts"
     },
     "./lsp": {
       "types": "./src/lsp/index.ts",
@@ -492,19 +452,7 @@
       "types": "./src/modes/utils/*.ts",
       "import": "./src/modes/utils/*.ts"
     },
-    "./plan-mode/*": {
-      "types": "./src/plan-mode/*.ts",
-      "import": "./src/plan-mode/*.ts"
-    },
     "./prompts/*": "./src/prompts/*.md",
-    "./secrets": {
-      "types": "./src/secrets/index.ts",
-      "import": "./src/secrets/index.ts"
-    },
-    "./secrets/*": {
-      "types": "./src/secrets/*.ts",
-      "import": "./src/secrets/*.ts"
-    },
     "./session/*": {
       "types": "./src/session/*.ts",
       "import": "./src/session/*.ts"

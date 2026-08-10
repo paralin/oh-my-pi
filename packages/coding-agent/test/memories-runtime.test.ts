@@ -5,8 +5,13 @@ import * as path from "node:path";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { IpythonCellResult } from "@oh-my-pi/pi-coding-agent/ipython/cell";
 import {
-	buildMemoryToolDeveloperInstructions,
+	createIpythonCellJournalDetail,
+	IPYTHON_JOURNAL_MESSAGE_TYPE,
+} from "@oh-my-pi/pi-coding-agent/ipython/journal";
+import {
+	buildMemoryDeveloperInstructions,
 	getMemoryRoot,
 	startMemoryStartupTask,
 } from "@oh-my-pi/pi-coding-agent/memories";
@@ -196,12 +201,72 @@ describe("memories runtime", () => {
 		expect(stage1Spy).not.toHaveBeenCalled();
 	});
 
-	test("runs phase1 to phase2 and writes consolidated outputs", async () => {
+	test("runs phase1 to phase2 and writes consolidated outputs verbatim", async () => {
 		const fx = await createFixture();
+		const stage1Token = `ghp_${"A".repeat(36)}`;
+		const phase2Token = `xoxb-${"B".repeat(20)}`;
 		const rolloutPath = path.join(fx.sessionDir, "thread-a.jsonl");
+		const journal: IpythonCellResult = {
+			cellId: "memory-cell",
+			executionId: "memory-execution",
+			sequence: 1,
+			origin: "direct",
+			authority: "trusted-cell",
+			code: "x".repeat(200_000),
+			status: "ok",
+			requestedAt: 1,
+			startedAt: 1,
+			finishedAt: 2,
+			durationMs: 1,
+			stdout: "",
+			stderr: "",
+			result: undefined,
+			events: [
+				{ kind: "stream", name: "stdout", text: "safe memory cell\n" },
+				{
+					kind: "display",
+					data: { "text/html": "<script>unsafe-memory()</script>" },
+					metadata: {},
+					transient: {},
+					update: false,
+					text: "[displayed MIME types: text/html]",
+				},
+			],
+			errors: [],
+			updates: [],
+			artifacts: Array.from({ length: 100 }, (_, index) => ({
+				path: `/tmp/${index}-${"artifact".repeat(1_000)}`,
+				label: "artifact".repeat(1_000),
+				bytes: 1,
+			})),
+			modelText: { text: "safe memory cell", truncated: false, totalBytes: 16, outputBytes: 16 },
+		};
 		const rolloutRows = [
 			{ type: "session", id: "thread-a", cwd: fx.agentDir },
 			{ type: "message", message: { role: "user", content: "summarize this rollout" } },
+			...(["bash", "read", "grep"] as const).map(toolName => ({
+				type: "message",
+				message: {
+					role: "toolResult",
+					toolCallId: `legacy-${toolName}`,
+					toolName,
+					content: [{ type: "text", text: `legacy-${toolName}-result` }],
+					isError: false,
+					timestamp: 3,
+				},
+			})),
+			{
+				type: "message",
+				message: {
+					role: "custom",
+					customType: IPYTHON_JOURNAL_MESSAGE_TYPE,
+					content: "",
+					display: true,
+					attribution: "agent",
+					timestamp: 2,
+					details: createIpythonCellJournalDetail(journal),
+				},
+			},
 		];
 		await fs.writeFile(rolloutPath, `${rolloutRows.map(row => JSON.stringify(row)).join("\n")}\n`);
 
@@ -213,9 +278,9 @@ describe("memories runtime", () => {
 					{
 						type: "text",
 						text: JSON.stringify({
-							rollout_summary: "Rollout summary A",
-							rollout_slug: "thread-a-rollout",
-							raw_memory: "Raw memory A",
+							rollout_summary: `Rollout summary A ${stage1Token}`,
+							rollout_slug: `ghp_${"S".repeat(36)}`,
+							raw_memory: `Raw memory A ${stage1Token}`,
 						}),
 					},
 				],
@@ -227,9 +292,9 @@ describe("memories runtime", () => {
 					{
 						type: "text",
 						text: JSON.stringify({
-							memory_md: "# Memory\n\nConsolidated body",
-							memory_summary: "Consolidated summary",
-							skills: [{ name: "deploy-playbook", content: "# Deploy\nUse blue/green." }],
+							memory_md: `# Memory\n\nConsolidated body ${phase2Token}`,
+							memory_summary: `Consolidated summary ${phase2Token}`,
+							skills: [{ name: "deploy-playbook", content: `# Deploy\nUse blue/green. ${phase2Token}` }],
 						}),
 					},
 				],
@@ -246,18 +311,35 @@ describe("memories runtime", () => {
 		const memoryRoot = getMemoryRoot(fx.agentDir, fx.session.sessionManager.getCwd());
 		await settle(fx.whenSettled, "phase1->phase2 pipeline");
 		expect((await fs.readFile(path.join(memoryRoot, "MEMORY.md"), "utf8")).trim()).toBe(
-			"# Memory\n\nConsolidated body",
+			`# Memory\n\nConsolidated body ${phase2Token}`,
 		);
 		expect((await fs.readFile(path.join(memoryRoot, "memory_summary.md"), "utf8")).trim()).toBe(
-			"Consolidated summary",
+			`Consolidated summary ${phase2Token}`,
 		);
 		expect((await fs.readFile(path.join(memoryRoot, "skills", "deploy-playbook", "SKILL.md"), "utf8")).trim()).toBe(
-			"# Deploy\nUse blue/green.",
+			`# Deploy\nUse blue/green. ${phase2Token}`,
 		);
+		expect(
+			await Bun.file(path.join(memoryRoot, "rollout_summaries", "thread-a-ghp_ssssssssssssssss.md")).exists(),
+		).toBe(true);
 		expect(fx.session.refreshBaseSystemPrompt).toHaveBeenCalledTimes(1);
 		expect(ai.completeSimple).toHaveBeenCalled();
 		expect(ai.completeSimple).toHaveBeenCalledTimes(2);
+		const phase1Prompt = completeSpy.mock.calls[0]?.[1];
+		const phase1Text = JSON.stringify(phase1Prompt);
+		expect(phase1Text).toContain("safe memory cell");
+		expect(phase1Text).toContain("[code truncated]");
+		expect(phase1Text).toContain("[IPython summary truncated]");
+		expect(phase1Text).not.toContain("<script>");
+		expect(phase1Text).not.toContain("artifact".repeat(1_000));
+		expect(phase1Text).not.toContain("legacy-bash-result");
+		expect(phase1Text).not.toContain("legacy-read-result");
+		expect(phase1Text).not.toContain("legacy-grep-result");
+		expect(phase1Text).toContain("summarize this rollout");
 		const phase2Prompt = completeSpy.mock.calls[1]?.[1];
+		const phase2Text = JSON.stringify(phase2Prompt);
+		expect(phase2Text).toContain(stage1Token);
+		expect(phase2Text).not.toContain("[REDACTED]");
 		expect(phase2Prompt?.systemPrompt?.[0]).toContain("memory-stage-two consolidator");
 	});
 
@@ -429,7 +511,7 @@ describe("memories runtime", () => {
 	});
 });
 
-describe("buildMemoryToolDeveloperInstructions", () => {
+describe("buildMemoryDeveloperInstructions", () => {
 	let savedXdgData: string | undefined;
 	let savedXdgState: string | undefined;
 
@@ -450,12 +532,12 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 		const agentDir = await makeTempDir("memories-runtime-instructions");
 		const settings = Settings.isolated({ "memory.backend": "local" });
 
-		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings)).toBeUndefined();
+		expect(await buildMemoryDeveloperInstructions(agentDir, settings)).toBeUndefined();
 
 		const memoryRoot = getMemoryRoot(agentDir, settings.getCwd());
 		await fs.mkdir(memoryRoot, { recursive: true });
 		await fs.writeFile(path.join(memoryRoot, "memory_summary.md"), "   \n\t\n");
-		expect(await buildMemoryToolDeveloperInstructions(agentDir, settings)).toBeUndefined();
+		expect(await buildMemoryDeveloperInstructions(agentDir, settings)).toBeUndefined();
 	});
 
 	test("renders payload with truncation for non-empty summary", async () => {
@@ -471,7 +553,7 @@ describe("buildMemoryToolDeveloperInstructions", () => {
 			`${"A".repeat(120)}\n${"B".repeat(120)}\n${"C".repeat(120)}`,
 		);
 
-		const payload = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+		const payload = await buildMemoryDeveloperInstructions(agentDir, settings);
 		expect(payload).toBeDefined();
 		expect(payload).toContain("memory://root/memory_summary.md");
 		expect(payload).not.toContain(memoryRoot);

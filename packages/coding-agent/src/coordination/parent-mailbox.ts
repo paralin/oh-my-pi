@@ -9,6 +9,7 @@ export const PARENT_MAILBOX_CAP = 100;
 
 export interface ParentMailboxFilter {
 	from?: string;
+	fromAny?: ReadonlySet<string>;
 	replyTo?: string;
 }
 
@@ -88,9 +89,11 @@ export class ParentMailboxRouter {
 	}
 
 	/** Drain or inspect matching records from the bounded locally accepted inbox. */
-	inbox(options: { peek?: boolean; from?: string; replyTo?: string; limit?: number } = {}): IrcMessage[] {
+	inbox(
+		options: { peek?: boolean; from?: string; fromAny?: ReadonlySet<string>; replyTo?: string; limit?: number } = {},
+	): IrcMessage[] {
 		if (this.#failure) throw this.#failure;
-		const filter = { from: options.from, replyTo: options.replyTo };
+		const filter = { from: options.from, fromAny: options.fromAny, replyTo: options.replyTo };
 		const limit = options.limit === undefined ? Number.POSITIVE_INFINITY : Math.max(0, options.limit);
 		const selected: IrcMessage[] = [];
 		const remaining: IrcMessage[] = [];
@@ -257,5 +260,9 @@ export class ParentMailboxRouter {
 }
 
 function matches(message: IrcMessage, filter: ParentMailboxFilter): boolean {
-	return (!filter.from || message.from === filter.from) && (!filter.replyTo || message.replyTo === filter.replyTo);
+	return (
+		(!filter.from || message.from === filter.from) &&
+		(!filter.fromAny || filter.fromAny.has(message.from)) &&
+		(!filter.replyTo || message.replyTo === filter.replyTo)
+	);
 }

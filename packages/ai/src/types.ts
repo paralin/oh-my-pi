@@ -1,41 +1,10 @@
 export * from "@oh-my-pi/pi-catalog/effort";
 export * from "@oh-my-pi/pi-catalog/types";
 
-import type { Type } from "@oh-my-pi/omptype";
-import type {
-	DeleteArgs,
-	DeleteResult,
-	DiagnosticsArgs,
-	DiagnosticsResult,
-	GrepArgs,
-	GrepResult,
-	LsArgs,
-	LsResult,
-	McpResult,
-	PiBashExecArgs,
-	PiBashExecResult,
-	PiEditExecArgs,
-	PiEditExecResult,
-	PiFindExecArgs,
-	PiFindExecResult,
-	PiGrepExecArgs,
-	PiGrepExecResult,
-	PiLsExecArgs,
-	PiLsExecResult,
-	PiReadExecArgs,
-	PiReadExecResult,
-	PiWriteExecArgs,
-	PiWriteExecResult,
-	ReadArgs,
-	ReadResult,
-	ShellArgs,
-	ShellResult,
-	WriteArgs,
-	WriteResult,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
+import type { ZodType, z } from "zod/v4";
 import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
@@ -585,9 +554,6 @@ export interface StreamOptions {
 	fetch?: FetchImpl;
 	/** Current session working directory for providers that need workspace-scoped discovery. */
 	cwd?: string;
-
-	/** Cursor exec/MCP tool handlers (cursor-agent only). */
-	execHandlers?: CursorExecHandlers;
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
@@ -622,8 +588,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	textVerbosity?: "low" | "medium" | "high";
 	/** Custom token budgets for thinking levels (token-based providers only) */
 	thinkingBudgets?: ThinkingBudgets;
-	/** Cursor exec handlers for local tool execution */
-	cursorExecHandlers?: CursorExecHandlers;
 	/**
 	 * Optional rewrite of Cursor exec-channel tool results. May return a Promise.
 	 *
@@ -632,7 +596,6 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * async transformer is honored even when the turn closes in the same chunk.
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
-	cursorOnToolResult?: CursorToolResultHandler;
 	/** Optional tool choice override for compatible providers */
 	toolChoice?: ToolChoice;
 	/** OpenAI service tier for processing priority/cost control. Ignored by non-OpenAI providers. */
@@ -800,7 +763,6 @@ export interface ToolCall {
 	arguments: Record<string, unknown>;
 	[kStreamingPartialJson]?: string;
 	thoughtSignature?: string; // Google-specific: opaque signature for reusing thought context
-	intent?: string; // Harness-level intent metadata extracted from traced tool arguments
 	/**
 	 * Verbatim in-band syntax block that produced this synthetic `ptc_*` call.
 	 * Present only for owned prompt/tool-call formats; provider-native calls omit it.
@@ -855,32 +817,22 @@ export interface DeveloperMessage {
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
-/** How an automatic retry recovered or ultimately settled a failed attempt. */
 export type AssistantRetryRecoveryKind = "credential" | "model" | "wait" | "plain";
 
-/** Persisted presentation state for an assistant error superseded by an automatic retry saga. */
-export type AssistantRetryRecovery =
-	| {
-			kind: "auto-retry";
-			status: "recovered";
-			attempt: number;
-			recoveredAt: string;
-			recovery: AssistantRetryRecoveryKind;
-			note: string;
-			supersededBy?: {
-				timestamp: number;
-				responseId?: string;
-				provider: string;
-				model: string;
-			};
-	  }
-	| {
-			kind: "auto-retry";
-			status: "superseded";
-			attempt: number;
-			recovery: AssistantRetryRecoveryKind;
-			note: string;
-	  };
+export interface AssistantRetryRecovery {
+	kind: "auto-retry";
+	status: "recovered";
+	attempt: number;
+	recoveredAt: string;
+	recovery: AssistantRetryRecoveryKind;
+	note: string;
+	supersededBy?: {
+		timestamp: number;
+		responseId?: string;
+		provider: string;
+		model: string;
+	};
+}
 
 export interface ContextSnapshot {
 	promptTokens: number; // authoritative provider prompt/input tokens
@@ -964,223 +916,33 @@ export interface ToolResultMessage<TDetails = unknown> {
 
 export type Message = UserMessage | DeveloperMessage | AssistantMessage | ToolResultMessage;
 
-export type CursorExecHandlerResult<T> = { result: T; toolResult?: ToolResultMessage } | T | ToolResultMessage;
-
-/**
- * Optional rewrite of a Cursor exec-channel tool result.
- * May return a Promise. Returning `undefined` keeps the original result.
- *
- * The Agent reserves the original result in its buffer before awaiting this
- * hook, and the `message_end` drain waits for a still-pending rewrite, so an
- * async transformer is honored even when the turn closes in the same chunk.
- * A rejecting transformer is swallowed and the reserved payload stands in.
- */
-export type CursorToolResultHandler = (
-	result: ToolResultMessage,
-) => ToolResultMessage | undefined | Promise<ToolResultMessage | undefined>;
-
-/**
- * Identifies the synthesized assistant block a Cursor exec call was filed
- * under, so paths that produce no handler `toolResult` can still pair one.
- */
-export interface CursorExecPairing {
-	toolCallId: string;
-	toolName: string;
-}
-
-export interface CursorMcpCall {
-	name: string;
-	providerIdentifier: string;
-	toolName: string;
-	toolCallId: string;
-	args: Record<string, unknown>;
-	rawArgs: Record<string, Uint8Array>;
-	/**
-	 * The frame asks only whether this call would be permitted — it must not
-	 * run. The server sends it to resolve a smart-mode approval decision ahead
-	 * of the real invocation, and answers with the dedicated `approved`
-	 * variant, so executing here would fire a side-effecting tool the user has
-	 * not yet been asked about (and fire it twice once the real call arrives).
-	 */
-	approvalOnly?: boolean;
-}
-
-export interface CursorTodoSnapshotItem {
-	content: string;
-	status: "pending" | "in_progress" | "completed" | "abandoned";
-}
-
-/**
- * Authoritative todo list state settled by Cursor's server-side
- * `update_todos` / `read_todos` tools.
- */
-export interface CursorTodoSnapshot {
-	todos: CursorTodoSnapshotItem[];
-	/** True when the server reported the update as a merge. Presentation only. */
-	merged: boolean;
-}
-
-/**
- * Settles a native todo call in the host.
- *
- * Called for every completed native todo call, not just successful ones: the
- * interactive todo card only resolves on a matching `tool_execution_end`, so a
- * refused or failed call that stayed silent would animate forever.
- *
- * `snapshot` is the server-confirmed list, or `null` when there is nothing to
- * mirror — a server error (`error` set), or a benign refusal with `error` null:
- * a filtered, truncated, or empty read, or a snapshot the local model cannot
- * represent (two rows sharing content). Local state MUST be left untouched
- * unless a snapshot is supplied.
- *
- * `toolCallId` is the id of the streamed native call, which is also the key the
- * interactive transcript filed the visible block under. The host MUST reuse it
- * when emitting the synthetic completion, or that block never resolves.
- *
- * Returns the result to persist for that block — always, since every settle
- * needs a paired result or `buildSessionContext` strips the block as dangling.
- * Only the host knows the phase grouping the todo renderer replays from, so the
- * provider persists this value verbatim. When no handler is registered at all,
- * the provider falls back to its own summary-only result.
- */
-export type CursorTodoSyncHandler = (
-	snapshot: CursorTodoSnapshot | null,
-	toolCallId: string,
-	error: string | null,
-) => ToolResultMessage;
-
-export interface CursorShellStreamCallbacks {
-	onStdout(data: string): void;
-	onStderr(data: string): void;
-}
-
-/**
- * A modern Pi exec frame plus the call id the dispatcher minted for it.
- *
- * Unlike the legacy exec args (`ReadArgs`, `ShellArgs`, ...), the Pi frames
- * carry no `tool_call_id` field: on modern builds the id rides the streamed
- * `ToolCall` envelope (`ToolCall.tool_call_id = 57`) instead of each variant's
- * args. The exec channel has no access to that envelope, so the dispatcher
- * mints an id and hands it to the handler, keeping the synthesized transcript
- * block and its paired `toolResult` on the same key.
- */
-export interface CursorPiCall<TArgs> {
-	args: TArgs;
-	toolCallId: string;
-}
-
-/** One resource a host's MCP servers advertise. */
-export interface CursorMcpResource {
-	uri: string;
-	name?: string;
-	description?: string;
-	mimeType?: string;
-	/** The server advertising it; Cursor addresses reads by this name. */
-	server: string;
-}
-
-/**
- * The content of one resource read.
- *
- * `text` and `blob` are the wire's content oneof: exactly one is sent, with
- * `text` winning when a host supplies both. A download instead sets
- * `downloadPath` and no content at all — the model is told where the file
- * landed rather than being handed its bytes.
- */
-export interface CursorMcpResourceContent {
-	uri: string;
-	name?: string;
-	description?: string;
-	mimeType?: string;
-	text?: string;
-	blob?: Uint8Array;
-	/**
-	 * Where the host wrote the resource, workspace-relative, when the frame
-	 * asked for a download. Set this INSTEAD of `text`/`blob`: the wire
-	 * contract is that a download returns no content to the model.
-	 */
-	downloadPath?: string;
-}
-
-export interface CursorExecHandlers {
-	read?: (args: ReadArgs) => Promise<CursorExecHandlerResult<ReadResult>>;
-	ls?: (args: LsArgs) => Promise<CursorExecHandlerResult<LsResult>>;
-	grep?: (args: GrepArgs) => Promise<CursorExecHandlerResult<GrepResult>>;
-	write?: (args: WriteArgs) => Promise<CursorExecHandlerResult<WriteResult>>;
-	delete?: (args: DeleteArgs) => Promise<CursorExecHandlerResult<DeleteResult>>;
-	shell?: (args: ShellArgs) => Promise<CursorExecHandlerResult<ShellResult>>;
-	shellStream?: (
-		args: ShellArgs,
-		callbacks: CursorShellStreamCallbacks,
-	) => Promise<CursorExecHandlerResult<ShellResult>>;
-	diagnostics?: (args: DiagnosticsArgs) => Promise<CursorExecHandlerResult<DiagnosticsResult>>;
-	mcp?: (call: CursorMcpCall) => Promise<CursorExecHandlerResult<McpResult>>;
-	/**
-	 * Answers "would this MCP call be permitted", without running it.
-	 *
-	 * A modern `mcpArgs` frame carrying `smart_mode_approval_only` asks for the
-	 * permission decision alone, ahead of the real invocation. Executing the
-	 * tool to answer it would fire a side effect the user never approved — and
-	 * fire it twice once the real call arrives.
-	 *
-	 * `true` only when the host's policy resolves to a definite allow. A pending
-	 * prompt is `false`: it can only be answered interactively at execution
-	 * time, and there is no "ask me later" reply in this frame's result. When no
-	 * handler is registered the provider refuses, since it cannot decide.
-	 */
-	mcpApprovalPreflight?: (call: CursorMcpCall) => Promise<boolean>;
-	/**
-	 * Modern Cursor CLI Pi tool frames (`ExecServerMessage` 45-51). They are a
-	 * distinct frame family from the legacy `readArgs`/`shellArgs`/... set, not
-	 * an alias: different args, different result oneofs, and no `tool_call_id`.
-	 */
-	piRead?: (call: CursorPiCall<PiReadExecArgs>) => Promise<CursorExecHandlerResult<PiReadExecResult>>;
-	piBash?: (call: CursorPiCall<PiBashExecArgs>) => Promise<CursorExecHandlerResult<PiBashExecResult>>;
-	piEdit?: (call: CursorPiCall<PiEditExecArgs>) => Promise<CursorExecHandlerResult<PiEditExecResult>>;
-	piWrite?: (call: CursorPiCall<PiWriteExecArgs>) => Promise<CursorExecHandlerResult<PiWriteExecResult>>;
-	piGrep?: (call: CursorPiCall<PiGrepExecArgs>) => Promise<CursorExecHandlerResult<PiGrepExecResult>>;
-	piFind?: (call: CursorPiCall<PiFindExecArgs>) => Promise<CursorExecHandlerResult<PiFindExecResult>>;
-	piLs?: (call: CursorPiCall<PiLsExecArgs>) => Promise<CursorExecHandlerResult<PiLsExecResult>>;
-	/**
-	 * The resources the host's MCP servers advertise, optionally filtered to one
-	 * server. Without a handler the provider answers an empty catalog, which
-	 * hides resources a host is in fact holding live connections to.
-	 */
-	listMcpResources?: (args: { server?: string }) => Promise<CursorMcpResource[]>;
-	/**
-	 * Read one resource. `null` means the server or uri is genuinely unknown,
-	 * which the provider answers as `not_found`; throwing surfaces as `error`.
-	 */
-	readMcpResource?: (args: {
-		server: string;
-		uri: string;
-		/**
-		 * When set, write the resource here (workspace-relative) and return
-		 * `downloadPath` instead of content.
-		 */
-		downloadPath?: string;
-	}) => Promise<CursorMcpResourceContent | null>;
-	/** Mirror Cursor's server-owned todo list into local session state. */
-	todoSync?: CursorTodoSyncHandler;
-	onToolResult?: CursorToolResultHandler;
-}
-
 /**
  * Plain JSON Schema document used by extension-authored tools (legacy TypeBox
  * emits this shape). Distinguished from arktype at runtime.
  */
 export type TJsonSchema = Record<string, unknown>;
 
+/** Minimal structural surface shared by ArkType and the legacy TypeBox facade. */
+export interface TInferSchema {
+	readonly infer: unknown;
+}
+
 /**
  * Schema type accepted by the {@link Tool} interface.
  *
- * Canonical authoring uses ArkType. Extension compat may supply a JSON Schema
- * object (including TypeBox static schema objects).
+ * Canonical authoring uses Zod or ArkType. Extension compat may supply a JSON
+ * Schema object (including TypeBox static schema objects).
  */
-export type TSchema = Type | TJsonSchema;
+export type TSchema = ZodType | TInferSchema | TJsonSchema;
 
 /** Resolve parameter types for tool execution / handlers. */
-export type Static<S> = S extends Type ? S["infer"] : S extends { static: infer T } ? T : unknown;
+export type Static<S> = S extends ZodType
+	? z.infer<S>
+	: S extends TInferSchema
+		? S["infer"]
+		: S extends { static: infer T }
+			? T
+			: unknown;
 
 export interface ToolCallExample<TArgs = Record<string, unknown>> {
 	caption?: string;
@@ -1218,9 +980,9 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	 * Optional wire-level name used when this tool is emitted as a custom tool
 	 * (e.g. OpenAI's `{type: "custom"}` shape). Models trained on specific tool
 	 * names — like GPT-5 on `apply_patch` — need to see that exact name on the
-	 * wire, but it may differ from the harness-internal `name`. The agent-loop
-	 * dispatcher matches both `name` and `customWireName` so returned tool
-	 * calls route correctly. Absent for regular JSON function tools.
+	 * wire, but it may differ from the stored tool name. Provider replay uses
+	 * this metadata to preserve the native custom-tool envelope. Absent for
+	 * regular JSON function tools.
 	 */
 	customWireName?: string;
 	/** Selects a provider-native hosted tool instead of a JSON-schema function tool. */
@@ -1228,9 +990,7 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	/**
 	 * Illustrative calls/notes; the AI layer renders them into an `<examples>`
 	 * block in the model's native tool-call syntax and appends to the wire
-	 * description. Author `call`/`bad`/`good` as plain argument objects WITHOUT
-	 * `i` — when intent tracing injects `i` into the schema, the renderer adds
-	 * a placeholder `i` automatically. Type each tool's `examples` against its
+	 * description. Type each tool's `examples` against its
 	 * own schema (e.g. `readonly ToolExample<typeof schema["type"]>[]`).
 	 */
 	examples?: readonly ToolExample[];

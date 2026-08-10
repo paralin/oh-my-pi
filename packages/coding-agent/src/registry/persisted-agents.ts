@@ -321,7 +321,7 @@ export async function registerPersistedSubagents(
 	sessionFile: string | null | undefined,
 	options: { shouldContinue?: () => boolean } = {},
 ): Promise<void> {
-	if (!sessionFile?.endsWith(".jsonl")) return;
+	if (!sessionFile) return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
 	if (!shouldContinue()) return;
 	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);

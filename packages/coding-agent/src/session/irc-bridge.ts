@@ -17,7 +17,6 @@ export interface IrcBridgeHost {
 	settings: Settings;
 	isDisposed(): boolean;
 	isStreaming(): boolean;
-	planModeEnabled(): boolean;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	wakeForIrc(records: CustomMessage[]): void;
 	runEphemeralTurn(args: { promptText: string }): Promise<{ replyText: string }>;
@@ -74,8 +73,18 @@ export class IrcBridge {
 		return records;
 	}
 
-	/** Surfaces and consumes queued incoming records before automatic injection. */
-	drainInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
+	/** Surfaces or consumes queued incoming records before automatic injection. */
+	drainInboxMessages(
+		agentId: string,
+		opts?: {
+			from?: string;
+			fromAny?: ReadonlySet<string>;
+			replyTo?: string;
+			limit?: number;
+			peek?: boolean;
+			ids?: ReadonlySet<string>;
+		},
+	): IrcMessage[] {
 		const messages: IrcMessage[] = [];
 		const remainingInterrupts: CustomMessage[] = [];
 		const remainingAsides: CustomMessage[] = [];
@@ -102,11 +111,13 @@ export class IrcBridge {
 					queue.remaining.push(record);
 					continue;
 				}
-				if (opts?.from !== undefined && from !== opts.from) {
-					queue.remaining.push(record);
-					continue;
-				}
-				if (opts?.limit !== undefined && messages.length >= opts.limit) {
+				if (
+					(opts?.from !== undefined && from !== opts.from) ||
+					(opts?.fromAny !== undefined && !opts.fromAny.has(from)) ||
+					(opts?.replyTo !== undefined && replyTo !== opts.replyTo) ||
+					(opts?.ids !== undefined && !opts.ids.has(id)) ||
+					(opts?.limit !== undefined && messages.length >= opts.limit)
+				) {
 					queue.remaining.push(record);
 					continue;
 				}
@@ -118,6 +129,7 @@ export class IrcBridge {
 					ts: record.timestamp,
 					...(typeof replyTo === "string" ? { replyTo } : {}),
 				});
+				if (opts?.peek) queue.remaining.push(record);
 			}
 		}
 		this.#interrupts = remainingInterrupts;
@@ -129,9 +141,7 @@ export class IrcBridge {
 	async deliver(msg: IrcMessage, opts?: { expectsReply?: boolean }): Promise<"injected" | "woken"> {
 		if (this.#host.isDisposed()) throw new Error("Recipient session is disposed.");
 		const streaming = this.#host.isStreaming();
-		const planModeIdle = !streaming && this.#host.planModeEnabled();
-		const autoReply =
-			(opts?.expectsReply ?? false) && ((streaming && !this.#host.settings.get("async.enabled")) || planModeIdle);
+		const autoReply = (opts?.expectsReply ?? false) && streaming && !this.#host.settings.get("async.enabled");
 		const record = buildIrcIncomingMessage(msg, { autoReplied: autoReply, interrupting: streaming });
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
@@ -147,18 +157,6 @@ export class IrcBridge {
 			} else {
 				this.#interrupts.push(record);
 			}
-			if (autoReply) void this.#runAutoReply(msg);
-			return "injected";
-		}
-		if (this.#host.planModeEnabled()) {
-			this.#host.agent.appendMessage(record);
-			this.#host.sessionManager.appendCustomMessageEntry(
-				record.customType,
-				record.content,
-				record.display,
-				record.details,
-				record.attribution ?? "agent",
-			);
 			if (autoReply) void this.#runAutoReply(msg);
 			return "injected";
 		}

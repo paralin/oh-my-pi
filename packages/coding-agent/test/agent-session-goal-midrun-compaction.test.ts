@@ -120,10 +120,10 @@ describe("AgentSession mid-run threshold compaction", () => {
 		});
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 
-		const mockBashTool: AgentTool = {
-			name: "bash",
-			label: "Bash",
-			description: "Mock bash tool",
+		const mockIpythonTool: AgentTool = {
+			name: "ipython",
+			label: "IPython",
+			description: "Mock IPython tool",
 			parameters: type({}),
 			execute: async () => ({
 				content: [{ type: "text" as const, text: "tool output" }],
@@ -134,7 +134,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 		let call = 0;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [mockBashTool], messages: [] },
+			initialState: { model, systemPrompt: ["Test"], tools: [mockIpythonTool], messages: [] },
 			convertToLlm,
 			streamFn: (_model, context) => {
 				const index = call++;
@@ -146,7 +146,7 @@ describe("AgentSession mid-run threshold compaction", () => {
 					? {
 							role: "assistant" as const,
 							content: [
-								{ type: "toolCall" as const, id: `tc-${index}`, name: "bash", arguments: { cmd: "pwd" } },
+								{ type: "toolCall" as const, id: `tc-${index}`, name: "ipython", arguments: { code: "pwd" } },
 							],
 							api: "anthropic-messages" as const,
 							provider: "anthropic" as const,
@@ -179,7 +179,6 @@ describe("AgentSession mid-run threshold compaction", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			toolRegistry: new Map([[mockBashTool.name, mockBashTool]]),
 			extensionRunner: options.extensionRunner,
 		});
 

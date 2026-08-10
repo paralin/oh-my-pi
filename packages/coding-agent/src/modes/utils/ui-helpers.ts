@@ -1,12 +1,10 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, Message, Usage } from "@oh-my-pi/pi-ai";
-import { getStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { type Component, Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
-import { getEditClipboard } from "../../edit/edit-clipboard";
-import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
+import { IPYTHON_JOURNAL_MESSAGE_TYPE, isIpythonJournalDetail } from "../../ipython/journal";
 import { createAdvisorMessageCard } from "../../modes/components/advisor-message";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { createBackgroundTanDispatchBlock } from "../../modes/components/background-tan-message";
@@ -20,32 +18,20 @@ import {
 } from "../../modes/components/compaction-summary-message";
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
-import { EvalExecutionComponent } from "../../modes/components/eval-execution";
-import {
-	type LateDiagnosticsFile,
-	LateDiagnosticsMessageComponent,
-} from "../../modes/components/late-diagnostics-message";
-import {
-	groupedReadUsageCallIds,
-	ReadToolGroupComponent,
-	readArgsCollapseIntoGroup,
-} from "../../modes/components/read-tool-group";
+import { HistoricalPythonExecutionComponent } from "../../modes/components/historical-python-execution";
+import { HistoricalToolExecutionComponent } from "../../modes/components/historical-tool-execution";
+import { IpythonCellMessageComponent } from "../../modes/components/ipython-cell-message";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { StrippedToolCallsPlaceholder } from "../../modes/components/stripped-tool-calls-placeholder";
-import { ToolActivityContainer } from "../../modes/components/tool-activity";
-import { ToolExecutionComponent, type ToolExecutionHandle } from "../../modes/components/tool-execution";
-import { TranscriptBlock, TranscriptContainer } from "../../modes/components/transcript-container";
+import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { createUsageRowBlock } from "../../modes/components/usage-row";
 import { UserMessageComponent } from "../../modes/components/user-message";
-import { decodeStreamedToolArgs, streamingStringKeysForTool } from "../../modes/controllers/tool-args-reveal";
 import { materializeImageReferenceLinksSync } from "../../modes/image-references";
 import { theme } from "../../modes/theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext, RenderSessionContextOptions } from "../../modes/types";
-import { LAUNCH_COMPLETION_MESSAGE_TYPE } from "../../session/launch-completion";
 import {
 	BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE,
 	type CustomMessage,
-	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
 } from "../../session/messages";
@@ -59,7 +45,6 @@ import {
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
-	normalizeToolArgs,
 	resolveAssistantErrorPresentation,
 	splitAssistantMessageToolTimeline,
 } from "./transcript-render-helpers";
@@ -68,15 +53,6 @@ type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
 	preserveExistingChat?: boolean;
 	clearTerminalHistory?: boolean;
-}
-
-const TRANSCRIPT_RENDER_CHUNK_MESSAGES = 32;
-const TRANSCRIPT_RENDER_CHUNK_MS = 8;
-
-function waitForImmediate(): Promise<void> {
-	const { promise, resolve } = Promise.withResolvers<void>();
-	setImmediate(resolve);
-	return promise;
 }
 
 type QueuedMessages = {
@@ -157,43 +133,22 @@ export class UiHelpers {
 				break;
 			}
 			case "pythonExecution": {
-				const component = new EvalExecutionComponent(message.code, this.ctx.ui, message.excludeFromContext);
-				if (message.output) {
-					component.appendOutput(message.output);
-				}
-				component.setComplete(message.exitCode, message.cancelled, {
-					truncation: message.meta?.truncation,
-				});
-				this.ctx.chatContainer.addChild(component);
+				this.ctx.chatContainer.addChild(new HistoricalPythonExecutionComponent(message));
 				break;
 			}
 			case "hookMessage":
 			case "custom": {
 				if (message.display) {
-					if (message.customType === "async-result") {
-						const component = buildAsyncResultBlock(message);
-						this.ctx.chatContainer.addChild(component);
-						break;
-					}
-					if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
-						const details = (
-							message as CustomMessage<{
-								files?: LateDiagnosticsFile[];
-							}>
-						).details;
-						const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
+					if (message.customType === IPYTHON_JOURNAL_MESSAGE_TYPE && isIpythonJournalDetail(message.details)) {
+						const component = new IpythonCellMessageComponent(message.details, mimeType =>
+							this.ctx.viewSession.getIpythonMimeRenderer(mimeType),
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;
 					}
-					if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {
-						const messageComponent = new CustomMessageComponent(
-							message as CustomMessage<unknown>,
-							this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType),
-						);
-						messageComponent.setExpanded(this.ctx.toolOutputExpanded);
-						const component = new ToolActivityContainer(messageComponent);
-						this.ctx.chatContainer.addChild(component);
+					if (message.customType === "async-result") {
+						this.ctx.chatContainer.addChild(buildAsyncResultBlock(message));
 						break;
 					}
 					if (message.customType === COLLAB_PROMPT_MESSAGE_TYPE) {
@@ -321,40 +276,6 @@ export class UiHelpers {
 	 * @param options.populateHistory Add user messages to editor history
 	 */
 	renderSessionContext(sessionContext: SessionContext, options: RenderSessionContextOptions = {}): void {
-		const steps = this.#renderSessionContextSteps(sessionContext, options);
-		while (!steps.next().done) {}
-	}
-
-	/** Build a session context in bounded chunks so terminal input runs between event-loop turns. */
-	async renderSessionContextIncrementally(
-		sessionContext: SessionContext,
-		options: RenderSessionContextOptions,
-		renderChunk?: () => void,
-	): Promise<void> {
-		const steps = this.#renderSessionContextSteps(sessionContext, options);
-		let messagesSinceYield = 0;
-		let chunkStartedAt = performance.now();
-		while (!steps.next().done) {
-			messagesSinceYield++;
-			if (
-				messagesSinceYield < TRANSCRIPT_RENDER_CHUNK_MESSAGES &&
-				performance.now() - chunkStartedAt < TRANSCRIPT_RENDER_CHUNK_MS
-			) {
-				continue;
-			}
-			renderChunk?.();
-			await waitForImmediate();
-			messagesSinceYield = 0;
-			chunkStartedAt = performance.now();
-		}
-	}
-
-	*#renderSessionContextSteps(
-		sessionContext: SessionContext,
-		options: RenderSessionContextOptions = {},
-	): Generator<void, void, void> {
-		// Preserved: message_start handler owns this lifecycle (see #783)
-		this.ctx.pendingTools.clear();
 		// Reseed the cache-invalidation baseline: this rebuild re-derives every
 		// turn's marker from usage, and the last turn becomes the live baseline.
 		this.ctx.lastAssistantUsage = undefined;
@@ -364,93 +285,26 @@ export class UiHelpers {
 			this.ctx.updateEditorBorderColor();
 		}
 
-		let readGroup: ReadToolGroupComponent | null = null;
-		const readToolCallArgs = new Map<string, Record<string, unknown>>();
-		const readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
-		// Defer per-turn metrics until the turn's tool results have materialized.
-		// Read-only invisible turns attach the metrics to their shared compact
-		// group; every other turn keeps the standalone row below its tool blocks.
+		// Defer per-turn metrics until any historical call/result pair has rendered.
 		let pendingUsage: Usage | undefined;
 		let pendingUsageDuration: number | undefined;
 		let pendingUsageTtft: number | undefined;
 		let pendingUsageTimestamp: number | undefined;
-		let pendingReadUsageCallIds: string[] | undefined;
+		const historicalCalls = new Map<string, HistoricalToolExecutionComponent>();
+		const settledHistoricalToolCalls = new Set<string>();
 		const flushPendingUsage = () => {
 			if (!pendingUsage) return;
-			const usageAttached =
-				pendingReadUsageCallIds !== undefined &&
-				(readGroup?.attachUsage(
-					pendingReadUsageCallIds,
-					pendingUsage,
-					pendingUsageDuration,
-					pendingUsageTtft,
-					pendingUsageTimestamp,
-				) ??
-					false);
-			if (!usageAttached) {
-				readGroup?.seal();
-				readGroup = null;
-				this.ctx.chatContainer.addChild(
-					createUsageRowBlock(pendingUsage, pendingUsageDuration, pendingUsageTtft, pendingUsageTimestamp),
-				);
-			}
+			this.ctx.chatContainer.addChild(
+				createUsageRowBlock(pendingUsage, pendingUsageDuration, pendingUsageTtft, pendingUsageTimestamp),
+			);
 			pendingUsage = undefined;
 			pendingUsageDuration = undefined;
 			pendingUsageTtft = undefined;
 			pendingUsageTimestamp = undefined;
-			pendingReadUsageCallIds = undefined;
-		};
-		// Rebuild-time mirror of the event controller's displaceable-poll
-		// bookkeeping: a `hub` wait that found every watched job still running is
-		// superseded by the next `hub` call, so a rebuilt transcript collapses a
-		// repeated-poll run to its final snapshot instead of replaying the spam.
-		let waitingPoll: ToolExecutionComponent | null = null;
-		const resolveWaitingPoll = (nextToolName?: string) => {
-			const previous = waitingPoll;
-			if (!previous) return;
-			waitingPoll = null;
-			if (
-				nextToolName === "hub" &&
-				previous.isDisplaceableBlock() &&
-				this.ctx.chatContainer.isBlockUncommitted(previous)
-			) {
-				this.ctx.chatContainer.removeChild(previous);
-			}
-			// Sealing freezes the block and stops the waiting-poll spinner that
-			// updateResult armed.
-			previous.seal();
-		};
-		let todoSnapshot: ToolExecutionComponent | null = null;
-		const resolveTodoSnapshot = (nextToolName?: string) => {
-			const previous = todoSnapshot;
-			if (!previous) return;
-			if (!previous.isDisplaceableBlock()) {
-				todoSnapshot = null;
-				return;
-			}
-			if (previous.canBeDisplacedBy(nextToolName)) {
-				todoSnapshot = null;
-				if (this.ctx.chatContainer.isBlockUncommitted(previous)) {
-					this.ctx.chatContainer.removeChild(previous);
-				}
-				previous.seal();
-				return;
-			}
-			if (nextToolName !== undefined) return;
-			todoSnapshot = null;
-			previous.seal();
 		};
 		const messages = sessionContext.messages;
 		const count = messages.length;
 		for (let i = 0; i < count; i++) {
-			// Yield BEFORE each message (except the first) rather than after: the
-			// per-message body has several early `continue` paths (preserved live
-			// results, image-only and grouped `read` results), and a trailing yield
-			// is skipped by all of them. A large parallel-read batch is entirely
-			// such results, so an after-body yield never trips the chunk counter and
-			// the whole batch replays in one event-loop turn. Yielding at the top of
-			// the next iteration is reached no matter how the prior message exited.
-			if (i > 0) yield;
 			const message = messages[i]!;
 			if (message.role !== "toolResult") flushPendingUsage();
 			// Assistant messages need special handling for tool calls
@@ -470,15 +324,6 @@ export class UiHelpers {
 						this.ctx.lastAssistantUsage = usage;
 					}
 				}
-				const hasVisibleAssistantContent = assistantHasVisibleContent(message);
-				if (hasVisibleAssistantContent) {
-					// Rebuild reconstructs immutable history; seal (not finalize) so the
-					// group freezes even if a read's result was never persisted —
-					// finalize alone keeps a pending entry live and would stop the whole
-					// transcript below it from committing to native scrollback.
-					readGroup?.seal();
-					readGroup = null;
-				}
 				const errorPresentation = resolveAssistantErrorPresentation(message, this.ctx.viewSession.retryAttempt);
 				const hasErrorStop = errorPresentation.kind === "full";
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
@@ -488,102 +333,20 @@ export class UiHelpers {
 					this.ctx.chatContainer.addChild(component);
 				};
 
-				// Render tool call components
+				// Removed calls render as inert history. The IPython journal owns current cell presentation.
 				for (const content of message.content) {
-					if (content.type !== "toolCall") {
-						continue;
-					}
+					if (content.type !== "toolCall") continue;
 					const afterToolSegment = timeline.afterToolCalls.get(content.id);
-					if (options.preservedLiveToolCallIds?.has(content.id)) {
-						appendAssistantSegment(afterToolSegment);
-						continue;
-					}
-					resolveWaitingPoll(content.name);
-
-					if (content.name === "read" && readArgsCollapseIntoGroup(content.arguments)) {
+					if (content.name !== "ipython") {
+						const historical = new HistoricalToolExecutionComponent(content.name, content.arguments);
+						historical.setToolActivityVisible(!this.ctx.hideToolActivity);
+						this.ctx.chatContainer.addChild(historical);
 						if (hasErrorStop && errorMessage) {
-							if (!readGroup) {
-								readGroup = new ReadToolGroupComponent({
-									showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
-								});
-								readGroup.setExpanded(this.ctx.toolOutputExpanded);
-								this.ctx.chatContainer.addChild(readGroup);
-							}
-							readGroup.updateArgs(content.arguments, content.id);
-							readGroup.updateResult(
-								{ content: [{ type: "text", text: errorMessage }], isError: true },
-								false,
-								content.id,
-							);
-						} else if (afterToolSegment) {
-							if (!readGroup) {
-								readGroup = new ReadToolGroupComponent({
-									showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
-								});
-								readGroup.setExpanded(this.ctx.toolOutputExpanded);
-								this.ctx.chatContainer.addChild(readGroup);
-							}
-							readGroup.updateArgs(content.arguments, content.id);
-							this.ctx.pendingTools.set(content.id, readGroup);
-							if (assistantComponent) {
-								readToolCallAssistantComponents.set(content.id, assistantComponent);
-							}
+							historical.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
+							settledHistoricalToolCalls.add(content.id);
 						} else {
-							const normalizedArgs = normalizeToolArgs(content.arguments);
-							readToolCallArgs.set(content.id, normalizedArgs);
-							if (assistantComponent) {
-								readToolCallAssistantComponents.set(content.id, assistantComponent);
-							}
+							historicalCalls.set(content.id, historical);
 						}
-						appendAssistantSegment(afterToolSegment);
-						continue;
-					}
-
-					readGroup?.seal();
-					readGroup = null;
-					const tool = this.ctx.viewSession.getToolByName(content.name);
-					const partialJson = getStreamingPartialJson(content);
-					// Mid-stream rebuild (theme change, settings, focus replay): decode
-					// display args from the raw stream exactly like the live reveal path.
-					// The provider-parsed `arguments` lag the stream by up to a throttled
-					// parse window, so spreading them alone would freeze a long write/edit
-					// preview at its last full parse.
-					const rawInput = content.customWireName !== undefined;
-					const renderArgs = partialJson
-						? decodeStreamedToolArgs(partialJson, {
-								rawInput,
-								fullArgs: content.arguments,
-								streamingStringKeys: streamingStringKeysForTool(content.name, rawInput),
-							})
-						: content.arguments;
-					const component = new ToolExecutionComponent(
-						content.name,
-						renderArgs,
-						{
-							useBuiltInRenderer: this.ctx.viewSession.hasBuiltInTool(content.name),
-							snapshots: getFileSnapshotStore(this.ctx.viewSession),
-							clipboard: getEditClipboard(this.ctx.viewSession),
-							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-							liveRegion: this.ctx.chatContainer,
-						},
-						tool,
-						this.ctx.ui,
-						this.ctx.viewSession.sessionManager.getCwd(),
-						content.id,
-					);
-					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
-
-					if (hasErrorStop && errorMessage) {
-						component.updateResult(
-							{ content: [{ type: "text", text: errorMessage }], isError: true },
-							false,
-							content.id,
-						);
-					} else {
-						this.ctx.pendingTools.set(content.id, component);
 					}
 					appendAssistantSegment(afterToolSegment);
 				}
@@ -605,254 +368,74 @@ export class UiHelpers {
 				pendingUsageDuration = message.duration;
 				pendingUsageTtft = message.ttft;
 				pendingUsageTimestamp = message.timestamp;
-				pendingReadUsageCallIds = pendingUsage ? groupedReadUsageCallIds(message) : undefined;
 			} else if (message.role === "toolResult") {
-				if (options.preservedLiveToolCallIds?.has(message.toolCallId)) continue;
-				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
-				const isReadGroupResult =
-					message.toolName === "read" &&
-					(!pendingReadComponent || pendingReadComponent instanceof ReadToolGroupComponent);
-				if (isReadGroupResult) {
-					const assistantComponent = readToolCallAssistantComponents.get(message.toolCallId);
-					const images: ImageContent[] = message.content.filter(
-						(content): content is ImageContent => content.type === "image",
-					);
-					if (images.length > 0 && assistantComponent) {
-						assistantComponent.setToolResultImages(message.toolCallId, images);
-						const hasText = message.content.some(c => c.type === "text");
-						if (!hasText && settings.get("terminal.showImages")) {
-							readToolCallArgs.delete(message.toolCallId);
-							readToolCallAssistantComponents.delete(message.toolCallId);
-							continue;
-						}
-					}
-					let component = this.ctx.pendingTools.get(message.toolCallId);
-					if (!component) {
-						if (!readGroup) {
-							readGroup = new ReadToolGroupComponent({
-								showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
-							});
-							readGroup.setExpanded(this.ctx.toolOutputExpanded);
-							this.ctx.chatContainer.addChild(readGroup);
-						}
-						const args = readToolCallArgs.get(message.toolCallId);
-						if (args) {
-							readGroup.updateArgs(args, message.toolCallId);
-						}
-						component = readGroup;
-						this.ctx.pendingTools.set(message.toolCallId, readGroup);
-					}
-					component.updateResult(message, false, message.toolCallId);
-					this.ctx.pendingTools.delete(message.toolCallId);
-					readToolCallArgs.delete(message.toolCallId);
-					readToolCallAssistantComponents.delete(message.toolCallId);
-					continue;
-				}
-
-				// Match tool results to pending tool components
-				const component = this.ctx.pendingTools.get(message.toolCallId);
-				if (component) {
-					component.updateResult(message, false, message.toolCallId);
-					this.ctx.pendingTools.delete(message.toolCallId);
-					if (
-						message.toolName === "hub" &&
-						component instanceof ToolExecutionComponent &&
-						component.isDisplaceableBlock()
-					) {
-						waitingPoll = component;
-					} else if (
-						message.toolName === "todo" &&
-						component instanceof ToolExecutionComponent &&
-						component.canBeDisplacedBy("todo")
-					) {
-						// A successful todo result supersedes the prior live snapshot. Failed
-						// follow-ups return false from canBeDisplacedBy("todo"), so the
-						// last-good panel stays on screen.
-						resolveTodoSnapshot("todo");
-						todoSnapshot = component;
-					}
+				if (message.toolName === "ipython" || settledHistoricalToolCalls.delete(message.toolCallId)) continue;
+				const historical = historicalCalls.get(message.toolCallId);
+				if (historical) {
+					historical.updateResult(message);
+					historicalCalls.delete(message.toolCallId);
+				} else {
+					const orphan = new HistoricalToolExecutionComponent(message.toolName, {});
+					orphan.setToolActivityVisible(!this.ctx.hideToolActivity);
+					orphan.updateResult(message);
+					this.ctx.chatContainer.addChild(orphan);
 				}
 			} else {
-				readGroup?.seal();
-				readGroup = null;
-				// A user prompt closes the displacement window, same as the live path.
-				if (message.role === "user") resolveWaitingPoll();
-				if (message.role === "user") resolveTodoSnapshot();
-				// All other messages use standard rendering
 				this.ctx.addMessageToChat(message, options);
 			}
 		}
 		flushPendingUsage();
-
-		// The trailing read run has no following break to close it; seal so the
-		// rebuilt group freezes (even with a never-persisted result) and commits to
-		// native scrollback like every other historical block.
-		readGroup?.seal();
-		// A trailing waiting poll is final history on rebuild; seal it so it
-		// freezes (and its spinner timer stops) like every other block.
-		resolveWaitingPoll();
-		// A trailing todo snapshot is live state, not history: when the rebuild
-		// runs mid-turn (settings overlay close, focus attach during streaming),
-		// hand it back to the controller so a follow-up `todo` update keeps
-		// displacing instead of stacking. Idle rebuilds (resume / compaction)
-		// fall through to the seal path so the snapshot freezes as history.
-		if (todoSnapshot && this.ctx.viewSession.isStreaming) {
-			this.ctx.eventController?.inheritDisplaceableTodo(todoSnapshot);
-			todoSnapshot = null;
-		} else {
-			resolveTodoSnapshot();
-		}
-
-		// Entries still in `pendingTools` are toolCalls whose result never landed
-		// during the replay — with `keepDanglingToolCalls` these are exactly the
-		// turn's in-flight calls (assistant turn persisted at message_end, tool
-		// still executing). While the viewed session streams, keep them tracked so
-		// the live event stream routes `tool_execution_update`/`_end` into the
-		// rebuilt components instead of dropping the result; their args are final,
-		// so mark them complete. Idle rebuilds have no result coming: seal so the
-		// blocks freeze as history instead of pinning the live region, then clear
-		// so reconstructed historical components never leak into live tracking.
-		// (`rebuildChatFromMessages` builds its context WITHOUT dangling calls and
-		// restores its own preserved live components afterwards — for that caller
-		// the map is empty here either way.)
-		if (this.ctx.viewSession.isStreaming) {
-			for (const [toolCallId, component] of this.ctx.pendingTools) {
-				component.setArgsComplete(toolCallId);
-			}
-		} else {
-			for (const component of this.ctx.pendingTools.values()) {
-				component.seal();
-			}
-			this.ctx.pendingTools.clear();
-		}
 		this.ctx.ui.requestRender();
 	}
 
-	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
-		// Build against a detached container. Incremental construction still yields
-		// to terminal input, while paints keep using the complete visible transcript
-		// until the replacement is ready to swap in.
-		const visibleChatContainer = this.ctx.chatContainer;
-		const stagedChatContainer = new TranscriptContainer();
-		stagedChatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
-		const preservedChatChildren = options.preserveExistingChat ? [...visibleChatContainer.children] : undefined;
-		const previousTranscriptMessageComponents = this.ctx.transcriptMessageComponents;
-		const previousPendingTools = this.ctx.pendingTools;
-		const previousPendingBashComponents = this.ctx.pendingBashComponents;
-		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
-		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
-		const chatWasAlreadyRendered = this.ctx.initialChatRendered;
-
-		this.ctx.chatContainer = stagedChatContainer;
-		this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-		this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
+	renderInitialMessages(options: RenderInitialMessagesOptions = {}): void {
+		// This path is used to rebuild the visible chat transcript (e.g. after custom/debug UI).
+		// Clear existing rendered chat first to avoid duplicating the full session in the container.
+		// On a non-preserving rebuild the existing blocks are discarded for good, so
+		// dispose them (stopping any live timers/subscriptions) before clearing. When
+		// preserving, the same instances are re-added below, so detach without dispose.
+		const preservedChatChildren = options.preserveExistingChat ? this.ctx.chatContainer.children : undefined;
+		this.ctx.initialChatRendered = true;
+		if (preservedChatChildren) {
+			this.ctx.chatContainer.clear();
+		} else {
+			this.ctx.resetTranscript();
+		}
 		this.ctx.pendingMessagesContainer.disposeChildren();
 		this.ctx.pendingBashComponents = [];
-		this.ctx.pendingPythonComponents = [];
 
 		// Live display collapses to the compacted transcript tail unless the
 		// user opted into the full inline history; export/resume callers can
-		// still request either mode. Mid-turn rebuilds
-		// (focus attach/unfocus while a tool executes) keep dangling toolCalls so
-		// the in-flight call re-renders as pending instead of vanishing;
-		// renderSessionContext then keeps it in `pendingTools` for live routing.
-		let context = this.ctx.viewSession.buildTranscriptSessionContext({
+		// still request either mode.
+		const context = this.ctx.viewSession.buildTranscriptSessionContext({
 			collapseCompactedHistory: settings.get("display.collapseCompacted"),
 			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
 		});
-		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
-		const renderOptions = {
+		this.ctx.renderSessionContext(context, {
 			updateFooter: true,
-			// A dirty replay may restart from a newer context. Populate history
-			// once from the stable context below instead of duplicating it on
-			// every attempt.
-			populateHistory: false,
-		};
-		let committed = false;
-		this.ctx.initialChatRendered = false;
-		try {
-			while (true) {
-				if (this.ctx.viewSession.isStreaming) {
-					// Live events mutate the same component maps; keep their replay atomic so
-					// a delta cannot land halfway through rebuilding its pending tool block.
-					this.ctx.renderSessionContext(context, renderOptions);
-				} else {
-					await this.ctx.renderSessionContextIncrementally(context, renderOptions);
-				}
-				if (this.ctx.viewSession.sessionManager.getEntries().length === replayEntryCount) {
-					break;
-				}
+			populateHistory: !this.ctx.focusedAgentId,
+		});
 
-				// An extension persisted a display message while the transcript replay
-				// yielded. The display callback stayed gated by initialChatRendered;
-				// discard the stale partial tree and replay the current session once
-				// more instead of letting a reentrant synchronous rebuild interleave.
-				stagedChatContainer.disposeChildren();
-				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-				this.ctx.pendingTools.clear();
-				this.ctx.pendingBashComponents = [];
-				this.ctx.pendingPythonComponents = [];
-				context = this.ctx.viewSession.buildTranscriptSessionContext({
-					collapseCompactedHistory: settings.get("display.collapseCompacted"),
-					keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
-				});
-				replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
+		// Show compaction info if session was compacted
+		const allEntries = this.ctx.viewSession.sessionManager.getEntries();
+		let compactionCount = 0;
+		for (const entry of allEntries) {
+			if (entry.type === "compaction") {
+				compactionCount++;
 			}
-
-			const replayedChatChildren = [...stagedChatContainer.children];
-			stagedChatContainer.clear();
-			this.ctx.chatContainer = visibleChatContainer;
-			if (preservedChatChildren) {
-				visibleChatContainer.clear();
-			} else {
-				visibleChatContainer.disposeChildren();
+		}
+		if (compactionCount > 0) {
+			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
+			this.ctx.showStatus(`Session compacted ${times}`);
+		}
+		if (options.clearTerminalHistory) {
+			this.ctx.ui.requestRender(true, { clearScrollback: true });
+		}
+		if (preservedChatChildren && preservedChatChildren.length > 0) {
+			for (const child of preservedChatChildren) {
+				this.ctx.chatContainer.addChild(child);
 			}
-			for (const child of replayedChatChildren) {
-				visibleChatContainer.addChild(child);
-			}
-			if (preservedChatChildren) {
-				for (const child of preservedChatChildren) {
-					visibleChatContainer.addChild(child);
-				}
-			}
-			committed = true;
-
-			if (!this.ctx.focusedAgentId) {
-				for (const message of context.messages) {
-					if (message.role !== "user" || message.synthetic) continue;
-					const text = this.getUserMessageText(message);
-					if (text) this.ctx.editor.addToHistory(text);
-				}
-			}
-
-			// Show compaction info if session was compacted.
-			const allEntries = this.ctx.viewSession.sessionManager.getEntries();
-			let compactionCount = 0;
-			for (const entry of allEntries) {
-				if (entry.type === "compaction") {
-					compactionCount++;
-				}
-			}
-			if (compactionCount > 0) {
-				const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
-				this.ctx.showStatus(`Session compacted ${times}`);
-			}
-			if (options.clearTerminalHistory) {
-				this.ctx.ui.requestRender(true, { clearScrollback: true });
-			} else {
-				this.ctx.ui.requestRender();
-			}
-		} finally {
-			if (!committed) {
-				this.ctx.chatContainer = visibleChatContainer;
-				this.ctx.transcriptMessageComponents = previousTranscriptMessageComponents;
-				this.ctx.pendingTools = previousPendingTools;
-				this.ctx.pendingBashComponents = previousPendingBashComponents;
-				this.ctx.pendingPythonComponents = previousPendingPythonComponents;
-				this.ctx.lastAssistantUsage = previousLastAssistantUsage;
-				stagedChatContainer.disposeChildren();
-			}
-			this.ctx.initialChatRendered = committed ? true : chatWasAlreadyRendered;
+			this.ctx.ui.requestRender();
 		}
 	}
 
@@ -866,10 +449,9 @@ export class UiHelpers {
 		this.ctx.present([new Spacer(1), text]);
 	}
 
-	showWarning(warningMessage: string, options?: { hideWithToolActivity?: boolean }): void {
+	showWarning(warningMessage: string): void {
 		const text = new Text(`Warning: ${warningMessage}`, 1, 0).setStyleFn(t => theme.fg("warning", t));
-		const content = [new Spacer(1), text];
-		this.ctx.present(options?.hideWithToolActivity ? new ToolActivityContainer(content) : content);
+		this.ctx.present([new Spacer(1), text]);
 	}
 
 	showNewVersionNotification(newVersion: string): void {
@@ -1080,11 +662,6 @@ export class UiHelpers {
 			this.ctx.chatContainer.addChild(component);
 		}
 		this.ctx.pendingBashComponents = [];
-		for (const component of this.ctx.pendingPythonComponents) {
-			this.ctx.pendingMessagesContainer.removeChild(component);
-			this.ctx.chatContainer.addChild(component);
-		}
-		this.ctx.pendingPythonComponents = [];
 	}
 
 	findLastAssistantMessage(): AssistantMessage | undefined {

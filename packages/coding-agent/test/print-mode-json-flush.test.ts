@@ -68,6 +68,63 @@ function createFlushHarness(): FlushHarness {
 	};
 }
 
+function makeIpythonEnd(): AgentSessionEvent {
+	return {
+		type: "ipython_cell_end",
+		presentation: {
+			kind: "cell",
+			phase: "complete",
+			cellId: "cell-print",
+			executionId: "execute-print",
+			sequence: 1,
+			origin: "model",
+			authority: "trusted-cell",
+			code: "print('early'); print('late')",
+			status: "ok",
+			requestedAt: 1,
+			startedAt: 2,
+			finishedAt: 3,
+			durationMs: 1,
+			stdout: "early\nlate\n",
+			stderr: "",
+			result: undefined,
+			events: [
+				{ kind: "stream", name: "stdout", text: "early\n" },
+				{ kind: "stream", name: "stdout", text: "late\n" },
+			],
+			errors: [],
+			updates: [],
+			startupProgress: [],
+			safeText: { text: "early\nlate\n", truncated: false, totalBytes: 11, outputBytes: 11 },
+			artifacts: [{ path: "/tmp/print.txt", mimeType: "text/plain", bytes: 11 }],
+		},
+	};
+}
+
+function makeActTerminal(): AgentSessionEvent {
+	return {
+		type: "act_event",
+		actId: "act-print",
+		outerToolCallId: "cell-print",
+		sequence: 5,
+		event: "terminal",
+		status: "done",
+		prompt: "bounded public prompt",
+		promptTruncated: false,
+		model: { provider: "test", id: "actor" },
+		cancellationCapability: "posix-managed",
+		usage: {
+			input: 1,
+			output: 1,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		errorTruncated: false,
+	};
+}
+
 function makeLargeAgentEnd(payload: string): AgentSessionEvent {
 	return {
 		type: "agent_end",
@@ -119,6 +176,8 @@ describe("print-mode JSON flush (#7635)", () => {
 		});
 
 		await harness.promptStarted;
+		harness.emit(makeIpythonEnd());
+		harness.emit(makeActTerminal());
 		harness.emit(makeLargeAgentEnd(payload));
 		harness.resolvePrompt();
 
@@ -146,5 +205,22 @@ describe("print-mode JSON flush (#7635)", () => {
 		// The complete payload survives — not a pipe-buffer-sized prefix.
 		expect(agentEndLine).toContain(payload);
 		expect(JSON.parse(agentEndLine as string)).toMatchObject({ type: "agent_end" });
+		const cellLine = writes.find(line => line.includes('"type":"ipython_cell_end"'));
+		expect(JSON.parse(cellLine as string)).toMatchObject({
+			type: "ipython_cell_end",
+			presentation: {
+				phase: "complete",
+				safeText: { text: "early\nlate\n" },
+				artifacts: [{ path: "/tmp/print.txt" }],
+			},
+		});
+		const actLine = writes.find(line => line.includes('"type":"act_event"'));
+		expect(JSON.parse(actLine as string)).toMatchObject({
+			type: "act_event",
+			event: "terminal",
+			actId: "act-print",
+			status: "done",
+			prompt: "bounded public prompt",
+		});
 	});
 });

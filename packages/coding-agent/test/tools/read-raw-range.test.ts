@@ -3,8 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -24,17 +24,17 @@ function makeSession(cwd: string): ToolSession {
 	};
 }
 
-describe("read tool raw range exactness", () => {
+describe("read service raw range exactness", () => {
 	let testDir: string;
 	let filePath: string;
-	let tool: ReadTool;
+	let tool: ReadService;
 
 	beforeEach(async () => {
 		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-raw-range-"));
 		filePath = path.join(testDir, "data.txt");
 		const lines = Array.from({ length: 60 }, (_, index) => `L${String(index + 1).padStart(2, "0")}`);
 		await Bun.write(filePath, lines.join("\n"));
-		tool = new ReadTool(makeSession(testDir));
+		tool = new ReadService(makeSession(testDir));
 	});
 
 	afterEach(async () => {
@@ -46,21 +46,21 @@ describe("read tool raw range exactness", () => {
 		// lines. Without line numbers the padding is indistinguishable from
 		// requested content, so verbatim-extraction callers pasted 5 lines
 		// where they asked for 1.
-		const result = await tool.execute("call-raw-single", { path: `${filePath}:raw:31-31` });
+		const result = await tool.read(`${filePath}:raw:31-31`);
 		const output = getTextOutput(result);
 
 		expect(output.trimEnd()).toBe("L31");
 	});
 
 	it("returns exactly the requested raw range at the start of the file", async () => {
-		const result = await tool.execute("call-raw-head", { path: `${filePath}:raw:1-2` });
+		const result = await tool.read(`${filePath}:raw:1-2`);
 		const output = getTextOutput(result);
 
 		expect(output.trimEnd()).toBe("L01\nL02");
 	});
 
 	it("records the source line count for an open-ended range that reaches EOF", async () => {
-		const result = await tool.execute("call-raw-tail", { path: `${filePath}:raw:31-` });
+		const result = await tool.read(`${filePath}:raw:31-`);
 
 		expect(result.details?.totalLines).toBe(60);
 	});
@@ -68,7 +68,7 @@ describe("read tool raw range exactness", () => {
 	it("keeps context padding for numbered range reads", async () => {
 		// Numbered mode intentionally pads (leading anchor buffer + trailing
 		// disambiguation lines) — line numbers make the padding self-describing.
-		const result = await tool.execute("call-numbered", { path: `${filePath}:31-31` });
+		const result = await tool.read(`${filePath}:31-31`);
 		const output = getTextOutput(result);
 
 		expect(output).toContain("L31");

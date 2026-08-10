@@ -6,7 +6,7 @@ import {
 	Container,
 	Ellipsis,
 	ImageProtocol,
-	type Loader,
+	Loader,
 	TERMINAL,
 	Text,
 	type TUI,
@@ -14,16 +14,13 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { theme } from "../../modes/theme/theme";
-import type { TruncationMeta } from "../../tools/output-meta";
+import { getSymbolTheme, theme } from "../../modes/theme/theme";
+import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
-import {
-	buildExecutionFrame,
-	buildStatusFooter,
-	createCollapsedPreview,
-	type ExecutionStatus,
-	resolveExecutionStatus,
-} from "./execution-shared";
+import { DynamicBorder } from "./dynamic-border";
+import { truncateToVisualLines } from "./visual-truncate";
+
+type ExecutionStatus = "running" | "complete" | "cancelled" | "error";
 
 // Preview line limit when not expanded (matches tool execution behavior)
 const PREVIEW_LINES = 20;
@@ -54,9 +51,18 @@ export class BashExecutionComponent extends Container {
 
 		// Use dim border for excluded-from-context commands (!! prefix)
 		const colorKey = excludeFromContext ? "dim" : "bashMode";
-		const { contentContainer, loader } = buildExecutionFrame(this, ui, colorKey);
-		this.#contentContainer = contentContainer;
-		this.#loader = loader;
+		const borderColor = (text: string) => theme.fg(colorKey, text);
+		this.addChild(new DynamicBorder(borderColor));
+		this.#contentContainer = new Container();
+		this.addChild(this.#contentContainer);
+		this.#loader = new Loader(
+			ui,
+			spinner => theme.fg(colorKey, spinner),
+			text => theme.fg("muted", text),
+			"Running… (esc to cancel)",
+			getSymbolTheme().spinnerFrames,
+		);
+		this.addChild(new DynamicBorder(borderColor));
 
 		// Command header
 		this.#headerText = new Text(theme.fg(colorKey, theme.bold(`$ ${command}`)), 1, 0);
@@ -123,7 +129,7 @@ export class BashExecutionComponent extends Container {
 		options?: { output?: string; truncation?: TruncationMeta },
 	): void {
 		this.#exitCode = exitCode;
-		this.#status = resolveExecutionStatus(exitCode, cancelled);
+		this.#status = cancelled ? "cancelled" : exitCode !== 0 && exitCode !== undefined ? "error" : "complete";
 		this.#truncation = options?.truncation;
 		if (options?.output !== undefined) {
 			this.#setOutput(options.output);
@@ -173,9 +179,11 @@ export class BashExecutionComponent extends Container {
 					.join("\n");
 				this.#contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
 			} else {
-				// Use shared visual truncation utility, recomputed per render width
-				const styledOutput = previewLogicalLines.map(line => theme.fg("muted", line)).join("\n");
-				this.#contentContainer.addChild(createCollapsedPreview(`\n${styledOutput}`, PREVIEW_LINES));
+				const previewText = `\n${previewLogicalLines.map(line => theme.fg("muted", line)).join("\n")}`;
+				this.#contentContainer.addChild({
+					render: width => truncateToVisualLines(previewText, PREVIEW_LINES, width, 1).visualLines,
+					invalidate: () => {},
+				});
 			}
 		}
 
@@ -183,14 +191,21 @@ export class BashExecutionComponent extends Container {
 		if (this.#status === "running") {
 			this.#contentContainer.addChild(this.#loader);
 		} else {
-			const footer = buildStatusFooter({
-				status: this.#status,
-				exitCode: this.#exitCode,
-				truncation: this.#truncation,
-				hiddenLineCount,
-				suppressHiddenCount: hasSixelOutput,
-			});
-			if (footer) this.#contentContainer.addChild(footer);
+			const statusLines: string[] = [];
+			if (hiddenLineCount > 0 && !hasSixelOutput) {
+				statusLines.push(theme.fg("dim", `… ${hiddenLineCount} more lines (ctrl+o to expand)`));
+			}
+			if (this.#status === "cancelled") {
+				statusLines.push(theme.fg("warning", "(cancelled)"));
+			} else if (this.#status === "error") {
+				statusLines.push(theme.fg("error", `(exit ${this.#exitCode})`));
+			}
+			if (this.#truncation) {
+				statusLines.push(theme.fg("warning", formatTruncationMetaNotice(this.#truncation)));
+			}
+			if (statusLines.length > 0) {
+				this.#contentContainer.addChild(new Text(`\n${statusLines.join("\n")}`, 1, 0));
+			}
 		}
 	}
 

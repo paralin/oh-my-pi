@@ -1,9 +1,9 @@
 <irc>
-Incoming IRC message from agent `{{from}}`{{#if replyTo}} (reply to {{replyTo}}){{/if}}:
+Incoming IRC message from agent `{{from}}`{{#if replyTo}} (replying to {{replyTo}}){{/if}}:
 
 {{message}}
 
-{{#if interrupting}}Sent while waiting/working. Active interruptible wait stopped early for immediate reading.{{/if}}
+{{#if interrupting}}An agent sent this while you were waiting or working. Any active interruptible wait was stopped early so you can read it now.{{/if}}
 
-{{#if autoReplied}}Mid-task: context-generated side-channel auto-reply sent to `{{from}}` on your behalf, recorded after this message. Follow up via `hub` (`op: "send"`, `to: "{{from}}"`) only to correct it.{{else}}If response expected, reply via `hub` (`op: "send"`, `to: "{{from}}"`); may finish current step first. No one replies on your behalf.{{/if}}
+{{#if autoReplied}}You are mid-task, so a side-channel auto-reply was generated from your context and delivered to `{{from}}` on your behalf (recorded after this message). Use `await agent_message.list_agents()` to identify the sender's family role, then reply through `agent_message.send` only if that auto-reply needs correcting.{{else}}If a response is expected, use `await agent_message.list_agents()` to identify the sender's family role, then reply through `agent_message.send` — you may finish your current step first. Nobody replies on your behalf.{{/if}}
 </irc>

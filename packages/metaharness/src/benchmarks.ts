@@ -27,14 +27,6 @@ export const BENCHMARK_DEFINITIONS: BenchmarkDefinition[] = [
 		metrics: [{ key: "success_rate", label: "Success rate", format: "percent", higherIsBetter: true }],
 	},
 	{
-		kind: "edit",
-		label: "TypeScript edit",
-		metrics: [
-			{ key: "task_success_rate", label: "Task success", format: "percent", higherIsBetter: true },
-			{ key: "edit_success_rate", label: "Edit success", format: "percent", higherIsBetter: true },
-		],
-	},
-	{
 		kind: "snapcompact",
 		label: "SnapCompact",
 		metrics: [
@@ -71,32 +63,6 @@ export interface BenchmarkSnapshot {
 	tokCache: number;
 	score: number | null;
 	metrics: Record<string, number | null>;
-}
-
-interface EditRun {
-	runIndex: number;
-	success: boolean;
-	error?: string;
-	duration: number;
-	tokens: { input: number; output: number; reasoning: number };
-	toolCalls?: { read: number; edit: number; write: number };
-}
-
-interface EditTask {
-	id: string;
-	name: string;
-	runs: EditRun[];
-}
-
-interface EditResult {
-	tasks: EditTask[];
-	summary: {
-		totalRuns: number;
-		successfulRuns: number;
-		taskSuccessRate: number;
-		editSuccessRate: number;
-		totalTokens: { input: number; output: number };
-	};
 }
 
 interface SnapRecord {
@@ -140,52 +106,6 @@ function emptySnapshot(): BenchmarkSnapshot {
 		tokCache: 0,
 		score: null,
 		metrics: {},
-	};
-}
-
-function readEditSnapshot(jobDir: string): BenchmarkSnapshot {
-	const file = path.join(jobDir, "result.json");
-	if (!fs.existsSync(file)) return emptySnapshot();
-	const result: EditResult = JSON.parse(fs.readFileSync(file, "utf8"));
-	const traces: BenchmarkTrace[] = [];
-	let tokIn = 0;
-	let tokOut = 0;
-	for (const task of result.tasks) {
-		for (const run of task.runs) {
-			tokIn += run.tokens.input;
-			tokOut += run.tokens.output;
-			const runNumber = run.runIndex + 1;
-			traces.push({
-				name: `${task.id}__${runNumber}`,
-				task: task.id,
-				status: run.success ? "pass" : run.error ? "error" : "fail",
-				reward: run.success ? 1 : 0,
-				costUsd: 0,
-				durationMs: run.duration,
-				detail: JSON.stringify({ name: task.name, error: run.error ?? null, tools: run.toolCalls ?? null }),
-				tracePath: path.join("result.dump", task.id.replace(/[^a-zA-Z0-9._-]/g, "_"), `run-${runNumber}.md`),
-			});
-		}
-	}
-	const pass = traces.filter(trace => trace.status === "pass").length;
-	const error = traces.filter(trace => trace.status === "error").length;
-	return {
-		traces,
-		total: result.summary.totalRuns,
-		done: traces.length,
-		pass,
-		fail: traces.length - pass,
-		error,
-		running: Math.max(0, result.summary.totalRuns - traces.length),
-		costUsd: 0,
-		tokIn,
-		tokOut,
-		tokCache: 0,
-		score: result.summary.taskSuccessRate,
-		metrics: {
-			task_success_rate: result.summary.taskSuccessRate,
-			edit_success_rate: result.summary.editSuccessRate,
-		},
 	};
 }
 
@@ -241,7 +161,6 @@ function readSnapcompactSnapshot(jobDir: string): BenchmarkSnapshot {
 
 /** Read and normalize the latest artifacts for a benchmark run. */
 export function readBenchmarkSnapshot(benchmark: BenchmarkKind, jobDir: string): BenchmarkSnapshot {
-	if (benchmark === "edit") return readEditSnapshot(jobDir);
 	if (benchmark === "snapcompact") return readSnapcompactSnapshot(jobDir);
 	const trials = readTrials(jobDir);
 	const job = readJobResult(jobDir);

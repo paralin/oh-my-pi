@@ -29,7 +29,7 @@ import {
 import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
-import type { MessageRenderer } from "../../extensibility/extensions/types";
+import type { IpythonMimeRenderer, MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -125,10 +125,10 @@ export interface AgentHubDeps {
 	ui?: TUI;
 	/** Tool lookup for transcript renderers (labels, custom render functions). */
 	getTool?: (name: string) => AgentTool | undefined;
-	/** Whether the active registry entry came from a built-in factory. */
-	isBuiltInTool?: (name: string) => boolean;
 	/** Extension message renderers for custom messages in the transcript. */
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	/** Extension rich MIME renderers for IPython cells in the transcript. */
+	getIpythonMimeRenderer?: (mimeType: string) => IpythonMimeRenderer | undefined;
 	/** Cwd used by tool renderers for path shortening; defaults to the project dir. */
 	cwd?: string;
 	/** Mirrors the main transcript's thinking-block visibility. */
@@ -210,8 +210,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	// Transcript-viewer launch deps (passed through to AgentTranscriptViewer).
 	#ui: TUI;
 	#getTool: ((name: string) => AgentTool | undefined) | undefined;
-	#isBuiltInTool: ((name: string) => boolean) | undefined;
 	#getMessageRenderer: ((customType: string) => MessageRenderer | undefined) | undefined;
+	#getIpythonMimeRenderer: ((mimeType: string) => IpythonMimeRenderer | undefined) | undefined;
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
@@ -243,8 +243,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 				requestComponentRender: () => deps.requestRender(),
 			} as unknown as TUI);
 		this.#getTool = deps.getTool;
-		this.#isBuiltInTool = deps.isBuiltInTool;
 		this.#getMessageRenderer = deps.getMessageRenderer;
+		this.#getIpythonMimeRenderer = deps.getIpythonMimeRenderer;
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
@@ -370,8 +370,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			lifecycle: this.#remote ? undefined : this.#lifecycle,
 			ui: this.#ui,
 			getTool: this.#getTool,
-			isBuiltInTool: this.#isBuiltInTool,
 			getMessageRenderer: this.#getMessageRenderer,
+			getIpythonMimeRenderer: this.#getIpythonMimeRenderer,
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
@@ -491,7 +491,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	#fallbackStatsSession(ref: AgentRef, observed: ObservableSession | undefined): AgentSession | undefined {
 		if (observed?.progress) return undefined;
-		return isAgentSession(ref.session) ? ref.session : undefined;
+		if (isAgentSession(ref.session)) return ref.session;
+		// Registry tests and lightweight integrations may expose only the
+		// session statistics seam; treat that as a valid fallback source too.
+		return ref.session && typeof (ref.session as { getSessionStats?: unknown }).getSessionStats === "function"
+			? (ref.session as AgentSession)
+			: undefined;
 	}
 
 	// ========================================================================

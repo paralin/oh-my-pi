@@ -72,9 +72,9 @@ export class ExtensionUiController {
 	#dialogActive = false;
 	#dialogQueue: Array<() => void> = [];
 	/**
-	 * Built once in `initHooksAndCustomTools()`. Reused directly by `/tree`
-	 * `ask` re-answer (issue #5642) to drive a standalone `AskTool.execute()`
-	 * call with the same picker/dialog primitives a live tool call would get.
+	 * Built once in `initExtensions()`. Reused directly by `/tree`
+	 * `ask` re-answer (issue #5642) to drive a standalone structured question
+	 * with the same picker/dialog primitives a live request would get.
 	 */
 	#toolUIContext: ExtensionUIContext | undefined;
 	constructor(private ctx: InteractiveModeContext) {}
@@ -82,7 +82,7 @@ export class ExtensionUiController {
 	/**
 	 * Initialize the hook system with TUI-based UI context.
 	 */
-	async initHooksAndCustomTools(): Promise<void> {
+	async initExtensions(): Promise<void> {
 		// Create and set hook & tool UI context
 		const uiContext: ExtensionUIContext = {
 			timeoutStartsOnPresentation: true,
@@ -166,9 +166,6 @@ export class ExtensionUiController {
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
-			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
-			getAllTools: () => this.ctx.session.getAllToolInfos(),
-			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
 				if (!key) return false;
@@ -297,10 +294,10 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * The `ExtensionUIContext` built in `initHooksAndCustomTools()` — the same
+	 * The `ExtensionUIContext` built in `initExtensions()` — the same
 	 * picker/dialog primitives passed as `context.ui` for every live tool
 	 * call. `/tree` `ask` re-answer (issue #5642) reuses this to drive a
-	 * standalone `AskTool.execute()` call outside a normal agent turn.
+	 * standalone structured-question request outside a normal agent turn.
 	 * `undefined` before hooks have initialized.
 	 */
 	getToolUIContext(): ExtensionUIContext | undefined {
@@ -399,9 +396,6 @@ export class ExtensionUiController {
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
-			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
-			getAllTools: () => this.ctx.session.getAllToolInfos(),
-			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
 				const key = await this.ctx.session.modelRegistry.getApiKey(model);
 				if (!key) return false;
@@ -513,43 +507,6 @@ export class ExtensionUiController {
 		};
 
 		extensionRunner.initialize(actions, contextActions, commandActions, uiContext, "tui");
-	}
-
-	/**
-	 * Emit session event to all extension tools.
-	 */
-	async emitCustomToolSessionEvent(
-		reason: "start" | "switch" | "branch" | "tree" | "shutdown",
-		previousSessionFile?: string,
-	): Promise<void> {
-		const event = { reason, previousSessionFile };
-		const uiContext = this.ctx.session.extensionRunner?.getUIContext();
-		if (!uiContext) {
-			return;
-		}
-		const runner = this.ctx.session.extensionRunner;
-		for (const registeredTool of runner?.getAllRegisteredTools() ?? []) {
-			if (registeredTool.definition.onSession) {
-				try {
-					await registeredTool.definition.onSession(event, {
-						...runner!.createContext(),
-						ui: uiContext,
-						hasUI: true,
-						compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
-					});
-				} catch (err) {
-					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));
-				}
-			}
-		}
-	}
-
-	/**
-	 * Show a tool error in the chat.
-	 */
-	showToolError(toolName: string, error: string): void {
-		const errorText = new Text(`Tool "${toolName}" error: ${error}`, 1, 0).setStyleFn(t => theme.fg("error", t));
-		this.ctx.present(errorText);
 	}
 
 	/**

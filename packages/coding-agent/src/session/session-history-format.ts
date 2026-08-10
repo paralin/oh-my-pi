@@ -9,7 +9,8 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { escapeXmlText } from "@oh-my-pi/pi-utils";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
+import { IPYTHON_JOURNAL_MESSAGE_TYPE, isIpythonJournalDetail } from "../ipython/journal";
+import { renderBoundedIpythonJournalSummary } from "./ipython-summary";
 import type {
 	BashExecutionMessage,
 	BranchSummaryMessage,
@@ -25,20 +26,9 @@ export interface HistoryFormatOptions {
 	title?: string;
 	/** Render assistant thinking blocks (default: elided). */
 	includeThinking?: boolean;
-	/** Render tool intent comment before tool call lines. */
-	includeToolIntent?: boolean;
 	/** Render watched-session roles as inline `**agent**:` / `**user**:` labels (collapsing consecutive same-role messages) instead of `## ` headings, so a primary transcript embedded inside an advisor turn stays visually distinct. */
 	watchedRoles?: boolean;
-	/**
-	 * Expand the primary agent's injected constraint context — plan mode's rules
-	 * (`plan-mode-context`) and the approved plan it implements
-	 * (`plan-mode-reference`) — verbatim instead of as a truncated one-liner,
-	 * wrapped in a `<primary-context>` tag so a reviewer reads it as the primary's
-	 * instructions, not its own. The advisor sets this: a truncated rule (plan
-	 * mode's "NEVER create files … except the plan file") makes it raise false
-	 * blockers. See {@link PRIMARY_CONTEXT_CUSTOM_TYPES}. Other custom messages
-	 * still collapse to a one-liner.
-	 */
+	/** Expand typed primary context entries verbatim when a consumer requests it. */
 	expandPrimaryContext?: boolean;
 	/**
 	 * Append the full unified diff (from a tool result's `details.diff`) below
@@ -152,11 +142,10 @@ export function formatToolCallPrimaryArg(name: string, args: Record<string, unkn
 		const summary = primaryArgValue(value);
 		if (summary) return oneLine(summary);
 	}
-	// Fallback: first non-intent string arg, then a compact JSON of the args.
+	// Fallback: first string arg, then a compact JSON of the args.
 	const rest: Record<string, unknown> = {};
 	let restCount = 0;
 	for (const key in args) {
-		if (key === INTENT_FIELD) continue;
 		const value = args[key];
 		if (typeof value === "string" && value.length > 0) return oneLine(value);
 		rest[key] = value;
@@ -168,11 +157,6 @@ export function formatToolCallPrimaryArg(name: string, args: Record<string, unkn
 	} catch {
 		return "";
 	}
-}
-
-export function formatToolCallIntentPreview(args: Record<string, unknown> | undefined): string | undefined {
-	const intent = args?.[INTENT_FIELD];
-	return typeof intent === "string" && intent.trim() ? oneLine(intent, 80) : undefined;
 }
 
 export function formatToolResultErrorPreview(content: string | readonly (TextContent | ImageContent)[]): string {
@@ -195,7 +179,6 @@ function toolCallLine(
 	name: string,
 	args: Record<string, unknown> | undefined,
 	result: ToolResultMessage | undefined,
-	includeToolIntent?: boolean,
 	expandEditDiffs?: boolean,
 ): string {
 	const head = `→ ${name}(${formatToolCallPrimaryArg(name, args)})`;
@@ -221,8 +204,6 @@ function toolCallLine(
 		}
 	}
 
-	const formattedIntent = includeToolIntent ? formatToolCallIntentPreview(args) : undefined;
-	if (formattedIntent) return `// ${formattedIntent}\n${base}`;
 	return base;
 }
 
@@ -245,20 +226,8 @@ function executionLine(
 	return `→ user-${kind}! ${sourcePreview} ⇒ ${status} · ${lines} ${lines === 1 ? "line" : "lines"}`;
 }
 
-/**
- * Hidden custom messages that inject the primary agent's operative *constraints*
- * — plan mode's rules and the approved plan it implements. A reviewer (the
- * advisor) must read these verbatim; truncating them hides load-bearing
- * exceptions (e.g. plan mode permits exactly one plan file). Every other custom
- * type stays a one-liner.
- *
- * Deliberately excludes `goal-mode-context`: its body carries live budget
- * counters (tokens/seconds used) that change every turn, so it can neither be
- * deduped against a prior copy nor expanded each turn without flooding the
- * reviewer — and its constraints don't drive the file-write misreads this
- * targets.
- */
-export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set(["plan-mode-context", "plan-mode-reference"]);
+/** Hidden custom messages that inject primary-agent context verbatim. */
+export const PRIMARY_CONTEXT_CUSTOM_TYPES: ReadonlySet<string> = new Set();
 
 /** Hidden non-primary custom messages whose content is needed to understand visible transcript entries. */
 const CONTEXTUAL_NON_PRIMARY_HIDDEN_CUSTOM_TYPES: Record<string, true> = {
@@ -270,6 +239,10 @@ function customOneLiner(msg: CustomMessage | HookMessage): string {
 	const details = (msg.details ?? {}) as Record<string, unknown>;
 	const str = (key: string): string => (typeof details[key] === "string" ? (details[key] as string) : "");
 	switch (msg.customType) {
+		case IPYTHON_JOURNAL_MESSAGE_TYPE:
+			return isIpythonJournalDetail(msg.details)
+				? `[${IPYTHON_JOURNAL_MESSAGE_TYPE}]\n${renderBoundedIpythonJournalSummary(msg.details)}`
+				: `[${IPYTHON_JOURNAL_MESSAGE_TYPE}]`;
 		case "irc:incoming":
 			return `[irc] ${str("from") || "?"} → me: ${oneLine(str("message"))}`;
 		case "irc:relay":
@@ -365,9 +338,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 					} else if (block.type === "toolCall") {
 						const result = resultsByCallId.get(block.id);
 						if (result) consumed.add(block.id);
-						body.push(
-							toolCallLine(block.name, block.arguments, result, opts?.includeToolIntent, opts?.expandEditDiffs),
-						);
+						body.push(toolCallLine(block.name, block.arguments, result, opts?.expandEditDiffs));
 					} else if (opts?.includeThinking && block.type === "thinking" && block.thinking.trim()) {
 						body.push(`_thinking:_ ${block.thinking}`);
 					}
@@ -390,7 +361,7 @@ export function formatSessionHistoryMarkdown(messages: unknown[], opts?: History
 			case "toolResult": {
 				// Normally consumed by its toolCall; orphans (e.g. truncated history) get their own line.
 				if (consumed.has(msg.toolCallId)) break;
-				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.includeToolIntent, opts?.expandEditDiffs), "");
+				lines.push(toolCallLine(msg.toolName, undefined, msg, opts?.expandEditDiffs), "");
 				lastWatchedLabel = undefined;
 				break;
 			}

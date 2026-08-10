@@ -11,7 +11,6 @@ const WARP_ATTENTION_EVENTS: Record<string, true> = {
 	stop: true,
 	stop_failure: true,
 	permission_request: true,
-	question_asked: true,
 };
 
 /** True when Warp has negotiated the structured CLI-agent OSC protocol. */
@@ -204,12 +203,6 @@ export function createWarpEventBridgeExtension(): ExtensionFactory {
 
 		api.on("tool_approval_resolved", () => {
 			emitter?.emit({ event: "permission_replied" });
-		});
-
-		api.on("tool_execution_start", event => {
-			if (event.toolName === "ask") {
-				emitter?.emit({ event: "question_asked", summary: "Waiting for your answer" });
-			}
 		});
 
 		api.on("tool_result", event => {

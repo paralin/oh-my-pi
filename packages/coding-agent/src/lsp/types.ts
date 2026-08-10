@@ -1,35 +1,3 @@
-import { type } from "@oh-my-pi/omptype";
-import { TOOL_TIMEOUTS } from "../tools/tool-timeouts";
-
-// =============================================================================
-// Tool Schema
-// =============================================================================
-
-export const lspSchema = type({
-	action:
-		"'diagnostics' | 'definition' | 'references' | 'hover' | 'symbols' | 'rename' | 'rename_file' | 'code_actions' | 'type_definition' | 'implementation' | 'status' | 'reload' | 'capabilities' | 'request'",
-	file: "string?",
-	line: "number?",
-	symbol: "string?",
-	query: "string?",
-	new_name: "string?",
-	apply: "boolean?",
-	"timeout?": type.number
-		.atLeast(TOOL_TIMEOUTS.lsp.min)
-		.atMost(TOOL_TIMEOUTS.lsp.max)
-		.describe("Timeout in seconds (default 20; range 5–300)."),
-	payload: "string?",
-});
-
-export type LspParams = typeof lspSchema.infer;
-
-export interface LspToolDetails {
-	serverName?: string;
-	action: string;
-	success: boolean;
-	request?: LspParams;
-}
-
 // =============================================================================
 // Core LSP Protocol Types
 // =============================================================================
@@ -306,14 +274,8 @@ export interface Hover {
 // Linter Client Interface
 // =============================================================================
 
-/**
- * Interface for linter/formatter clients.
- * Can be implemented using LSP protocol or CLI tools.
- */
+/** Interface for diagnostics clients backed by an LSP protocol or CLI tool. */
 export interface LinterClient {
-	/** Format file content. Returns formatted content. */
-	format(filePath: string, content: string): Promise<string>;
-
 	/** Get diagnostics for a file. Content should already be written to disk. */
 	lint(filePath: string): Promise<Diagnostic[]>;
 
@@ -359,13 +321,13 @@ export interface ServerConfig {
 		statusRequestTimeoutMs?: number;
 	};
 	capabilities?: ServerCapabilities;
-	/** If true, this is a linter/formatter server (e.g., Biome) - used only for diagnostics/actions, not type intelligence */
+	/** If true, this is a diagnostics-only linter server (e.g., Biome), not a type-intelligence server. */
 	isLinter?: boolean;
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;
 	/**
 	 * Custom linter client factory. If provided, creates a custom client instead of using LSP.
-	 * The client handles format/lint operations. Useful for tools with buggy LSP implementations.
+	 * The client supplies diagnostics. Useful for tools with buggy LSP implementations.
 	 */
 	createClient?: LinterClientFactory;
 }

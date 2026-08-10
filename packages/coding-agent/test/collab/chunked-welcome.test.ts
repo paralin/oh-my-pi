@@ -104,7 +104,6 @@ function makeFailingGuestContext(failure: Error): InteractiveModeContext {
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		loadingAnimation: undefined,
 		statusLine: {
 			setCollabStatus: () => {},

@@ -140,7 +140,6 @@ export const enum PiGenAIAttr {
 	CostOutputUsd = "pi.gen_ai.cost.output_usd",
 	CostUnavailableReason = "pi.gen_ai.cost.unavailable_reason",
 	ToolStatus = "pi.gen_ai.tool.status",
-	ToolCallIntent = "pi.gen_ai.tool.call.intent",
 	HandoffFromAgentName = "pi.gen_ai.handoff.from_agent.name",
 	HandoffFromAgentId = "pi.gen_ai.handoff.from_agent.id",
 	HandoffToAgentName = "pi.gen_ai.handoff.to_agent.name",
@@ -768,7 +767,6 @@ function serializeToolChoice(toolChoice: ToolChoice | undefined): string | undef
 	if (toolChoice == null) return undefined;
 	if (typeof toolChoice === "string") return toolChoice;
 	if (typeof toolChoice === "object") {
-		// `{ type: "tool", name: "foo" }` shapes used across providers.
 		if ("name" in toolChoice && typeof toolChoice.name === "string") return toolChoice.name;
 		if ("type" in toolChoice && typeof toolChoice.type === "string") return toolChoice.type;
 	}
@@ -1636,7 +1634,7 @@ export async function recordManualChatTelemetry(
 /**
  * Options accepted by {@link instrumentedCompleteSimple}. Mirrors the
  * `streamAssistantResponse` chat-span lifecycle for oneshot LLM calls
- * (compaction summaries, handoff document, branch summary, inspect_image).
+ * (compaction summaries, handoff documents, and branch summaries).
  */
 export interface InstrumentedChatSpanOptions {
 	readonly telemetry: AgentTelemetry | undefined;
@@ -1647,7 +1645,7 @@ export interface InstrumentedChatSpanOptions {
 	/**
 	 * Tag stamped onto `pi.gen_ai.oneshot.kind`. Values used by the agent:
 	 * `compaction_summary`, `compaction_short_summary`, `compaction_turn_prefix`,
-	 * `handoff`, `branch_summary`, `inspect_image`. Free-form to allow callers
+	 * `handoff`, `branch_summary`. Free-form to allow callers
 	 * outside this package to add new kinds without bumping the helper.
 	 */
 	readonly oneshotKind?: string;

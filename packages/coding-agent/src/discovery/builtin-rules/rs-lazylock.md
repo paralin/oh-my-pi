@@ -3,7 +3,7 @@ description: Prefer std::sync::LazyLock over OnceLock and once_cell
 condition:
   - "once_cell::"
   - "OnceLock::new"
-scope: "tool:edit(*.rs), tool:write(*.rs)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

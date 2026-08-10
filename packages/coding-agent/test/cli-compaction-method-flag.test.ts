@@ -28,7 +28,6 @@ async function observeCompactionSettings(
 	parsed.noExtensions = true;
 	parsed.noSkills = true;
 	parsed.noRules = true;
-	parsed.noTools = true;
 	parsed.noLsp = true;
 	parsed.sessionDir = tempDir.path();
 

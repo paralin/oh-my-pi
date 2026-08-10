@@ -11,7 +11,7 @@
  *
  * Every turn runs as an AsyncJobManager job, so a completed turn self-delivers
  * into the director's conversation exactly like an async `task` result, and
- * `vibe_wait` can block on the first settling turn with `hub`-wait semantics.
+ * `omp.vibe.wait` can block on the first settling turn with `hub`-wait semantics.
  */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -28,12 +28,12 @@ import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-r
 import { hasAgentTurnState, isAgentSession } from "../session/agent-session";
 import { SessionManager, SessionPersistenceIndeterminateError } from "../session/session-manager";
 import { sessionSidecarDir } from "../session/session-paths";
+import type { ToolSession } from "../session/tool-session";
 import { getBundledAgent } from "../task/agents";
 import { type ExecutorOptions, runSubagentFollowUpTurn, runSubprocess } from "../task/executor";
 import { generateTaskName } from "../task/name-generator";
 import { AgentOutputManager } from "../task/output-manager";
 import { type AgentDefinition, type AgentProgress, oneLineLabel, type SingleResult } from "../task/types";
-import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
@@ -67,7 +67,7 @@ interface VibeTraceEntry {
 const TURN_TRACE_CAP = 40;
 /** Cap on a single rendered trace line. */
 const TRACE_LINE_MAX = 120;
-/** Default `vibe_wait` window when no timeout was given (ms). */
+/** Default `omp.vibe.wait` window when no timeout was given (ms). */
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 /** Response text cap inside a delivered turn result; full output stays at agent://<id>. */
 const RESPONSE_PREVIEW_MAX = 6000;
@@ -638,7 +638,7 @@ export class VibeSessionRegistry {
 		if (!record || !matchesScope(record, scope)) {
 			const roster = this.#listIds(scope);
 			throw new ToolError(
-				`Unknown vibe session "${id}".${roster.length > 0 ? ` Active sessions: ${roster.join(", ")}` : " No sessions — spawn one with vibe_spawn."}`,
+				`Unknown vibe session "${id}".${roster.length > 0 ? ` Active sessions: ${roster.join(", ")}` : " No sessions — spawn one with omp.vibe.spawn."}`,
 			);
 		}
 		return record;
@@ -1034,7 +1034,7 @@ export class VibeSessionRegistry {
 		const scope = this.ownerScope(session);
 		const record = this.#record(scope, args.session);
 		if (record.state === "dead") {
-			throw new ToolError(`Vibe session "${record.id}" is dead. Spawn a new one with vibe_spawn.`);
+			throw new ToolError(`Vibe session "${record.id}" is dead. Spawn a new one with omp.vibe.spawn.`);
 		}
 		const message = args.message.trim();
 		if (!message) throw new ToolError("Message must not be empty.");
@@ -1399,7 +1399,7 @@ export class VibeSessionRegistry {
 			});
 	}
 
-	/** Build the ExecutorOptions for a first spawn, mirroring the `task`/eval-bridge plumbing. */
+	/** Build the ExecutorOptions for a first spawn, mirroring the task plumbing. */
 	async #buildSpawnOptions(
 		session: ToolSession,
 		record: VibeRecord,
@@ -1447,13 +1447,11 @@ export class VibeSessionRegistry {
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
 			preloadedExtensionPaths: session.extensionPaths,
-			preloadedCustomToolPaths: session.customToolPaths,
 			localProtocolOptions,
 			parentArtifactManager: session.getArtifactManager?.() ?? undefined,
 			parentHindsightSessionState: session.getHindsightSessionState?.(),
 			parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 			parentTelemetry: session.getTelemetry?.(),
-			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
 			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
 			keepAlive: true,
@@ -1584,7 +1582,7 @@ export class VibeSessionRegistry {
 		try {
 			this.#registerTurnJob(session, manager, record, nextMessage, { first: false });
 		} catch (error) {
-			// Leave the messages recoverable: a later vibe_send flushes again.
+			// Leave the messages recoverable: a later omp.vibe.send flushes again.
 			record.queue.unshift(nextMessage);
 			logger.warn("vibe: failed to start queued follow-up turn", {
 				id: record.id,

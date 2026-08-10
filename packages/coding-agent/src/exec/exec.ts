@@ -1,5 +1,5 @@
 /**
- * Shared command execution utilities for hooks and custom tools.
+ * Shared command execution utilities for hooks and extensions.
  */
 import { ptree } from "@oh-my-pi/pi-utils";
 

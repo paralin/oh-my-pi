@@ -45,16 +45,9 @@ describe("extensions discovery", () => {
 		}
 	`;
 
-	const extensionCodeWithTool = (toolName: string) => `
+	const extensionCodeWithCommand = (commandName: string) => `
 		export default function(pi) {
-			const { Type } = pi.typebox;
-			pi.registerTool({
-				name: "${toolName}",
-				label: "${toolName}",
-				description: "Test tool",
-				parameters: Type.Object({}),
-				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
-			});
+			pi.registerCommand("${commandName}", { handler: async () => {} });
 		}
 	`;
 
@@ -144,7 +137,10 @@ describe("extensions discovery", () => {
 	it("SDK explicit-only discovery loads package hooks without ambient package hooks", async () => {
 		const ambientPackage = path.join(tempDir.path(), "ambient-package");
 		fs.mkdirSync(path.join(ambientPackage, "hooks", "pre"), { recursive: true });
-		fs.writeFileSync(path.join(ambientPackage, "hooks", "pre", "ambient.ts"), extensionCodeWithTool("ambient-tool"));
+		fs.writeFileSync(
+			path.join(ambientPackage, "hooks", "pre", "ambient.ts"),
+			extensionCodeWithCommand("ambient-tool"),
+		);
 		fs.writeFileSync(
 			path.join(getProjectAgentDir(tempDir.path()), "settings.json"),
 			JSON.stringify({ extensions: [ambientPackage] }),
@@ -155,8 +151,8 @@ describe("extensions discovery", () => {
 		const hookDir = path.join(packageDir, "hooks", "pre");
 		fs.mkdirSync(sourceDir, { recursive: true });
 		fs.mkdirSync(hookDir, { recursive: true });
-		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCodeWithTool("explicit-tool"));
-		fs.writeFileSync(path.join(hookDir, "read.ts"), extensionCodeWithTool("explicit-hook-tool"));
+		fs.writeFileSync(path.join(sourceDir, "main.ts"), extensionCodeWithCommand("explicit-tool"));
+		fs.writeFileSync(path.join(hookDir, "read.ts"), extensionCodeWithCommand("explicit-hook-tool"));
 		fs.writeFileSync(
 			path.join(packageDir, "package.json"),
 			JSON.stringify({
@@ -184,7 +180,7 @@ describe("extensions discovery", () => {
 			path.join(hookDir, "read.ts"),
 			path.join(sourceDir, "main.ts"),
 		]);
-		expect(result.extensions.flatMap(extension => [...extension.tools.keys()])).toEqual([
+		expect(result.extensions.flatMap(extension => [...extension.commands.keys()])).toEqual([
 			"explicit-hook-tool",
 			"explicit-tool",
 		]);
@@ -289,8 +285,8 @@ describe("extensions discovery", () => {
 	it("package.json with pi field takes precedence over index.ts", async () => {
 		const subdir = path.join(extensionsDir, "my-package");
 		fs.mkdirSync(subdir);
-		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCodeWithTool("from-index"));
-		fs.writeFileSync(path.join(subdir, "custom.ts"), extensionCodeWithTool("from-custom"));
+		fs.writeFileSync(path.join(subdir, "index.ts"), extensionCodeWithCommand("from-index"));
+		fs.writeFileSync(path.join(subdir, "custom.ts"), extensionCodeWithCommand("from-custom"));
 		fs.writeFileSync(
 			path.join(subdir, "package.json"),
 			JSON.stringify({
@@ -306,9 +302,8 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("custom.ts");
-		// Verify the right tool was registered
-		expect(result.extensions[0].tools.has("from-custom")).toBe(true);
-		expect(result.extensions[0].tools.has("from-index")).toBe(false);
+		expect(result.extensions[0].commands.has("from-custom")).toBe(true);
+		expect(result.extensions[0].commands.has("from-index")).toBe(false);
 	});
 
 	it("ignores package.json without pi field, falls back to index.ts", async () => {
@@ -399,7 +394,7 @@ describe("extensions discovery", () => {
 		// symlinked into a profile's extensions/ dir.
 		const realDir = path.join(tempDir.path(), "external", "ctk");
 		fs.mkdirSync(realDir, { recursive: true });
-		fs.writeFileSync(path.join(realDir, "index.ts"), extensionCodeWithTool("ctk-tool"));
+		fs.writeFileSync(path.join(realDir, "index.ts"), extensionCodeWithCommand("ctk-tool"));
 		fs.writeFileSync(
 			path.join(realDir, "package.json"),
 			JSON.stringify({ name: "ctk", omp: { extensions: ["./index.ts"] } }),
@@ -413,7 +408,7 @@ describe("extensions discovery", () => {
 		// from the synthesized index.ts match colliding with the manifest entry).
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("index.ts");
-		expect(result.extensions[0].tools.has("ctk-tool")).toBe(true);
+		expect(result.extensions[0].commands.has("ctk-tool")).toBe(true);
 	});
 
 	it("discovers a symlinked extension file", async () => {
@@ -491,14 +486,14 @@ describe("extensions discovery", () => {
 		expect(result.extensions[0].commands.has("test")).toBe(true);
 	});
 
-	it("loads extensions and registers tools", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), extensionCodeWithTool("my-tool"));
+	it("loads commands from dynamically selected extension source", async () => {
+		fs.writeFileSync(path.join(extensionsDir, "with-tool.ts"), extensionCodeWithCommand("my-tool"));
 
 		const result = await discoverForTest();
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("my-tool")).toBe(true);
+		expect(result.extensions[0].commands.has("my-tool")).toBe(true);
 	});
 
 	it("reports errors for invalid extension code", async () => {
@@ -556,16 +551,8 @@ describe("extensions discovery", () => {
 			`			import parseDuration from "local-duration-parser";
 
 				export default function (pi) {
-					const { Type } = pi.typebox;
-					pi.registerTool({
-						name: "parse_duration",
-						label: "Parse Duration",
-						description: "Parse duration strings",
-						parameters: Type.Object({ duration: Type.String() }),
-						execute: async (_toolCallId, params) => ({
-							content: [{ type: "text", text: String(parseDuration(params.duration)) }],
-							details: {},
-						}),
+					pi.registerCommand("parse_duration", {
+						handler: async () => { parseDuration("1s"); },
 					});
 				}
 			`,
@@ -590,7 +577,7 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(result.extensions[0].path).toContain("with-deps");
-		expect(result.extensions[0].tools.has("parse_duration")).toBe(true);
+		expect(result.extensions[0].commands.has("parse_duration")).toBe(true);
 	});
 
 	it("registers message renderers", async () => {
@@ -640,23 +627,17 @@ describe("extensions discovery", () => {
 		expect(result.extensions).toHaveLength(0);
 	});
 
-	it("allows multiple extensions to register different tools", async () => {
-		fs.writeFileSync(path.join(extensionsDir, "tool-a.ts"), extensionCodeWithTool("tool-a"));
-		fs.writeFileSync(path.join(extensionsDir, "tool-b.ts"), extensionCodeWithTool("tool-b"));
+	it("allows multiple extensions to register different commands", async () => {
+		fs.writeFileSync(path.join(extensionsDir, "tool-a.ts"), extensionCodeWithCommand("tool-a"));
+		fs.writeFileSync(path.join(extensionsDir, "tool-b.ts"), extensionCodeWithCommand("tool-b"));
 
 		const result = await discoverForTest();
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(2);
 
-		const allTools = new Set<string>();
-		for (const ext of result.extensions) {
-			for (const name of ext.tools.keys()) {
-				allTools.add(name);
-			}
-		}
-		expect(allTools.has("tool-a")).toBe(true);
-		expect(allTools.has("tool-b")).toBe(true);
+		expect(result.extensions.some(extension => extension.commands.has("tool-a"))).toBe(true);
+		expect(result.extensions.some(extension => extension.commands.has("tool-b"))).toBe(true);
 	});
 
 	it("loads extension with event handlers", async () => {
@@ -767,19 +748,19 @@ describe("extensions discovery", () => {
 
 	it("loadExtensions only loads explicit paths without discovery", async () => {
 		// Create discoverable extensions (would be found by discoverAndLoadExtensions)
-		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCodeWithTool("discovered"));
+		fs.writeFileSync(path.join(extensionsDir, "discovered.ts"), extensionCodeWithCommand("discovered"));
 
 		// Create explicit extension outside discovery path
 		const explicitPath = path.join(tempDir.path(), "explicit.ts");
-		fs.writeFileSync(explicitPath, extensionCodeWithTool("explicit"));
+		fs.writeFileSync(explicitPath, extensionCodeWithCommand("explicit"));
 
 		// Use loadExtensions directly to skip discovery
 		const result = await loadExtensions([explicitPath], tempDir.path());
 
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has("explicit")).toBe(true);
-		expect(result.extensions[0].tools.has("discovered")).toBe(false);
+		expect(result.extensions[0].commands.has("explicit")).toBe(true);
+		expect(result.extensions[0].commands.has("discovered")).toBe(false);
 	});
 
 	it("loadExtensions with no paths loads nothing", async () => {

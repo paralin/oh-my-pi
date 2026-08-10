@@ -8,7 +8,6 @@ import {
 	INTERRUPTED_THINKING_MESSAGE_TYPE,
 	isCustomMessageContent,
 	normalizeCustomMessagePayload,
-	PREWALK_PLAN_MESSAGE_TYPE,
 } from "./messages";
 import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
 
@@ -75,7 +74,7 @@ export interface SessionContext {
 	/**
 	 * Array parallel to messages, indicating which assistant turns should
 	 * have their prompt-cache misses suppressed/explained (because a model,
-	 * compaction, or plan-mode transition directly preceded them).
+	 * compaction directly preceded them).
 	 * Only populated in transcript mode.
 	 */
 	cacheMissExplainedAt?: boolean[];
@@ -308,10 +307,10 @@ export function buildSessionContext(
 		} else if (entry.type === "model_change") {
 			pendingReset = true;
 		} else if (entry.type === "mode_change") {
-			const isPlanTransition = (entry.mode === "plan") !== (currentMode === "plan");
-			if (isPlanTransition) {
-				pendingReset = true;
-			}
+			// Historical plan-mode entries changed the provider prefix, so retain their
+			// cache boundary while reading legacy journals. New sessions never write them.
+			const isLegacyPlanTransition = (entry.mode === "plan") !== (currentMode === "plan");
+			if (isLegacyPlanTransition) pendingReset = true;
 			currentMode = entry.mode;
 		}
 	};
@@ -333,12 +332,15 @@ export function buildSessionContext(
 	const appendMessage = (entry: SessionEntry) => {
 		handleEntryResetTracking(entry);
 		if (entry.type === "message") {
-			if (!options?.transcript && entry.message.role === "assistant" && entry.message.retryRecovery) {
+			if (
+				!options?.transcript &&
+				entry.message.role === "assistant" &&
+				entry.message.retryRecovery?.status === "recovered"
+			) {
 				return;
 			}
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
-			if (!options?.transcript && entry.customType === PREWALK_PLAN_MESSAGE_TYPE) return;
 			if (!isCustomMessageContent(entry.content)) return;
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;

@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { getProjectDir, prompt } from "@oh-my-pi/pi-utils";
 import {
 	isValidManagedSkillName,
@@ -27,11 +28,10 @@ export interface Skill {
 	 * prompt's `<skills>` listing.
 	 */
 	hide?: boolean;
-	/**
-	 * Filesystem-resolved plugin root for Agent Plugin skills (spec §4.1):
-	 * every `skill://` resource access must realpath-resolve within it.
-	 */
-	containRoot?: string;
+	/** Importable Python package metadata retained from an authored SKILL.md. */
+	pythonImport?: string;
+	pythonCallable?: string;
+	pythonPath?: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -64,6 +64,20 @@ export function setActiveSkills(value: readonly Skill[]): void {
 /** Reset the active skill snapshot. Test-only. */
 export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
+}
+
+function pythonSkillMetadata(skill: CapabilitySkill): Pick<Skill, "pythonImport" | "pythonCallable" | "pythonPath"> {
+	if (skill.frontmatter?.type !== "python") return {};
+	const pythonImport = skill.frontmatter.python_import;
+	const pythonCallable = skill.frontmatter.python_callable;
+	if (typeof pythonImport !== "string" || !pythonImport || typeof pythonCallable !== "string" || !pythonCallable) {
+		return {};
+	}
+	return {
+		pythonImport,
+		pythonCallable,
+		pythonPath: path.join(path.dirname(skill.path), "src"),
+	};
 }
 
 /**
@@ -109,8 +123,8 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			filePath: capSkill.path,
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: options.source,
-			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...pythonSkillMetadata(capSkill),
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -245,8 +259,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				filePath: capSkill.path,
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
-				...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 				hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+				...pythonSkillMetadata(capSkill),
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -283,8 +297,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					filePath: capSkill.path,
 					baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 					source: "custom:user",
-					...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 					hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+					...pythonSkillMetadata(capSkill),
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -384,8 +398,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 			filePath: capSkill.path,
 			baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 			source: `${capSkill._source.provider}:${capSkill.level}`,
-			...(capSkill.containRoot !== undefined && { containRoot: capSkill.containRoot }),
 			hide: capSkill.frontmatter?.hide === true || capSkill.frontmatter?.disableModelInvocation === true,
+			...pythonSkillMetadata(capSkill),
 			_source: capSkill._source,
 		});
 		realPathSet.add(resolvedPath);
@@ -435,8 +449,8 @@ const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
  *
  * Mid-prompt detection is disabled when the draft itself starts with a
  * different slash command (e.g. `/compact /skill:foo`) or a local-execution
- * sigil — `!cmd` / `!!cmd` for the bash tool and `$ cmd` / `$$ cmd` for the
- * python tool. Those handlers run after the skill-command dispatcher and
+ * sigil — `!cmd` / `!!cmd` for the local shell handler and `$ cmd` / `$$ cmd` for the
+ * local Python handler. Those handlers run after the skill-command dispatcher and
  * their bodies routinely contain `/skill:<name>` references that are not
  * meant as skill invocations.
  */

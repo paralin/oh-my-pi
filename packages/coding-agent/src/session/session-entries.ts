@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, MessageAttribution, ServiceTierByFamily, TextContent, Usage } from "@oh-my-pi/pi-ai";
 import type { ClaudeCodeEffort } from "../task/claude-code-selector";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 
@@ -154,6 +154,23 @@ export interface ResetBoundaryEntry extends SessionEntryBase {
  * Does NOT participate in LLM context (ignored by buildSessionContext).
  * For injecting content into context, see CustomMessageEntry.
  */
+export interface ActStartEntry extends SessionEntryBase {
+	type: "act_start";
+	actId: string;
+	sessionKey?: string;
+	usageBaseline: Usage;
+}
+export type ActTerminalStatus = "done" | "cancelled" | "error" | "interrupted";
+export interface ActTerminalEntry extends SessionEntryBase {
+	type: "act_terminal";
+	actId: string;
+	sessionKey?: string;
+	status: ActTerminalStatus;
+	usage: Usage;
+	model?: { provider: string; id: string };
+	error?: string;
+}
+
 export interface CustomEntry<T = unknown> extends SessionEntryBase {
 	type: "custom";
 	customType: string;
@@ -181,6 +198,8 @@ declare module "@oh-my-pi/pi-agent-core/compaction/entries" {
 		titleChange: TitleChangeEntry;
 		credentialPin: CredentialPinEntry;
 		resetBoundary: ResetBoundaryEntry;
+		actStart: ActStartEntry;
+		actTerminal: ActTerminalEntry;
 	}
 }
 
@@ -248,20 +267,16 @@ export interface SessionInitEntry extends SessionEntryBase {
 	restrictToolNames?: boolean;
 	/** Spawn allowlist the subagent ran with ("" = none, "*" = any, else CSV); absent on pre-spawns files. */
 	spawns?: string;
-	/** The agent's `readSummarize` setting (`false` = read summarization disabled); absent uses the session default. */
-	readSummarize?: boolean;
-	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
-	advisor?: string;
 	/** Absent means the native Pi runtime for backward compatibility. */
 	runtime?: SessionRuntimeMetadata;
 }
 
-/** Mode change entry - tracks agent mode transitions (e.g. plan mode). */
+/** Mode change entry - tracks agent mode transitions. */
 export interface ModeChangeEntry extends SessionEntryBase {
 	type: "mode_change";
 	/** Current mode name, or "none" when exiting a mode */
 	mode: string;
-	/** Optional mode-specific data (e.g. plan file path) */
+	/** Optional mode-specific persisted state. */
 	data?: Record<string, unknown>;
 }
 
@@ -296,6 +311,8 @@ export type SessionEntry =
 	| CompactionEntry
 	| BranchSummaryEntry
 	| CustomEntry
+	| ActStartEntry
+	| ActTerminalEntry
 	| CustomMessageEntry
 	| LabelEntry
 	| TitleChangeEntry

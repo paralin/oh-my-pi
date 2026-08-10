@@ -168,6 +168,25 @@ function captureResponsesPayload(model: Model<"openai-responses">, context: Cont
 }
 
 describe("OpenAI tool strict mode", () => {
+	it("sends an async onPayload replacement body", async () => {
+		const model: Model<"openai-completions"> = {
+			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),
+			api: "openai-completions",
+		};
+		let sentBody: Record<string, unknown> | undefined;
+		const stream = streamOpenAICompletions(model, testContext, {
+			apiKey: "test-key",
+			fetch: async (_input, init) => {
+				if (typeof init?.body !== "string") throw new Error("Expected JSON request body");
+				sentBody = JSON.parse(init.body) as Record<string, unknown>;
+				return new Response("rejected", { status: 418 });
+			},
+			onPayload: async payload => ({ ...(payload as Record<string, unknown>), temperature: 0.25 }),
+		});
+
+		await stream.result();
+		expect(sentBody?.temperature).toBe(0.25);
+	});
 	it("sends strict=true for openai-completions tool schemas", async () => {
 		const model: Model<"openai-completions"> = {
 			...(getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">),

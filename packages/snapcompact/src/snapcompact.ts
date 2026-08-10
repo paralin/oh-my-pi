@@ -49,7 +49,6 @@ import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { isFableOrMythos, parseAnthropicModel, semverGte } from "@oh-my-pi/pi-catalog/identity";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
 import snapcompactSummaryPrompt from "./prompts/snapcompact-summary.md" with { type: "text" };
 
@@ -880,18 +879,8 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 					if (uselessCallIds.has(block.id)) continue;
 					flushAssistant();
 					const args = block.arguments as Record<string, unknown>;
-					// Prefer the harness-derived intent, else the raw intent arg; render it as
-					// a one-line `//comment` and drop it from the args below.
-					const rawIntent =
-						typeof block.intent === "string"
-							? block.intent
-							: typeof args[INTENT_FIELD] === "string"
-								? (args[INTENT_FIELD] as string)
-								: "";
-					const intent = stripDimMarkers(rawIntent).replace(/\s+/g, " ").trim();
 					const argsStr = truncateForSummary(
 						Object.entries(args)
-							.filter(([key]) => key !== INTENT_FIELD)
 							.map(
 								([key, value]) =>
 									`${key}=${truncateForSummary(JSON.stringify(value) ?? "undefined", toolArgMaxChars, headRatio)}`,
@@ -901,11 +890,7 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 						headRatio,
 					);
 					const lines: string[] = [];
-					let firstLine = `${block.name}(${argsStr})`;
-					if (intent) {
-						firstLine += `//${intent}`;
-					}
-					lines.push(firstLine);
+					lines.push(`${block.name}(${argsStr})`);
 					const resultText = resultTextByCallId.get(block.id);
 					if (resultText !== undefined) {
 						mergedCallIds.add(block.id);

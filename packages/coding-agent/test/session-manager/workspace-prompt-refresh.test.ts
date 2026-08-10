@@ -26,8 +26,10 @@ describe("workspace directories in the system prompt", () => {
 			auth.setRuntimeApiKey("mock", "test-key");
 			const extraDir = path.join(dir.path(), "extra-root");
 			fs.mkdirSync(extraDir, { recursive: true });
+			fs.writeFileSync(path.join(extraDir, "AGENTS.md"), "extra workspace context");
 			const laterDir = path.join(dir.path(), "later-root");
 			fs.mkdirSync(laterDir, { recursive: true });
+			fs.writeFileSync(path.join(laterDir, "AGENTS.md"), "later workspace context");
 
 			const mockModel = createMockModel({ id: "text", handler: () => ({ content: ["ok"] }) });
 			const settings = Settings.isolated({
@@ -50,7 +52,6 @@ describe("workspace directories in the system prompt", () => {
 				enableLsp: false,
 				skills: [],
 				rules: [],
-				contextFiles: [],
 			});
 			try {
 				// Sanity: the seed dir is present in the sessionManager state.
@@ -70,10 +71,10 @@ describe("workspace directories in the system prompt", () => {
 				const lastCall = calls.at(-1);
 				const systemPrompt = (lastCall?.context?.systemPrompt as string[] | undefined)?.join("\n") ?? "";
 
-				// Both directories must appear in the <workspace-roots> block.
-				expect(systemPrompt).toContain("<workspace-roots>");
-				expect(systemPrompt).toContain(extraDir);
-				expect(systemPrompt).toContain(laterDir);
+				// Both newly-discovered context files must appear after refresh.
+				expect(systemPrompt).toContain("<project-context>");
+				expect(systemPrompt).toContain("extra workspace context");
+				expect(systemPrompt).toContain("later workspace context");
 			} finally {
 				await session.dispose();
 			}

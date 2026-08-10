@@ -30,7 +30,7 @@ describe("discoverAdvisorConfigs", () => {
 		await fsp.rm(agentDir, { recursive: true, force: true });
 	});
 
-	it("parses advisors, the model thinking suffix, tool filtering, and shared instructions", async () => {
+	it("parses advisors, the model thinking suffix, and shared instructions", async () => {
 		const yaml = [
 			"instructions: Shared baseline for all advisors.",
 			"advisors:",
@@ -38,7 +38,6 @@ describe("discoverAdvisorConfigs", () => {
 			"    model: x-ai/grok-code-fast:high",
 			"    instructions: Watch module boundaries.",
 			"  - name: Security Reviewer",
-			"    tools: [read, definitely-not-a-tool]",
 		].join("\n");
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
 
@@ -52,30 +51,7 @@ describe("discoverAdvisorConfigs", () => {
 		expect(arch.instructions).toBe("Watch module boundaries.");
 		expect(sec.name).toBe("Security Reviewer");
 		expect(sec.model).toBeUndefined();
-		// The unknown/non-read-only tool is dropped; only `read` survives.
-		expect(sec.tools).toEqual(["read"]);
 		expect(sharedInstructions).toBe("Shared baseline for all advisors.");
-	});
-
-	it("distinguishes omitted tools, explicit no-tools, and invalid-only lists", async () => {
-		const yaml = [
-			"advisors:",
-			"  - name: No Tools",
-			"    tools: []",
-			"  - name: Default Tools",
-			"  - name: Invalid Only",
-			"    tools: [reed]",
-		].join("\n");
-		await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
-
-		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir);
-		const noTools = advisors.find(a => a.name === "No Tools");
-		const defaultTools = advisors.find(a => a.name === "Default Tools");
-		const invalidOnly = advisors.find(a => a.name === "Invalid Only");
-
-		expect(noTools?.tools).toEqual([]);
-		expect(defaultTools?.tools).toBeUndefined();
-		expect(invalidOnly?.tools).toBeUndefined();
 	});
 
 	it("ignores a malformed YAML file without throwing", async () => {
@@ -210,7 +186,7 @@ describe("WATCHDOG.yml file round-trip", () => {
 				model: "x-ai/grok-code-fast:high",
 				instructions: "Watch module boundaries.\nReport coupling.",
 			},
-			{ name: "Security", tools: ["read", "grep"] },
+			{ name: "Security" },
 		],
 	};
 
@@ -245,21 +221,6 @@ describe("WATCHDOG.yml file round-trip", () => {
 
 		await saveWatchdogConfigFile(file, whitespaceDoc);
 		expect(await loadWatchdogConfigFile(file)).toEqual(whitespaceDoc);
-	});
-
-	it("round-trips an explicit empty tools list without collapsing it into the default", async () => {
-		const file = path.join(tmp, "WATCHDOG.yml");
-		const explicitNoToolsDoc: WatchdogConfigDoc = {
-			advisors: [{ name: "No Tools", tools: [] }, { name: "Default Tools" }],
-		};
-
-		await saveWatchdogConfigFile(file, explicitNoToolsDoc);
-		const serializedDoc = await loadWatchdogConfigFile(file);
-		expect(serializedDoc).toEqual(explicitNoToolsDoc);
-
-		const { advisors } = await discoverAdvisorConfigs(tmp, tmp);
-		expect(advisors.find(a => a.name === "No Tools")?.tools).toEqual([]);
-		expect(advisors.find(a => a.name === "Default Tools")?.tools).toBeUndefined();
 	});
 
 	it("removes the file when the doc is empty so legacy discovery resumes", async () => {

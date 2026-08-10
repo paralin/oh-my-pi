@@ -1,5 +1,5 @@
 /**
- * Hub tool — the single agent-coordination surface: peer messaging over the
+ * Hub operation service — the single agent-coordination surface: peer messaging over the
  * IrcBus, lifecycle control for async background jobs, and supervision of
  * project-scoped long-running processes (launch).
  *
@@ -16,42 +16,21 @@
  */
 
 import { type } from "@oh-my-pi/omptype";
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolApprovalDecision,
-} from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
-import type { Component } from "@oh-my-pi/pi-tui";
-import { prompt } from "@oh-my-pi/pi-utils";
-import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
+import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { IrcBus } from "../../irc/bus";
-import type { Theme } from "../../modes/theme/theme";
-import hubDescription from "../../prompts/tools/hub.md" with { type: "text" };
 import type { AgentRegistry } from "../../registry/agent-registry";
-import type { ToolSession } from "..";
+import type { ToolSession } from "../../session/tool-session";
 import {
 	buildJobResult,
 	executeCancel,
 	executeJobsSnapshot,
-	jobsRenderCall,
-	jobsRenderResult,
 	noMatchingJobsResult,
 	nothingToWaitForResult,
 	resolvePollWindow,
 	snapshotJobs,
 	visibleJobs,
 } from "./jobs";
-import {
-	executeLaunch,
-	type LaunchParams,
-	type LaunchRenderArgs,
-	type LaunchToolDetails,
-	launchRenderCall,
-	launchRenderResult,
-} from "./launch";
+import { executeLaunch, type LaunchParams } from "./launch";
 import {
 	drainPendingInbox,
 	executeInbox,
@@ -59,18 +38,16 @@ import {
 	executeMessageWait,
 	executeSend,
 	messageResult,
-	messagingRenderCall,
-	messagingRenderResult,
 	normalizeIrcTimeoutMs,
 } from "./messaging";
-import { type HubDetails, type HubRenderArgs, hubErrorResult } from "./types";
+import { type HubDetails, hubErrorResult } from "./types";
 
 export { isWaitingPollDetails } from "./jobs";
 export type { LaunchParams, LaunchToolDetails } from "./launch";
 export { createIrcMessageCard, isIrcEnabled } from "./messaging";
 export * from "./types";
 
-const hubSchema = type({
+export const HUB_TOOL_SCHEMA = type({
 	op: type(
 		"'send' | 'wait' | 'inbox' | 'list' | 'jobs' | 'cancel' | 'start' | 'ps' | 'logs' | 'stop' | 'restart' | 'describe'",
 	).describe("hub operation"),
@@ -115,7 +92,8 @@ const hubSchema = type({
 	"timeout?": type("number > 0").describe("logs/stop/wait with name: max seconds; default 30 (stop: 5)"),
 });
 
-type HubParams = typeof hubSchema.infer;
+export type HubParams = typeof HUB_TOOL_SCHEMA.infer;
+export const HUB_TOOL_NAME = "hub";
 
 interface MessagingDeps {
 	registry: AgentRegistry;
@@ -126,470 +104,262 @@ interface MessagingDeps {
 
 const PROGRESS_INTERVAL_MS = 500;
 
-/** Mutating process ops require exec approval; messaging, jobs, and inspection are read-only. */
-function hubApproval(params: unknown): ToolApprovalDecision {
-	if (typeof params !== "object" || params === null || !("op" in params)) return "exec";
-	const op = params.op;
-	switch (op) {
+/** Messaging deps when this session can address peers; null otherwise. */
+function messagingDeps(session: ToolSession): MessagingDeps | null {
+	const registry = session.agentRegistry;
+	const senderId = session.getAgentId?.() ?? null;
+	if (!registry || !senderId) return null;
+	return {
+		registry,
+		senderId,
+		settings: session.settings,
+		coordinationBackend: session.coordinationBackend,
+	};
+}
+
+export async function executeHubOperation(
+	session: ToolSession,
+	params: HubParams,
+	signal?: AbortSignal,
+	onUpdate?: AgentToolUpdateCallback<HubDetails>,
+): Promise<AgentToolResult<HubDetails>> {
+	switch (params.op) {
+		case "list": {
+			const messaging = messagingDeps(session);
+			if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
+			const parentRoster = session.coordinationBackend
+				? await session.coordinationBackend.listPeers(signal).catch(error => ({
+						peers: [],
+						errors: [
+							{
+								code: "projection_error" as const,
+								peerId: "*",
+								detail: error instanceof Error ? error.message : String(error),
+							},
+						],
+					}))
+				: undefined;
+			return executeList(messaging.registry, messaging.senderId, parentRoster);
+		}
+		case "send": {
+			const toPeer = params.to?.trim();
+			const toProcess = params.name?.trim();
+			if (toPeer && toProcess) {
+				return hubErrorResult('`to` (peer) and `name` (process) are mutually exclusive for op="send".', {
+					op: "send",
+				});
+			}
+			if (toProcess) return hubLaunch(session, params, "send", signal);
+			const messaging = messagingDeps(session);
+			if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "send" });
+			return executeSend(messaging, params, signal);
+		}
+		case "inbox": {
+			const messaging = messagingDeps(session);
+			if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
+			return executeInbox(messaging.registry, messaging.senderId, params.peek, messaging.coordinationBackend);
+		}
 		case "wait":
-		case "inbox":
-		case "list":
-		case "jobs":
-		case "cancel":
+			if (params.name?.trim()) return hubLaunch(session, params, "wait", signal);
+			return executeHubWait(session, params, signal, onUpdate);
+		case "cancel": {
+			const manager = session.asyncJobManager;
+			if (!manager) return asyncDisabled("cancel");
+			if (!params.ids?.length) {
+				return hubErrorResult('`ids` is required for op="cancel".', { op: "cancel", jobs: [] });
+			}
+			return await executeCancel(session, manager, ownerId(session), params.ids);
+		}
+		case "jobs": {
+			const manager = session.asyncJobManager;
+			if (!manager) return asyncDisabled("jobs");
+			return executeJobsSnapshot(session, manager, ownerId(session));
+		}
+		case "start":
 		case "ps":
 		case "logs":
+		case "stop":
+		case "restart":
 		case "describe":
-			return "read";
-		case "send": {
-			// Peer DMs are read-tier; writing to a process stdin is exec-tier.
-			const name = "name" in params ? params.name : undefined;
-			const to = "to" in params ? params.to : undefined;
-			return typeof name === "string" && name.length > 0 && !to ? "exec" : "read";
-		}
+			return hubLaunch(session, params, params.op === "ps" ? "list" : params.op, signal);
 		default:
-			// start / stop / restart and anything unrecognized.
-			return "exec";
+			return hubErrorResult("Unknown hub op.", { op: params.op });
 	}
 }
 
-export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
-	readonly name = "hub";
-	readonly approval = hubApproval;
-	readonly label = "Hub";
-	readonly summary = "Message peer agents, control background jobs, and supervise long-running processes";
-	readonly description: string;
-	readonly parameters = hubSchema;
-	readonly strict = true;
-	readonly interruptible = (params: Partial<HubParams>): boolean => {
-		if (params.op === "wait") return true;
-		return params.op === "logs" && params.follow === true;
+/** Job visibility scope: everything the calling agent owns (tests/SDK without an agent id see all). */
+function ownerId(session: ToolSession): string | undefined {
+	return session.getAgentId?.() ?? undefined;
+}
+
+function asyncDisabled(op: "cancel" | "jobs"): AgentToolResult<HubDetails> {
+	return {
+		content: [{ type: "text", text: "Async execution is disabled; no background jobs are available." }],
+		details: { op, jobs: [] },
 	};
-	readonly loadMode = "essential";
+}
 
-	readonly examples: readonly ToolExample<typeof hubSchema.infer>[] = [
-		{
-			caption: "List peers",
-			call: { op: "list" },
-		},
-		{
-			caption: "Fire-and-forget DM — same send wakes idle/parked peers",
-			call: {
-				op: "send",
-				to: "AuthLoader",
-				message: "Still touching src/server/auth.ts? I need to add a 401 path.",
-			},
-		},
-		{
-			caption: "Round-trip when you cannot proceed without the answer",
-			call: {
-				op: "send",
-				to: "Main",
-				message: "JWT or session cookies for the auth flow?",
-				await: true,
-			},
-		},
-		{
-			caption: "Completely blocked: wait for the first finished job or incoming message",
-			call: { op: "wait" },
-		},
-		{
-			caption: "Block until a specific peer answers",
-			call: { op: "wait", from: "AuthLoader", timeoutMs: 60000 },
-		},
-		{
-			caption: "Kill a hung background job",
-			call: { op: "cancel", ids: ["bash_a1b2c3"] },
-		},
-		{
-			caption: "Snapshot every background job without waiting",
-			call: { op: "jobs" },
-		},
-		{
-			caption: "Start a dev server and wait for its log banner and port",
-			call: {
-				op: "start",
-				name: "web",
-				application: "bun",
-				args: ["run", "dev"],
-				ready: { log: "Local:.*http", port: 5173, timeout: 30 },
-			},
-		},
-		{
-			caption: "Follow process output after a cursor",
-			call: { op: "logs", name: "web", follow: true, cursor: 1842, timeout: 30 },
-		},
-		{
-			caption: "Drive a REPL/debugger over stdin",
-			call: { op: "send", name: "debugger", text: "breakpoint set --name main" },
-		},
-		{
-			caption: "Interrupt a process",
-			call: { op: "send", name: "debugger", keys: ["CTRL_C"] },
-		},
-		{
-			caption: "Block until a process is ready",
-			call: { op: "wait", name: "web", for: "ready", timeout: 30 },
-		},
-	];
+/** Route a process-supervision op to the launch broker, honoring `launch.enabled`. */
+async function hubLaunch(
+	session: ToolSession,
+	params: HubParams,
+	op: LaunchParams["op"],
+	signal?: AbortSignal,
+): Promise<AgentToolResult<HubDetails>> {
+	if (!session.settings.get("launch.enabled")) {
+		return hubErrorResult("Process supervision is disabled (launch.enabled=false).", { op: params.op });
+	}
+	const { op: _hubOp, ...rest } = params;
+	return executeLaunch(session, { ...rest, op }, signal);
+}
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(hubDescription);
+/**
+ * Unified wait: race the caller's running jobs against incoming peer
+ * messages. Returns on the FIRST settled job, the first matching message,
+ * window expiry, or abort — never "when everything finishes"; the model
+ * re-issues to keep waiting. With no job legs it degrades to a pure
+ * message wait; with no messaging it is exactly the old job poll.
+ */
+async function executeHubWait(
+	session: ToolSession,
+	params: HubParams,
+	signal?: AbortSignal,
+	onUpdate?: AgentToolUpdateCallback<HubDetails>,
+): Promise<AgentToolResult<HubDetails>> {
+	const messaging = messagingDeps(session);
+	const manager = session.asyncJobManager;
+	const ownerAgentId = ownerId(session);
+	const from = params.from?.trim() || undefined;
+
+	// A message already buffered on the session satisfies the wait first.
+	if (messaging) {
+		const pending = drainPendingInbox(messaging.registry, messaging.senderId, from, messaging.coordinationBackend);
+		if (pending) return messageResult(messaging.senderId, pending);
 	}
 
-	/** Messaging deps when this session can address peers; null otherwise. */
-	#messaging(): MessagingDeps | null {
-		const registry = this.session.agentRegistry;
-		const senderId = this.session.getAgentId?.() ?? null;
-		if (!registry || !senderId) return null;
-		return {
-			registry,
-			senderId,
-			settings: this.session.settings,
-			coordinationBackend: this.session.coordinationBackend,
-		};
+	// Resolve which jobs to watch:
+	// - explicit `ids` → exactly those (owner-scoped; missing ids corrected);
+	// - omitted → every running job the caller owns.
+	const ids = params.ids;
+	const jobsToWatch = manager
+		? ids?.length
+			? visibleJobs(manager, ids, ownerAgentId)
+			: manager.getRunningJobs(ownerAgentId ? { ownerId: ownerAgentId } : undefined)
+		: [];
+	if (manager && ids?.length && jobsToWatch.length === 0) {
+		return noMatchingJobsResult(session, ids);
+	}
+	const runningJobs = jobsToWatch.filter(j => j.status === "running");
+	if (manager && jobsToWatch.length > 0 && runningJobs.length === 0) {
+		// Every explicitly watched job already settled — immediate snapshot.
+		return buildJobResult(session, manager, "wait", jobsToWatch, []);
 	}
 
-	async execute(
-		_toolCallId: string,
-		params: HubParams,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<HubDetails>,
-		_context?: AgentToolContext,
-	): Promise<AgentToolResult<HubDetails>> {
-		switch (params.op) {
-			case "list": {
-				const messaging = this.#messaging();
-				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
-				const parentRoster = this.session.coordinationBackend
-					? await this.session.coordinationBackend.listPeers(signal).catch(error => ({
-							peers: [],
-							errors: [
-								{
-									code: "projection_error" as const,
-									peerId: "*",
-									detail: error instanceof Error ? error.message : String(error),
-								},
-							],
-						}))
-					: undefined;
-				return executeList(messaging.registry, messaging.senderId, parentRoster);
-			}
-			case "send": {
-				const toPeer = params.to?.trim();
-				const toProcess = params.name?.trim();
-				if (toPeer && toProcess) {
-					return hubErrorResult('`to` (peer) and `name` (process) are mutually exclusive for op="send".', {
-						op: "send",
-					});
-				}
-				if (toProcess) return this.#launch(params, "send", signal);
-				const messaging = this.#messaging();
-				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "send" });
-				return executeSend(messaging, params, signal);
-			}
-			case "inbox": {
-				const messaging = this.#messaging();
-				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
-				return executeInbox(messaging.registry, messaging.senderId, params.peek, messaging.coordinationBackend);
-			}
-			case "wait":
-				if (params.name?.trim()) return this.#launch(params, "wait", signal);
-				return this.#executeWait(params, signal, onUpdate);
-			case "cancel": {
-				const manager = this.session.asyncJobManager;
-				if (!manager) return this.#asyncDisabled("cancel");
-				if (!params.ids?.length) {
-					return hubErrorResult('`ids` is required for op="cancel".', { op: "cancel", jobs: [] });
-				}
-				return await executeCancel(this.session, manager, this.#ownerId(), params.ids);
-			}
-			case "jobs": {
-				const manager = this.session.asyncJobManager;
-				if (!manager) return this.#asyncDisabled("jobs");
-				return executeJobsSnapshot(this.session, manager, this.#ownerId());
-			}
-			case "start":
-			case "ps":
-			case "logs":
-			case "stop":
-			case "restart":
-			case "describe":
-				return this.#launch(params, params.op === "ps" ? "list" : params.op, signal);
-			default:
-				return hubErrorResult("Unknown hub op.", { op: params.op });
+	if (!manager || runningJobs.length === 0) {
+		// No job legs: pure message wait — or nothing to block on at all.
+		if (!messaging) return nothingToWaitForResult(session);
+		if (!from && !messaging.coordinationBackend) {
+			// A bare local wait can only be satisfied by a running peer.
+			const hasRunningPeer = messaging.registry
+				.listVisibleTo(messaging.senderId)
+				.some(ref => ref.status === "running");
+			if (!hasRunningPeer) return nothingToWaitForResult(session);
 		}
+		return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
 	}
 
-	/** Job visibility scope: everything the calling agent owns (tests/SDK without an agent id see all). */
-	#ownerId(): string | undefined {
-		return this.session.getAgentId?.() ?? undefined;
-	}
+	// Wait window: explicit timeout wins (0 = no window); otherwise the
+	// `async.pollWaitDuration` fixed value or smart ladder. The ladder
+	// starts at the floor and climbs as the agent waits in a tight loop,
+	// then resets once it steps away (see AsyncJobManager.nextPollWaitMs).
+	const window = resolvePollWindow(session, manager, ownerAgentId);
+	const windowMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
+	const usedSmartWindow = window.smart && params.timeoutMs === undefined;
 
-	#asyncDisabled(op: "cancel" | "jobs"): AgentToolResult<HubDetails> {
-		return {
-			content: [{ type: "text", text: "Async execution is disabled; no background jobs are available." }],
-			details: { op, jobs: [] },
-		};
-	}
+	const racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
 
-	/** Route a process-supervision op to the launch broker, honoring `launch.enabled`. */
-	async #launch(
-		params: HubParams,
-		op: LaunchParams["op"],
-		signal?: AbortSignal,
-	): Promise<AgentToolResult<HubDetails>> {
-		if (!this.session.settings.get("launch.enabled")) {
-			return hubErrorResult("Process supervision is disabled (launch.enabled=false).", { op: params.op });
-		}
-		const { op: _hubOp, ...rest } = params;
-		return executeLaunch(this.session, { ...rest, op }, signal);
-	}
-
-	/**
-	 * Unified wait: race the caller's running jobs against incoming peer
-	 * messages. Returns on the FIRST settled job, the first matching message,
-	 * window expiry, or abort — never "when everything finishes"; the model
-	 * re-issues to keep waiting. With no job legs it degrades to a pure
-	 * message wait; with no messaging it is exactly the old job poll.
-	 */
-	async #executeWait(
-		params: HubParams,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<HubDetails>,
-	): Promise<AgentToolResult<HubDetails>> {
-		const messaging = this.#messaging();
-		const manager = this.session.asyncJobManager;
-		const ownerId = this.#ownerId();
-		const from = params.from?.trim() || undefined;
-
-		// A message already buffered on the session satisfies the wait first.
-		if (messaging) {
-			const pending = drainPendingInbox(messaging.registry, messaging.senderId, from, messaging.coordinationBackend);
-			if (pending) return messageResult(messaging.senderId, pending);
-		}
-
-		// Resolve which jobs to watch:
-		// - explicit `ids` → exactly those (owner-scoped; missing ids corrected);
-		// - omitted → every running job the caller owns.
-		const ids = params.ids;
-		const jobsToWatch = manager
-			? ids?.length
-				? visibleJobs(manager, ids, ownerId)
-				: manager.getRunningJobs(ownerId ? { ownerId } : undefined)
-			: [];
-		if (manager && ids?.length && jobsToWatch.length === 0) {
-			return noMatchingJobsResult(this.session, ids);
-		}
-		const runningJobs = jobsToWatch.filter(j => j.status === "running");
-		if (manager && jobsToWatch.length > 0 && runningJobs.length === 0) {
-			// Every explicitly watched job already settled — immediate snapshot.
-			return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
-		}
-
-		if (!manager || runningJobs.length === 0) {
-			// No job legs: pure message wait — or nothing to block on at all.
-			if (!messaging) return nothingToWaitForResult(this.session);
-			if (!from && !messaging.coordinationBackend) {
-				// A bare local wait can only be satisfied by a running peer.
-				const hasRunningPeer = messaging.registry
-					.listVisibleTo(messaging.senderId)
-					.some(ref => ref.status === "running");
-				if (!hasRunningPeer) return nothingToWaitForResult(this.session);
-			}
-			return executeMessageWait(messaging, { from, timeoutMs: params.timeoutMs }, signal);
-		}
-
-		// Wait window: explicit timeout wins (0 = no window); otherwise the
-		// `async.pollWaitDuration` fixed value or smart ladder. The ladder
-		// starts at the floor and climbs as the agent waits in a tight loop,
-		// then resets once it steps away (see AsyncJobManager.nextPollWaitMs).
-		const window = resolvePollWindow(this.session, manager, ownerId);
-		const windowMs = params.timeoutMs !== undefined ? normalizeIrcTimeoutMs(params.timeoutMs) : window.waitMs;
-		const usedSmartWindow = window.smart && params.timeoutMs === undefined;
-
-		const racePromises: Promise<unknown>[] = runningJobs.map(j => j.promise);
-
-		// Message leg: park a bus waiter with no timeout of its own — the race
-		// window governs. Cancelled via sentinel so late losers do not reject.
-		const busAbort = messaging ? new AbortController() : undefined;
-		const busCancelled = new Error("hub wait settled");
-		let removeBusAbortListener: (() => void) | undefined;
-		const busLeg =
-			messaging && busAbort
-				? (messaging.coordinationBackend
-						? messaging.coordinationBackend.waitMessage({ from }, 0, busAbort.signal)
-						: IrcBus.global().wait(messaging.senderId, { from }, 0, busAbort.signal)
-					).then(
-						message => ({ message, error: null as Error | null }),
-						error => ({
-							message: null,
-							error: error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
-						}),
-					)
-				: undefined;
-		if (busLeg) racePromises.push(busLeg);
-		if (busAbort && signal) {
-			if (signal.aborted) {
+	// Message leg: park a bus waiter with no timeout of its own — the race
+	// window governs. Cancelled via sentinel so late losers do not reject.
+	const busAbort = messaging ? new AbortController() : undefined;
+	const busCancelled = new Error("hub wait settled");
+	let removeBusAbortListener: (() => void) | undefined;
+	const busLeg =
+		messaging && busAbort
+			? (messaging.coordinationBackend
+					? messaging.coordinationBackend.waitMessage({ from }, 0, busAbort.signal)
+					: IrcBus.global().wait(messaging.senderId, { from }, 0, busAbort.signal)
+				).then(
+					message => ({ message, error: null as Error | null }),
+					error => ({
+						message: null,
+						error: error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
+					}),
+				)
+			: undefined;
+	if (busLeg) racePromises.push(busLeg);
+	if (busAbort && signal) {
+		if (signal.aborted) {
+			busAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted"));
+		} else {
+			const onAbort = (): void => {
 				busAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted"));
-			} else {
-				const onAbort = (): void => {
-					busAbort.abort(signal.reason instanceof Error ? signal.reason : new Error("hub wait aborted"));
-				};
-				signal.addEventListener("abort", onAbort, { once: true });
-				removeBusAbortListener = () => signal.removeEventListener("abort", onAbort);
-			}
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			removeBusAbortListener = () => signal.removeEventListener("abort", onAbort);
 		}
+	}
 
-		const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
-		const timeoutHandle = windowMs > 0 ? setTimeout(() => timeoutResolve(), windowMs) : undefined;
-		if (timeoutHandle) racePromises.push(timeoutPromise);
+	const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
+	const timeoutHandle = windowMs > 0 ? setTimeout(() => timeoutResolve(), windowMs) : undefined;
+	if (timeoutHandle) racePromises.push(timeoutPromise);
 
-		const watchedJobIds = runningJobs.map(job => job.id);
-		manager.watchJobs(watchedJobIds);
+	const watchedJobIds = runningJobs.map(job => job.id);
+	manager.watchJobs(watchedJobIds);
 
-		const emitProgress = () => {
-			if (!onUpdate) return;
-			onUpdate({
-				content: [{ type: "text", text: "" }],
-				details: { op: "wait", jobs: snapshotJobs(this.session, jobsToWatch) },
-			});
-		};
-		const progressTimer = onUpdate ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
-		emitProgress();
+	const emitProgress = () => {
+		if (!onUpdate) return;
+		onUpdate({
+			content: [{ type: "text", text: "" }],
+			details: { op: "wait", jobs: snapshotJobs(session, jobsToWatch) },
+		});
+	};
+	const progressTimer = onUpdate ? setInterval(emitProgress, PROGRESS_INTERVAL_MS) : undefined;
+	emitProgress();
 
-		try {
-			if (signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
-				const onAbort = () => abortResolve();
-				signal.addEventListener("abort", onAbort, { once: true });
-				racePromises.push(abortPromise);
-				try {
-					await Promise.race(racePromises);
-				} finally {
-					signal.removeEventListener("abort", onAbort);
-				}
-			} else {
+	try {
+		if (signal) {
+			const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
+			const onAbort = () => abortResolve();
+			signal.addEventListener("abort", onAbort, { once: true });
+			racePromises.push(abortPromise);
+			try {
 				await Promise.race(racePromises);
+			} finally {
+				signal.removeEventListener("abort", onAbort);
 			}
-		} finally {
-			manager.unwatchJobs(watchedJobIds);
-			if (timeoutHandle) clearTimeout(timeoutHandle);
-			if (progressTimer) clearInterval(progressTimer);
-			busAbort?.abort(busCancelled);
-			removeBusAbortListener?.();
-			if (usedSmartWindow) {
-				// Reset the idle-gap clock: escalate if the agent waits again soon,
-				// drop back to the floor once it goes quiet for a while.
-				manager.recordPollWaitEnd(ownerId);
-			}
+		} else {
+			await Promise.race(racePromises);
 		}
-
-		// A message consumed by the bus waiter must never be dropped — it wins
-		// even a photo-finish race (job results re-deliver themselves; a
-		// dequeued message would otherwise be lost).
-		if (busLeg && messaging) {
-			const settled = await busLeg;
-			if (settled.message) return messageResult(messaging.senderId, settled.message);
+	} finally {
+		manager.unwatchJobs(watchedJobIds);
+		if (timeoutHandle) clearTimeout(timeoutHandle);
+		if (progressTimer) clearInterval(progressTimer);
+		busAbort?.abort(busCancelled);
+		removeBusAbortListener?.();
+		if (usedSmartWindow) {
+			// Reset the idle-gap clock: escalate if the agent waits again soon,
+			// drop back to the floor once it goes quiet for a while.
+			manager.recordPollWaitEnd(ownerAgentId);
 		}
-
-		return buildJobResult(this.session, manager, "wait", jobsToWatch, []);
 	}
-}
 
-// =============================================================================
-// TUI Renderer — dispatches to the preserved messaging/job/launch renderings.
-// =============================================================================
-
-const LAUNCH_OPS: Record<string, true> = {
-	start: true,
-	ps: true,
-	logs: true,
-	stop: true,
-	restart: true,
-	describe: true,
-};
-
-/** Launch-style call: an explicit process op, or `send`/`wait` targeting a process `name`. */
-function isLaunchStyleArgs(args: HubRenderArgs | undefined): boolean {
-	if (!args?.op) return false;
-	if (LAUNCH_OPS[args.op]) return true;
-	return (args.op === "send" || args.op === "wait") && !!args.name && !args.to && !args.from;
-}
-
-/** Job-style call: job ops, or a `wait` that does not target a peer or process. */
-function isJobStyleArgs(args: HubRenderArgs | undefined): boolean {
-	switch (args?.op) {
-		case "jobs":
-		case "cancel":
-			return true;
-		case "wait":
-			return !!args.ids?.length || (!args.from && !args.name);
-		default:
-			return false;
+	// A message consumed by the bus waiter must never be dropped — it wins
+	// even a photo-finish race (job results re-deliver themselves; a
+	// dequeued message would otherwise be lost).
+	if (busLeg && messaging) {
+		const settled = await busLeg;
+		if (settled.message) return messageResult(messaging.senderId, settled.message);
 	}
+
+	return buildJobResult(session, manager, "wait", jobsToWatch, []);
 }
-
-/** Launch details carry process/broker state; coordination details never define these keys. */
-function isLaunchDetails(details: HubDetails): details is LaunchToolDetails {
-	// `state`/`cursor` cover logs results, which may carry neither a daemon
-	// snapshot nor terminal rows; coordination details never define these keys.
-	return (
-		"daemon" in details ||
-		"daemons" in details ||
-		"terminalRows" in details ||
-		"spec" in details ||
-		"state" in details ||
-		"cursor" in details
-	);
-}
-
-/** Hub args → launch renderer args: `ps` is the broker's `list`; everything else is verbatim. */
-function toLaunchArgs(args: HubRenderArgs | undefined): LaunchRenderArgs {
-	if (!args) return {};
-	const { op, ...rest } = args;
-	return { ...rest, op: op === "ps" ? "list" : op };
-}
-
-export const hubToolRenderer = {
-	inline: true,
-	mergeCallAndResult: true,
-	// Only launch pending frames consume the spinner (broker RPC in flight);
-	// messaging/job pending frames are static, exactly as before the merge.
-	animatedPendingPreview: (args: unknown): boolean => isLaunchStyleArgs(args as HubRenderArgs | undefined),
-
-	renderCall(args: HubRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
-		if (isLaunchStyleArgs(args)) return launchRenderCall(toLaunchArgs(args), options, uiTheme);
-		return isJobStyleArgs(args)
-			? jobsRenderCall(args, options, uiTheme)
-			: messagingRenderCall(args, options, uiTheme);
-	},
-
-	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: HubDetails; isError?: boolean },
-		options: RenderResultOptions,
-		uiTheme: Theme,
-		args?: HubRenderArgs,
-	): Component {
-		// Results dispatch on what actually happened, falling back to the call
-		// shape when details are absent (framework-generated errors).
-		const details = result.details;
-		if (details && isLaunchDetails(details)) {
-			return launchRenderResult({ ...result, details }, options, uiTheme, toLaunchArgs(args));
-		}
-		const coordination = details;
-		if (coordination && (Array.isArray(coordination.jobs) || Array.isArray(coordination.agents))) {
-			return jobsRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-		}
-		if (
-			coordination &&
-			("receipts" in coordination || "waited" in coordination || "inbox" in coordination || "peers" in coordination)
-		) {
-			return messagingRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-		}
-		// Detail-less or op-only results (validation errors, disabled gates).
-		if (isLaunchStyleArgs(args))
-			return launchRenderResult({ ...result, details: undefined }, options, uiTheme, toLaunchArgs(args));
-		if (isJobStyleArgs(args)) return jobsRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-		return messagingRenderResult({ ...result, details: coordination }, options, uiTheme, args);
-	},
-};

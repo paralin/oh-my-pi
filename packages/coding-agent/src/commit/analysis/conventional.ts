@@ -6,11 +6,7 @@ import analysisSystemPrompt from "../../commit/prompts/analysis-system.md" with 
 import analysisUserPrompt from "../../commit/prompts/analysis-user.md" with { type: "text" };
 import type { ConventionalAnalysis } from "../../commit/types";
 import { toReasoningEffort } from "../../thinking";
-import { createConventionalAnalysisTool, parseConventionalAnalysisResponse } from "../shared-llm";
-
-const ConventionalAnalysisTool = createConventionalAnalysisTool(
-	"Analyze a diff and return conventional commit classification.",
-);
+import { parseConventionalAnalysisResponse } from "../shared-llm";
 
 export interface ConventionalAnalysisInput {
 	model: Model<Api>;
@@ -55,10 +51,9 @@ export async function generateConventionalAnalysis({
 		{
 			systemPrompt: [prompt.render(analysisSystemPrompt)],
 			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-			tools: [ConventionalAnalysisTool],
 		},
 		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
 	);
 
-	return parseConventionalAnalysisResponse(response, ConventionalAnalysisTool);
+	return parseConventionalAnalysisResponse(response);
 }

@@ -9,8 +9,8 @@ import * as path from "node:path";
 
 /**
  * Sanitize a tool name for safe use as the middle segment of the artifact
- * filename (`${id}.${toolType}.log`). Built-in tool names are fixed, but MCP,
- * extension, and RPC-host tool names are arbitrary and may contain path
+ * filename (`${id}.${toolType}.log`). Internal names are fixed, but MCP and
+ * extension names are arbitrary and may contain path
  * separators (`/`, `\`) or traversal sequences (`..`) that would otherwise let
  * a spilled artifact escape the artifacts directory. Collapse everything
  * outside `[A-Za-z0-9_-]` to `_`, and cap the length so an arbitrarily long

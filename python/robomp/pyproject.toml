@@ -36,7 +36,18 @@ package-dir = { "robomp" = "src" }
 packages = ["robomp", "robomp.proxy"]
 
 [tool.setuptools.package-data]
-robomp = ["prompts/*", "py.typed", "static/*", "static/assets/*"]
+robomp = [
+  "prompts/*",
+  "py.typed",
+  "static/*",
+  "static/assets/*",
+  "agent_runtime/*.ts",
+  "agent_runtime/robomp-host/*",
+  "agent_runtime/robomp-host/src/robomp_host/*.py",
+]
+
+[tool.uv.sources]
+omp-rpc = { path = "../omp-rpc", editable = true }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

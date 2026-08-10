@@ -10,8 +10,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import type { ToolSession } from "../src/session/tool-session.js";
+import { type CoordinationDetails, executeHubOperation } from "../src/tools/hub";
 
 const managers: AsyncJobManager[] = [];
 
@@ -67,9 +67,9 @@ afterEach(async () => {
 
 describe("hub jobs snapshot", () => {
 	test("empty jobs snapshot reports 'no jobs' instead of empty output", async () => {
-		const tool = new HubTool(createToolSession({ manager: createManager(), agentId: "Main" }));
+		const hubSession = createToolSession({ manager: createManager(), agentId: "Main" });
 
-		const result = await tool.execute("call", { op: "jobs" });
+		const result = await executeHubOperation(hubSession, { op: "jobs" });
 
 		expect(resultText(result)).toBe("No background jobs.");
 		expect((result.details as CoordinationDetails)?.jobs).toEqual([]);
@@ -82,9 +82,9 @@ describe("hub jobs snapshot", () => {
 		registry.setStatus("Idler", "idle");
 		registry.register({ id: "advisor", displayName: "advisor", kind: "advisor", session: null });
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main" }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main" });
 
-		const result = await tool.execute("call", { op: "jobs" });
+		const result = await executeHubOperation(hubSession, { op: "jobs" });
 
 		expect((result.details as CoordinationDetails)?.agents?.map(agent => agent.id)).toEqual(["Worker"]);
 		const text = resultText(result);
@@ -112,9 +112,9 @@ describe("hub jobs snapshot", () => {
 		registerRunningSub(registry, "vibe-1");
 		// Woken via irc: running agent with no job at all.
 		registerRunningSub(registry, "Loner");
-		const tool = new HubTool(createToolSession({ manager, registry, agentId: "Main" }));
+		const hubSession = createToolSession({ manager, registry, agentId: "Main" });
 
-		const result = await tool.execute("call", { op: "jobs" });
+		const result = await executeHubOperation(hubSession, { op: "jobs" });
 
 		expect((result.details as CoordinationDetails)?.jobs?.map(job => job.id).sort()).toEqual(["AgentA", "vibe-1-t1"]);
 		expect((result.details as CoordinationDetails)?.agents?.map(agent => agent.id)).toEqual(["Loner"]);
@@ -129,9 +129,9 @@ describe("hub jobs snapshot", () => {
 		await manager.waitForAll();
 		// The agent was re-woken (e.g. via irc) after its job completed.
 		registerRunningSub(registry, "AgentB");
-		const tool = new HubTool(createToolSession({ manager, registry, agentId: "Main" }));
+		const hubSession = createToolSession({ manager, registry, agentId: "Main" });
 
-		const result = await tool.execute("call", { op: "jobs" });
+		const result = await executeHubOperation(hubSession, { op: "jobs" });
 
 		expect((result.details as CoordinationDetails)?.jobs?.find(job => job.id === "AgentB")?.status).toBe("completed");
 		expect((result.details as CoordinationDetails)?.agents?.map(agent => agent.id)).toEqual(["AgentB"]);
@@ -140,9 +140,9 @@ describe("hub jobs snapshot", () => {
 
 describe("hub wait with no matching jobs", () => {
 	test("bare wait with nothing running stays a useless no-op message", async () => {
-		const tool = new HubTool(createToolSession({ manager: createManager(), agentId: "Main" }));
+		const hubSession = createToolSession({ manager: createManager(), agentId: "Main" });
 
-		const result = await tool.execute("call", { op: "wait" });
+		const result = await executeHubOperation(hubSession, { op: "wait" });
 
 		expect(resultText(result)).toBe("No running background jobs to wait for.");
 		expect(result.useless).toBe(true);
@@ -151,9 +151,9 @@ describe("hub wait with no matching jobs", () => {
 	test("bare wait reports running agents outside job control", async () => {
 		const registry = new AgentRegistry();
 		registerRunningSub(registry, "Worker");
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry }));
+		const hubSession = createToolSession({ manager: createManager(), registry });
 
-		const result = await tool.execute("call", { op: "wait" });
+		const result = await executeHubOperation(hubSession, { op: "wait" });
 
 		const text = resultText(result);
 		expect(text).toContain("No running background jobs to wait for.");
@@ -165,9 +165,9 @@ describe("hub wait with no matching jobs", () => {
 	test("waiting on an agent id that has no job explains the agent's state", async () => {
 		const registry = new AgentRegistry();
 		registerRunningSub(registry, "Worker");
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main" }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main" });
 
-		const result = await tool.execute("call", { op: "wait", ids: ["Worker"] });
+		const result = await executeHubOperation(hubSession, { op: "wait", ids: ["Worker"] });
 
 		const text = resultText(result);
 		expect(text).toContain("No matching jobs found for IDs: Worker");
@@ -204,9 +204,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			status: "idle",
 		});
 		lifecycle.adopt("Zombie", { idleTtlMs: 0 });
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["Zombie"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["Zombie"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Zombie", status: "cancelled" }]);
 		expect(resultText(result)).toContain("Cancelled agent Zombie");
@@ -229,9 +229,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			status: "running",
 		});
 		lifecycle.adopt("Runner", { idleTtlMs: 0 });
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["Runner"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["Runner"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Runner", status: "cancelled" }]);
 		expect(fake.abortCalls()).toBe(1);
@@ -271,9 +271,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			status: "running",
 		});
 		lifecycle.adopt("Runner", { idleTtlMs: 0 });
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["Runner"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["Runner"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Runner", status: "cancelled" }]);
 		expect(oldAborts).toBe(1);
@@ -295,9 +295,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			session: fake.session as never,
 			status: "idle",
 		});
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["OtherKid"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["OtherKid"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "OtherKid", status: "not_found" }]);
 		expect(registry.get("OtherKid")).toBeDefined();
@@ -307,9 +307,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 	test("cancel of a truly unknown id still reports not_found", async () => {
 		const registry = new AgentRegistry();
 		const lifecycle = new AgentLifecycleManager(registry);
-		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager: createManager(), registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["Ghost"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["Ghost"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Ghost", status: "not_found" }]);
 		expect(resultText(result)).toContain("Background job not found: Ghost");
@@ -332,9 +332,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 			status: "idle",
 		});
 		lifecycle.adopt("Zombie", { idleTtlMs: 0 });
-		const tool = new HubTool(createToolSession({ manager, registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager, registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["Zombie"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["Zombie"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([{ id: "Zombie", status: "cancelled" }]);
 		expect(registry.get("Zombie")).toBeUndefined();
@@ -348,9 +348,9 @@ describe("hub cancel of a non-job-backed agent registration (#6315)", () => {
 		const manager = createManager();
 		manager.register("task", "DoneJob", async () => "done", { id: "DoneJob", agentId: "DoneJob", ownerId: "Main" });
 		await manager.waitForAll();
-		const tool = new HubTool(createToolSession({ manager, registry, agentId: "Main", lifecycle }));
+		const hubSession = createToolSession({ manager, registry, agentId: "Main", lifecycle });
 
-		const result = await tool.execute("call", { op: "cancel", ids: ["DoneJob"] });
+		const result = await executeHubOperation(hubSession, { op: "cancel", ids: ["DoneJob"] });
 
 		expect((result.details as CoordinationDetails)?.cancelled).toEqual([
 			{ id: "DoneJob", status: "already_completed" },

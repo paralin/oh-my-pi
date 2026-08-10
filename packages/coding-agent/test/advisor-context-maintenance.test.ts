@@ -72,7 +72,7 @@ describe("AgentSession advisor context maintenance", () => {
 		const advisorMock = createMockModel({
 			provider: "anthropic",
 			contextWindow: CONTEXT_WINDOW,
-			responses: [{ content: ["advisor reviewed current update"] }],
+			responses: [{ content: ['{"note":null}'] }],
 		});
 		Object.assign(advisorMock, { contextPromotionTarget });
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -92,7 +92,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
@@ -148,7 +147,7 @@ describe("AgentSession advisor context maintenance", () => {
 		});
 		const advisorMock = createMockModel({
 			provider: "openai",
-			responses: [{ content: ["advisor reviewed current update"] }],
+			responses: [{ content: ['{"note":null}'] }],
 		});
 		const nativeModel = getBundledModel("openai", "gpt-5");
 		const sameProviderBase = getBundledModel("openai", "gpt-5-mini");
@@ -182,7 +181,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -214,7 +212,7 @@ describe("AgentSession advisor context maintenance", () => {
 			id: "advisor-active",
 			provider: "anthropic",
 			contextWindow: ACTIVE_ADVISOR_CONTEXT_WINDOW,
-			responses: [{ content: ["advisor reviewed current update"] }],
+			responses: [{ content: ['{"note":null}'] }],
 		});
 		// Never the active advisor model: it only summarizes, so its window gates
 		// nothing and must not reach `profile.t`.
@@ -258,7 +256,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
@@ -363,7 +360,7 @@ describe("AgentSession advisor context maintenance", () => {
 		expect(session.getAdvisorAgent()?.state.model).toBe(advisorMock);
 	});
 
-	it("includes advisor system prompt and tool schemas in the local maintenance floor", async () => {
+	it("includes the advisor system prompt with an empty tool catalog in the local maintenance floor", async () => {
 		const { advisor, advisorMock, settings } = createHarness();
 		const seed: AgentMessage = { role: "user", content: "small stored advisor message", timestamp: 1 };
 		advisor.state.messages.push(seed);
@@ -477,7 +474,6 @@ describe("AgentSession advisor context maintenance", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");

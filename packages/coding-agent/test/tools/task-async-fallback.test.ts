@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 function createSession(overrides: Partial<Record<string, unknown>> = {}): ToolSession {
 	return {
@@ -26,7 +26,7 @@ describe("task.async-fallback", () => {
 	});
 
 	it("falls back to sync execution when the session has no job manager", async () => {
-		// Two-stage spy: the initial discovery during `TaskTool.create` advertises
+		// Two-stage spy: the initial discovery during `TaskService.create` advertises
 		// `task` so the tool builds; the executor's later call (inside the sync
 		// `#runSpawn`) advertises *nothing*, forcing the unique "Unknown agent"
 		// message. That re-discovery only happens on the sync codepath — the
@@ -48,9 +48,9 @@ describe("task.async-fallback", () => {
 		discoverSpy.mockResolvedValue({ agents: [], projectAgentsDir: null });
 
 		// Enable async so the missing `asyncJobManager` is the fallback trigger.
-		const tool = await TaskTool.create(createSession({ "async.enabled": true }));
+		const tool = await TaskService.create(createSession({ "async.enabled": true }));
 
-		const result = await tool.execute("tool-1", {
+		const result = await tool.spawn("tool-1", {
 			agent: "task",
 			name: "One",
 			task: "Do the thing.",

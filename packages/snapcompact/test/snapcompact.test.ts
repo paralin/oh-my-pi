@@ -698,7 +698,7 @@ describe("serializeConversation", () => {
 		expect(out).toBe("¶user:do the thing\n\n¶ai:done");
 	});
 
-	it("merges a tool call with its paired result into one block, intent as a // comment", () => {
+	it("merges a legacy tool call with its paired result without reinterpreting arguments", () => {
 		const out = snapcompact.serializeConversation(
 			[
 				createAssistantMessage([
@@ -713,24 +713,7 @@ describe("serializeConversation", () => {
 			],
 			{ dimToolResults: false },
 		);
-		expect(out).toBe('¶call:bash(command="bun test")//Running tests\n<out>\n3 pass\n</out>');
-	});
-
-	it("prefers the harness-derived intent over the raw intent arg and squashes newlines", () => {
-		const out = snapcompact.serializeConversation([
-			createAssistantMessage([
-				{
-					type: "toolCall",
-					id: "c1",
-					name: "bash",
-					arguments: { [INTENT_FIELD]: "raw arg", command: "ls" },
-					intent: "Derived\nintent  line",
-				},
-			]),
-		]);
-		expect(out).toContain("//Derived intent line");
-		expect(out).not.toContain("raw arg");
-		expect(out).not.toContain(`${INTENT_FIELD}=`);
+		expect(out).toBe('¶call:bash(i="Running tests", command="bun test")\n<out>\n3 pass\n</out>');
 	});
 
 	it("folds thinking into separate sections above the text", () => {

@@ -1,23 +1,19 @@
 /**
  * Read CLI command handler.
  *
- * Handles `omp read` — invokes the `read` agent tool against a path/URL and
- * prints the resulting content blocks exactly as the model would receive them
- * (including truncation/limit notices appended by the meta-notice wrapper).
+ * Handles `omp read` — reads a path/URL through the shared service and
+ * prints the resulting content blocks.
  */
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
-import { closeDaemonClients } from "../launch/client";
-import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
 import { discoverAuthStorage } from "../session/auth-broker-config";
 import type { AuthStorage } from "../session/auth-storage";
-import type { ToolSession } from "../tools";
-import { wrapToolWithMetaNotice } from "../tools/output-meta";
-import { ReadTool } from "../tools/read";
+import type { ToolSession } from "../session/tool-session";
+import { ReadService } from "../tools/read";
 import { renderError } from "../tools/tool-errors";
 
 export interface ReadCommandArgs {
@@ -59,20 +55,18 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	try {
 		if (shouldDiscoverMcp(cmd.path)) {
 			authStorage = await discoverAuthStorage();
-			const result = await discoverAndLoadMCPTools(cwd, {
+			mcpManager = new MCPManager(cwd);
+			mcpManager.setAuthStorage(authStorage);
+			await mcpManager.discoverAndConnect({
 				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 				filterExa: true,
 				filterBrowser: settings.get("browser.enabled") ?? false,
-				cacheStorage: settings.getStorage(),
-				authStorage,
 			});
-			mcpManager = result.manager;
 			session.mcpManager = mcpManager;
 			MCPManager.setInstance(mcpManager);
 		}
 
-		const tool = wrapToolWithMetaNotice(new ReadTool(session));
-		const result = await tool.execute("omp-read", { path: cmd.path });
+		const result = await new ReadService(session).read(cmd.path);
 
 		for (const block of result.content) {
 			if (block.type === "text") {
@@ -94,7 +88,6 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
 		}
 		authStorage?.close();
-		await closeDaemonClients();
 	}
 
 	if (failed) process.exit(1);

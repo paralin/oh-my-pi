@@ -6,24 +6,12 @@ import {
 	buildSystemPrompt,
 	loadProjectContextFiles,
 	loadSystemPromptFiles,
-	type SystemPromptToolMetadata,
 } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 function escapeRegExp(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-
-const READ_TOOL = new Map<string, SystemPromptToolMetadata>([
-	[
-		"read",
-		{
-			label: "Read",
-			description: "Reads files from disk.",
-			parameters: { type: "object", properties: { path: { type: "string" } } },
-		},
-	],
-]);
 
 describe("SYSTEM.md prompt assembly", () => {
 	let tempDir = "";
@@ -39,66 +27,36 @@ describe("SYSTEM.md prompt assembly", () => {
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
-	it("renders an absolute cwd beneath the user's home directory", async () => {
-		const projectDir = path.join(os.homedir(), "project");
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: projectDir,
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: [],
-			activeRepoContext: null,
-			workspaceTree: {
-				rootPath: projectDir,
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
-		});
-
-		const promptText = systemPrompt.join("\n\n");
-		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
-		// cwd interpolation: the quoted absolute path appears in the footer line.
-		expect(promptText).toContain(`'${normalizedProjectDir}'`);
-	});
-
-	it("renders SYSTEM.md exactly once when it is used as the custom base prompt", async () => {
+	it("keeps fixed ABI, stable project context, and volatile notices in order", async () => {
 		const projectDir = path.join(tempDir, "project");
-		const systemDir = path.join(projectDir, ".omp");
-		const systemPrompt = "You are the project SYSTEM prompt.";
-		fs.mkdirSync(systemDir, { recursive: true });
-		fs.writeFileSync(path.join(systemDir, "SYSTEM.md"), systemPrompt);
-
-		const { systemPrompt: renderedPrompt } = await buildSystemPrompt({
-			cwd: projectDir,
-			customPrompt: systemPrompt,
-			contextFiles: [],
-			skills: [
-				{
-					name: "focused-work",
-					description: "Focused work instructions",
-					filePath: "skills/focused-work/SKILL.md",
-					baseDir: "skills/focused-work",
-					source: "test",
-				},
+		const outerPath = path.join(projectDir, "AGENTS.md");
+		const innerPath = path.join(projectDir, "nested", "AGENTS.md");
+		const { systemPrompt } = await buildSystemPrompt({
+			calendarDate: "2026-08-06",
+			contextFiles: [
+				{ path: innerPath, content: "Nested instruction", depth: 0 },
+				{ path: outerPath, content: "Outer instruction", depth: 1 },
 			],
-			rules: [],
-			toolNames: ["read"],
-			tools: READ_TOOL,
-			workspaceTree: {
-				rootPath: projectDir,
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
+			cwd: projectDir,
+			recursiveDepth: 1,
+			resolvedSystemPromptCustomization: null,
+			sessionLogLocation: "/sessions/root.jsonl",
+			sessionNotice: "root",
 		});
 
-		const promptText = renderedPrompt.join("\n\n");
-		const matches = promptText.match(new RegExp(escapeRegExp(systemPrompt), "g")) ?? [];
-		expect(matches).toHaveLength(1);
-		expect(promptText).toContain('<skill name="focused-work">');
+		expect(systemPrompt).toHaveLength(3);
+		expect(systemPrompt[0]).toContain("capable general-purpose agent");
+		expect(systemPrompt[0]).toContain("exclusive `ipython`");
+		expect(systemPrompt[0]).toContain("fresh subshell");
+		expect(systemPrompt[0]).toContain("native environment");
+		expect(systemPrompt[0]).toContain("`rlm`, `omp`, and installed Python skills are preloaded");
+		expect(systemPrompt[0]).toContain("`SKILL.md`");
+		expect(systemPrompt[0]).toContain("appended operator and project instructions");
+		expect(systemPrompt[1].indexOf("Outer instruction")).toBeLessThan(systemPrompt[1].indexOf("Nested instruction"));
+		expect(systemPrompt[2]).toContain("Today is 2026-08-06.");
+		expect(systemPrompt[2]).toContain("Session log: /sessions/root.jsonl.");
+		expect(systemPrompt[2]).toContain("Session: root.");
+		expect(systemPrompt[2]).toContain("Recursive depth: 1.");
 	});
 
 	it("does not resolve already-loaded prompt text as a path", async () => {
@@ -108,88 +66,37 @@ describe("SYSTEM.md prompt assembly", () => {
 		fs.writeFileSync(readablePromptText, "File content that must not replace the prompt.");
 
 		const { systemPrompt } = await buildSystemPrompt({
-			cwd: projectDir,
-			resolvedCustomPrompt: readablePromptText,
-			resolvedAppendSystemPrompt: readablePromptText,
 			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: ["read"],
-			tools: READ_TOOL,
-			workspaceTree: {
-				rootPath: projectDir,
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
+			cwd: projectDir,
+			resolvedAppendSystemPrompt: readablePromptText,
+			resolvedCustomPrompt: readablePromptText,
+			resolvedSystemPromptCustomization: null,
 		});
-
 		const promptText = systemPrompt.join("\n\n");
+
 		expect(promptText).toContain(readablePromptText);
 		expect(promptText).not.toContain("File content that must not replace the prompt.");
 	});
 
-	it("suppresses discovered SYSTEM.md while preserving the project footer", async () => {
+	it("gives explicit custom and append text precedence over discovered SYSTEM.md", async () => {
 		const projectDir = path.join(tempDir, "project");
-		const appendPrompt = "Extra append instructions";
 		fs.mkdirSync(path.join(projectDir, ".omp"), { recursive: true });
 		fs.writeFileSync(path.join(projectDir, ".omp", "SYSTEM.md"), "Discovered project SYSTEM prompt");
 
 		const { systemPrompt } = await buildSystemPrompt({
+			contextFiles: [{ path: path.join(projectDir, "AGENTS.md"), content: "Project instruction", depth: 0 }],
 			cwd: projectDir,
-			resolvedCustomPrompt: "CLI custom prompt",
-			resolvedAppendSystemPrompt: appendPrompt,
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: ["read"],
-			tools: READ_TOOL,
-			includeWorkspaceTree: true,
-			workspaceTree: {
-				rootPath: projectDir,
-				rendered: ".\n  - nested/",
-				truncated: false,
-				totalLines: 2,
-				agentsMdFiles: ["nested/AGENTS.md"],
-			},
+			resolvedAppendSystemPrompt: "Append instruction",
+			resolvedCustomPrompt: "Custom instruction",
 		});
-
 		const promptText = systemPrompt.join("\n\n");
-		const normalizedProjectDir = projectDir.replace(/\\/g, "/");
-		const appendMatches = promptText.match(new RegExp(escapeRegExp(appendPrompt), "g")) ?? [];
-		expect(systemPrompt).toHaveLength(2);
-		expect(promptText).toContain("CLI custom prompt");
-		expect(promptText).toContain("<workspace-tree>");
-		expect(promptText).toContain("<dir-context>");
-		expect(promptText).toContain(`'${normalizedProjectDir}'`);
-		expect(appendMatches).toHaveLength(1);
+
+		expect(systemPrompt[0]).toContain("exclusive `ipython`");
+		expect(promptText).toContain("Project instruction");
+		expect(promptText).toContain("Custom instruction");
+		expect(promptText).toContain("Append instruction");
 		expect(promptText).not.toContain("Discovered project SYSTEM prompt");
-	});
-
-	it("renders active child repo context in the main system prompt", async () => {
-		const parentDir = path.join(tempDir, "parent-cwd");
-		fs.mkdirSync(path.join(parentDir, "active-project", ".git"), { recursive: true });
-
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: parentDir,
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: [],
-			workspaceTree: {
-				rootPath: parentDir,
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
-		});
-
-		const promptText = systemPrompt.join("\n\n");
-		expect(promptText).toContain("<active-repo-context>");
-		expect(promptText).toContain("`active-project`");
-		expect(promptText).toContain("`active-project/`");
+		expect(promptText.indexOf("Custom instruction")).toBeLessThan(promptText.indexOf("Append instruction"));
 	});
 
 	it("prefers project SYSTEM.md over user SYSTEM.md", async () => {
@@ -200,36 +107,38 @@ describe("SYSTEM.md prompt assembly", () => {
 		fs.writeFileSync(path.join(projectDir, ".omp", "SYSTEM.md"), "Project SYSTEM prompt");
 
 		await expect(loadSystemPromptFiles({ cwd: projectDir })).resolves.toBe("Project SYSTEM prompt");
-	});
-	it("drops identical explicit context entries even when file names differ", async () => {
-		const farPath = path.join(tempDir, "far", "AGENTS.md");
-		const nearPath = path.join(tempDir, "near", "CLAUDE.md");
-		const sharedContent = "Shared context instructions";
-
 		const { systemPrompt } = await buildSystemPrompt({
-			cwd: tempDir,
-			customPrompt: "Base prompt",
-			contextFiles: [
-				{ path: farPath, content: sharedContent, depth: 2 },
-				{ path: nearPath, content: sharedContent, depth: 0 },
-			],
-			skills: [],
-			rules: [],
-			toolNames: [],
+			contextFiles: [],
+			cwd: projectDir,
 		});
+		expect(systemPrompt.join("\n\n")).toContain("Project SYSTEM prompt");
+	});
 
+	it("deduplicates identical context and rule content while keeping the closer context", async () => {
+		const farPath = path.join(tempDir, "far", "AGENTS.md");
+		const nearPath = path.join(tempDir, "near", "AGENTS.md");
+		const sharedContent = "Shared context instructions";
+		const { systemPrompt } = await buildSystemPrompt({
+			alwaysApplyRules: [{ name: "shared", path: path.join(tempDir, "rule.md"), content: sharedContent }],
+			contextFiles: [
+				{ path: nearPath, content: sharedContent, depth: 0 },
+				{ path: farPath, content: sharedContent, depth: 2 },
+			],
+			cwd: tempDir,
+			resolvedSystemPromptCustomization: null,
+		});
 		const promptText = systemPrompt.join("\n\n");
 		const matches = promptText.match(new RegExp(escapeRegExp(sharedContent), "g")) ?? [];
+
 		expect(matches).toHaveLength(1);
 		expect(promptText).not.toContain(`<file path="${farPath}">`);
 		expect(promptText).toContain(`<file path="${nearPath}">`);
 	});
 
-	it("drops identical discovered context entries and keeps the closest copy", async () => {
+	it("deduplicates identical discovered context and keeps the closest file", async () => {
 		const projectDir = path.join(tempDir, "project");
 		const appDir = path.join(projectDir, "packages", "app");
 		const sharedContent = "Shared context instructions";
-
 		fs.mkdirSync(appDir, { recursive: true });
 		fs.writeFileSync(path.join(projectDir, "AGENTS.md"), sharedContent);
 		fs.writeFileSync(path.join(appDir, "AGENTS.md"), sharedContent);
@@ -239,50 +148,5 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		expect(discoveredFiles).toHaveLength(1);
 		expect(discoveredFiles[0]?.path).toBe(path.join(appDir, "AGENTS.md"));
-	});
-
-	it("keeps distinct context entries when their contents differ", async () => {
-		const farPath = path.join(tempDir, "far", "AGENTS.md");
-		const nearPath = path.join(tempDir, "near", "CLAUDE.md");
-
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: tempDir,
-			customPrompt: "Base prompt",
-			contextFiles: [
-				{ path: farPath, content: "Root context instructions", depth: 2 },
-				{ path: nearPath, content: "Near context instructions", depth: 0 },
-			],
-			skills: [],
-			rules: [],
-			toolNames: [],
-		});
-		const promptText = systemPrompt.join("\n\n");
-
-		expect(promptText).toContain("Root context instructions");
-		expect(promptText).toContain("Near context instructions");
-	});
-
-	it("drops always-apply rule content already present through expanded context imports", async () => {
-		const projectDir = path.join(tempDir, "project");
-		const instructionPath = path.join(projectDir, ".github", "instructions", "shared.instructions.md");
-		const sharedContent = "Shared imported guidance";
-		fs.mkdirSync(path.dirname(instructionPath), { recursive: true });
-		fs.writeFileSync(path.join(projectDir, "AGENTS.md"), "Use @.github/instructions/shared.instructions.md\n");
-		fs.writeFileSync(instructionPath, `---\napplyTo: '**'\n---\n\n${sharedContent}\n`);
-
-		const contextFiles = await loadProjectContextFiles({ cwd: projectDir });
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: projectDir,
-			customPrompt: "Base prompt",
-			contextFiles,
-			skills: [],
-			rules: [],
-			alwaysApplyRules: [{ name: "shared", path: instructionPath, content: sharedContent }],
-			toolNames: [],
-		});
-
-		const promptText = systemPrompt.join("\n\n");
-		const matches = promptText.match(new RegExp(escapeRegExp(sharedContent), "g")) ?? [];
-		expect(matches).toHaveLength(1);
 	});
 });

@@ -1,3 +1,5 @@
+import { pathToFileURL } from "node:url";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type {
 	SessionNotification,
 	SessionUpdate,
@@ -6,7 +8,9 @@ import type {
 	ToolCallLocation,
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
-import { parseXdUrl } from "../../internal-urls/xd-protocol";
+import { parseDiffHunks } from "../../edit/diff";
+import type { IpythonCellPresentation } from "../../ipython/projection";
+import type { ActProjectionEvent } from "../../session/act-events";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
@@ -72,16 +76,6 @@ interface CommandContainer {
 	command?: unknown;
 }
 
-interface EvalCellContainer {
-	cells?: unknown;
-}
-
-interface EvalCellLike {
-	language?: unknown;
-	title?: unknown;
-	code?: unknown;
-}
-
 interface PatternContainer {
 	pattern?: unknown;
 }
@@ -128,35 +122,19 @@ interface TextMessageLike {
 }
 
 const ACP_TEXT_LIMIT = 4_000;
-
-/**
- * Device name when the call is an `xd://` device dispatch riding the
- * read/write transport (`write xd://<tool>` executes the mounted tool,
- * `read xd://` is discovery). Returns `undefined` for plain file paths.
- */
-function xdevDispatchDevice(toolName: string, args: unknown): string | undefined {
-	if (toolName !== "write" && toolName !== "read") return undefined;
-	const path = extractStringProperty<PathContainer>(args, "path");
-	if (!path) return undefined;
-	return parseXdUrl(path)?.name ?? undefined;
-}
+const IPYTHON_ACP_CONTENT_MAX_BYTES = 256 * 1024;
+const IPYTHON_ACP_CONTENT_MAX_ITEMS = 64;
+const IPYTHON_ACP_STARTUP_MAX_ITEMS = 8;
+const IPYTHON_ACP_CATEGORY_MAX_ITEMS = 16;
+const IPYTHON_ACP_LOCATION_MAX_ITEMS = 64;
+const IPYTHON_ACP_LOCATION_MAX_BYTES = 4_096;
+const IPYTHON_ACP_IMAGE_MAX_BYTES = 192 * 1024;
+const IPYTHON_ACP_DIFF_SOURCE_MAX_BYTES = 128 * 1024;
 
 /** Whether a Hub call carries peer-to-peer coordination rather than process control. */
 function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
-	let hubArgs = args;
-	if (toolName !== "hub") {
-		if (xdevDispatchDevice(toolName, args) !== "hub" || typeof args !== "object" || args === null) {
-			return false;
-		}
-		const content = Reflect.get(args, "content");
-		if (typeof content !== "string") return false;
-		try {
-			hubArgs = JSON.parse(content);
-		} catch {
-			return false;
-		}
-	}
-	if (typeof hubArgs !== "object" || hubArgs === null) return false;
+	if (toolName !== "hub" || typeof args !== "object" || args === null) return false;
+	const hubArgs = args;
 	const op = Reflect.get(hubArgs, "op");
 	switch (op) {
 		case "list":
@@ -174,12 +152,7 @@ function isInternalHubMessageTool(toolName: string, args: unknown): boolean {
 	}
 }
 
-export function mapToolKind(toolName: string, args?: unknown): ToolKind {
-	// An xd:// device write executes the mounted tool — "edit" would make ACP
-	// clients render it as a file modification to a nonexistent path (and
-	// auto-approve it under edit-tier policies). Reads stay "read": listing
-	// devices or fetching docs is discovery.
-	if (toolName === "write" && xdevDispatchDevice(toolName, args)) return "execute";
+export function mapToolKind(toolName: string, _args?: unknown): ToolKind {
 	switch (toolName) {
 		case "read":
 			return "read";
@@ -193,7 +166,7 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 		case "bash":
 		case "shell":
 		case "exec":
-		case "eval":
+		case "ipython":
 			return "execute";
 		case "grep":
 		case "glob":
@@ -208,29 +181,136 @@ export function mapToolKind(toolName: string, args?: unknown): ToolKind {
 	}
 }
 
+function actToolCallId(actId: string): string {
+	return `omp-act-${actId}`;
+}
+
+function boundedActText(text: string): string {
+	return limitText(sanitizeText(text));
+}
+
+function mapActEventToAcpUpdate(event: ActProjectionEvent): SessionUpdate {
+	const toolCallId = actToolCallId(event.actId);
+	switch (event.event) {
+		case "start":
+			return {
+				sessionUpdate: "tool_call",
+				toolCallId,
+				title: `Act (${boundedActText(event.model.id)})`,
+				kind: "execute",
+				status: "in_progress",
+				rawInput: { prompt: boundedActText(event.prompt) },
+			};
+		case "assistant_delta":
+			return {
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				status: "in_progress",
+				content: [
+					textToolCallContent(`[${event.stream}]
+${boundedActText(event.text)}`),
+				],
+			};
+		case "cell_start":
+			return {
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				status: "in_progress",
+				content: [
+					textToolCallContent(`Cell ${boundedActText(event.cellId)} start:
+${boundedActText(event.code)}`),
+				],
+			};
+		case "cell_terminal": {
+			const parts = [`Cell ${boundedActText(event.cellId)} ${event.status}.`];
+			if (event.error !== undefined)
+				parts.push(`error:
+${event.error}`);
+			if (event.result !== undefined)
+				parts.push(`result:
+${event.result}`);
+			if (event.stderr)
+				parts.push(`stderr:
+${event.stderr}`);
+			if (event.stdout)
+				parts.push(`stdout:
+${event.stdout}`);
+			return {
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				status: "in_progress",
+				content: [textToolCallContent(boundedActText(parts.join("\n")))],
+			};
+		}
+		case "terminal":
+			return {
+				sessionUpdate: "tool_call_update",
+				toolCallId,
+				status: event.status === "done" ? "completed" : "failed",
+				content: [
+					textToolCallContent(
+						boundedActText(
+							`Act ${event.status}.${
+								event.error
+									? `
+${event.error}`
+									: ""
+							}`,
+						),
+					),
+				],
+			};
+	}
+}
+
 export function mapAgentSessionEventToAcpSessionUpdates(
 	event: AgentSessionEvent,
 	sessionId: string,
 	options: AcpEventMapperOptions = {},
 ): SessionNotification[] {
+	return mapSessionEventToAcpSessionUpdates(event, sessionId, options, false);
+}
+
+/** Render legacy tool records when replaying historical session JSONL. */
+export function mapHistoricalAgentSessionEventToAcpSessionUpdates(
+	event: AgentSessionEvent,
+	sessionId: string,
+	options: AcpEventMapperOptions = {},
+): SessionNotification[] {
+	return mapSessionEventToAcpSessionUpdates(event, sessionId, options, true);
+}
+
+function mapSessionEventToAcpSessionUpdates(
+	event: AgentSessionEvent,
+	sessionId: string,
+	options: AcpEventMapperOptions,
+	includeHistoricalToolPresentation: boolean,
+): SessionNotification[] {
 	switch (event.type) {
+		case "act_event":
+			return [toSessionNotification(sessionId, mapActEventToAcpUpdate(event))];
 		case "message_update":
 			return mapAssistantMessageUpdate(event, sessionId, options);
 		case "message_end":
 			return mapAssistantMessageEnd(event, sessionId, options);
+		case "ipython_cell_start":
+			return mapIpythonCellStart(event.presentation, sessionId, options);
+		case "ipython_cell_update":
+			return mapIpythonCellUpdate(event.presentation, sessionId, options);
+		case "ipython_cell_end":
+			return mapIpythonCellEnd(event.presentation, sessionId, options);
 		case "tool_execution_start": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (!includeHistoricalToolPresentation || isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const update = buildToolCallStartUpdate({
 				toolCallId: event.toolCallId,
 				toolName: event.toolName,
 				args: event.args,
-				intent: event.intent,
 				cwd: options.cwd,
 			});
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
-			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
+			if (!includeHistoricalToolPresentation || isInternalHubMessageTool(event.toolName, event.args)) return [];
 			const content = mergeToolUpdateContent(
 				buildToolStartContent(event.toolName, event.args),
 				extractToolCallContent(event.partialResult, options),
@@ -251,6 +331,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_end": {
+			if (!includeHistoricalToolPresentation) return [];
 			const args = getToolExecutionEndArgs(event, options);
 			if (isInternalHubMessageTool(event.toolName, args)) return [];
 			const resultContent = [
@@ -291,6 +372,239 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 		default:
 			return [];
 	}
+}
+
+function ipythonToolCallId(presentation: IpythonCellPresentation): string | undefined {
+	return presentation.cellId;
+}
+
+function mapIpythonCellStart(
+	presentation: IpythonCellPresentation,
+	sessionId: string,
+	options: AcpEventMapperOptions,
+): SessionNotification[] {
+	const toolCallId = ipythonToolCallId(presentation);
+	if (!toolCallId) return [];
+	const firstLine = sanitizeText(presentation.code).split("\n", 1)[0]?.trim();
+	const update: ToolCall & { sessionUpdate: "tool_call" } = {
+		sessionUpdate: "tool_call",
+		toolCallId,
+		title: firstLine ? limitText(`IPython: ${firstLine}`) : "IPython cell",
+		kind: "execute",
+		status: "pending",
+		rawInput: { code: limitText(sanitizeText(presentation.code)), origin: presentation.origin },
+	};
+	const content = ipythonCellContent(presentation, options, true);
+	if (content.length > 0) update.content = content;
+	const locations = ipythonCellLocations(presentation, options.cwd);
+	if (locations.length > 0) update.locations = locations;
+	return [toSessionNotification(sessionId, update)];
+}
+
+function mapIpythonCellUpdate(
+	presentation: IpythonCellPresentation,
+	sessionId: string,
+	options: AcpEventMapperOptions,
+): SessionNotification[] {
+	const toolCallId = ipythonToolCallId(presentation);
+	if (!toolCallId) return [];
+	const update: SessionUpdate = {
+		sessionUpdate: "tool_call_update",
+		toolCallId,
+		status: "in_progress",
+	};
+	const content = ipythonCellContent(presentation, options, false);
+	if (content.length > 0) update.content = content;
+	const locations = ipythonCellLocations(presentation, options.cwd);
+	if (locations.length > 0) update.locations = locations;
+	return [toSessionNotification(sessionId, update)];
+}
+
+function mapIpythonCellEnd(
+	presentation: Extract<IpythonCellPresentation, { phase: "complete" }>,
+	sessionId: string,
+	options: AcpEventMapperOptions,
+): SessionNotification[] {
+	const update: SessionUpdate = {
+		sessionUpdate: "tool_call_update",
+		toolCallId: presentation.cellId,
+		status: presentation.status === "ok" ? "completed" : "failed",
+	};
+	const content = ipythonCellContent(presentation, options, false);
+	if (content.length > 0) update.content = content;
+	const locations = ipythonCellLocations(presentation, options.cwd);
+	if (locations.length > 0) update.locations = locations;
+	return [toSessionNotification(sessionId, update)];
+}
+
+function ipythonCellContent(
+	presentation: IpythonCellPresentation,
+	options: AcpEventMapperOptions,
+	includeCode: boolean,
+): ToolCallContent[] {
+	const content: ToolCallContent[] = [];
+	let contentBytes = 0;
+	let attempts = 0;
+	let omitted = false;
+	let saturated = false;
+	const append = (item: ToolCallContent): boolean => {
+		attempts++;
+		if (attempts > IPYTHON_ACP_CONTENT_MAX_ITEMS * 2) {
+			omitted = true;
+			saturated = true;
+			return false;
+		}
+		const serialized = safeJsonStringify(item);
+		const bytes = serialized === undefined ? IPYTHON_ACP_CONTENT_MAX_BYTES : Buffer.byteLength(serialized);
+		if (
+			content.length >= IPYTHON_ACP_CONTENT_MAX_ITEMS - 1 ||
+			contentBytes + bytes > IPYTHON_ACP_CONTENT_MAX_BYTES - 256
+		) {
+			omitted = true;
+			if (content.length >= IPYTHON_ACP_CONTENT_MAX_ITEMS - 1) saturated = true;
+			return false;
+		}
+		content.push(item);
+		contentBytes += bytes;
+		return true;
+	};
+	if (includeCode && presentation.code) {
+		append(textToolCallContent(limitText(sanitizeText(presentation.code))));
+	}
+	for (const [index, progress] of presentation.startupProgress.entries()) {
+		if (saturated) break;
+		if (index >= IPYTHON_ACP_STARTUP_MAX_ITEMS) {
+			omitted = true;
+			break;
+		}
+		const text = limitText(sanitizeText(progress.message));
+		if (text && !hasEquivalentTextContent(content, text)) append(textToolCallContent(text));
+	}
+	const safeText = limitText(presentation.safeText.text).trimEnd();
+	if (safeText && !hasEquivalentTextContent(content, safeText)) append(textToolCallContent(safeText));
+	let artifactCount = 0;
+	for (const artifact of presentation.artifacts) {
+		if (saturated) break;
+		if (artifactCount >= IPYTHON_ACP_CATEGORY_MAX_ITEMS) {
+			omitted = true;
+			break;
+		}
+		const path = artifact.path;
+		if (!path) continue;
+		const absolute = toAcpLocationPath(path, options.cwd);
+		artifactCount++;
+		append({
+			type: "content",
+			content: {
+				type: "resource_link",
+				uri: pathToFileURL(absolute).href,
+				name: artifact.label || path.split(/[\\/]/).at(-1) || "IPython artifact",
+				...(artifact.mimeType ? { mimeType: artifact.mimeType } : {}),
+				...(artifact.bytes !== undefined ? { size: artifact.bytes } : {}),
+			},
+		});
+	}
+	let progressCount = 0;
+	let richCount = 0;
+	for (const event of presentation.events) {
+		if (saturated) break;
+		if (event.kind === "host_progress") {
+			if (progressCount >= IPYTHON_ACP_CATEGORY_MAX_ITEMS) {
+				omitted = true;
+				continue;
+			}
+			const text = limitText(sanitizeText(`[${event.operation}] ${event.message}`));
+			if (text && !safeText.includes(text) && !hasEquivalentTextContent(content, text)) {
+				progressCount++;
+				append(textToolCallContent(text));
+			}
+			continue;
+		}
+		if (event.kind !== "display" && event.kind !== "result") continue;
+		for (const [mimeType, value] of Object.entries(event.data)) {
+			if (saturated) break;
+			if (richCount >= IPYTHON_ACP_CATEGORY_MAX_ITEMS) {
+				omitted = true;
+				break;
+			}
+			const rich = ipythonMimeContent(mimeType, value, options);
+			if (rich) {
+				richCount++;
+				append(rich);
+			}
+		}
+	}
+	if (omitted) content.push(textToolCallContent("Additional IPython cell content omitted from ACP output."));
+	return content;
+}
+
+function boundedIpythonImageContent(data: string, mimeType: string): ToolCallContent {
+	if (Buffer.byteLength(data) > IPYTHON_ACP_IMAGE_MAX_BYTES) {
+		return textToolCallContent(
+			`IPython ${limitText(sanitizeText(mimeType))} image omitted from ACP output because it exceeds the size limit.`,
+		);
+	}
+	return {
+		type: "content",
+		content: { type: "image", data, mimeType },
+	};
+}
+
+function ipythonMimeContent(
+	mimeType: string,
+	value: unknown,
+	options: AcpEventMapperOptions,
+): ToolCallContent | undefined {
+	if (mimeType.startsWith("image/") && typeof value === "string") {
+		return boundedIpythonImageContent(options.resolveImageData?.(value, mimeType) ?? value, mimeType);
+	}
+	if (mimeType === "application/vnd.omp.attachment+json" && typeof value === "object" && value !== null) {
+		const data = Reflect.get(value, "data");
+		const attachmentMime = Reflect.get(value, "mime_type");
+		if (typeof data === "string" && typeof attachmentMime === "string" && attachmentMime.startsWith("image/")) {
+			return boundedIpythonImageContent(options.resolveImageData?.(data, attachmentMime) ?? data, attachmentMime);
+		}
+	}
+	if (mimeType !== "application/vnd.omp.diff+json" || typeof value !== "object" || value === null) {
+		return undefined;
+	}
+	const path = Reflect.get(value, "path");
+	const diff = Reflect.get(value, "diff");
+	if (typeof path !== "string" || !path || typeof diff !== "string") return undefined;
+	if (Buffer.byteLength(diff) > IPYTHON_ACP_DIFF_SOURCE_MAX_BYTES) {
+		return textToolCallContent("IPython diff omitted from ACP output because it exceeds the size limit.");
+	}
+	try {
+		const hunks = parseDiffHunks(diff);
+		return {
+			type: "diff",
+			path: toAcpLocationPath(path, options.cwd),
+			oldText: limitText(sanitizeText(hunks.flatMap(hunk => hunk.oldLines).join("\n"))),
+			newText: limitText(sanitizeText(hunks.flatMap(hunk => hunk.newLines).join("\n"))),
+		};
+	} catch {
+		return textToolCallContent(limitText(sanitizeText(diff)));
+	}
+}
+
+function ipythonCellLocations(presentation: IpythonCellPresentation, cwd?: string): ToolCallLocation[] {
+	const locations: ToolCallLocation[] = [];
+	const seen = new Set<string>();
+	for (const event of presentation.events) {
+		if (locations.length >= IPYTHON_ACP_LOCATION_MAX_ITEMS) break;
+		if (event.kind !== "display" && event.kind !== "result") continue;
+		for (const value of Object.values(event.data)) {
+			if (locations.length >= IPYTHON_ACP_LOCATION_MAX_ITEMS) break;
+			if (typeof value !== "object" || value === null) continue;
+			const raw = Reflect.get(value, "path");
+			if (typeof raw !== "string" || !raw || INTERNAL_URL_SUBJECT.test(raw)) continue;
+			const path = toAcpLocationPath(raw, cwd);
+			if (Buffer.byteLength(path) > IPYTHON_ACP_LOCATION_MAX_BYTES || seen.has(path)) continue;
+			seen.add(path);
+			locations.push({ path });
+		}
+	}
+	return locations;
 }
 
 function mapAssistantMessageUpdate(
@@ -479,14 +793,13 @@ export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
 	toolName: string;
 	args: unknown;
-	intent?: string;
 	cwd?: string;
 	status?: "pending" | "completed";
 }): SessionUpdate {
 	const update: ToolCall & { sessionUpdate: "tool_call" } = {
 		sessionUpdate: "tool_call",
 		toolCallId: input.toolCallId,
-		title: buildToolTitle(input.toolName, input.args, input.intent),
+		title: buildToolTitle(input.toolName, input.args),
 		kind: mapToolKind(input.toolName, input.args),
 		status: input.status ?? "pending",
 		rawInput: input.args,
@@ -534,39 +847,7 @@ function buildToolStartText(toolName: string, args: unknown): string | undefined
 		const command = extractStringProperty<CommandContainer>(args, "command");
 		return command ? limitText(`$ ${command}`) : undefined;
 	}
-	if (toolName === "eval") {
-		return buildEvalStartText(args);
-	}
 	return undefined;
-}
-
-function buildEvalStartText(args: unknown): string | undefined {
-	if (typeof args !== "object" || args === null || Array.isArray(args)) {
-		return undefined;
-	}
-	const container = args as EvalCellContainer & EvalCellLike;
-	const cells = Array.isArray(container.cells)
-		? container.cells
-		: typeof container.code === "string"
-			? [container]
-			: [];
-	if (cells.length === 0) {
-		return undefined;
-	}
-	const lines: string[] = [];
-	for (const cell of cells) {
-		if (typeof cell !== "object" || cell === null || Array.isArray(cell)) {
-			continue;
-		}
-		const language = extractStringProperty<EvalCellLike>(cell, "language") ?? "?";
-		const title = extractStringProperty<EvalCellLike>(cell, "title");
-		const code = extractStringProperty<EvalCellLike>(cell, "code");
-		if (!code) {
-			continue;
-		}
-		lines.push(title ? `[${language}] ${title}` : `[${language}]`, code);
-	}
-	return lines.length > 0 ? limitText(lines.join("\n")) : undefined;
 }
 
 function mergeToolUpdateContent(startContent: ToolCallContent[], resultContent: ToolCallContent[]): ToolCallContent[] {
@@ -591,27 +872,18 @@ function isCommandToolName(toolName: string): boolean {
 	return toolName === "bash" || toolName === "shell" || toolName === "exec";
 }
 
-function buildToolTitle(toolName: string, args: unknown, intent: string | undefined): string {
+function buildToolTitle(toolName: string, args: unknown): string {
 	if (isCommandToolName(toolName)) {
 		const commandText = buildToolStartText(toolName, args);
 		if (commandText) return commandText;
 	}
-	if (toolName === "eval") {
-		const evalText = buildEvalStartText(args);
-		if (evalText) return evalText;
-	}
-	const trimmedIntent = intent?.trim();
-	if (trimmedIntent) {
-		return trimmedIntent;
-	}
-
 	const subject =
 		extractStringProperty<PathContainer>(args, "path") ??
 		extractStringProperty<CommandContainer>(args, "command") ??
 		extractStringProperty<PatternContainer>(args, "pattern") ??
 		extractStringProperty<QueryContainer>(args, "query");
 	if (subject) {
-		// Internal URLs (xd://github, skill://react, …) name their target fully;
+		// Internal URLs (skill://react, agent://worker, …) name their target fully;
 		// prefixing the transport tool reads as a file write to a fake path.
 		if (INTERNAL_URL_SUBJECT.test(subject)) return subject;
 		return `${toolName}: ${subject}`;
@@ -636,7 +908,7 @@ function toAcpLocationPath(value: string, cwd?: string): string {
 }
 
 /**
- * Scheme-qualified subjects (`xd://`, `skill://`, `agent://`, `https://`, …)
+ * Scheme-qualified subjects (`skill://`, `agent://`, `https://`, …)
  * are not local files: resolving them against cwd fabricates paths like
  * `/repo/xd:/github` and makes editors focus nonexistent files.
  */
@@ -660,7 +932,7 @@ function extractToolLocations(args: unknown, cwd?: string): ToolCallLocation[] {
 	return locations;
 }
 
-/** Pull locations from a tool result's details (e.g. EditToolDetails.perFileResults[].path). */
+/** Pull locations from a tool result's details (e.g. EditOperationDetails.perFileResults[].path). */
 function extractToolLocationsFromResult(result: unknown, cwd?: string): ToolCallLocation[] {
 	if (typeof result !== "object" || result === null) return [];
 	const details = (result as { details?: unknown }).details;

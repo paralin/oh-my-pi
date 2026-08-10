@@ -25,9 +25,7 @@ export class RuleProtocolHandler implements ProtocolHandler {
 			const availableStr = available.length > 0 ? available.join(", ") : "none";
 			throw new Error(`Unknown rule: ${ruleName}\nAvailable: ${availableStr}`);
 		}
-		const content = rule.semanticCondition
-			? `${rule.content.trimEnd()}\n\n## Semantic conditions\n\n\`\`\`json\n${JSON.stringify(rule.semanticCondition, null, 2)}\n\`\`\`\n`
-			: rule.content;
+		const content = rule.content;
 
 		const providerId = rule._source?.provider ?? "unknown";
 		const providerName = rule._source?.providerName?.trim() || providerId;

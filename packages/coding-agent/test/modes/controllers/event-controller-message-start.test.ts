@@ -62,7 +62,6 @@ function createContext(options: {
 		clearOptimisticUserMessage,
 		replaceOptimisticUserMessage,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		viewSession: { isStreaming: false },
 	} as unknown as InteractiveModeContext;
 	return {

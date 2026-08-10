@@ -1,5 +1,6 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import { type } from "@oh-my-pi/omptype";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { z } from "@oh-my-pi/omptype/zod";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -11,9 +12,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const failingToolSchema = type({ value: type("string") });
+const failingToolSchema = z.object({ code: z.string() });
 const failingTool: AgentTool<typeof failingToolSchema, Record<string, never>> = {
-	name: "boom",
+	name: "ipython",
 	label: "Boom",
 	description: "Always fails",
 	parameters: failingToolSchema,
@@ -22,24 +23,15 @@ const failingTool: AgentTool<typeof failingToolSchema, Record<string, never>> = 
 	},
 };
 
-type Harness = { session: AgentSession; tempDir: TempDir };
+type Harness = { session: AgentSession; authStorage: AuthStorage; tempDir: TempDir };
 const activeHarnesses: Harness[] = [];
-let authStorage: AuthStorage;
-let modelRegistry: ModelRegistry;
-
-beforeAll(async () => {
-	authStorage = await AuthStorage.create(":memory:");
-	authStorage.setRuntimeApiKey("mock", "test-key");
-	modelRegistry = new ModelRegistry(authStorage);
-});
-
-afterAll(() => {
-	authStorage.close();
-});
 
 async function createHarness(responses: MockResponse[]): Promise<Harness & { sessionManager: SessionManager }> {
 	const tempDir = TempDir.createSync("@pi-terminal-error-persistence-");
+	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	authStorage.setRuntimeApiKey("mock", "test-key");
 	const mock = createMockModel({ responses });
+	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -60,9 +52,8 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { ses
 		sessionManager,
 		settings,
 		modelRegistry,
-		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, tempDir };
+	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, sessionManager };
 }
@@ -78,6 +69,7 @@ function persistedErrorTurns(sessionManager: SessionManager): AssistantMessage[]
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
+		harness.authStorage.close();
 		harness.tempDir.removeSync();
 	}
 	vi.restoreAllMocks();
@@ -91,7 +83,7 @@ describe("AgentSession terminal error persistence", () => {
 	it("persists the terminal empty error turn that ends the run after a failed tool result", async () => {
 		const { session, sessionManager } = await createHarness([
 			{
-				content: [{ type: "toolCall", id: "call-1", name: "boom", arguments: { value: "x" } }],
+				content: [{ type: "toolCall", id: "call-1", name: "ipython", arguments: { code: "x" } }],
 				stopReason: "toolUse",
 			},
 			{ content: [], stopReason: "error", errorMessage: "provider rejected the continuation" },

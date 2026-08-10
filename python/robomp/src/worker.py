@@ -4,8 +4,8 @@ The orchestrator calls `run_task(...)` from within an asyncio loop. The
 function spins up `RpcClient` on a worker thread, drives the kickoff/follow-up
 prompt, and returns when the agent emits `agent_end`.
 
-Host tools call back into the orchestrator's GitHub client and DB. Because the
-RpcClient runs in its own subprocess and the host-tool callbacks are dispatched
+Operations call back into the orchestrator's GitHub client and DB. Because the
+RpcClient runs in its own subprocess and the operation callbacks are dispatched
 on the RpcClient's stdout-reader thread, the callbacks block until coroutines
 scheduled onto the parent loop complete (`asyncio.run_coroutine_threadsafe`).
 """
@@ -27,19 +27,19 @@ from omp_rpc import (
     RpcClient,
     RpcError,
     RpcProcessExitError,
-    ToolExecutionEndEvent,
 )
 
-from robomp import host_tools, persona, pragmas
+from robomp import operations, persona, pragmas
 from robomp.cancellation import register_cancel_hook, unregister_cancel_hook
 from robomp.config import Settings
 from robomp.db import Database, issue_key
 from robomp.git_ops import DirtyState, inspect_dirty_state
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import CommentInfo, IssueInfo, PullRequestInfo, RepoInfo
-from robomp.host_tools import AbortController, ToolBindings, _git_identity_env
+from robomp.host_bridge import HostBridge, JsonValue, RobompOperation
 from robomp.natives_cache import NativesCache
 from robomp.natives_cache import compute_key as natives_compute_key
+from robomp.operations import AbortController, ToolBindings, _git_identity_env
 from robomp.sandbox import GitTransport, Workspace, _prepare_slot_runtime_env, _safe_directory_env
 
 log = logging.getLogger(__name__)
@@ -124,6 +124,16 @@ _AGENT_HOME_STAGE = Path("/srv/agent-home-stage")
 
 def _stage_agent_home() -> None:
     """Copy late-appearing staged agent config into the runtime HOME."""
+    # Robomp admission is task-local: install the packaged Python skill into
+    # the same HOME tree used by the child, rather than exposing a global skill.
+    skill_source = Path(__file__).parent / "agent_runtime" / "robomp-host"
+    skill_target = _AGENT_HOME / ".agent" / "skills" / "robomp-host"
+    try:
+        if skill_source.is_dir() and _AGENT_HOME.is_dir():
+            skill_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(skill_source, skill_target, dirs_exist_ok=True)
+    except OSError as exc:
+        log.warning("Failed to stage Robomp host skill: %s", exc)
     if not _AGENT_HOME_STAGE.exists():
         return
 
@@ -226,8 +236,8 @@ def _build_extra_env(settings: Settings) -> dict[str, str]:
     return env
 
 
-_TERMINAL_TRIAGE_TOOLS: frozenset[str] = frozenset({"gh_open_pr", "mark_unable_to_reproduce", "abort_task"})
-_TERMINAL_REVIEW_TOOLS: frozenset[str] = frozenset({"submit_pr_review", "abort_task"})
+_TERMINAL_TRIAGE_OPERATIONS: frozenset[str] = frozenset({"gh_open_pr", "mark_unable_to_reproduce", "abort_task"})
+_TERMINAL_REVIEW_OPERATIONS: frozenset[str] = frozenset({"submit_pr_review", "abort_task"})
 _PR_REQUIRING_CLASSIFICATIONS: frozenset[str] = frozenset({"bug", "documentation"})
 
 
@@ -236,19 +246,19 @@ def _needs_completion_reminder(
     task_kind: str,
     inputs: TaskInputs,
     bindings: ToolBindings,
-    tools_called: set[str],
+    operations_called: set[str],
 ) -> bool:
-    """True iff a task turn ended before reaching its terminal tool."""
+    """True iff a task turn ended before reaching its terminal operation."""
     if bindings.abort is not None and bindings.abort.triggered:
         return False
     if task_kind == "review_pr":
-        return not (tools_called & _TERMINAL_REVIEW_TOOLS)
+        return not (operations_called & _TERMINAL_REVIEW_OPERATIONS)
     if task_kind != "triage_issue":
         return False
     row = inputs.db.get_issue(bindings.issue_key)
     if row is None or row.classification not in _PR_REQUIRING_CLASSIFICATIONS:
         return False
-    return not (tools_called & _TERMINAL_TRIAGE_TOOLS)
+    return not (operations_called & _TERMINAL_TRIAGE_OPERATIONS)
 
 
 def _probe_workspace_dirty(workspace: Workspace, slot_uid: int | None) -> DirtyState:
@@ -278,7 +288,7 @@ def _drive_turn(
     task_kind: str,
     inputs: TaskInputs,
     bindings: ToolBindings,
-    tools_called: set[str],
+    operations_called: set[str],
 ) -> Any:
     """Run the initial prompt and, if the agent stopped early, send reminders.
 
@@ -311,7 +321,7 @@ def _drive_turn(
     reminders_used = 0
     while reminders_used < max_reminders:
         needs_completion = _needs_completion_reminder(
-            task_kind=task_kind, inputs=inputs, bindings=bindings, tools_called=tools_called
+            task_kind=task_kind, inputs=inputs, bindings=bindings, operations_called=operations_called
         )
         if not needs_completion:
             if task_kind == "review_pr":
@@ -360,7 +370,7 @@ def _drive_turn(
         turn = next_turn
 
     if reminders_used and _needs_completion_reminder(
-        task_kind=task_kind, inputs=inputs, bindings=bindings, tools_called=tools_called
+        task_kind=task_kind, inputs=inputs, bindings=bindings, operations_called=operations_called
     ):
         log.warning(
             "rpc_completion_unfinished",
@@ -368,7 +378,7 @@ def _drive_turn(
                 "issue": bindings.issue_key,
                 "task": task_kind,
                 "reminders": reminders_used,
-                "tools_called": sorted(tools_called),
+                "operations_called": sorted(operations_called),
             },
         )
     if reminders_used and task_kind != "review_pr":
@@ -484,6 +494,27 @@ def _build_prompt(
     raise ValueError(f"unknown task kind: {task_kind!r}")
 
 
+def _bridge_dispatcher(bindings: ToolBindings, operations_called: set[str]) -> callable:
+    """Adapt Robomp's existing audited operations to the task-local bridge."""
+    available_operations = operations.operations(bindings)
+
+    def dispatch(operation: RobompOperation, arguments: dict[str, JsonValue]) -> JsonValue:
+        operation_impl = available_operations.get(operation)
+        if operation_impl is None:
+            raise ValueError(f"Robomp operation is not available: {operation}")
+        result = operation_impl.execute(arguments)
+        operations_called.add(operation)
+        log.info(
+            "operation_done",
+            extra={"issue": bindings.issue_key, "operation": operation},
+        )
+        if isinstance(result, (str, int, float, bool)) or result is None:
+            return result
+        return result
+
+    return dispatch
+
+
 def _run_rpc_blocking(
     inputs: TaskInputs,
     *,
@@ -496,40 +527,28 @@ def _run_rpc_blocking(
     """Run a full RPC turn synchronously. Returns final assistant text (or None)."""
     settings = inputs.settings
 
-    tools_called: set[str] = set()
-
-    def _on_tool_end(event: ToolExecutionEndEvent) -> None:
-        tool_name = event.tool_name
-        # `tool_name` is transport-normalized by omp_rpc: an xd:// device
-        # dispatch (`write xd://submit_pr_review`) reports the host tool that
-        # ran, so terminal-action detection can match on host-tool names. A
-        # failed execution (`is_error`) does not count as reaching the
-        # terminal action — a rejected submit must still trigger the
-        # completion reminder.
-        ok = event.result is not None and not event.is_error
-        if ok:
-            tools_called.add(tool_name)
-        log.info(
-            "tool_end",
-            extra={
-                "issue": bindings.issue_key,
-                "tool": tool_name,
-                "ok": ok,
-            },
-        )
+    operations_called: set[str] = set()
 
     def _on_msg(event: MessageUpdateEvent) -> None:
         ev = event.assistant_message_event
         if isinstance(ev, dict) and ev.get("type") == "text_delta":
             log.debug("delta", extra={"issue": bindings.issue_key, "delta": str(ev.get("delta", ""))[:200]})
 
+    bridge = HostBridge(
+        bindings.issue_key,
+        _bridge_dispatcher(bindings, operations_called),
+        client_uid=inputs.slot_uid,
+        client_gid=inputs.slot_uid,
+    )
+    bridge.start()
     rpc_env = _build_extra_env(settings)
+    rpc_env["ROBOMP_HOST_SOCKET"] = str(bridge.socket_path)
     rpc_env.update(_prepare_slot_runtime_env(inputs.workspace, inputs.slot_uid))
     rpc_env.update(_safe_directory_env(bindings.workspace.repo_dir))
     rpc_env.update(_git_identity_env(inputs.settings.resolved_author_name, inputs.settings.git_author_email))
     # Bare worktrees have no node_modules; install (idempotently) so the agent
     # can resolve workspace packages (@oh-my-pi/pi-*) and actually run tests.
-    host_tools.ensure_workspace_dependencies(bindings)
+    operations.ensure_workspace_dependencies(bindings)
     resuming = _has_prior_session(bindings.workspace.session_dir)
     extra_args: tuple[str, ...] = ("--continue",) if resuming else ()
     log.info(
@@ -573,26 +592,30 @@ def _run_rpc_blocking(
         )
     )
 
-    with RpcClient(
-        executable=settings.omp_command,
-        cwd=bindings.workspace.repo_dir,
-        session_dir=bindings.workspace.session_dir,
-        env=rpc_env,
-        no_session=False,
-        no_title=True,
-        model=chosen_model,
-        provider=settings.provider,
-        thinking=chosen_thinking if chosen_thinking != "off" else None,
-        append_system_prompt=append_system_prompt,
-        custom_tools=host_tools.build(bindings),
-        request_timeout=settings.request_timeout_seconds,
-        startup_timeout=60.0,
-        max_event_history=50_000,
-        extra_args=extra_args,
-        user=inputs.slot_uid,
-        group=inputs.slot_uid if inputs.slot_uid is not None else None,
-        extra_groups=["omp"] if inputs.slot_uid is not None else None,
-    ) as client:
+    try:
+        rpc_client = RpcClient(
+            executable=settings.omp_command,
+            cwd=bindings.workspace.repo_dir,
+            session_dir=bindings.workspace.session_dir,
+            env=rpc_env,
+            no_session=False,
+            no_title=True,
+            model=chosen_model,
+            provider=settings.provider,
+            thinking=chosen_thinking if chosen_thinking != "off" else None,
+            append_system_prompt=append_system_prompt,
+            extra_args=("--extension", str(Path(__file__).parent / "agent_runtime" / "extension.ts"), *extra_args),
+            request_timeout=settings.request_timeout_seconds,
+            startup_timeout=60.0,
+            max_event_history=50_000,
+            user=inputs.slot_uid,
+            group=inputs.slot_uid if inputs.slot_uid is not None else None,
+            extra_groups=["omp"] if inputs.slot_uid is not None else None,
+        )
+    except BaseException:
+        bridge.close()
+        raise
+    with rpc_client as client:
         # Arm cancellation: from this point the API can kill the omp subprocess
         # out from under us, which makes `prompt_and_wait` raise an `RpcError`
         # we'll let propagate. The `with` exit calls `client.stop()` again, but
@@ -620,7 +643,6 @@ def _run_rpc_blocking(
         register_cancel_hook(_cancel_hook)
         try:
             client.install_headless_ui()
-            client.on_tool_execution_end(_on_tool_end)
             client.on_message_update(_on_msg)
 
             phases = persona.seed_phases(task_kind)
@@ -693,7 +715,7 @@ def _run_rpc_blocking(
                     task_kind=task_kind,
                     inputs=inputs,
                     bindings=bindings,
-                    tools_called=tools_called,
+                    operations_called=operations_called,
                 )
                 if turn is None:
                     return None
@@ -718,6 +740,7 @@ def _run_rpc_blocking(
             return turn.assistant_text
         finally:
             unregister_cancel_hook()
+            bridge.close()
 
 
 async def run_task(

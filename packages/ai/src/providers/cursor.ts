@@ -10,160 +10,44 @@ import {
 	AgentRunRequestSchema,
 	type AgentServerMessage,
 	AgentServerMessageSchema,
-	AgentStoreConflictErrorSchema,
-	AgentStoreConflictResultSchema,
 	AssistantMessageSchema,
-	BackgroundShellSpawnResultSchema,
-	CanvasDiagnosticsErrorSchema,
-	CanvasDiagnosticsResultSchema,
 	ClientHeartbeatSchema,
-	ComputerUseErrorSchema,
-	ComputerUseResultSchema,
 	ConversationActionSchema,
-	ConversationSearchErrorSchema,
-	ConversationSearchResultSchema,
 	type ConversationStateStructure,
 	ConversationStateStructureSchema,
 	ConversationStepSchema,
 	ConversationTurnStructureSchema,
-	DeleteErrorSchema,
-	DeleteRejectedSchema,
-	DeleteResultSchema,
-	DeleteSuccessSchema,
-	DiagnosticsErrorSchema,
-	DiagnosticsRejectedSchema,
-	DiagnosticsResultSchema,
-	DiagnosticsSuccessSchema,
-	ExecClientControlMessageSchema,
-	type ExecClientMessage,
-	ExecClientMessageSchema,
-	ExecClientStreamCloseSchema,
-	ExecClientThrowSchema,
-	type ExecServerMessage,
-	FetchErrorSchema,
-	FetchResultSchema,
-	ForceBackgroundShellResultSchema,
-	ForceBackgroundShellStatus,
-	ForceBackgroundSubagentResultSchema,
-	ForceBackgroundSubagentStatus,
 	GetBlobResultSchema,
-	GrepContentMatchSchema,
-	GrepContentResultSchema,
-	GrepCountResultSchema,
-	GrepErrorSchema,
-	type GrepFileCount,
-	GrepFileCountSchema,
-	GrepFileMatchSchema,
-	GrepFilesResultSchema,
-	GrepResultSchema,
-	GrepSuccessSchema,
-	type GrepUnionResult,
-	GrepUnionResultSchema,
 	KvClientMessageSchema,
 	type KvServerMessage,
-	ListMcpResourcesErrorSchema,
-	type ListMcpResourcesExecResult,
-	ListMcpResourcesExecResult_McpResourceSchema,
-	ListMcpResourcesExecResultSchema,
-	ListMcpResourcesSuccessSchema,
-	type LsDirectoryTreeNode,
-	type LsDirectoryTreeNode_File,
-	LsDirectoryTreeNode_FileSchema,
-	LsDirectoryTreeNodeSchema,
-	LsErrorSchema,
-	LsRejectedSchema,
-	LsResultSchema,
-	LsSuccessSchema,
-	McpAllowlistPrecheckResultSchema,
-	McpApprovedSchema,
 	McpArgsSchema,
-	McpErrorSchema,
 	McpImageContentSchema,
-	McpRejectedSchema,
-	McpResultSchema,
 	McpSuccessSchema,
 	McpTextContentSchema,
 	McpToolCallSchema,
 	McpToolDefinitionSchema,
 	McpToolErrorSchema,
-	McpToolNotFoundSchema,
 	McpToolResultContentItemSchema,
 	McpToolResultSchema,
 	ModelDetailsSchema,
-	ReadErrorSchema,
-	ReadMcpResourceErrorSchema,
-	type ReadMcpResourceExecResult,
-	ReadMcpResourceExecResultSchema,
-	ReadMcpResourceNotFoundSchema,
-	ReadMcpResourceSuccessSchema,
-	ReadRejectedSchema,
-	ReadResultSchema,
-	ReadSuccessSchema,
-	RecordScreenFailureSchema,
-	RecordScreenResultSchema,
-	RequestContextResultSchema,
-	RequestContextSchema,
-	RequestContextSuccessSchema,
 	RequestedModelSchema,
 	ResumeActionSchema,
 	SelectedContextSchema,
 	SelectedImageSchema,
 	SetBlobResultSchema,
-	ShellAllowlistPrecheckResultSchema,
-	type ShellArgs,
-	ShellFailureSchema,
-	ShellRejectedSchema,
-	type ShellResult,
-	ShellResultSchema,
-	type ShellStream,
-	ShellStreamExitSchema,
-	ShellStreamSchema,
-	ShellStreamStartSchema,
-	ShellStreamStderrSchema,
-	ShellStreamStdoutSchema,
-	ShellSuccessSchema,
-	SmartModeClassifierErrorSchema,
-	SmartModeClassifierResultSchema,
-	SubagentAwaitNotFoundSchema,
-	SubagentAwaitResultSchema,
-	SubagentErrorSchema,
-	SubagentResultSchema,
 	ThinkingMessageSchema,
 	ToolCallSchema,
 	UserMessageActionSchema,
 	UserMessageSchema,
-	WebFetchAllowlistPrecheckResultSchema,
-	WriteErrorSchema,
-	WriteRejectedSchema,
-	WriteResultSchema,
-	WriteShellStdinErrorSchema,
-	WriteShellStdinResultSchema,
-	WriteSuccessSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
 import { isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import {
-	$env,
-	logger,
-	parseJsonWithRepair,
-	parseStreamingJson,
-	parseStreamingJsonThrottled,
-	sanitizeText,
-} from "@oh-my-pi/pi-utils";
+import { $env, logger, parseJsonWithRepair, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import type {
 	Api,
 	AssistantMessage,
 	Context,
-	CursorExecHandlerResult,
-	CursorExecHandlers,
-	CursorExecPairing,
-	CursorMcpCall,
-	CursorShellStreamCallbacks,
-	CursorTodoSnapshot,
-	CursorTodoSnapshotItem,
-	CursorTodoSyncHandler,
-	CursorToolResultHandler,
 	ImageContent,
 	Message,
 	Model,
@@ -177,9 +61,7 @@ import type {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import {
-	type CursorExecResolvedCarrier,
 	clearStreamingPartialJson,
-	kCursorExecResolved,
 	kStreamingBlockIndex,
 	kStreamingBlockKind,
 	kStreamingEnvelopeId,
@@ -191,99 +73,9 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
 import { toolWireSchema } from "../utils/schema/wire";
-import {
-	buildMcpStateResult,
-	buildNeutralHookResult,
-	buildPiBashError,
-	buildPiBashResult,
-	buildPiEditError,
-	buildPiEditRejected,
-	buildPiEditResult,
-	buildPiFindError,
-	buildPiFindResult,
-	buildPiGrepError,
-	buildPiGrepResult,
-	buildPiLsError,
-	buildPiLsResult,
-	buildPiReadError,
-	buildPiReadResult,
-	buildPiWriteError,
-	buildPiWriteRejected,
-	buildPiWriteResult,
-	omitUndefinedArgs,
-	piEscapeRegexLiteral,
-	piGrepSkip,
-	piJoinPath,
-	piLimit,
-	piLsPath,
-	piReadDisplayPath,
-	piReadPathHasRange,
-	piTimeout,
-} from "./cursor/exec-modern";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.07.23-e383d2b";
-
-/**
- * HTTP/1 connection-specific headers that HTTP/2 forbids. Node's `http2.request()`
- * throws `ERR_HTTP2_INVALID_CONNECTION_HEADERS` on these rather than dropping
- * them, so a caller sending one would kill the request outright.
- */
-const HTTP2_FORBIDDEN_HEADERS = new Set([
-	"connection",
-	"keep-alive",
-	"proxy-connection",
-	"transfer-encoding",
-	"upgrade",
-	"http2-settings",
-]);
-
-/**
- * Header names the Cursor request sets for itself. A caller copy in ANY casing
- * has to go: the spread below adds the fixed lower-case name regardless, and two
- * spellings of one field are a duplicate rather than an override.
- */
-const CURSOR_RESERVED_HEADERS = new Set([
-	"content-type",
-	"connect-protocol-version",
-	"te",
-	"authorization",
-	"x-ghost-mode",
-	"x-cursor-client-version",
-	"x-cursor-client-type",
-	"x-request-id",
-	// Transport-owned even though this request never sets it: node's http2 client
-	// suppresses the `:authority` it derives from the URL when a plain `host`
-	// header is present, so a caller value here silently retargets the request at
-	// a different virtual host.
-	"host",
-	// The Connect body is streamed after the headers (initial frame, heartbeats,
-	// tool responses), so no caller-supplied length can describe it and an HTTP/2
-	// peer resets the stream once the body diverges.
-	"content-length",
-]);
-
-/**
- * Reduce caller-supplied headers to what this HTTP/2 request can legally carry.
- *
- * Everything is lower-cased, because HTTP/2 field names are lower-case and node
- * compares them that way. A caller `Authorization` next to the fixed
- * `authorization` does not lose to it, it DUPLICATES it, and node throws
- * `ERR_HTTP2_HEADER_SINGLE_VALUE` before the request goes out. Same for a `TE`
- * that is not `trailers`. Node throws on all three classes here rather than
- * ignoring them, so a miss turns a harmless header into a dead request.
- */
-function sanitizeCursorCallerHeaders(headers: Record<string, string> | undefined): Record<string, string> {
-	const sanitized: Record<string, string> = {};
-	for (const [name, value] of Object.entries(headers ?? {})) {
-		const field = name.toLowerCase();
-		if (field.startsWith(":")) continue;
-		if (HTTP2_FORBIDDEN_HEADERS.has(field)) continue;
-		if (CURSOR_RESERVED_HEADERS.has(field)) continue;
-		sanitized[field] = value;
-	}
-	return sanitized;
-}
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
@@ -292,9 +84,6 @@ const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
  * variant. Phrased as a client capability statement, not a tool failure: the
  * model reads it and should route around the capability, not retry the call.
  */
-const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
-const NOT_IMPLEMENTED = `Not implemented by this client`;
-
 const conversationStateCache = new Map<string, ConversationStateStructure>();
 const conversationBlobStores = new Map<string, Map<string, Uint8Array>>();
 const warnedCursorKimiK3ReplayMessages = new Set<string>();
@@ -302,8 +91,6 @@ const warnedCursorKimiK3ReplayMessages = new Set<string>();
 export interface CursorOptions extends StreamOptions {
 	customSystemPrompt?: string;
 	conversationId?: string;
-	execHandlers?: CursorExecHandlers;
-	onToolResult?: CursorToolResultHandler;
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -597,7 +384,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
 			const cachedState = conversationStateCache.get(conversationId);
-			const { requestBytes, conversationState } = buildGrpcRequest(model, context, options, {
+			const { requestBytes, conversationState } = await buildGrpcRequest(model, context, options, {
 				conversationId,
 				blobStore,
 				conversationState: cachedState,
@@ -607,22 +394,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
-			// Caller headers are additive, and are spread FIRST so the protocol
-			// framing, auth, and request id below always win. Cursor built this map
-			// from scratch and never read `options.headers`, so tracing/attribution
-			// headers set by a caller (or a `before_provider_headers` extension) were
-			// silently dropped here while working on other providers.
-			//
-			// Two classes are stripped because node's http2 client THROWS on them
-			// rather than ignoring them, which would turn a harmless header into a
-			// dead request: pseudo-headers, which belong to the transport, and the
-			// HTTP/1 connection-specific headers HTTP/2 forbids outright
-			// (ERR_HTTP2_INVALID_CONNECTION_HEADERS). `te` needs no filtering here —
-			// HTTP/2 allows it only as `trailers`, which is exactly what the fixed
-			// set below re-applies over anything a caller sent.
-			const callerHeaders = sanitizeCursorCallerHeaders(options?.headers);
 			const requestHeaders = {
-				...callerHeaders,
 				":method": "POST",
 				":path": requestPath,
 				"content-type": "application/connect+proto",
@@ -666,7 +438,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			let currentTextBlock: (TextContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null = null;
 			let currentToolCall: ToolCallState | null = null;
-			const resolvedMcpToolCallIds = new Set<string>();
 			const usageState: UsageState = { sawTokenDelta: false };
 
 			const state: BlockState = {
@@ -680,7 +451,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 					return currentToolCall;
 				},
 				openToolCalls: new Map<string, ToolCallState>(),
-				resolvedMcpToolCallIds,
 				get firstTokenTime() {
 					return firstTokenTime;
 				},
@@ -696,8 +466,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				setFirstTokenTime: () => {
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
-				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
-				onToolResult: options?.onToolResult,
 			};
 			openBlockState = state;
 
@@ -757,8 +525,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							state,
 							blobStore,
 							h2Request!,
-							options?.execHandlers,
-							options?.onToolResult,
 							usageState,
 							requestContextTools,
 							onConversationCheckpoint,
@@ -900,9 +666,8 @@ export type ToolCallState = ToolCall & {
 	[kStreamingBlockIndex]: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
-	[kStreamingBlockKind]: "mcp" | "todo" | "cursor-exec" | "connect-scm";
+	[kStreamingBlockKind]: "mcp" | "connect-scm";
 	[kStreamingEnvelopeId]?: string;
-	[kCursorExecResolved]?: true;
 };
 
 export interface BlockState {
@@ -920,25 +685,11 @@ export interface BlockState {
 	 * only as the fallback for frames that carry no `call_id`.
 	 */
 	openToolCalls: Map<string, ToolCallState>;
-	/** MCP call IDs synthesized from exec frames before their redundant streamed block arrives. */
-	resolvedMcpToolCallIds: Set<string>;
 	firstTokenTime: number | undefined;
 	setTextBlock: (b: (TextContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setThinkingBlock: (b: (ThinkingContent & { [kStreamingBlockIndex]: number }) | null) => void;
 	setToolCall: (t: ToolCallState | null) => void;
 	setFirstTokenTime: () => void;
-	/** Mirror a server-confirmed todo snapshot into local session state. */
-	onTodoSnapshot?: CursorTodoSyncHandler;
-	/**
-	 * Persist a paired `toolResult` for a server-resolved call. Native todo calls
-	 * never travel the exec channel, so without this the resolved block has no
-	 * matching result and every transcript rebuild strips it as dangling.
-	 */
-	onToolResult?: CursorToolResultHandler;
-}
-
-function markCursorExecResolved(block: CursorExecResolvedCarrier): void {
-	block[kCursorExecResolved] = true;
 }
 
 export interface UsageState {
@@ -953,10 +704,8 @@ export async function handleServerMessage(
 	state: BlockState,
 	blobStore: Map<string, Uint8Array>,
 	h2Request: http2.ClientHttp2Stream,
-	execHandlers: CursorExecHandlers | undefined,
-	onToolResult: CursorToolResultHandler | undefined,
 	usageState: UsageState,
-	requestContextTools: McpToolDefinition[],
+	_requestContextTools: McpToolDefinition[],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): Promise<void> {
 	const msgCase = msg.message.case;
@@ -967,23 +716,6 @@ export async function handleServerMessage(
 		processInteractionUpdate(msg.message.value, output, stream, state, usageState);
 	} else if (msgCase === "kvServerMessage") {
 		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
-	} else if (msgCase === "execServerMessage") {
-		// The server is waiting on OUR local tool result during this window — no
-		// AssistantMessageEvent flows until the handler finishes. Mark the wait
-		// as local work so the lazy stream idle watchdog attributes the silence
-		// to the tool run instead of aborting a healthy stream (issue #4593).
-		await stream.trackLocalWork(
-			handleExecServerMessage(
-				msg.message.value as ExecServerMessage,
-				h2Request,
-				execHandlers,
-				onToolResult,
-				requestContextTools,
-				output,
-				stream,
-				state,
-			),
-		);
 	} else if (msgCase === "conversationCheckpointUpdate") {
 		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
 	}
@@ -1042,1950 +774,86 @@ function handleKvServerMessage(
 	}
 }
 
-function sendShellStreamEvent(
-	h2Request: http2.ClientHttp2Stream,
-	execMsg: ExecServerMessage,
-	event: ShellStream["event"],
-): void {
-	sendExecClientMessage(h2Request, execMsg, "shellStream", create(ShellStreamSchema, { event }));
+function retainStreamedCall(state: BlockState, block: ToolCallState, envelopeId: string | undefined): void {
+	if (envelopeId) state.openToolCalls.set(envelopeId, block);
+	state.setToolCall(block);
 }
 
-function sanitizeShellExecResult(execResult: ShellResult): ShellResult {
-	const result = execResult.result;
-	if (!result) return execResult;
-
-	switch (result.case) {
-		case "success":
-		case "failure": {
-			const value = result.value;
-			return {
-				...execResult,
-				result: {
-					case: result.case,
-					value: {
-						...value,
-						stdout: value.stdout ? sanitizeText(value.stdout) : value.stdout,
-						stderr: value.stderr ? sanitizeText(value.stderr) : value.stderr,
-					},
-				},
-			} as ShellResult;
-		}
-		default:
-			return execResult;
-	}
-}
-
-async function handleShellStreamArgs(
-	args: ShellArgs,
-	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
-	execHandlers: CursorExecHandlers | undefined,
-	onToolResult: CursorToolResultHandler | undefined,
-): Promise<void> {
-	const normalizedWorkingDirectory = args.workingDirectory || process.cwd();
-	const normalizedArgs: ShellArgs = { ...args, workingDirectory: normalizedWorkingDirectory };
-	const startTs = performance.now();
-	log("shellStream", "start", {
-		command: (args as any).command,
-		workingDirectory: normalizedWorkingDirectory,
-		execId: execMsg.execId,
-		hasExecHandlers: !!execHandlers,
-		hasShell: !!execHandlers?.shell,
-		hasShellStream: !!execHandlers?.shellStream,
+function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
+	const block = state.currentTextBlock;
+	if (!block) return;
+	const idx = output.content.indexOf(block);
+	stream.push({
+		type: "text_end",
+		contentIndex: idx,
+		content: block.text,
+		partial: output,
 	});
-
-	sendShellStreamEvent(h2Request, execMsg, { case: "start", value: create(ShellStreamStartSchema, {}) });
-
-	// Buffer for incomplete ANSI sequences across chunks
-	let stdoutBuffer = "";
-	let stderrBuffer = "";
-
-	const incompleteEscapeRegex = /\x1b(|\[|\[\d*|\[\?|\[\?\d*|\]\d*;?)$/;
-
-	const flushStdout = () => {
-		if (stdoutBuffer) {
-			let safeEnd = stdoutBuffer.length;
-			const match = stdoutBuffer.match(incompleteEscapeRegex);
-			if (match && match[0].length > 0) {
-				safeEnd = stdoutBuffer.length - match[0].length;
-			}
-			const toSend = stdoutBuffer.slice(0, safeEnd);
-			const remaining = stdoutBuffer.slice(safeEnd);
-			if (toSend) {
-				sendShellStreamEvent(h2Request, execMsg, {
-					case: "stdout",
-					value: create(ShellStreamStdoutSchema, { data: sanitizeText(toSend) }),
-				});
-			}
-			stdoutBuffer = remaining;
-		}
-	};
-
-	const flushStderr = () => {
-		if (stderrBuffer) {
-			let safeEnd = stderrBuffer.length;
-			const match = stderrBuffer.match(incompleteEscapeRegex);
-			if (match && match[0].length > 0) {
-				safeEnd = stderrBuffer.length - match[0].length;
-			}
-			const toSend = stderrBuffer.slice(0, safeEnd);
-			const remaining = stderrBuffer.slice(safeEnd);
-			if (toSend) {
-				sendShellStreamEvent(h2Request, execMsg, {
-					case: "stderr",
-					value: create(ShellStreamStderrSchema, { data: sanitizeText(toSend) }),
-				});
-			}
-			stderrBuffer = remaining;
-		}
-	};
-
-	let stdoutFlushTimer: NodeJS.Timeout | null = null;
-	let stderrFlushTimer: NodeJS.Timeout | null = null;
-
-	const scheduleStdoutFlush = () => {
-		if (!stdoutFlushTimer) {
-			stdoutFlushTimer = setTimeout(() => {
-				stdoutFlushTimer = null;
-				flushStdout();
-			}, 100);
-		}
-	};
-
-	const scheduleStderrFlush = () => {
-		if (!stderrFlushTimer) {
-			stderrFlushTimer = setTimeout(() => {
-				stderrFlushTimer = null;
-				flushStderr();
-			}, 100);
-		}
-	};
-
-	const streamCallbacks: CursorShellStreamCallbacks = {
-		onStdout(data: string) {
-			stdoutBuffer += data;
-			if (stdoutBuffer.includes("\n") || stdoutBuffer.length > 4096) {
-				if (stdoutFlushTimer) {
-					clearTimeout(stdoutFlushTimer);
-					stdoutFlushTimer = null;
-				}
-				flushStdout();
-			} else {
-				scheduleStdoutFlush();
-			}
-		},
-		onStderr(data: string) {
-			stderrBuffer += data;
-			if (stderrBuffer.includes("\n") || stderrBuffer.length > 4096) {
-				if (stderrFlushTimer) {
-					clearTimeout(stderrFlushTimer);
-					stderrFlushTimer = null;
-				}
-				flushStderr();
-			} else {
-				scheduleStderrFlush();
-			}
-		},
-	};
-
-	// Prefer the streaming handler — it forwards output chunks in real time.
-	// Falls back to the batch shell handler otherwise.
-	const streamHandler = execHandlers?.shellStream?.bind(execHandlers);
-	const batchHandler = execHandlers?.shell?.bind(execHandlers);
-	const handler = streamHandler ? (shellArgs: ShellArgs) => streamHandler(shellArgs, streamCallbacks) : batchHandler;
-
-	const { execResult } = await resolveExecHandler(
-		args as any,
-		handler as typeof batchHandler,
-		onToolResult,
-		toolResult => buildShellResultFromToolResult(normalizedArgs as any, toolResult),
-		reason =>
-			buildShellRejectedResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, reason),
-		error =>
-			buildShellFailureResult((normalizedArgs as any).command, (normalizedArgs as any).workingDirectory, error),
-		{ toolCallId: args.toolCallId, toolName: "bash" },
-	);
-
-	// When using the batch handler (no shellStream), send buffered stdout/stderr
-	// after execution completes. With shellStream these were already sent in real time.
-	const sendBufferedOutput = !streamHandler;
-	const sanitizedExecResult = sanitizeShellExecResult(execResult);
-
-	// Flush any remaining buffered output before sending results
-	if (stdoutFlushTimer) clearTimeout(stdoutFlushTimer);
-	if (stderrFlushTimer) clearTimeout(stderrFlushTimer);
-	flushStdout();
-	flushStderr();
-
-	sendShellStreamExitFromResult(h2Request, execMsg, sanitizedExecResult, sendBufferedOutput);
-	// Cursor can keep the turn pending when it receives only stream deltas.
-	// Send the final structured shellResult as completion acknowledgement.
-	sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
-	sendExecClientStreamClose(h2Request, execMsg);
-
-	log("shellStream", "done", { elapsed: performance.now() - startTs });
+	state.setTextBlock(null);
 }
 
-function sendShellStreamExitFromResult(
-	h2Request: http2.ClientHttp2Stream,
-	execMsg: ExecServerMessage,
-	execResult: ShellResult,
-	sendBufferedOutput: boolean,
-): void {
-	const result = execResult.result;
-	switch (result.case) {
-		case "success": {
-			const value = result.value;
-			if (sendBufferedOutput) {
-				if (value.stdout) {
-					sendShellStreamEvent(h2Request, execMsg, {
-						case: "stdout",
-						value: create(ShellStreamStdoutSchema, { data: sanitizeText(value.stdout) }),
-					});
-				}
-				if (value.stderr) {
-					sendShellStreamEvent(h2Request, execMsg, {
-						case: "stderr",
-						value: create(ShellStreamStderrSchema, { data: sanitizeText(value.stderr) }),
-					});
-				}
-			}
-			sendShellStreamEvent(h2Request, execMsg, {
-				case: "exit",
-				value: create(ShellStreamExitSchema, {
-					code: value.exitCode,
-					cwd: value.workingDirectory,
-					aborted: false,
-				}),
-			});
-			return;
-		}
-		case "failure": {
-			const value = result.value;
-			if (sendBufferedOutput) {
-				if (value.stdout) {
-					sendShellStreamEvent(h2Request, execMsg, {
-						case: "stdout",
-						value: create(ShellStreamStdoutSchema, { data: sanitizeText(value.stdout) }),
-					});
-				}
-				if (value.stderr) {
-					sendShellStreamEvent(h2Request, execMsg, {
-						case: "stderr",
-						value: create(ShellStreamStderrSchema, { data: sanitizeText(value.stderr) }),
-					});
-				}
-			}
-			sendShellStreamEvent(h2Request, execMsg, {
-				case: "exit",
-				value: create(ShellStreamExitSchema, {
-					code: value.exitCode,
-					cwd: value.workingDirectory,
-					aborted: value.aborted,
-					abortReason: value.abortReason,
-				}),
-			});
-			return;
-		}
-		case "rejected": {
-			sendShellStreamEvent(h2Request, execMsg, { case: "rejected", value: result.value });
-			sendShellStreamEvent(h2Request, execMsg, {
-				case: "exit",
-				value: create(ShellStreamExitSchema, {
-					code: 1,
-					cwd: result.value.workingDirectory,
-					aborted: false,
-				}),
-			});
-			return;
-		}
-		case "timeout": {
-			const value = result.value;
-			sendShellStreamEvent(h2Request, execMsg, {
-				case: "stderr",
-				value: create(ShellStreamStderrSchema, {
-					data: `Command timed out after ${value.timeoutMs}ms`,
-				}),
-			});
-			sendShellStreamEvent(h2Request, execMsg, {
-				case: "exit",
-				value: create(ShellStreamExitSchema, {
-					code: 1,
-					cwd: value.workingDirectory,
-					aborted: true,
-				}),
-			});
-			return;
-		}
-		case "permissionDenied": {
-			sendShellStreamEvent(h2Request, execMsg, { case: "permissionDenied", value: result.value });
-			sendShellStreamEvent(h2Request, execMsg, {
-				case: "exit",
-				value: create(ShellStreamExitSchema, {
-					code: 1,
-					cwd: result.value.workingDirectory,
-					aborted: false,
-				}),
-			});
-			return;
-		}
-		default:
-			return;
-	}
-}
-
-async function handleExecServerMessage(
-	execMsg: ExecServerMessage,
-	h2Request: http2.ClientHttp2Stream,
-	execHandlers: CursorExecHandlers | undefined,
-	onToolResult: CursorToolResultHandler | undefined,
-	requestContextTools: McpToolDefinition[],
+function endCurrentThinkingBlock(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
-): Promise<void> {
-	const execCase = execMsg.message.case;
-	log("exec", "dispatch", { execCase, execId: execMsg.execId, hasHandlers: !!execHandlers });
-	if (execCase === "requestContextArgs") {
-		const requestContext = create(RequestContextSchema, {
-			rules: [],
-			repositoryInfo: [],
-			tools: requestContextTools,
-			gitRepos: [],
-			projectLayouts: [],
-			mcpInstructions: [],
-			fileContents: {},
-			customSubagents: [],
-		});
-
-		const requestContextResult = create(RequestContextResultSchema, {
-			result: {
-				case: "success",
-				value: create(RequestContextSuccessSchema, { requestContext }),
-			},
-		});
-
-		sendExecClientMessage(h2Request, execMsg, "requestContextResult", requestContextResult);
-		log("execClient", "requestContextResult");
-		return;
-	}
-
-	if (!execCase) {
-		// A frame carrying a oneof number this build's `agent.proto` does not
-		// model at all: protobuf decodes it into unknown fields and leaves
-		// `message.case` unset, so the client cannot even name what was asked.
-		// Returning silently strands the exec id — the server waits on a reply
-		// that never comes. Distinct from the `default:` branch below, which
-		// names a frame it recognises but cannot serve.
-		log("warn", "unknownExecVariant", { id: execMsg.id, execId: execMsg.execId });
-		sendExecClientThrow(h2Request, execMsg, "Unknown exec message variant", "unknown_exec_variant");
-		return;
-	}
-
-	switch (execCase) {
-		case "readArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			// The same composed selector the bridge executes: showing a bare path
-			// for a ranged read makes the returned slice look like the whole
-			// file in every rebuilt transcript.
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", {
-				path: piReadDisplayPath(args.path, args.offset, args.limit),
-			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.read?.bind(execHandlers),
-				onToolResult,
-				toolResult =>
-					buildReadResultFromToolResult(
-						args.path,
-						toolResult,
-						args.offset !== undefined || args.limit !== undefined || piReadPathHasRange(args.path),
-					),
-				reason => buildReadRejectedResult(args.path, reason),
-				error => buildReadErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "read" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "readResult", execResult);
-			return;
-		}
-		case "lsArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			// Bridge maps `ls` onto the coding-agent `read` tool (see
-			// `CursorExecHandlers.ls` in `pi-coding-agent/src/cursor.ts`); mirror
-			// that here so the synthesized block matches the toolResult's `toolName`.
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "read", { path: args.path });
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.ls?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildLsResultFromToolResult(args.path, toolResult),
-				reason => buildLsRejectedResult(args.path, reason),
-				error => buildLsErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "read" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "lsResult", execResult);
-			return;
-		}
-		case "grepArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			// Cursor's model sometimes emits `grepArgs` with an empty `pattern` and a
-			// non-empty `glob`, expecting grep to list files matching the glob. Reject
-			// that up front with an actionable error so the model retries with a real
-			// regex or switches to `ls`/`read`, instead of the local grep tool
-			// surfacing a bare "Pattern must not be empty" (issue #4574) after the
-			// synthesized block has already been persisted with a placeholder pattern.
-			const emptyPatternError = emptyGrepPatternRejection(args.pattern, args.glob);
-			if (emptyPatternError !== null) {
-				sendExecClientMessage(h2Request, execMsg, "grepResult", buildGrepErrorResult(emptyPatternError));
-				return;
-			}
-			// Mirror the coding-agent bridge's arg mapping so live UI (from
-			// `tool_execution_start`) and rebuilt transcript (from this block)
-			// display identical args.
-			const searchPath = args.glob ? `${args.path || "."}/${args.glob}` : args.path || ".";
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "grep", {
-				pattern: args.pattern,
-				path: searchPath,
-				case: args.caseInsensitive === true ? false : undefined,
-				skip: piGrepSkip(args.offset),
-			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.grep?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildGrepResultFromToolResult(args, toolResult),
-				reason => buildGrepErrorResult(reason),
-				error => buildGrepErrorResult(error),
-				{ toolCallId: args.toolCallId, toolName: "grep" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "grepResult", execResult);
-			return;
-		}
-		case "writeArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			// Match the bridge: prefer `fileText`, fall back to decoded `fileBytes`.
-			const content = args.fileText ?? new TextDecoder().decode(args.fileBytes ?? new Uint8Array());
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "write", {
-				path: args.path,
-				content,
-			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.write?.bind(execHandlers),
-				onToolResult,
-				toolResult =>
-					buildWriteResultFromToolResult(
-						{
-							path: args.path,
-							fileText: args.fileText,
-							fileBytes: args.fileBytes,
-							returnFileContentAfterWrite: args.returnFileContentAfterWrite,
-						},
-						toolResult,
-					),
-				reason => buildWriteRejectedResult(args.path, reason),
-				error => buildWriteErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "write" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "writeResult", execResult);
-			return;
-		}
-		case "deleteArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "delete", { path: args.path });
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.delete?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildDeleteResultFromToolResult(args.path, toolResult),
-				reason => buildDeleteRejectedResult(args.path, reason),
-				error => buildDeleteErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "delete" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "deleteResult", execResult);
-			return;
-		}
-		case "shellArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			const normalizedArgs: ShellArgs = { ...args, workingDirectory: args.workingDirectory || process.cwd() };
-			// Match the bridge (`CursorExecHandlers.shell`): map `workingDirectory`
-			// → `cwd`, drop non-positive timeouts.
-			const shellTimeout = args.timeout && args.timeout > 0 ? args.timeout : undefined;
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
-				command: args.command,
-				cwd: args.workingDirectory || undefined,
-				timeout: shellTimeout,
-			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.shell?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
-				reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
-				error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
-				{ toolCallId: args.toolCallId, toolName: "bash" },
-			);
-			const sanitizedExecResult = sanitizeShellExecResult(execResult);
-			sendExecClientMessage(h2Request, execMsg, "shellResult", sanitizedExecResult);
-			return;
-		}
-		case "shellStreamArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			const shellStreamTimeout = args.timeout && args.timeout > 0 ? args.timeout : undefined;
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
-				command: args.command,
-				cwd: args.workingDirectory || undefined,
-				timeout: shellStreamTimeout,
-			});
-			await handleShellStreamArgs(args, execMsg, h2Request, execHandlers, onToolResult);
-			return;
-		}
-		case "backgroundShellSpawnArgs": {
-			const args = execMsg.message.value;
-			const execResult = create(BackgroundShellSpawnResultSchema, {
-				result: {
-					case: "rejected",
-					value: create(ShellRejectedSchema, {
-						command: args.command,
-						workingDirectory: args.workingDirectory,
-						reason: "Not implemented",
-						isReadonly: false,
-					}),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "backgroundShellSpawnResult", execResult);
-			return;
-		}
-		case "writeShellStdinArgs": {
-			const execResult = create(WriteShellStdinResultSchema, {
-				result: {
-					case: "error",
-					value: create(WriteShellStdinErrorSchema, {
-						error: "Not implemented",
-					}),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "writeShellStdinResult", execResult);
-			return;
-		}
-		case "fetchArgs": {
-			const args = execMsg.message.value;
-			const execResult = create(FetchResultSchema, {
-				result: {
-					case: "error",
-					value: create(FetchErrorSchema, {
-						url: args.url,
-						error: "Not implemented",
-					}),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "fetchResult", execResult);
-			return;
-		}
-		case "diagnosticsArgs": {
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			// Bridge maps `diagnostics` onto the coding-agent `lsp` tool with
-			// `action: "diagnostics"` and `file: path`.
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "lsp", {
-				action: "diagnostics",
-				file: args.path,
-			});
-			const { execResult } = await resolveExecHandler(
-				args,
-				execHandlers?.diagnostics?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildDiagnosticsResultFromToolResult(args.path, toolResult),
-				reason => buildDiagnosticsRejectedResult(args.path, reason),
-				error => buildDiagnosticsErrorResult(args.path, error),
-				{ toolCallId: args.toolCallId, toolName: "lsp" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "diagnosticsResult", execResult);
-			return;
-		}
-		case "mcpArgs": {
-			const args = execMsg.message.value;
-			const mcpCall = decodeMcpCall(args);
-			// An approval probe, not an invocation: the frame asks whether the
-			// call would be permitted. Running the tool to find out fires a side
-			// effect the user has not been asked about, and fires it again when
-			// the real frame follows — so this must answer without executing.
-			//
-			// The host resolves it against the same policy the wrapper applies at
-			// execution time. Only a definite allow is approved: a pending prompt
-			// cannot be asked through this frame, and answering yes on its behalf
-			// would pre-authorize a call the user never saw. Without a handler
-			// there is nothing to decide with, so it is refused. Either way no
-			// block is synthesized — nothing ran.
-			if (mcpCall.approvalOnly) {
-				const approved = (await execHandlers?.mcpApprovalPreflight?.(mcpCall)) === true;
-				sendExecClientMessage(
-					h2Request,
-					execMsg,
-					"mcpResult",
-					create(McpResultSchema, {
-						result: approved
-							? { case: "approved", value: create(McpApprovedSchema, {}) }
-							: {
-									case: "rejected",
-									value: create(McpRejectedSchema, {
-										reason: `Tool "${mcpCall.toolName || mcpCall.name}" is not approved to run without asking.`,
-									}),
-								},
-					}),
-				);
-				return;
-			}
-			if (execHandlers?.mcp) {
-				const existingBlock = output.content.find(
-					block => block.type === "toolCall" && block.id === mcpCall.toolCallId,
-				);
-				if (existingBlock) {
-					markCursorExecResolved(existingBlock);
-				} else {
-					synthesizeCursorExecToolCall(
-						output,
-						stream,
-						state,
-						mcpCall.toolCallId,
-						mcpCall.toolName || mcpCall.name,
-						mcpCall.args,
-					);
-					state.resolvedMcpToolCallIds.add(mcpCall.toolCallId);
-				}
-			}
-			const { execResult } = await resolveExecHandler(
-				mcpCall,
-				execHandlers?.mcp?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildMcpResultFromToolResult(mcpCall, toolResult),
-				_reason => buildMcpToolNotFoundResult(mcpCall),
-				error => buildMcpErrorResult(error),
-				execHandlers?.mcp ? { toolCallId: mcpCall.toolCallId, toolName: mcpCall.toolName } : null,
-			);
-			sendExecClientMessage(h2Request, execMsg, "mcpResult", execResult);
-			return;
-		}
-		case "listMcpResourcesExecArgs": {
-			// A host holding live MCP connections answers from them; without a
-			// handler the honest answer is an explicit empty success. An
-			// unset-oneof result would read as "the call produced nothing".
-			const args = execMsg.message.value;
-			let execResult: ListMcpResourcesExecResult;
-			// The model consumes this catalog, so it needs a block and a paired
-			// result or the listing is invisible in the UI and gone from every
-			// rebuilt history. Only synthesized when a handler exists: without
-			// one the frame is a fixed empty answer that executed nothing.
-			const toolCallId = execHandlers?.listMcpResources ? crypto.randomUUID() : undefined;
-			if (toolCallId) {
-				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "list_mcp_resources", {
-					server: args.server,
-				});
-			}
-			try {
-				const resources = (await execHandlers?.listMcpResources?.({ server: args.server })) ?? [];
-				execResult = create(ListMcpResourcesExecResultSchema, {
-					result: {
-						case: "success",
-						value: create(ListMcpResourcesSuccessSchema, {
-							resources: resources.map(resource =>
-								create(ListMcpResourcesExecResult_McpResourceSchema, {
-									uri: resource.uri,
-									name: resource.name,
-									description: resource.description,
-									mimeType: resource.mimeType,
-									server: resource.server,
-								}),
-							),
-						}),
-					},
-				});
-			} catch (error) {
-				execResult = create(ListMcpResourcesExecResultSchema, {
-					result: {
-						case: "error",
-						value: create(ListMcpResourcesErrorSchema, {
-							error: error instanceof Error ? error.message : String(error),
-						}),
-					},
-				});
-			}
-			if (toolCallId) {
-				// Derived from the answer that goes on the wire, so the block can
-				// never disagree with what the model was told.
-				const settled = execResult.result;
-				const text =
-					settled.case === "success"
-						? formatListedMcpResources(settled.value.resources)
-						: settled.case === "error"
-							? settled.value.error || "Failed to list MCP resources"
-							: (settled.value?.reason ?? "Failed to list MCP resources");
-				await pairSynthesizedExecResult(
-					state,
-					onToolResult,
-					toolCallId,
-					"list_mcp_resources",
-					text,
-					settled.case !== "success",
-				);
-			}
-			sendExecClientMessage(h2Request, execMsg, "listMcpResourcesExecResult", execResult);
-			return;
-		}
-		case "readMcpResourceExecArgs": {
-			const args = execMsg.message.value;
-			let execResult: ReadMcpResourceExecResult;
-			// The read runs locally, and in download mode it writes a workspace
-			// file — an operation with no transcript block is invisible in the UI
-			// and absent from every rebuilt history. Only synthesized when a
-			// handler exists: without one the frame is a fixed `not_found` that
-			// executed nothing, and a block would claim work that never happened.
-			const toolCallId = execHandlers?.readMcpResource ? crypto.randomUUID() : undefined;
-			if (toolCallId) {
-				synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read_mcp_resource", {
-					server: args.server,
-					uri: args.uri,
-					download_path: args.downloadPath,
-				});
-			}
-			try {
-				// `null` is the handler's "no such server or uri", which is exactly
-				// `not_found`; a throw is a real failure and must not masquerade as
-				// a missing resource.
-				const content = await execHandlers?.readMcpResource?.({
-					server: args.server,
-					uri: args.uri,
-					downloadPath: args.downloadPath,
-				});
-				execResult = content
-					? create(ReadMcpResourceExecResultSchema, {
-							result: {
-								case: "success",
-								value: create(ReadMcpResourceSuccessSchema, {
-									uri: content.uri,
-									name: content.name,
-									description: content.description,
-									mimeType: content.mimeType,
-									downloadPath: content.downloadPath,
-									// A download returns no content to the model: the file is
-									// on disk and the path is the answer. Otherwise the wire's
-									// content oneof carries one of the two, text winning when
-									// a host supplies both.
-									content:
-										content.downloadPath !== undefined
-											? { case: undefined }
-											: content.text !== undefined
-												? { case: "text", value: content.text }
-												: content.blob !== undefined
-													? { case: "blob", value: content.blob }
-													: { case: undefined },
-								}),
-							},
-						})
-					: create(ReadMcpResourceExecResultSchema, {
-							result: { case: "notFound", value: create(ReadMcpResourceNotFoundSchema, { uri: args.uri }) },
-						});
-			} catch (error) {
-				execResult = create(ReadMcpResourceExecResultSchema, {
-					result: {
-						case: "error",
-						value: create(ReadMcpResourceErrorSchema, {
-							uri: args.uri,
-							error: error instanceof Error ? error.message : String(error),
-						}),
-					},
-				});
-			}
-			if (toolCallId) {
-				// Derived from the answer that actually goes on the wire, so no exit
-				// can drift out of sync with what the model was told.
-				const settled = execResult.result;
-				let text: string;
-				switch (settled.case) {
-					case "success":
-						text = settled.value.downloadPath
-							? `Downloaded ${args.uri} to ${settled.value.downloadPath}`
-							: `Read ${args.uri}`;
-						break;
-					case "notFound":
-						text = `No such resource: ${args.uri}`;
-						break;
-					// The wire union carries a refusal variant this client never
-					// builds today — the handler answers content or `null`. Handled
-					// anyway so the switch stays total: it holds a `reason`, not an
-					// `error`, so a collapsed default would have read `undefined`.
-					case "rejected":
-						text = `Refused: ${settled.value.reason}`;
-						break;
-					default:
-						text = settled.value?.error ?? `Failed to read ${args.uri}`;
-						break;
-				}
-				await pairSynthesizedExecResult(
-					state,
-					onToolResult,
-					toolCallId,
-					"read_mcp_resource",
-					text,
-					settled.case !== "success",
-				);
-			}
-			sendExecClientMessage(h2Request, execMsg, "readMcpResourceExecResult", execResult);
-			return;
-		}
-		case "recordScreenArgs": {
-			const execResult = create(RecordScreenResultSchema, {
-				result: { case: "failure", value: create(RecordScreenFailureSchema, { error: NOT_IMPLEMENTED }) },
-			});
-			sendExecClientMessage(h2Request, execMsg, "recordScreenResult", execResult);
-			return;
-		}
-		case "computerUseArgs": {
-			const execResult = create(ComputerUseResultSchema, {
-				result: { case: "error", value: create(ComputerUseErrorSchema, { error: NOT_IMPLEMENTED }) },
-			});
-			sendExecClientMessage(h2Request, execMsg, "computerUseResult", execResult);
-			return;
-		}
-		case "piReadArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			// The displayed block must show the operation that actually runs: the
-			// bridge composes the same range selector onto the path.
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", {
-				path: piReadDisplayPath(args.path, args.offset, args.limit),
-			});
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piRead?.bind(execHandlers),
-				onToolResult,
-				buildPiReadResult,
-				buildPiReadError,
-				buildPiReadError,
-				{ toolCallId, toolName: "read" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piReadResult", execResult);
-			return;
-		}
-		case "piBashArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "bash", {
-				command: args.command,
-				timeout: piTimeout(args.timeout),
-			});
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piBash?.bind(execHandlers),
-				onToolResult,
-				buildPiBashResult,
-				buildPiBashError,
-				buildPiBashError,
-				{ toolCallId, toolName: "bash" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piBashResult", execResult);
-			return;
-		}
-		case "piEditArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			// `PiEditReplacement` maps onto the local `edit` tool's replace mode:
-			// one snake_case `old_string`/`new_string` per call. Multi-replacement
-			// frames display the first replacement; the exec handler applies all.
-			const firstEdit = args.edits[0];
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "edit", {
-				path: args.path,
-				old_string: firstEdit?.oldText ?? "",
-				new_string: firstEdit?.newText ?? "",
-			});
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piEdit?.bind(execHandlers),
-				onToolResult,
-				buildPiEditResult,
-				buildPiEditRejected,
-				buildPiEditError,
-				{ toolCallId, toolName: "edit" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piEditResult", execResult);
-			return;
-		}
-		case "piWriteArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "write", {
-				path: args.path,
-				content: args.content,
-			});
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piWrite?.bind(execHandlers),
-				onToolResult,
-				buildPiWriteResult,
-				buildPiWriteRejected,
-				buildPiWriteError,
-				{ toolCallId, toolName: "write" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piWriteResult", execResult);
-			return;
-		}
-		case "piGrepArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "grep", {
-				pattern: args.literal === true ? piEscapeRegexLiteral(args.pattern) : args.pattern,
-				path: args.glob ? piJoinPath(args.path, args.glob) : args.path || ".",
-				case: args.ignoreCase === true ? false : undefined,
-				// Neither field exists in the model-facing `grep` schema — the bridge
-				// serves them by building a scoped tool instead. Recorded anyway, for
-				// the same reason `pi_read` renders its range into the displayed path:
-				// a capped or context-widened search is otherwise replayed as an
-				// ordinary grep sitting next to output no ordinary grep produces.
-				context: args.context,
-				limit: piLimit(args.limit),
-			});
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piGrep?.bind(execHandlers),
-				onToolResult,
-				buildPiGrepResult,
-				buildPiGrepError,
-				buildPiGrepError,
-				{ toolCallId, toolName: "grep" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piGrepResult", execResult);
-			return;
-		}
-		case "piFindArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "glob", {
-				path: piJoinPath(args.path, args.pattern),
-				limit: piLimit(args.limit),
-			});
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piFind?.bind(execHandlers),
-				onToolResult,
-				buildPiFindResult,
-				buildPiFindError,
-				buildPiFindError,
-				{ toolCallId, toolName: "glob" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piFindResult", execResult);
-			return;
-		}
-		case "piLsArgs": {
-			const args = execMsg.message.value;
-			const toolCallId = crypto.randomUUID();
-			// Same mapping as the legacy `lsArgs` frame: the local `read` tool lists
-			// directories, so the synthesized block must name `read` to match the
-			// bridge's own `toolResult`.
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "read", { path: piLsPath(args.path) });
-			const { execResult } = await resolveExecHandler(
-				{ args, toolCallId },
-				execHandlers?.piLs?.bind(execHandlers),
-				onToolResult,
-				buildPiLsResult,
-				buildPiLsError,
-				buildPiLsError,
-				{ toolCallId, toolName: "read" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "piLsResult", execResult);
-			return;
-		}
-		case "miniSweAgentBashArgs": {
-			// Same `ShellArgs`/`ShellResult` pair as `shellArgs`, under its own frame
-			// number, so the existing shell handler answers it unchanged.
-			const args = execMsg.message.value;
-			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			const normalizedArgs: ShellArgs = { ...args, workingDirectory: args.workingDirectory || process.cwd() };
-			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
-				command: args.command,
-				cwd: args.workingDirectory || undefined,
-				timeout: args.timeout && args.timeout > 0 ? args.timeout : undefined,
-			});
-			const { execResult } = await resolveExecHandler(
-				normalizedArgs,
-				execHandlers?.shell?.bind(execHandlers),
-				onToolResult,
-				toolResult => buildShellResultFromToolResult(normalizedArgs, toolResult),
-				reason => buildShellRejectedResult(normalizedArgs.command, normalizedArgs.workingDirectory, reason),
-				error => buildShellFailureResult(normalizedArgs.command, normalizedArgs.workingDirectory, error),
-				{ toolCallId: args.toolCallId, toolName: "bash" },
-			);
-			sendExecClientMessage(h2Request, execMsg, "miniSweAgentBashResult", sanitizeShellExecResult(execResult));
-			return;
-		}
-		case "redactedReadArgs": {
-			// Same `ReadArgs`/`ReadResult` pair as `readArgs`, but the server expects
-			// the client to strip secrets from the content first. No redaction is
-			// implemented here, and serving a plain read would hand back exactly the
-			// unredacted bytes the frame exists to withhold.
-			const args = execMsg.message.value;
-			sendExecClientMessage(
-				h2Request,
-				execMsg,
-				"redactedReadResult",
-				buildReadErrorResult(args.path, "Secret redaction is not implemented by this client"),
-			);
-			return;
-		}
-		case "mcpStateExecArgs": {
-			const args = execMsg.message.value;
-			sendExecClientMessage(
-				h2Request,
-				execMsg,
-				"mcpStateExecResult",
-				buildMcpStateResult(requestContextTools, args.serverIdentifiers),
-			);
-			return;
-		}
-		case "executeHookArgs": {
-			const args = execMsg.message.value;
-			const execResult = buildNeutralHookResult(args.request);
-			if (!execResult) {
-				sendExecClientThrow(
-					h2Request,
-					execMsg,
-					`Unsupported hook request: ${args.request?.request.case ?? "unset"}`,
-					"unknown_hook_request",
-				);
-				return;
-			}
-			sendExecClientMessage(h2Request, execMsg, "executeHookResult", execResult);
-			return;
-		}
-		case "subagentArgs": {
-			const args = execMsg.message.value;
-			const execResult = create(SubagentResultSchema, {
-				result: {
-					case: "error",
-					value: create(SubagentErrorSchema, { error: `Subagents are ${NOT_IMPLEMENTED_SUFFIX}` }),
-				},
-			});
-			log("exec", "subagentRejected", { subagentType: args.subagentType });
-			sendExecClientMessage(h2Request, execMsg, "subagentResult", execResult);
-			return;
-		}
-		case "subagentAwaitArgs": {
-			// No subagent was ever spawned, so every awaited id is genuinely unknown.
-			const args = execMsg.message.value;
-			const execResult = create(SubagentAwaitResultSchema, {
-				result: {
-					case: "notFound",
-					value: create(SubagentAwaitNotFoundSchema, { agentId: args.agentId }),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "subagentAwaitResult", execResult);
-			return;
-		}
-		case "forceBackgroundShellArgs": {
-			// Backgrounding targets a running tool call by id. This client runs every
-			// shell to completion in band, so there is never one to move.
-			const execResult = create(ForceBackgroundShellResultSchema, {
-				status: ForceBackgroundShellStatus.NOT_FOUND,
-			});
-			sendExecClientMessage(h2Request, execMsg, "forceBackgroundShellResult", execResult);
-			return;
-		}
-		case "forceBackgroundSubagentArgs": {
-			const execResult = create(ForceBackgroundSubagentResultSchema, {
-				status: ForceBackgroundSubagentStatus.NOT_FOUND,
-			});
-			sendExecClientMessage(h2Request, execMsg, "forceBackgroundSubagentResult", execResult);
-			return;
-		}
-		case "smartModeClassifierArgs": {
-			// The classifier decides whether a risky action needs approval. Answering
-			// `ALLOW` would silently wave through actions the server asked us to
-			// judge, so the honest answer is that no classifier exists here.
-			const execResult = create(SmartModeClassifierResultSchema, {
-				result: {
-					case: "error",
-					value: create(SmartModeClassifierErrorSchema, {
-						error: `Smart-mode classification is ${NOT_IMPLEMENTED_SUFFIX}`,
-					}),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "smartModeClassifierResult", execResult);
-			return;
-		}
-		case "canvasDiagnosticsArgs": {
-			const args = execMsg.message.value;
-			const execResult = create(CanvasDiagnosticsResultSchema, {
-				result: {
-					case: "error",
-					value: create(CanvasDiagnosticsErrorSchema, {
-						path: args.path,
-						error: `Canvas diagnostics are ${NOT_IMPLEMENTED_SUFFIX}`,
-					}),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "canvasDiagnosticsResult", execResult);
-			return;
-		}
-		case "shellAllowlistPrecheckArgs": {
-			// The prechecks ask "is this pre-approved, so may it skip the approval
-			// prompt?". This client keeps no allowlist, so the answer is always no:
-			// `false` costs an approval round-trip, `true` would grant one that was
-			// never configured.
-			sendExecClientMessage(
-				h2Request,
-				execMsg,
-				"shellAllowlistPrecheckResult",
-				create(ShellAllowlistPrecheckResultSchema, { allowlisted: false }),
-			);
-			return;
-		}
-		case "mcpAllowlistPrecheckArgs": {
-			sendExecClientMessage(
-				h2Request,
-				execMsg,
-				"mcpAllowlistPrecheckResult",
-				create(McpAllowlistPrecheckResultSchema, { allowlisted: false }),
-			);
-			return;
-		}
-		case "webFetchAllowlistPrecheckArgs": {
-			sendExecClientMessage(
-				h2Request,
-				execMsg,
-				"webFetchAllowlistPrecheckResult",
-				create(WebFetchAllowlistPrecheckResultSchema, { allowlisted: false }),
-			);
-			return;
-		}
-		case "conversationSearchArgs": {
-			// Cursor conversation history lives server-side; this client keeps no
-			// local index of it to search.
-			//
-			// The streamed `search_conversations_tool_call` envelope announces this
-			// call but the interaction decoder builds no block for it, so the block
-			// and its paired result are synthesized here — exactly like every other
-			// exec frame. Without the pair, `buildSessionContext` strips the whole
-			// interaction on replay. The frame carries its own `tool_call_id`, so
-			// the streamed announcement and this block agree on the key.
-			const args = execMsg.message.value;
-			const toolCallId = args.toolCallId || crypto.randomUUID();
-			const error = `Conversation search is ${NOT_IMPLEMENTED_SUFFIX}`;
-			synthesizeCursorExecToolCall(output, stream, state, toolCallId, "search_conversations", {
-				query: args.query,
-				limit: args.limit,
-			});
-			await pairSynthesizedExecResult(state, onToolResult, toolCallId, "search_conversations", error);
-			const execResult = create(ConversationSearchResultSchema, {
-				result: { case: "error", value: create(ConversationSearchErrorSchema, { error }) },
-			});
-			sendExecClientMessage(h2Request, execMsg, "conversationSearchResult", execResult);
-			return;
-		}
-		case "agentStoreConflictArgs": {
-			// The agent store is Cursor's own on-disk journal; this client never
-			// writes one, so it has no conflict events to replay.
-			const execResult = create(AgentStoreConflictResultSchema, {
-				result: {
-					case: "error",
-					value: create(AgentStoreConflictErrorSchema, {
-						error: `Agent store conflicts are ${NOT_IMPLEMENTED_SUFFIX}`,
-					}),
-				},
-			});
-			sendExecClientMessage(h2Request, execMsg, "agentStoreConflictResult", execResult);
-			return;
-		}
-		case "gitDiffRequest": {
-			// `GetDiffResponse` has no error variant: it models five output formats
-			// plus before/after file contents and nothing else. Any in-band answer is
-			// therefore a claim that a diff was computed, so a `throw` is the only
-			// truthful reply.
-			sendExecClientThrow(h2Request, execMsg, `Git diff is ${NOT_IMPLEMENTED_SUFFIX}`, "exec_variant_unsupported");
-			return;
-		}
-		default: {
-			// A frame number this build recognises structurally but has no answer
-			// for. Distinct from the unset-case path above: there the client cannot
-			// even name the frame.
-			log("warn", "unhandledExecMessage", { execCase });
-			sendExecClientThrow(
-				h2Request,
-				execMsg,
-				`No handler for exec message of type ${execCase}`,
-				"exec_variant_unsupported",
-			);
-		}
-	}
-}
-
-/**
- * Send one typed answer on the exec channel.
- *
- * `ExecClientMessage["message"]` is a discriminated union pairing each case
- * with its own result type, so the generic is keyed on the case: passing a
- * `ReadResult` under `"shellResult"` is a compile error rather than a wire
- * message the server rejects at runtime.
- */
-function sendExecClientMessage<TCase extends NonNullable<ExecClientMessage["message"]["case"]>>(
-	h2Request: http2.ClientHttp2Stream,
-	execMsg: ExecServerMessage,
-	messageCase: TCase,
-	value: Extract<ExecClientMessage["message"], { case: TCase }>["value"],
 ): void {
-	const execClientMessage = create(ExecClientMessageSchema, {
-		id: execMsg.id,
-		execId: execMsg.execId,
-		message: { case: messageCase, value } as ExecClientMessage["message"],
+	const block = state.currentThinkingBlock;
+	if (!block) return;
+	const idx = output.content.indexOf(block);
+	stream.push({
+		type: "thinking_end",
+		contentIndex: idx,
+		content: block.thinking,
+		partial: output,
 	});
-
-	const clientMessage = create(AgentClientMessageSchema, {
-		message: { case: "execClientMessage", value: execClientMessage },
-	});
-
-	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
-
-	log("execClientMessage", messageCase, value);
+	state.setThinkingBlock(null);
 }
 
-/**
- * Fail one exec frame in band.
- *
- * `ExecClientThrow` is the protocol's failure channel for a frame that cannot
- * be answered at all — as opposed to a frame answered with its own typed error
- * variant, which means "the tool ran and failed". Cursor's own executor sends
- * exactly this for a frame no handler claims
- * (`agent-exec/dist/index.js`: `No handler found for server message of type …`
- * → `case: 'throw'` then `streamClose`), so the server already knows how to
- * recover from it: it surfaces the error to the model instead of blocking on a
- * reply that never comes.
- *
- * The alternative this replaces — writing an `ExecClientMessage` whose `message`
- * oneof is unset — is not a valid answer: the server sees a reply carrying no
- * result and cannot tell it apart from a malformed frame.
- */
-function sendExecClientThrow(
-	h2Request: http2.ClientHttp2Stream,
-	execMsg: ExecServerMessage,
-	error: string,
-	errorCode?: string,
+export function mergeCursorMcpToolCallArgs(
+	streamed: Record<string, unknown> | undefined,
+	completion: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+	const merged: Record<string, unknown> = { ...(streamed ?? {}) };
+	if (!completion) return merged;
+	for (const [key, completionValue] of Object.entries(completion)) {
+		const streamedValue = merged[key];
+		if (typeof completionValue === "string" && streamedValue !== null && typeof streamedValue === "object") {
+			continue;
+		}
+		merged[key] = completionValue;
+	}
+	return merged;
+}
+
+function selectMcpCall(
+	toolCall: { tool?: { case?: string; value?: unknown }; mcpToolCall?: unknown } | undefined,
+): any {
+	const oneof = toolCall?.tool;
+	if (oneof?.case === "mcpToolCall") return oneof.value;
+	return toolCall?.mcpToolCall;
+}
+
+export function flushOpenToolCalls(
+	output: AssistantMessage,
+	stream: AssistantMessageEventStream,
+	state: BlockState,
 ): void {
-	const controlMessage = create(ExecClientControlMessageSchema, {
-		message: {
-			case: "throw",
-			value: create(ExecClientThrowSchema, { id: execMsg.id, error, errorCode }),
-		},
-	});
-	const clientMessage = create(AgentClientMessageSchema, {
-		message: { case: "execClientControlMessage", value: controlMessage },
-	});
-	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
-	log("execClientControl", "throw", { id: execMsg.id, execId: execMsg.execId, error, errorCode });
-	sendExecClientStreamClose(h2Request, execMsg);
-}
-
-function sendExecClientStreamClose(h2Request: http2.ClientHttp2Stream, execMsg: ExecServerMessage): void {
-	const closeMessage = create(ExecClientControlMessageSchema, {
-		message: {
-			case: "streamClose",
-			value: create(ExecClientStreamCloseSchema, {
-				id: execMsg.id,
-			}),
-		},
-	});
-	const clientMessage = create(AgentClientMessageSchema, {
-		message: { case: "execClientControlMessage", value: closeMessage },
-	});
-	const responseBytes = toBinary(AgentClientMessageSchema, clientMessage);
-	h2Request.write(frameConnectMessage(responseBytes));
-	log("execClientControl", "streamClose", { id: execMsg.id, execId: execMsg.execId });
-}
-
-/**
- * Exported for tests: verifies handler is invoked with correct `this` when passed as bound.
- *
- * Every exit pairs a `toolResult`. The synthesized block was already marked
- * `kCursorExecResolved` before this runs (`synthesizeCursorExecToolCall`), so
- * `agent-loop.ts` emits no placeholder for it: a path that returns without a
- * result leaves the call unpaired and `buildSessionContext` strips the whole
- * interaction on replay. The three result-less paths — no handler installed, a
- * handler that produced nothing, and a thrown handler — therefore synthesize
- * one from the same text the server sees in `execResult`.
- *
- * `pairing` is required so a new callsite cannot silently recreate the orphan,
- * and nullable for the one caller whose block is NOT pre-resolved: MCP without
- * an `mcp` handler, which `agent-loop.ts` runs locally and pairs itself.
- */
-export async function resolveExecHandler<TArgs, TResult>(
-	args: TArgs,
-	handler: ((args: TArgs) => Promise<CursorExecHandlerResult<TResult>>) | undefined,
-	onToolResult: CursorToolResultHandler | undefined,
-	buildFromToolResult: (toolResult: ToolResultMessage) => TResult,
-	buildRejected: (reason: string) => TResult,
-	buildError: (error: string) => TResult,
-	pairing: CursorExecPairing | null,
-): Promise<{ execResult: TResult; toolResult?: ToolResultMessage }> {
-	const pair = async (text: string, isError: boolean): Promise<ToolResultMessage | undefined> => {
-		// `null` only for MCP without a handler: that block is never marked
-		// resolved, so `agent-loop.ts` runs it locally and pairs its own result.
-		// Synthesizing one here would double up.
-		if (!pairing) return undefined;
-		const synthesized: ToolResultMessage = {
-			role: "toolResult",
-			toolCallId: pairing.toolCallId,
-			toolName: pairing.toolName,
-			content: [{ type: "text", text }],
-			isError,
-			timestamp: Date.now(),
-		};
-		return await applyToolResultHandler(synthesized, onToolResult);
-	};
-
-	if (!handler) {
-		const reason = "Tool not available";
-		return { execResult: buildRejected(reason), toolResult: await pair(reason, true) };
-	}
-
-	try {
-		const handlerResult = await handler(args);
-		const { execResult, toolResult } = splitExecHandlerResult(handlerResult);
-		const finalToolResult = await applyToolResultHandler(toolResult, onToolResult);
-
-		if (execResult) {
-			// TResult-only is a supported return form, so the transcript entry has to
-			// be synthesized here. Deriving its state from the raw result keeps the
-			// two views consistent: every exec result is a proto oneof whose only
-			// non-failure variant is `success`, so a `rejected`/`error`/
-			// `file_not_found`/... result must not be recorded as a successful call.
-			return {
-				execResult,
-				toolResult: finalToolResult ?? (await pair(...describeExecResult(execResult))),
-			};
+	const blocks = new Set<ToolCallState>(state.openToolCalls.values());
+	if (state.currentToolCall) blocks.add(state.currentToolCall);
+	for (const block of blocks) {
+		const idx = output.content.indexOf(block);
+		if (block[kStreamingPartialJson] !== undefined) {
+			block.arguments = parseStreamingJson(block[kStreamingPartialJson]!);
+			clearStreamingPartialJson(block);
 		}
-		if (finalToolResult) {
-			return { execResult: buildFromToolResult(finalToolResult), toolResult: finalToolResult };
-		}
-		const reason = "Tool returned no result";
-		return { execResult: buildRejected(reason), toolResult: await pair(reason, true) };
-	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		return { execResult: buildError(message), toolResult: await pair(message, true) };
+		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
 	}
+	state.openToolCalls.clear();
+	state.setToolCall(null);
 }
 
-/**
- * Derive the transcript state of an exec result the SDK handler returned in the
- * TResult-only form, which carries no `toolResult` to copy it from.
- *
- * Every exec result in `agent.proto` is a `oneof result` whose success variant
- * is named `success` — the rest (`error`, `rejected`, `file_not_found`,
- * `permission_denied`, `invalid_file`, ...) are failures. Recording those as a
- * successful call would show the user a green entry for a call Cursor was told
- * failed. The variant's own `error`/`reason` text is the same string the server
- * receives, so it is reused verbatim as the transcript body.
- *
- * MCP is the one shape where `success` is not enough: `McpSuccess.is_error`
- * carries an application-level tool failure inside the success variant
- * (`agent.proto:2058`), mirroring the MCP spec's own `isError`. The transport
- * succeeded, the tool did not — so the entry must be a failure, and its text
- * comes from the payload's own content rather than a placeholder.
- */
-function describeExecResult(execResult: unknown): [text: string, isError: boolean] {
-	const result = (execResult as { result?: { case?: string; value?: unknown } } | null)?.result;
-	const variant = result?.case;
-	if (variant === "success") {
-		const success = result?.value as { isError?: boolean; content?: unknown[] } | undefined;
-		if (!success?.isError) return ["Tool produced no transcript result", false];
-		return [mcpContentToText(success.content) || "MCP tool reported an error", true];
-	}
-	if (!variant) return ["Tool produced no transcript result", false];
-	const value = result?.value as { error?: string; reason?: string } | undefined;
-	return [value?.error || value?.reason || `Tool call ${variant}`, true];
-}
-
-/**
- * Flatten `McpSuccess.content` into transcript text. Image items carry no text
- * to surface, so only the text variant contributes; an all-image failure falls
- * back to the caller's generic message.
- */
-function mcpContentToText(content: unknown[] | undefined): string {
-	if (!Array.isArray(content)) return "";
-	const parts: string[] = [];
-	for (const item of content) {
-		const inner = (item as { content?: { case?: string; value?: { text?: string } } } | null)?.content;
-		if (inner?.case === "text" && inner.value?.text) parts.push(inner.value.text);
-	}
-	return parts.join("\n");
-}
-
-function splitExecHandlerResult<TResult>(result: CursorExecHandlerResult<TResult>): {
-	execResult?: TResult;
-	toolResult?: ToolResultMessage;
-} {
-	if (isToolResultMessage(result)) {
-		return { toolResult: result };
-	}
-	if (result && typeof result === "object") {
-		const record = result as Record<string, unknown>;
-		if ("execResult" in record) {
-			const { execResult, toolResult } = record as {
-				execResult: TResult;
-				toolResult?: ToolResultMessage;
-			};
-			return { execResult, toolResult };
-		}
-		if ("toolResult" in record && !isToolResultMessage(record)) {
-			const { result: execResult, toolResult } = record as {
-				result?: TResult;
-				toolResult?: ToolResultMessage;
-			};
-			return { execResult, toolResult };
-		}
-		if ("result" in record && !("$typeName" in record)) {
-			const { result: execResult, toolResult } = record as {
-				result: TResult;
-				toolResult?: ToolResultMessage;
-			};
-			return { execResult, toolResult };
-		}
-	}
-	return { execResult: result as TResult };
-}
-
-function isToolResultMessage(value: unknown): value is ToolResultMessage {
-	return !!value && typeof value === "object" && (value as ToolResultMessage).role === "toolResult";
-}
-
-async function applyToolResultHandler(
-	toolResult: ToolResultMessage | undefined,
-	onToolResult: CursorToolResultHandler | undefined,
-): Promise<ToolResultMessage | undefined> {
-	if (!toolResult || !onToolResult) {
-		return toolResult;
-	}
-	const updated = await onToolResult(toolResult);
-	return updated ?? toolResult;
-}
-
-function toolResultToText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
-}
-
-/**
- * The catalog as the paired transcript result records it.
- *
- * Cursor receives every resource's identity on the wire, but rebuilt history is
- * serialized from this local result — so recording only a count leaves the
- * model, one reload later, aware that it once saw N resources and unable to
- * name any of them. The URI is what a follow-up `read_mcp_resource` needs, so
- * it leads; name and mime type follow only when the server supplied them.
- */
-function formatListedMcpResources(
-	resources: { uri: string; name?: string; mimeType?: string; server?: string }[],
-): string {
-	if (resources.length === 0) return "No MCP resources available";
-	const lines = resources.map(resource => {
-		const qualifiers = [resource.name, resource.mimeType].filter(part => !!part).join(", ");
-		const server = resource.server ? `[${resource.server}] ` : "";
-		return qualifiers ? `- ${server}${resource.uri} (${qualifiers})` : `- ${server}${resource.uri}`;
-	});
-	return [`Listed ${resources.length} MCP resource(s):`, ...lines].join("\n");
-}
-
-function toolResultWasTruncated(toolResult: ToolResultMessage): boolean {
-	if (!toolResult.details || typeof toolResult.details !== "object") {
-		return false;
-	}
-	const truncation = (toolResult.details as { truncation?: { truncated?: boolean } }).truncation;
-	return !!truncation?.truncated;
-}
-
-function toolResultDetailBoolean(toolResult: ToolResultMessage, key: string): boolean {
-	if (!toolResult.details || typeof toolResult.details !== "object") {
-		return false;
-	}
-	const value = (toolResult.details as Record<string, unknown>)[key];
-	return typeof value === "boolean" ? value : false;
-}
-
-/**
- * The file's own line count, when the tool recorded one.
- *
- * Read results expose the source-wide count directly when known. Older tool
- * results carry it at `details.meta.truncation.totalLines`; the flat
- * `details.truncation.totalLines` counts from a window's start and is
- * deliberately not consulted here.
- */
-function readTotalLinesFromDetails(toolResult: ToolResultMessage): number | undefined {
-	const details = toolResult.details;
-	if (!details || typeof details !== "object") return undefined;
-	const direct = "totalLines" in details ? details.totalLines : undefined;
-	if (typeof direct === "number" && Number.isFinite(direct)) return direct;
-	const meta = "meta" in details ? details.meta : undefined;
-	if (!meta || typeof meta !== "object") return undefined;
-	const truncation = "truncation" in meta ? meta.truncation : undefined;
-	if (!truncation || typeof truncation !== "object") return undefined;
-	const totalLines = "totalLines" in truncation ? truncation.totalLines : undefined;
-	return typeof totalLines === "number" && Number.isFinite(totalLines) ? totalLines : undefined;
-}
-
-function readFileSizeFromDetails(toolResult: ToolResultMessage): number | undefined {
-	const details = toolResult.details;
-	if (!details || typeof details !== "object" || !("fileSize" in details)) return undefined;
-	const { fileSize } = details;
-	return typeof fileSize === "number" && Number.isSafeInteger(fileSize) && fileSize >= 0 ? fileSize : undefined;
-}
-
-function buildReadResultFromToolResult(path: string, toolResult: ToolResultMessage, rangeApplied = false) {
-	const text = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildReadErrorResult(path, text || "Read failed");
-	}
-	// Counting the payload is only the file's length when the payload is the
-	// whole file. Under a composed window it is the window's, and answering a
-	// 20-line page of a 100-line file with `total_lines: 20` tells a paginating
-	// server it has reached the end.
-	const totalLines = readTotalLinesFromDetails(toolResult) ?? (rangeApplied ? 0 : text ? text.split("\n").length : 0);
-	return create(ReadResultSchema, {
-		result: {
-			case: "success",
-			value: create(ReadSuccessSchema, {
-				path,
-				totalLines,
-				fileSize: BigInt(readFileSizeFromDetails(toolResult) ?? Buffer.byteLength(text, "utf-8")),
-				truncated: toolResultWasTruncated(toolResult),
-				output: { case: "content", value: text },
-				// Set when this client composed the frame's window onto the read,
-				// left false when it read the file whole. The proto names the
-				// field but nothing here pins the server's use of it, so the only
-				// safe contract is that it describes what we actually did.
-				rangeApplied,
-			}),
-		},
-	});
-}
-
-function buildReadErrorResult(path: string, error: string) {
-	return create(ReadResultSchema, {
-		result: {
-			case: "error",
-			value: create(ReadErrorSchema, { path, error }),
-		},
-	});
-}
-
-function buildReadRejectedResult(path: string, reason: string) {
-	return create(ReadResultSchema, {
-		result: {
-			case: "rejected",
-			value: create(ReadRejectedSchema, { path, reason }),
-		},
-	});
-}
-
-function buildWriteResultFromToolResult(
-	args: { path: string; fileText?: string; fileBytes?: Uint8Array; returnFileContentAfterWrite?: boolean },
-	toolResult: ToolResultMessage,
-) {
-	const text = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildWriteErrorResult(args.path, text || "Write failed");
-	}
-	const fileText = args.fileText ?? "";
-	const fileSize = args.fileBytes?.length ?? Buffer.byteLength(fileText, "utf-8");
-	const linesCreated = fileText ? fileText.split("\n").length : 0;
-	return create(WriteResultSchema, {
-		result: {
-			case: "success",
-			value: create(WriteSuccessSchema, {
-				path: args.path,
-				linesCreated,
-				fileSize,
-				fileContentAfterWrite: args.returnFileContentAfterWrite ? fileText : undefined,
-			}),
-		},
-	});
-}
-
-function buildWriteErrorResult(path: string, error: string) {
-	return create(WriteResultSchema, {
-		result: {
-			case: "error",
-			value: create(WriteErrorSchema, { path, error }),
-		},
-	});
-}
-
-function buildWriteRejectedResult(path: string, reason: string) {
-	return create(WriteResultSchema, {
-		result: {
-			case: "rejected",
-			value: create(WriteRejectedSchema, { path, reason }),
-		},
-	});
-}
-
-function buildDeleteResultFromToolResult(path: string, toolResult: ToolResultMessage) {
-	const text = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildDeleteErrorResult(path, text || "Delete failed");
-	}
-	return create(DeleteResultSchema, {
-		result: {
-			case: "success",
-			value: create(DeleteSuccessSchema, {
-				path,
-				deletedFile: path,
-				fileSize: BigInt(0),
-				prevContent: "",
-			}),
-		},
-	});
-}
-
-function buildDeleteErrorResult(path: string, error: string) {
-	return create(DeleteResultSchema, {
-		result: {
-			case: "error",
-			value: create(DeleteErrorSchema, { path, error }),
-		},
-	});
-}
-
-function buildDeleteRejectedResult(path: string, reason: string) {
-	return create(DeleteResultSchema, {
-		result: {
-			case: "rejected",
-			value: create(DeleteRejectedSchema, { path, reason }),
-		},
-	});
-}
-
-function buildShellResultFromToolResult(
-	args: { command: string; workingDirectory: string },
-	toolResult: ToolResultMessage,
-) {
-	const output = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildShellFailureResult(args.command, args.workingDirectory, output || "Shell failed");
-	}
-	return create(ShellResultSchema, {
-		result: {
-			case: "success",
-			value: create(ShellSuccessSchema, {
-				command: args.command,
-				workingDirectory: args.workingDirectory,
-				exitCode: 0,
-				signal: "",
-				stdout: output,
-				stderr: "",
-				executionTime: 0,
-			}),
-		},
-	});
-}
-
-function buildShellFailureResult(command: string, workingDirectory: string, error: string) {
-	return create(ShellResultSchema, {
-		result: {
-			case: "failure",
-			value: create(ShellFailureSchema, {
-				command,
-				workingDirectory,
-				exitCode: 1,
-				signal: "",
-				stdout: "",
-				stderr: error,
-				executionTime: 0,
-				aborted: false,
-			}),
-		},
-	});
-}
-
-function buildShellRejectedResult(command: string, workingDirectory: string, reason: string) {
-	return create(ShellResultSchema, {
-		result: {
-			case: "rejected",
-			value: create(ShellRejectedSchema, {
-				command,
-				workingDirectory,
-				reason,
-				isReadonly: false,
-			}),
-		},
-	});
-}
-
-function buildLsResultFromToolResult(path: string, toolResult: ToolResultMessage) {
-	const text = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildLsErrorResult(path, text || "Ls failed");
-	}
-	const rootPath = path || ".";
-	const entries = text
-		.split("\n")
-		.map(line => line.trim())
-		.filter(line => line.length > 0 && !line.startsWith("["));
-	const childrenDirs: LsDirectoryTreeNode[] = [];
-	const childrenFiles: LsDirectoryTreeNode_File[] = [];
-
-	for (const entry of entries) {
-		const name = entry.split(" (")[0];
-		if (name.endsWith("/")) {
-			const dirName = name.slice(0, -1);
-			childrenDirs.push(
-				create(LsDirectoryTreeNodeSchema, {
-					absPath: `${rootPath.replace(/\/$/, "")}/${dirName}`,
-					childrenDirs: [],
-					childrenFiles: [],
-					childrenWereProcessed: false,
-					fullSubtreeExtensionCounts: {},
-					numFiles: 0,
-				}),
-			);
-		} else {
-			childrenFiles.push(create(LsDirectoryTreeNode_FileSchema, { name }));
-		}
-	}
-
-	const root = create(LsDirectoryTreeNodeSchema, {
-		absPath: rootPath,
-		childrenDirs,
-		childrenFiles,
-		childrenWereProcessed: true,
-		fullSubtreeExtensionCounts: {},
-		numFiles: childrenFiles.length,
-	});
-
-	return create(LsResultSchema, {
-		result: {
-			case: "success",
-			value: create(LsSuccessSchema, { directoryTreeRoot: root }),
-		},
-	});
-}
-
-function buildLsErrorResult(path: string, error: string) {
-	return create(LsResultSchema, {
-		result: {
-			case: "error",
-			value: create(LsErrorSchema, { path, error }),
-		},
-	});
-}
-
-function buildLsRejectedResult(path: string, reason: string) {
-	return create(LsResultSchema, {
-		result: {
-			case: "rejected",
-			value: create(LsRejectedSchema, { path, reason }),
-		},
-	});
-}
-
-function buildGrepResultFromToolResult(
-	args: { pattern: string; path?: string; outputMode?: string; offset?: number },
-	toolResult: ToolResultMessage,
-) {
-	const text = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildGrepErrorResult(text || "Grep failed");
-	}
-
-	const outputMode = args.outputMode || "content";
-	const clientTruncated = toolResultDetailBoolean(toolResult, "truncated");
-	const lines = text
-		.split("\n")
-		.map(line => line.trimEnd())
-		.filter(line => line.length > 0 && !line.startsWith("[") && !line.toLowerCase().startsWith("no matches"));
-
-	const workspaceKey = args.path || ".";
-	let unionResult: GrepUnionResult;
-
-	if (outputMode === "files_with_matches") {
-		const files = lines;
-		unionResult = create(GrepUnionResultSchema, {
-			result: {
-				case: "files",
-				value: create(GrepFilesResultSchema, {
-					files,
-					totalFiles: files.length,
-					clientTruncated,
-					ripgrepTruncated: false,
-					// Echoes the offset this client actually applied; absent when
-					// the frame requested none. The proto names the field but
-					// nothing here pins the server's use of it, so it reports what
-					// we did rather than asserting a pagination protocol.
-					offsetApplied: args.offset,
-				}),
-			},
-		});
-	} else if (outputMode === "count") {
-		const counts = lines
-			.map(line => {
-				const separatorIndex = line.lastIndexOf(":");
-				if (separatorIndex === -1) {
-					return null;
-				}
-				const file = line.slice(0, separatorIndex);
-				const count = Number.parseInt(line.slice(separatorIndex + 1), 10);
-				if (!file || Number.isNaN(count)) {
-					return null;
-				}
-				return create(GrepFileCountSchema, { file, count });
-			})
-			.filter((entry): entry is GrepFileCount => entry !== null);
-		const totalMatches = counts.reduce((sum, entry) => sum + entry.count, 0);
-		unionResult = create(GrepUnionResultSchema, {
-			result: {
-				case: "count",
-				value: create(GrepCountResultSchema, {
-					counts,
-					totalFiles: counts.length,
-					totalMatches,
-					clientTruncated,
-					ripgrepTruncated: false,
-					offsetApplied: args.offset,
-				}),
-			},
-		});
-	} else {
-		const matchMap = new Map<string, Array<{ line: number; content: string; isContextLine: boolean }>>();
-		let totalMatchedLines = 0;
-
-		for (const line of lines) {
-			const matchLine = line.match(/^(.+?):(\d+):\s?(.*)$/);
-			const contextLine = line.match(/^(.+?)-(\d+)-\s?(.*)$/);
-			const match = matchLine ?? contextLine;
-			if (!match) {
-				continue;
-			}
-			const [, file, lineNumber, content] = match;
-			const isContextLine = Boolean(contextLine);
-			const list = matchMap.get(file) ?? [];
-			list.push({ line: Number(lineNumber), content, isContextLine });
-			matchMap.set(file, list);
-			if (!isContextLine) {
-				totalMatchedLines += 1;
-			}
-		}
-
-		const matches = Array.from(matchMap.entries()).map(([file, matches]) =>
-			create(GrepFileMatchSchema, {
-				file,
-				matches: matches.map(entry =>
-					create(GrepContentMatchSchema, {
-						lineNumber: entry.line,
-						content: entry.content,
-						contentTruncated: false,
-						isContextLine: entry.isContextLine,
-					}),
-				),
-			}),
-		);
-		const totalLines = matches.reduce((sum, entry) => sum + entry.matches.length, 0);
-		unionResult = create(GrepUnionResultSchema, {
-			result: {
-				case: "content",
-				value: create(GrepContentResultSchema, {
-					matches,
-					totalLines,
-					totalMatchedLines,
-					clientTruncated,
-					ripgrepTruncated: false,
-					offsetApplied: args.offset,
-				}),
-			},
-		});
-	}
-
-	return create(GrepResultSchema, {
-		result: {
-			case: "success",
-			value: create(GrepSuccessSchema, {
-				pattern: args.pattern,
-				path: args.path || "",
-				outputMode,
-				workspaceResults: { [workspaceKey]: unionResult },
-			}),
-		},
-	});
-}
-
-function buildGrepErrorResult(error: string) {
-	return create(GrepResultSchema, {
-		result: {
-			case: "error",
-			value: create(GrepErrorSchema, { error }),
-		},
-	});
-}
-
-/**
- * Reject a Cursor exec-channel `grepArgs` frame whose `pattern` is empty or
- * whitespace-only. Returns an actionable error message when the pattern is
- * unusable (with a `glob`-aware hint when the model likely meant to list
- * files), or `null` when the pattern is valid and grep should run.
- *
- * Exported for tests. Cursor's model sometimes sends `pattern=""` together
- * with a non-empty `glob`, expecting grep to enumerate matching files; the
- * downstream coding-agent `grep` tool rejects that with a bare "Pattern must
- * not be empty", which the TUI renders as `?` in the tool preview (issue
- * #4574). Handling it at the Cursor exec dispatch keeps the synthesized
- * `toolCall` block off the persisted assistant message and gives the model a
- * specific recovery hint.
- */
-export function emptyGrepPatternRejection(pattern: string | undefined, glob: string | undefined): string | null {
-	if (pattern && pattern.trim().length > 0) return null;
-	if (glob && glob.length > 0) {
-		return (
-			`grep pattern is required (received an empty pattern). To list files matching "${glob}", ` +
-			`pass a non-empty regex (e.g. ".") and set path to that glob, or use the ls/read tool instead.`
-		);
-	}
-	return "grep pattern is required (received an empty pattern).";
-}
-
-function buildDiagnosticsResultFromToolResult(path: string, toolResult: ToolResultMessage) {
-	const text = toolResultToText(toolResult);
-	if (toolResult.isError) {
-		return buildDiagnosticsErrorResult(path, text || "Diagnostics failed");
-	}
-	return create(DiagnosticsResultSchema, {
-		result: {
-			case: "success",
-			value: create(DiagnosticsSuccessSchema, {
-				path,
-				diagnostics: [],
-				totalDiagnostics: 0,
-			}),
-		},
-	});
-}
-
-function buildDiagnosticsErrorResult(_path: string, error: string) {
-	return create(DiagnosticsResultSchema, {
-		result: {
-			case: "error",
-			value: create(DiagnosticsErrorSchema, { error }),
-		},
-	});
-}
-
-function buildDiagnosticsRejectedResult(path: string, reason: string) {
-	return create(DiagnosticsResultSchema, {
-		result: {
-			case: "rejected",
-			value: create(DiagnosticsRejectedSchema, { path, reason }),
-		},
-	});
+function toolResultToText(result: ToolResultMessage): string {
+	return result.content.map(item => (item.type === "text" ? item.text : "[image]")).join("\n");
 }
 
 function parseToolArgsJson(text: string): unknown {
@@ -3024,252 +892,6 @@ function decodeMcpArgsMap(args?: Record<string, Uint8Array>): Record<string, unk
 	return decoded;
 }
 
-function decodeMcpCall(args: {
-	name: string;
-	args: Record<string, Uint8Array>;
-	toolCallId: string;
-	providerIdentifier: string;
-	toolName: string;
-	smartModeApprovalOnly?: boolean;
-}): CursorMcpCall {
-	const decodedArgs: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(args.args ?? {})) {
-		decodedArgs[key] = decodeMcpArgValue(value);
-	}
-	return {
-		name: args.name,
-		providerIdentifier: args.providerIdentifier,
-		toolName: args.toolName || args.name,
-		toolCallId: args.toolCallId,
-		args: decodedArgs,
-		rawArgs: args.args ?? {},
-		approvalOnly: args.smartModeApprovalOnly === true,
-	};
-}
-
-/**
- * Map Cursor's `TodoStatus` enum (agent.proto) onto the local todo statuses.
- *
- * `TODO_STATUS_CANCELLED` (4) maps to `abandoned` rather than collapsing to
- * `pending`, which would resurrect a task the model explicitly cancelled.
- */
-function mapTodoStatusValue(status?: number): CursorTodoSnapshotItem["status"] {
-	switch (status) {
-		case 2:
-			return "in_progress";
-		case 3:
-			return "completed";
-		case 4:
-			return "abandoned";
-		default:
-			return "pending";
-	}
-}
-
-interface CursorTodoItem {
-	id?: string;
-	content?: string;
-	status?: number;
-	/** IDs of other todos this one waits on (agent.proto `TodoItem.dependencies`). */
-	dependencies?: string[];
-}
-
-interface CursorTodoResult {
-	result?: {
-		case?: "success" | "error";
-		value?: { todos?: CursorTodoItem[]; totalCount?: number; wasMerge?: boolean; error?: string };
-	};
-}
-
-interface CursorReadTodosArgs {
-	statusFilter?: number[];
-	idFilter?: string[];
-}
-
-interface CursorUpdateTodosCall {
-	args?: { todos?: CursorTodoItem[]; merge?: boolean };
-	result?: CursorTodoResult;
-}
-
-interface CursorReadTodosCall {
-	args?: CursorReadTodosArgs;
-	result?: CursorTodoResult;
-}
-
-/**
- * `ToolCall` is a protobuf oneof, so a decoded message exposes the selected
- * variant as `tool: { case, value }` — NOT as a named property. Hand-built
- * fixtures and some call sites still use the flattened form, so both are
- * accepted here.
- */
-interface CursorTodoToolCall {
-	tool?: { case?: string; value?: unknown };
-	updateTodosToolCall?: CursorUpdateTodosCall;
-	readTodosToolCall?: CursorReadTodosCall;
-}
-
-function selectTodoCalls(toolCall: CursorTodoToolCall): {
-	update?: CursorUpdateTodosCall;
-	read?: CursorReadTodosCall;
-} {
-	const oneof = toolCall.tool;
-	if (oneof?.case === "updateTodosToolCall") return { update: oneof.value as CursorUpdateTodosCall };
-	if (oneof?.case === "readTodosToolCall") return { read: oneof.value as CursorReadTodosCall };
-	return { update: toolCall.updateTodosToolCall, read: toolCall.readTodosToolCall };
-}
-
-function mapTodoSnapshot(todos: CursorTodoItem[]): CursorTodoSnapshotItem[] {
-	return todos.map(todo => ({
-		content: typeof todo.content === "string" ? todo.content : "",
-		status: mapTodoStatusValue(typeof todo.status === "number" ? todo.status : undefined),
-	}));
-}
-
-interface CursorMcpToolCall {
-	args?: {
-		name?: string;
-		toolName?: string;
-		toolCallId?: string;
-		args?: Record<string, Uint8Array>;
-	};
-}
-
-interface CursorMcpToolCallCarrier {
-	tool?: { case?: string; value?: unknown };
-	mcpToolCall?: CursorMcpToolCall;
-}
-
-/**
- * `ToolCall.tool` is a protobuf oneof: a wire-decoded message exposes the
- * variant as `{ case, value }` and NEVER as a flattened `mcpToolCall`
- * property. Reading the flat property alone is what made native todo calls
- * invisible on the wire while hand-shaped test fixtures kept passing, so MCP
- * goes through the same selector. The flat fallback is kept for those fixtures.
- */
-function selectMcpCall(toolCall: CursorMcpToolCallCarrier | undefined): CursorMcpToolCall | undefined {
-	const oneof = toolCall?.tool;
-	if (oneof?.case === "mcpToolCall") return oneof.value as CursorMcpToolCall;
-	return toolCall?.mcpToolCall;
-}
-
-/**
- * The streamed `ToolCall` variants whose block the exec channel owns.
- *
- * Each of these is announced on the interaction stream AND dispatched as its
- * own `ExecServerMessage` frame — the Pi family (45-51), plus the two MCP
- * resource frames — so the block is synthesized once, by the exec handler,
- * which is the side that has the result.
- *
- * `connect_scm` is deliberately NOT here: `ExecServerMessage` has no
- * connect-SCM case at all (field 44 is `git_diff_request`), so nothing on the
- * exec channel ever answers it and the streamed announcement is the only
- * signal. `search_conversations` is not here either: frame 53 answers it, but
- * it carries its own `tool_call_id` on the streamed envelope and pairs there,
- * so the exec branch does not synthesize a block for it.
- */
-const EXEC_OWNED_TOOL_CALL_CASES: ReadonlySet<string> = new Set([
-	"piReadToolCall",
-	"piBashToolCall",
-	"piEditToolCall",
-	"piWriteToolCall",
-	"piGrepToolCall",
-	"piFindToolCall",
-	"piLsToolCall",
-	"listMcpResourcesToolCall",
-	"readMcpResourceToolCall",
-]);
-
-function isExecOwnedToolCall(toolCall: { tool?: { case?: string } } | undefined): boolean {
-	const variant = toolCall?.tool?.case;
-	return variant !== undefined && EXEC_OWNED_TOOL_CALL_CASES.has(variant);
-}
-
-/**
- * Retain a freshly opened streamed tool-call block.
- *
- * Keyed by the interaction envelope's `call_id`, which is the only key every
- * `ToolCall*Update` for that call shares. The block's own `id` is deliberately
- * not the key: MCP, Pi and connect-SCM blocks are filed under the id carried
- * inside the call's `args`, because that is what the exec channel pairs its
- * result under and what the transcript files the visible block under.
- *
- * `currentToolCall` is still set, as the fallback for frames that carry no
- * `call_id` (proto3-optional, and unset on what older builds send).
- */
-/**
- * Close every tool-call block still open when the stream ends.
- *
- * Not just the last one started: with interleaved calls several can be open at
- * once, and an unclosed block leaves its live card animating and its call
- * unpaired.
- *
- * Only blocks fed by a streamed argument buffer get reparsed. Todo,
- * connect-SCM and MCP-settled frames arrive with complete `arguments` and
- * never set the partial buffer; `parseStreamingJson(undefined)` returns `{}`,
- * so reparsing unconditionally would erase the arguments of every such block
- * caught open by a truncated stream.
- *
- * Server-owned blocks are also paired here. `connect-scm` and `todo` are
- * stamped {@link kCursorExecResolved} the moment they open, so `agent-loop.ts`
- * synthesizes no placeholder for them and only their `toolCallCompleted` frame
- * pairs a result. A transport that closes before that frame would leave the
- * call unpaired, and `buildSessionContext` strips a dangling call from every
- * rebuilt transcript — the interaction disappears. An interrupted result is
- * emitted instead.
- *
- * MCP blocks are excluded even when resolved: the exec dispatch that marked
- * them owns their result, and `drainInFlightDispatches` awaits it before this
- * runs, so pairing here would duplicate one against the same `toolCallId`.
- */
-export function flushOpenToolCalls(
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
-	state: BlockState,
-): void {
-	const openBlocks = new Set<ToolCallState>(state.openToolCalls.values());
-	if (state.currentToolCall) openBlocks.add(state.currentToolCall);
-	for (const block of openBlocks) {
-		const idx = output.content.indexOf(block);
-		const partialJson = block[kStreamingPartialJson];
-		if (partialJson !== undefined) {
-			block.arguments = parseStreamingJson(partialJson);
-			clearStreamingPartialJson(block);
-		}
-		const kind = block[kStreamingBlockKind];
-		if (kind === "connect-scm" || kind === "todo") {
-			state.onToolResult?.({
-				role: "toolResult",
-				toolCallId: block.id,
-				toolName: block.name,
-				content: [{ type: "text", text: "The connection to Cursor closed before this call completed." }],
-				isError: true,
-				timestamp: Date.now(),
-			});
-		}
-		stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
-	}
-	state.openToolCalls.clear();
-	state.setToolCall(null);
-}
-
-function retainStreamedCall(state: BlockState, block: ToolCallState, envelopeId: string | undefined): void {
-	if (envelopeId) state.openToolCalls.set(envelopeId, block);
-	state.setToolCall(block);
-}
-
-/**
- * The open block a streamed update addresses, or `null` to ignore the update.
- *
- * Cursor interleaves calls: `start A, start B, complete A` is legal, so the
- * update must reach block A even though B opened last. An id naming no open
- * block is ignored rather than misapplied — settling the wrong block would pair
- * it with another call's result.
- *
- * A missing id falls back to the current block: the correlation key is
- * optional, and dropping those updates would strand a block stamped
- * {@link kCursorExecResolved}, which nothing else settles and whose whole
- * interaction is then stripped from every rebuilt transcript.
- */
 function resolveStreamedCall(state: BlockState, envelopeId: string | undefined): ToolCallState | null {
 	if (!envelopeId) return state.currentToolCall;
 	const keyed = state.openToolCalls.get(envelopeId);
@@ -3287,443 +909,6 @@ function releaseStreamedCall(state: BlockState, block: ToolCallState): void {
 	if (state.currentToolCall === block) state.setToolCall(null);
 }
 
-interface CursorConnectScmRepository {
-	owner?: string;
-	repo?: string;
-}
-
-interface CursorConnectScmCall {
-	args?: {
-		toolCallId?: string;
-		/** `ConnectScmArgs.target` oneof; `github` is its only member today. */
-		target?: { case?: string; value?: { repository?: CursorConnectScmRepository } };
-		github?: { repository?: CursorConnectScmRepository };
-	};
-	/** `ConnectScmResult.result` oneof: `success` | `error` | `rejected`. */
-	result?: { result?: { case?: string; value?: { error?: string; reason?: string } } };
-}
-
-interface CursorConnectScmCarrier {
-	tool?: { case?: string; value?: unknown };
-	connectScmToolCall?: CursorConnectScmCall;
-}
-
-/**
- * The streamed `connect_scm_tool_call` variant, if this update carries one.
- *
- * Same oneof-vs-flattened handling as {@link selectMcpCall}: a wire-decoded
- * `ToolCall` exposes its variant as `{ case, value }`, while hand-shaped test
- * fixtures use the flat property.
- */
-function selectConnectScmCall(toolCall: CursorConnectScmCarrier | undefined): CursorConnectScmCall | undefined {
-	const oneof = toolCall?.tool;
-	if (oneof?.case === "connectScmToolCall") return oneof.value as CursorConnectScmCall;
-	return toolCall?.connectScmToolCall;
-}
-
-/** The repository a connect-SCM call targets, across the `target` oneof. */
-function selectConnectScmRepository(call: CursorConnectScmCall | undefined): CursorConnectScmRepository | undefined {
-	const target = call?.args?.target;
-	if (target?.case === "github") return target.value?.repository;
-	return call?.args?.github?.repository;
-}
-
-/**
- * Render a settled `ConnectScmResult` as the text of its paired tool result.
- *
- * Returns `isError` because the three outcomes are not interchangeable: only
- * `success` means the repository was connected, and reporting a rejection as
- * success would tell the model to proceed against a repo it cannot reach.
- */
-function describeConnectScmResult(call: CursorConnectScmCall | undefined): { text: string; isError: boolean } {
-	const result = call?.result?.result;
-	switch (result?.case) {
-		case "success":
-			return { text: "SCM connected", isError: false };
-		case "error":
-			return { text: result.value?.error || "SCM connection failed", isError: true };
-		case "rejected":
-			return { text: result.value?.reason || "SCM connection rejected", isError: true };
-		default:
-			// A completion carrying no result settles the block anyway: it is
-			// stamped resolved, so nothing downstream would ever pair it.
-			return { text: "SCM connection reported no result", isError: true };
-	}
-}
-
-/**
- * Extract the authoritative full todo list from a completed native todo call.
- *
- * Cursor owns this list server-side: `update_todos` / `read_todos` are resolved
- * remotely and the settled state rides on the tool call's `result`, never on
- * the exec channel (`ExecServerMessage` has no todo case). Only
- * `result.success.todos` is authoritative — the request `args` may differ from
- * what the server actually stored after a merge or normalization, and on
- * `UpdateTodosError` nothing was stored at all.
- *
- * A `read_todos` call carrying `status_filter` / `id_filter` (agent.proto
- * `ReadTodosArgs`) returns a SUBSET, not the list, and its `total_count`
- * reports the full size. Mirroring a partial response would delete every task
- * it omitted, so filtered and short reads are refused here. An empty read is
- * refused too: proto3 defaults unset `total_count` to 0, so `todos=[]` cannot
- * be told from a missing count.
- *
- * A snapshot whose rows are not unique by content is refused for a different
- * reason: Cursor keys todos by `id`, the local list is keyed by content, and
- * the collision is unrepresentable rather than merely partial.
- *
- * Returns `null` when no usable full snapshot is available, which the caller
- * MUST treat as "leave local state untouched".
- */
-function extractTodoSnapshot(toolCall: CursorTodoToolCall): CursorTodoSnapshot | null {
-	const { update, read } = selectTodoCalls(toolCall);
-	if (read && ((read.args?.statusFilter?.length ?? 0) > 0 || (read.args?.idFilter?.length ?? 0) > 0)) {
-		return null;
-	}
-	const call = update ?? read;
-	if (!call) return null;
-	const result = call.result?.result;
-	if (result?.case !== "success") return null;
-	const todos = result.value?.todos;
-	if (!todos) return null;
-	// A response that disagrees with the server's own count is partial; treating
-	// it as the list would drop whatever it left out. This applies to BOTH call
-	// kinds and to the empty case: a size-limited or partial `update_todos`
-	// merge response is just as incomplete as a filtered read, and an empty one
-	// whose `total_count` is nonzero is the most destructive shape of all —
-	// mirroring it would delete every local task at once.
-	//
-	// `total_count` is a proto3 scalar, so an unset field arrives as `0`. That
-	// makes `todos=[]` + `total_count=0` ambiguous: a genuine clear, or a
-	// filtered read that matched nothing with the count omitted. An empty READ
-	// is therefore refused outright, while an empty UPDATE with a matching zero
-	// count remains the authoritative clear path.
-	const totalCount = result.value?.totalCount;
-	if (typeof totalCount === "number" && totalCount !== todos.length) {
-		return null;
-	}
-	if (read && todos.length === 0) {
-		return null;
-	}
-	const mapped = mapTodoSnapshot(todos);
-	// A row whose `content` is missing or proto-default lands as `""`. The local
-	// list is keyed by content and `resolveTaskOrError` rejects a falsy one
-	// before lookup, so the task would be permanently unreachable to every
-	// task-targeted `done`/`drop`/`rm` — the same unrepresentable shape as a
-	// content collision, refused for the same reason.
-	if (mapped.some(todo => todo.content.length === 0)) return null;
-	// The wire model identifies rows by `id` and can represent two rows sharing
-	// `content`; the local list is keyed by content alone (`findTaskByContent`)
-	// and `todo` rejects a duplicate outright. Importing such a snapshot would
-	// leave every task-targeted `done`/`drop`/`rm` resolving to the first row and
-	// the second unreachable (phase-wide and untargeted ops still hit both), so
-	// it is refused like any other snapshot that cannot be represented locally.
-	const seen = new Set<string>();
-	for (const todo of mapped) {
-		if (seen.has(todo.content)) return null;
-		seen.add(todo.content);
-	}
-	// `TodoItem.dependencies` carries the IDs a row waits on. The local model can
-	// express *that* a task is blocked (`TodoStatus` has `blocked`, `TodoItem`
-	// has `blocker`), but not the graph: it has no ids, so an edge cannot be
-	// stored, replayed, or re-evaluated when the blocker later completes.
-	//
-	// Dropping the edge silently is the harmful part. `nextActionableTask`
-	// (`todo.ts:164`) returns the first `pending` row with no notion of
-	// blockage, so the panel, the idle recap, and the completion reminders
-	// would all steer toward work the server says is not ready yet — and a
-	// reload loses the constraint for good.
-	//
-	// Only *unresolved* edges are refused: a dependency on an already
-	// finished row imposes nothing, which keeps late-session snapshots
-	// syncing normally.
-	//
-	// Projecting unresolved edges onto `blocked` + a `blocker` note is the
-	// lossy alternative — it preserves the warning but not the graph, and
-	// nothing would ever unblock the row, since the local engine has no id to
-	// match when the dependency completes. Refusing keeps this consistent with
-	// the collision case above: decline what cannot be represented rather than
-	// import an approximation.
-	const finished = new Set<string>();
-	for (const todo of todos) {
-		const status = mapTodoStatusValue(typeof todo.status === "number" ? todo.status : undefined);
-		if (todo.id && (status === "completed" || status === "abandoned")) finished.add(todo.id);
-	}
-	for (const todo of todos) {
-		for (const dependency of todo.dependencies ?? []) {
-			if (!finished.has(dependency)) return null;
-		}
-	}
-	return {
-		todos: mapped,
-		// Presentation-only: the snapshot is already the settled full list.
-		merged: result.value?.wasMerge === true,
-	};
-}
-
-/**
- * Error text when the server itself rejected the call.
- *
- * Distinct from {@link extractTodoSnapshot} returning `null`: a filtered read, a
- * truncated or empty one (proto3 cannot tell unset `total_count` from zero), or
- * a snapshot the local model cannot represent are all benign refusals (the call
- * succeeded, we just decline to mirror it), whereas an `UpdateTodosError` /
- * `ReadTodosError` is a real failure that must not replay as a successful no-op.
- */
-function extractTodoError(toolCall: CursorTodoToolCall): string | null {
-	const { update, read } = selectTodoCalls(toolCall);
-	const result = (update ?? read)?.result?.result;
-	if (result?.case !== "error") return null;
-	const error = result.value?.error;
-	return typeof error === "string" && error.length > 0 ? error : "Todo operation failed";
-}
-
-/** Args echoed onto the synthesized display block, for rendering only. */
-function buildTodoDisplayArgs(toolCall: CursorTodoToolCall): { todos: CursorTodoSnapshotItem[]; merge?: boolean } {
-	const args = selectTodoCalls(toolCall).update?.args;
-	return {
-		todos: args?.todos ? mapTodoSnapshot(args.todos) : [],
-		merge: args?.merge === true ? true : undefined,
-	};
-}
-
-/**
- * Paired result for a server-resolved native todo call.
- *
- * The bridge never runs a local `todo` tool for these, so nothing else would
- * produce a `toolResult` for the block — and `buildSessionContext` strips any
- * `toolCall` left unpaired, taking the interaction out of every rebuilt
- * transcript.
- *
- * Three outcomes, kept distinct: a server error replays as a failure, a benign
- * refusal (a filtered, truncated, or empty read, or a snapshot the local model
- * cannot represent) replays as `"Todo snapshot not mirrored"`, and a settled
- * snapshot replays as its summary. Collapsing the first into the second would
- * hide the failure and let downstream lifecycle logic treat it as success. The
- * refusal text must not say `"No todo changes"`: an `update_todos` the server
- * accepted may still be declined locally, and that is not "no changes".
- */
-function buildTodoToolResult(
-	toolCallId: string,
-	snapshot: CursorTodoSnapshot | null,
-	error: string | null,
-): ToolResultMessage {
-	const text = error ?? (snapshot ? formatTodoSnapshotSummary(snapshot.todos) : "Todo snapshot not mirrored");
-	return {
-		role: "toolResult",
-		toolCallId,
-		toolName: "todo",
-		content: [{ type: "text", text }],
-		isError: error !== null,
-		timestamp: Date.now(),
-	};
-}
-
-function formatTodoSnapshotSummary(todos: CursorTodoSnapshotItem[]): string {
-	if (todos.length === 0) return "No todos";
-	const done = todos.filter(todo => todo.status === "completed").length;
-	return `${done}/${todos.length} tasks completed`;
-}
-
-function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolResultMessage) {
-	if (toolResult.isError) {
-		return buildMcpErrorResult(toolResultToText(toolResult) || "MCP tool failed");
-	}
-	const content = toolResult.content.map(item => {
-		if (item.type === "image") {
-			return create(McpToolResultContentItemSchema, {
-				content: {
-					case: "image",
-					value: create(McpImageContentSchema, {
-						data: Uint8Array.from(Buffer.from(item.data, "base64")),
-						mimeType: item.mimeType,
-					}),
-				},
-			});
-		}
-		return create(McpToolResultContentItemSchema, {
-			content: {
-				case: "text",
-				value: create(McpTextContentSchema, { text: item.text }),
-			},
-		});
-	});
-
-	return create(McpResultSchema, {
-		result: {
-			case: "success",
-			value: create(McpSuccessSchema, {
-				content,
-				isError: false,
-			}),
-		},
-	});
-}
-
-function buildMcpToolNotFoundResult(mcpCall: CursorMcpCall) {
-	return create(McpResultSchema, {
-		result: {
-			case: "toolNotFound",
-			value: create(McpToolNotFoundSchema, { name: mcpCall.toolName, availableTools: [] }),
-		},
-	});
-}
-
-function buildMcpErrorResult(error: string) {
-	return create(McpResultSchema, {
-		result: {
-			case: "error",
-			value: create(McpErrorSchema, { error }),
-		},
-	});
-}
-
-/**
- * Merge the decoded completion-frame `McpArgs` map into the args assembled
- * from streamed `args_text_delta` snapshots.
- *
- * The completion frame is authoritative for the scalars it carries — but it
- * can omit oversized parameters entirely and can downgrade a structured value
- * to its raw string fallback when `decodeMcpArgValue` cannot parse it as
- * JSON. Overwriting the streamed args wholesale therefore loses data (e.g.
- * the task tool's `tasks` array on multi-subagent dispatches, issue #2615).
- *
- * Rules per key:
- * - completion key absent  → keep the streamed value.
- * - completion is a string while the streamed value is structured (object or
- *   array) → keep the streamed value (the completion frame downgraded it).
- * - otherwise               → completion wins.
- */
-export function mergeCursorMcpToolCallArgs(
-	streamed: Record<string, unknown> | undefined,
-	completion: Record<string, unknown> | undefined,
-): Record<string, unknown> {
-	const merged: Record<string, unknown> = { ...(streamed ?? {}) };
-	if (!completion) return merged;
-	for (const [key, completionValue] of Object.entries(completion)) {
-		const streamedValue = merged[key];
-		if (typeof completionValue === "string" && streamedValue !== null && typeof streamedValue === "object") {
-			continue;
-		}
-		merged[key] = completionValue;
-	}
-	return merged;
-}
-
-function endCurrentTextBlock(output: AssistantMessage, stream: AssistantMessageEventStream, state: BlockState): void {
-	const block = state.currentTextBlock;
-	if (!block) return;
-	const idx = output.content.indexOf(block);
-	stream.push({
-		type: "text_end",
-		contentIndex: idx,
-		content: block.text,
-		partial: output,
-	});
-	state.setTextBlock(null);
-}
-
-function endCurrentThinkingBlock(
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
-	state: BlockState,
-): void {
-	const block = state.currentThinkingBlock;
-	if (!block) return;
-	const idx = output.content.indexOf(block);
-	stream.push({
-		type: "thinking_end",
-		contentIndex: idx,
-		content: block.thinking,
-		partial: output,
-	});
-	state.setThinkingBlock(null);
-}
-
-/**
- * Synthesize a completed `toolCall` content block for a Cursor exec-channel
- * native tool (`shell`, `read`, `write`, `grep`, `ls`, `delete`, `diagnostics`)
- * or for an MCP exec frame whose corresponding interaction block is absent.
- *
- * Args arrive complete on the exec message, so the block opens and closes in
- * one step — no partial-JSON streaming path. Without this the persisted
- * assistant message carries only text/thinking blocks, and on replay the
- * following `toolResult` messages have no matching `toolCall.id` in
- * `renderSessionContext`, so they render beneath the final answer or disappear.
- *
- * The block is stamped with {@link kCursorExecResolved} so the shared
- * `agent-loop.ts` execution pass skips it — Cursor's server-driven exec
- * channel already ran the tool via the bridge and buffered the result, so
- * treating this block as runnable would re-execute the same side-effecting
- * tool a second time.
- *
- * Exported for tests to exercise ordering with adjacent text/thinking blocks.
- */
-export function synthesizeCursorExecToolCall(
-	output: AssistantMessage,
-	stream: AssistantMessageEventStream,
-	state: BlockState,
-	toolCallId: string,
-	toolName: string,
-	args: Record<string, unknown>,
-): void {
-	endCurrentTextBlock(output, stream, state);
-	endCurrentThinkingBlock(output, stream, state);
-	// Exec-frame translators often write `optional: value || undefined`. A
-	// present `undefined` fails ArkType optional-field validation; drop those
-	// keys so the transcript block matches what a model-native call would omit.
-	const block: ToolCallState = {
-		type: "toolCall",
-		id: toolCallId,
-		name: toolName,
-		arguments: omitUndefinedArgs(args),
-		[kStreamingBlockIndex]: output.content.length,
-		[kStreamingBlockKind]: "cursor-exec",
-		[kCursorExecResolved]: true,
-	};
-	output.content.push(block);
-	const idx = output.content.length - 1;
-	stream.push({ type: "toolcall_start", contentIndex: idx, partial: output });
-	stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: block, partial: output });
-}
-
-/**
- * Pair a `toolResult` for a synthesized block the client answered itself,
- * without ever consulting a handler.
- *
- * {@link resolveExecHandler} does this for every frame backed by a local tool.
- * Frames answered from a fixed verdict — no handler, no local execution — still
- * need the pair for the same reason: the block was stamped
- * {@link kCursorExecResolved}, so `agent-loop.ts` emits no placeholder for it
- * and `buildSessionContext` strips an unpaired call, taking the whole
- * interaction out of every rebuilt transcript.
- *
- * `isError` defaults true because most such verdicts are refusals; the MCP
- * resource frames run locally and can genuinely succeed, and a success filed
- * as an error would render as a failed call in every rebuilt transcript.
- */
-async function pairSynthesizedExecResult(
-	state: BlockState,
-	onToolResult: CursorToolResultHandler | undefined,
-	toolCallId: string,
-	toolName: string,
-	text: string,
-	isError = true,
-): Promise<void> {
-	const synthesized: ToolResultMessage = {
-		role: "toolResult",
-		toolCallId,
-		toolName,
-		content: [{ type: "text", text }],
-		isError,
-		timestamp: Date.now(),
-	};
-	const sink = onToolResult ?? state.onToolResult;
-	if (!sink) return;
-	await sink(synthesized);
-}
-
-/** Exported for tests: drives one Cursor interaction update through the streaming state machine. */
 export function processInteractionUpdate(
 	update: any,
 	output: AssistantMessage,
@@ -3769,43 +954,6 @@ export function processInteractionUpdate(
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
 		endCurrentThinkingBlock(output, stream, state);
-	} else if (updateCase === "toolCallStarted" && selectConnectScmCall(update.message.value.toolCall)) {
-		// `connect_scm` is resolved entirely server-side and has NO exec frame:
-		// `ExecServerMessage` carries no connect-SCM case (field 44 is
-		// `git_diff_request`), so the streamed pair is the only signal this client
-		// sees. The authoritative outcome rides on the COMPLETION's `result`
-		// oneof, so the block is opened here and settled there — answering now
-		// would persist a verdict before the server has given one.
-		//
-		// Stamped resolved so `agent-loop.ts` runs no local tool for it: there is
-		// no local `connect_scm`, and the completion pairs the result itself.
-		endCurrentTextBlock(output, stream, state);
-		endCurrentThinkingBlock(output, stream, state);
-		const scmCall = selectConnectScmCall(update.message.value.toolCall);
-		const repository = selectConnectScmRepository(scmCall);
-		const block: ToolCallState = {
-			type: "toolCall",
-			id: scmCall?.args?.toolCallId || update.message.value.callId || crypto.randomUUID(),
-			name: "connect_scm",
-			arguments: repository ? { owner: repository.owner, repo: repository.repo } : {},
-			[kStreamingBlockIndex]: output.content.length,
-			[kStreamingBlockKind]: "connect-scm",
-			[kStreamingEnvelopeId]: update.message.value.callId || undefined,
-			[kCursorExecResolved]: true,
-		};
-		output.content.push(block);
-		retainStreamedCall(state, block, update.message.value.callId);
-		stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
-	} else if (updateCase === "toolCallStarted" && isExecOwnedToolCall(update.message.value.toolCall)) {
-		// The exec channel already synthesized this block (and marked it resolved)
-		// when it ran the tool locally, so the streamed announcement must not
-		// create a second one. Modern builds stream a `pi_*_tool_call` envelope
-		// alongside every `ExecServerMessage` 45-51 frame; before this branch the
-		// duplicate was avoided only because the decoder recognised neither, which
-		// would silently start double-rendering the moment a variant was added.
-		endCurrentTextBlock(output, stream, state);
-		endCurrentThinkingBlock(output, stream, state);
-		log("exec", "streamedToolCallOwnedByExec", { case: update.message.value.toolCall?.tool?.case });
 	} else if (updateCase === "toolCallStarted") {
 		endCurrentTextBlock(output, stream, state);
 		endCurrentThinkingBlock(output, stream, state);
@@ -3815,10 +963,6 @@ export function processInteractionUpdate(
 			if (mcpCall) {
 				const args = mcpCall.args || {};
 				const id = args.toolCallId || crypto.randomUUID();
-				const resolvedByExec = state.resolvedMcpToolCallIds.delete(id);
-				if (resolvedByExec && output.content.some(block => block.type === "toolCall" && block.id === id)) {
-					return;
-				}
 				const block: ToolCallState = {
 					type: "toolCall",
 					id,
@@ -3832,39 +976,10 @@ export function processInteractionUpdate(
 					[kStreamingBlockKind]: "mcp",
 					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
 				};
-				if (resolvedByExec) {
-					markCursorExecResolved(block);
-				}
 				output.content.push(block);
 				retainStreamedCall(state, block, update.message.value.callId);
 				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 				return;
-			}
-
-			// Cursor resolves `update_todos` / `read_todos` server-side and settles
-			// them on the tool call's `result`. Both blocks are stamped resolved so
-			// `agent-loop.ts` never runs them locally: there is no local tool behind
-			// them, and executing one would emit a spurious toolResult and drive an
-			// extra continuation turn. Local state is mirrored on completion, from
-			// the server's success snapshot only.
-			const todoCalls = selectTodoCalls(toolCall);
-			if (todoCalls.update || todoCalls.read) {
-				const callId = update.message.value.callId || crypto.randomUUID();
-				const block: ToolCallState = {
-					type: "toolCall",
-					id: callId,
-					name: "todo",
-					arguments: buildTodoDisplayArgs(toolCall),
-					[kStreamingBlockIndex]: output.content.length,
-					[kStreamingBlockKind]: "todo",
-					// Only the real envelope id is a correlation key; the minted
-					// fallback below names no frame the server will ever send back.
-					[kStreamingEnvelopeId]: update.message.value.callId || undefined,
-					[kCursorExecResolved]: true,
-				};
-				output.content.push(block);
-				retainStreamedCall(state, block, update.message.value.callId);
-				stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 			}
 		}
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
@@ -3919,92 +1034,29 @@ export function processInteractionUpdate(
 					settled.arguments as Record<string, unknown> | undefined,
 					decodedArgs,
 				);
-			} else if (settled[kStreamingBlockKind] === "connect-scm") {
-				// The authoritative outcome arrives only here, on the completion's
-				// `ConnectScmResult` oneof. The block was stamped resolved at start,
-				// so nothing downstream pairs it: settling is this branch's job, and
-				// a completion with no `toolCall` still settles rather than leaking a
-				// dangling call into every rebuilt transcript.
-				//
-				// Late args are merged too — a start frame may announce the call
-				// before the target repository is known.
-				const scmCall = selectConnectScmCall(toolCall);
-				const repository = selectConnectScmRepository(scmCall);
-				if (repository) {
-					settled.arguments = { owner: repository.owner, repo: repository.repo };
-				}
-				const { text, isError } = describeConnectScmResult(scmCall);
-				state.onToolResult?.({
-					role: "toolResult",
-					toolCallId: settled.id,
-					toolName: "connect_scm",
-					content: [{ type: "text", text }],
-					isError,
-					timestamp: Date.now(),
-				});
-			} else if (settled[kStreamingBlockKind] === "todo") {
-				// Only the server's success snapshot is authoritative: the request args
-				// may differ from what was actually stored after a merge, and on
-				// `UpdateTodosError` nothing was stored at all. No snapshot => leave
-				// both the rendered args and local session state untouched.
-				//
-				// A completion frame whose optional `toolCall` is absent carries
-				// neither, but must still settle: the block is already marked
-				// `kCursorExecResolved`, so `agent-loop.ts` emits no placeholder for
-				// it and an unpaired call is stripped from every rebuilt transcript.
-				// It reads as "nothing to mirror", the same as a refused snapshot.
-				const snapshot = toolCall ? extractTodoSnapshot(toolCall) : null;
-				const error = toolCall ? extractTodoError(toolCall) : null;
-				if (snapshot) {
-					settled.arguments = { todos: snapshot.todos, merged: snapshot.merged };
-				}
-				// The host settles EVERY completed native todo call, successful or
-				// not: the interactive card only resolves on a matching
-				// `tool_execution_end`, so staying silent on a refusal or a server
-				// error would leave it animating for the rest of the session. The
-				// streamed call id is reused because the transcript filed the block
-				// under it.
-				//
-				// Exactly one result is persisted. The host's is preferred — only it
-				// carries the `details.phases` the todo renderer replays the list
-				// from — with the provider's summary standing in when the host has
-				// nothing to add.
-				let persisted: ToolResultMessage | undefined;
-				let hostError: string | null = null;
-				try {
-					persisted = state.onTodoSnapshot?.(snapshot, settled.id, error) ?? undefined;
-				} catch (callbackError) {
-					// A throwing host callback (e.g. session persistence failing on
-					// disk error) must not leave the resolved block unpaired: the
-					// exception would skip both the paired result and `toolcall_end`,
-					// stranding the live card and stripping the call from every
-					// rebuilt transcript. Settle it as a failure instead.
-					hostError = callbackError instanceof Error ? callbackError.message : String(callbackError);
-					log("error", "onTodoSnapshot", { error: hostError });
-				}
-				state.onToolResult?.(persisted ?? buildTodoToolResult(settled.id, snapshot, hostError ?? error));
+
+				const idx = output.content.indexOf(settled);
+				clearStreamingPartialJson(settled);
+				stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: settled, partial: output });
+				releaseStreamedCall(state, settled);
 			}
-			const idx = output.content.indexOf(settled);
-			clearStreamingPartialJson(settled);
-			stream.push({ type: "toolcall_end", contentIndex: idx, toolCall: settled, partial: output });
-			releaseStreamedCall(state, settled);
+		} else if (updateCase === "turnEnded") {
+			output.stopReason = "stop";
+			if (
+				isKimiK3ModelId(output.model) &&
+				!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
+			) {
+				logger.warn(
+					"Cursor kimi-k3 turn completed without thinking blocks; persisted history will replay this turn without reasoning",
+					{ model: output.model, messageTimestamp: output.timestamp },
+				);
+			}
+		} else if (updateCase === "tokenDelta") {
+			const tokenDelta = update.message.value;
+			usageState.sawTokenDelta = true;
+			output.usage.output += tokenDelta.tokens || 0;
+			output.usage.totalTokens = output.usage.input + output.usage.output;
 		}
-	} else if (updateCase === "turnEnded") {
-		output.stopReason = "stop";
-		if (
-			isKimiK3ModelId(output.model) &&
-			!output.content.some(item => item.type === "thinking" && item.thinking.length > 0)
-		) {
-			logger.warn(
-				"Cursor kimi-k3 turn completed without thinking blocks; persisted history will replay this turn without reasoning",
-				{ model: output.model, messageTimestamp: output.timestamp },
-			);
-		}
-	} else if (updateCase === "tokenDelta") {
-		const tokenDelta = update.message.value;
-		usageState.sawTokenDelta = true;
-		output.usage.output += tokenDelta.tokens || 0;
-		output.usage.totalTokens = output.usage.input + output.usage.output;
 	}
 }
 
@@ -4045,39 +1097,8 @@ function readCursorBlob(blobStore: Map<string, Uint8Array>, blobId: Uint8Array):
 	return data;
 }
 
-/**
- * Local tools Cursor already drives natively over the exec channel, so
- * advertising them again as MCP tools would give the model two ways to call the
- * same thing.
- *
- * `lsp` is deliberately NOT here. The native `diagnosticsArgs` frame covers
- * exactly one of the tool's actions (`action: "diagnostics"`); the rest —
- * `definition`, `references`, `rename`, `code_actions`, `hover`,
- * `implementation`, `type_definition`, `symbols`, ... — have no native frame at
- * all, so filtering the whole tool out hid every one of them from the model.
- */
-const CURSOR_NATIVE_TOOL_NAMES = new Set(["bash", "read", "write", "delete", "ls", "grep", "todo"]);
-
 export function buildMcpToolDefinitions(tools: Tool[] | undefined): McpToolDefinition[] {
-	if (!tools || tools.length === 0) {
-		return [];
-	}
-
-	const advertisedTools = tools.filter(tool => !CURSOR_NATIVE_TOOL_NAMES.has(tool.name));
-	if (advertisedTools.length === 0) {
-		return [];
-	}
-
-	// The `write` tool doubles as the xd:// transport: forwarded devices such as
-	// `ast_edit` stage previews finalized only by writing a reason to xd://resolve
-	// or xd://reject. Cursor's native catalog may expose no write path, so
-	// re-include the built-in `write` (dropped as native above) whenever pi-agent
-	// devices are advertised — otherwise a staged preview can never be resolved
-	// and the SoftToolRequirement('write') escalation aborts the turn.
-	const writeTool = tools.find(tool => tool.name === "write");
-	const forwarded = writeTool ? [...advertisedTools, writeTool] : advertisedTools;
-
-	return forwarded.map(tool => {
+	return (tools ?? []).map(tool => {
 		const jsonSchema = toolWireSchema(tool);
 		const schemaValue: JsonValue =
 			jsonSchema && typeof jsonSchema === "object"
@@ -4602,7 +1623,7 @@ function extractImages(content: (TextContent | ImageContent)[]) {
 		);
 }
 
-function buildGrpcRequest(
+async function buildGrpcRequest(
 	model: Model<"cursor-agent">,
 	context: Context,
 	options: CursorOptions | undefined,
@@ -4611,11 +1632,11 @@ function buildGrpcRequest(
 		blobStore: Map<string, Uint8Array>;
 		conversationState?: ConversationStateStructure;
 	},
-): {
+): Promise<{
 	requestBytes: Uint8Array;
 	blobStore: Map<string, Uint8Array>;
 	conversationState: ConversationStateStructure;
-} {
+}> {
 	const blobStore = state.blobStore;
 
 	const systemPromptIds = buildCursorSystemPromptJsons(context.systemPrompt).map(json =>
@@ -4729,16 +1750,17 @@ function buildGrpcRequest(
 		conversationId: state.conversationId,
 	});
 
-	options?.onPayload?.(runRequest, model);
-
-	// Tools are sent later via requestContext (exec handshake)
-
 	if (options?.customSystemPrompt) {
 		runRequest.customSystemPrompt = options.customSystemPrompt;
 	}
 
+	const replacementPayload = await options?.onPayload?.(runRequest, model);
+	const payload = replacementPayload !== undefined ? (replacementPayload as typeof runRequest) : runRequest;
+
+	// Tools are sent later via requestContext (exec handshake)
+
 	const clientMessage = create(AgentClientMessageSchema, {
-		message: { case: "runRequest", value: runRequest },
+		message: { case: "runRequest", value: payload },
 	});
 
 	const requestBytes = toBinary(AgentClientMessageSchema, clientMessage);

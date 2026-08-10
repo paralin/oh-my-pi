@@ -29,10 +29,9 @@ Import these core embedding APIs from the package root:
 - `ModelRegistry`
 - `AgentRegistry`
 - `discoverAuthStorage`
-- Discovery helpers (`discoverExtensions`, `discoverSkills`, `discoverContextFiles`, `discoverPromptTemplates`, `discoverSlashCommands`, `discoverCustomTSCommands`, `discoverMCPServers`)
-- Tool factory surface (`createTools`, `BUILTIN_TOOLS`, tool classes)
+- Discovery helpers (`discoverExtensions`, `discoverSkills`, `discoverContextFiles`, `discoverPromptTemplates`, `discoverSlashCommands`, `discoverCustomTSCommands`)
 
-The narrower `@oh-my-pi/pi-coding-agent/sdk` subpath exports `createAgentSession`, its option/result types, `Settings`, `AgentRegistry`, discovery and system-prompt helpers, workspace-tree helpers, selected extension/MCP/tool types, and selected tool classes/factories. It does **not** export `SessionManager`, `AuthStorage`, or `ModelRegistry`; import those three from the package root as the examples below do.
+The narrower `@oh-my-pi/pi-coding-agent/sdk` subpath exports `createAgentSession`, its option/result types, `Settings`, `AgentRegistry`, discovery and system-prompt helpers, workspace-tree helpers, selected extension and MCP types. It does **not** export `SessionManager`, `AuthStorage`, or `ModelRegistry`; import those three from the package root as the examples below do.
 
 ## Quick start (auto-discovery defaults)
 
@@ -72,9 +71,8 @@ If omitted, it resolves:
 - `settings`: `await Settings.init({ cwd, agentDir })`
 - `sessionManager`: `SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir))` (file-backed)
 - skills/rules/context files/prompt templates/slash commands/extensions/custom TS commands
-- built-in tools via `createTools(...)`
-- MCP tools (enabled by default; Exa MCP servers are folded into native Exa integration, and browser automation MCP servers are filtered when the built-in browser tool is enabled)
-- LSP integration (enabled by default)
+- the fixed persistent IPython runtime and its cell journal
+- MCP, language-intelligence, browser, computer, and other typed host capability services
 - `eventBus`: new `EventBus()` unless supplied
 
 ### Required vs optional inputs
@@ -268,7 +266,7 @@ Related APIs:
 
 Call `await session.dispose()` when the embedder is completely done with a session. `dispose()` starts disposal itself and is idempotent: repeated or concurrent calls receive the same teardown promise, so shutdown events and owned resources are not drained twice.
 
-`beginDispose()` is the synchronous admission barrier for wrappers that must await their own teardown before calling `dispose()`. Call it before the wrapper's first `await`; otherwise deferred work can enter the gap. It immediately marks the session disposed, cancels memory startup, title generation, and auto-learn capture, clears queued yield/asides, stops advisor runtime, detaches aside delivery, and rejects new eval executions. Deferred session work checks the disposed state and is dropped or skipped. `beginDispose()` is also idempotent, and the later `dispose()` call remains required to finish asynchronous cleanup.
+`beginDispose()` is the synchronous admission barrier for wrappers that must await their own teardown before calling `dispose()`. Call it before the wrapper's first `await`; otherwise deferred work can enter the gap. It immediately marks the session disposed, cancels memory startup, title generation, and auto-learn capture, clears queued yield/asides, stops advisor runtime, detaches aside delivery, and rejects new IPython cells. Deferred session work checks the disposed state and is dropped or skipped. `beginDispose()` is also idempotent, and the later `dispose()` call remains required to finish asynchronous cleanup.
 
 ```ts
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent";
@@ -283,54 +281,20 @@ async function closeEmbeddedSession(
 }
 ```
 
-During asynchronous disposal, the session records and synchronously flushes its exit diagnostic, emits `session_shutdown` once, stops extension fallback timers, aborts retries, compaction, and the active agent turn, and gives post-prompt and auto-learn work bounded time to settle. It then tears down session-owned async jobs, eval kernels, browser tabs, native computer sessions, MCP connections, advisor state, and memory state concurrently. These subsystem drains are best-effort and bounded where applicable; failures are logged rather than preventing the remaining subsystem cleanup.
+During asynchronous disposal, the session records and synchronously flushes its exit diagnostic, emits `session_shutdown` once, stops extension fallback timers, aborts retries, compaction, and the active agent turn, and gives post-prompt and auto-learn work bounded time to settle. It then tears down session-owned async jobs, IPython kernels, browser tabs, native computer sessions, MCP connections, advisor state, and memory state concurrently. These subsystem drains are best-effort and bounded where applicable; failures are logged rather than preventing the remaining subsystem cleanup.
 
 Only after work capable of appending session entries has settled does disposal clean up an empty moved session, close the `SessionManager`, close provider session state, disconnect the agent, and remove listeners. A failure from the final persistence cleanup or `SessionManager.close()` rejects the shared disposal promise; individual provider-session close failures are logged.
 
-## Tools and extension integration
+## IPython and extension integration
 
-### Built-ins and filtering
+Every SDK session exposes the fixed `ipython` provider interface. The retained
+kernel uses ordinary Python for workspace work and typed `omp.*` or skill APIs
+for host-owned services. The SDK does not accept a provider function allowlist
+or runtime capability-catalog changes.
 
-- Built-ins come from `createTools(...)` and `BUILTIN_TOOLS`.
-- `toolNames` requests named tools and can enable tools that are disabled by
-  default; by itself it is **not** an allowlist.
-- Set `restrictToolNames: true` to limit the session to the names in
-  `toolNames`. Restricted sessions disable ambient MCP, extensions, custom
-  commands, and LSP by default.
-- In a restricted session, SDK-supplied `customTools` are excluded unless
-  `allowRestrictedCustomTools: true` and their names also appear in
-  `toolNames`.
-- Hidden tools (for example `yield`) are opt-in unless required by options.
-
-```ts
-const { session } = await createAgentSession({
-  toolNames: ["read", "grep", "glob", "write"],
-  restrictToolNames: true,
-  requireYieldTool: true,
-});
-```
-
-### Extensions
-
-- `extensions`: inline `ExtensionFactory[]`
-- `additionalExtensionPaths`: load extra extension files
-- `disableExtensionDiscovery`: disable ambient scanning; explicit paths and
-  inline factories still load
-- `preloadedExtensions`: reuse an extension set loaded early by the same
-  session-owning process. Never pass loaded extension instances from a parent
-  to another session; use `preloadedExtensionPaths` so each session gets its
-  own `ExtensionAPI` binding.
-
-### Runtime tool set changes
-
-`AgentSession` supports runtime activation updates:
-
-- `getActiveToolNames()`
-- `getAllToolNames()`
-- `setActiveToolsByName(names)`
-- `refreshMCPTools(mcpTools)`
-
-System prompt is rebuilt to reflect active tool changes.
+Extensions may contribute prompt context, commands, UI, rules, and skills, but
+they do not extend the provider interface. See [Persistent IPython runtime](./ipython.md)
+and [Extensions](./extensions.md).
 
 ## Discovery helpers
 
@@ -343,16 +307,14 @@ Use these when you want partial control without recreating internal discovery lo
 - `discoverPromptTemplates(cwd?, agentDir?)`
 - `discoverSlashCommands(cwd?)`
 - `discoverCustomTSCommands(cwd?, agentDir?)`
-- `discoverMCPServers(cwd?)`
 - `buildSystemPrompt(options?)`
 
 ## Subagent-oriented options
 
 For SDK consumers building orchestrators (similar to task executor flow):
 
-- `outputSchema`: passes structured output expectation into tool context
+- `outputSchema`: validates a subagent session’s final response
 - `outputSchemaMode`: selects permissive or strict structured-output enforcement
-- `requireYieldTool`: forces `yield` tool inclusion
 - `taskDepth`: recursion-depth context for nested task sessions
 - `parentTaskPrefix`: artifact naming prefix for nested task outputs
 
@@ -377,7 +339,7 @@ type CreateAgentSessionResult = {
 };
 ```
 
-Use `setToolUIContext(...)` only if your embedder provides UI capabilities that tools/extensions should call into.
+Use `setToolUIContext(...)` only if your embedder provides UI capabilities that host services or extensions should call into.
 
 ## Startup performance
 
@@ -389,7 +351,7 @@ Use `setToolUIContext(...)` only if your embedder provides UI capabilities that 
   - `options.hasUI === true` (interactive TUI), **and**
   - the `lsp.lazy` setting is disabled (it defaults to `true`).
 
-  With `lsp.lazy` enabled — the default — no language servers are launched at startup at all; each server cold-starts on first use, i.e. when the agent invokes the `lsp` tool or an edit/write touches a file whose extension matches the server's `fileTypes`. Print / script / RPC / ACP invocations (`hasUI=false`) skip the warmup regardless of the setting: they don't render the warmup status indicator and typically finish before the language servers would stabilize, so warming them just spends CPU parsing big `initialize` responses concurrently with the LLM stream consumer and jitters perceived latency. Tools that actually need an LSP server still spin one up on demand through `getOrCreateClient()` — only the _startup_ warmup is skipped. The returned `lspServers` field in `CreateAgentSessionResult` is still populated for UI sessions in lazy mode — recognized servers are discovered (no processes spawned) and reported with status `"available"` so the welcome screen and `/status` can list them; it is `undefined` only when `enableLsp === false` or `hasUI === false`.
+  With `lsp.lazy` enabled — the default — no language servers launch at startup. A server cold-starts on the first matching typed `omp.code` request. Print, script, RPC, and ACP invocations (`hasUI=false`) skip warmup regardless of the setting because they do not render startup status and usually finish before a server stabilizes. The returned `lspServers` field remains populated for lazy UI sessions: recognized servers appear as `"available"` without starting a process. It is `undefined` only when `enableLsp === false` or `hasUI === false`.
 
 ## Minimal controlled embed example
 
@@ -416,7 +378,6 @@ const { session } = await createAgentSession({
   modelRegistry,
   settings,
   sessionManager: SessionManager.inMemory(),
-  toolNames: ["read", "grep", "glob", "edit", "write"],
   enableMCP: false,
   enableLsp: true,
 });

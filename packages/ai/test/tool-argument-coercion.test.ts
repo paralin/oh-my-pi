@@ -831,7 +831,7 @@ describe("Tool argument coercion", () => {
 			id: "call-16",
 			name: "t16",
 			arguments: {
-				path: "packages/coding-agent/src/prompts/tools/bash.md",
+				path: "packages/coding-agent/src/prompts/tools/task.md",
 				edits: '[{"op":"replace","pos":"38#BR","end":"39#QY","lines":["line 1","line 2"]}]}\n',
 			},
 		};

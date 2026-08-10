@@ -497,7 +497,6 @@ export class ParentCoordinationBackend implements CoordinationBackend {
 				label: candidate.label,
 				request: candidate.request,
 				policy: candidate.policy,
-				planReference: candidate.planReference,
 			});
 			const encoded = encodeExternalSubagentProfile(profile);
 			const worktreePath =
@@ -901,7 +900,13 @@ export class ParentCoordinationBackend implements CoordinationBackend {
 			replayed: result.replayed,
 		};
 	}
-	inbox(options?: { peek?: boolean; from?: string; replyTo?: string; limit?: number }): IrcMessage[] {
+	inbox(options?: {
+		peek?: boolean;
+		from?: string;
+		fromAny?: ReadonlySet<string>;
+		replyTo?: string;
+		limit?: number;
+	}): IrcMessage[] {
 		if (this.#isRotatable() && (!this.#bound || this.#quiesced)) throw unavailable("Parent mailbox inbox");
 		if (!this.#mailboxRouter) throw unavailable("mailbox inbox");
 		return this.#mailboxRouter.inbox(options);

@@ -12,7 +12,11 @@ import {
 	withAuth,
 	withOAuthAccess,
 } from "@oh-my-pi/pi-ai";
-import { resolveCodexResponsesUrl } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { applyCodexResponsesLiteShape } from "@oh-my-pi/pi-ai/providers/openai-codex/request-transformer";
+import {
+	createOpenAICodexCompatibilityMetadata,
+	resolveCodexResponsesUrl,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import {
 	CODEX_BASE_URL,
@@ -493,6 +497,7 @@ async function callCodexSearch(
 		systemPrompt?: string;
 		searchContextSize?: "low" | "medium" | "high";
 		model: CodexModelCandidate;
+		sessionId?: string;
 		fetch?: FetchImpl;
 		transport: CodexSearchTransport;
 	},
@@ -500,6 +505,7 @@ async function callCodexSearch(
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId, options.transport.headers);
 
 	const requestedModel = options.model.modelId;
+	const usesResponsesLite = options.model.catalogModel?.useResponsesLite === true;
 
 	const body: Record<string, unknown> = {
 		model: requestedModel,
@@ -523,6 +529,21 @@ async function callCodexSearch(
 		tool_choice: { type: "web_search" },
 		instructions: options.systemPrompt ?? DEFAULT_INSTRUCTIONS,
 	};
+	if (usesResponsesLite) {
+		const metadata = createOpenAICodexCompatibilityMetadata({
+			sessionId: options.sessionId,
+			requestKind: "turn",
+			startNewTurn: true,
+		});
+		for (const name in metadata.headers) {
+			const value = metadata.headers[name];
+			if (value !== undefined) headers.set(name, value);
+		}
+		headers.set(OPENAI_HEADERS.RESPONSES_LITE, "true");
+		body.client_metadata = metadata.clientMetadata;
+		body.reasoning = { context: "all_turns" };
+		applyCodexResponsesLiteShape(body);
+	}
 
 	const fetchImpl = options.fetch ?? fetch;
 	const response = await fetchImpl(options.transport.url, {
@@ -550,8 +571,9 @@ async function callCodexSearch(
 	let model = requestedModel;
 	let requestId = "";
 	let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
-	// A search command must reject a completion that did not invoke the hosted
-	// tool rather than returning an answer from the model's own knowledge (#6988).
+	// Evidence that the hosted web_search tool actually ran. Lite models get
+	// `tool_choice: "auto"` and may answer without searching (#6988); a search
+	// command must reject that rather than return a non-search completion.
 	let webSearchInvoked = false;
 
 	for await (const rawEvent of readSseJson<Record<string, unknown>>(response.body, options.signal)) {
@@ -705,6 +727,7 @@ async function runCodexSearchCandidates(options: {
 				systemPrompt: options.params.systemPrompt,
 				searchContextSize: "high",
 				model: candidate,
+				sessionId: options.params.sessionId,
 				fetch: options.params.fetch,
 				transport: options.transport,
 			});

@@ -1,7 +1,7 @@
 ---
 description: Prefer Record<K, V> for small static literals; use Set/Map for anything dynamic
 condition: "\\bnew\\s+(Set|Map)\\b"
-scope: "tool:edit(**/*.{ts,tsx}), tool:write(**/*.{ts,tsx})"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

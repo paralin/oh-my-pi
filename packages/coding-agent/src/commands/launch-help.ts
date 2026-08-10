@@ -20,18 +20,6 @@ export const launchHelp = {
 		}),
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
-		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
-		prewalk: Flags.boolean({
-			description:
-				"Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see prewalk.enabled)",
-		}),
-		"no-prewalk": Flags.boolean({ description: "Disable prewalk even if prewalk.enabled is set" }),
-		"prewalk-into": Flags.string({ description: 'Target model for prewalk (default the "smol" role)' }),
-		"plan-yolo": Flags.boolean({
-			description:
-				"Force read-only plan mode at start, auto-approve the plan on the model's first resolve call, then switch to --plan-yolo-into to implement it",
-		}),
-		"plan-yolo-into": Flags.string({ description: 'Target model for plan-yolo execution (default the "smol" role)' }),
 		provider: Flags.string({ description: "Provider to use (legacy; prefer --model)" }),
 		"api-key": Flags.string({ description: "API key (defaults to env vars)" }),
 		"system-prompt": Flags.string({ description: "System prompt (default: coding assistant prompt)" }),
@@ -65,10 +53,8 @@ export const launchHelp = {
 		"session-dir": Flags.string({ description: "Directory for session storage and lookup" }),
 		"no-session": Flags.boolean({ description: "Don't save session (ephemeral)" }),
 		models: Flags.string({ description: "Comma-separated model patterns for Ctrl+P cycling" }),
-		"no-tools": Flags.boolean({ description: "Disable all built-in tools" }),
-		"no-lsp": Flags.boolean({ description: "Disable LSP tools, formatting, and diagnostics" }),
+		"no-lsp": Flags.boolean({ description: "Disable language-server startup, formatting, and diagnostics" }),
 		"no-pty": Flags.boolean({ description: "Disable PTY-based interactive bash execution" }),
-		tools: Flags.string({ description: "Comma-separated list of tools to enable (default: all)" }),
 		thinking: Flags.string({
 			description: `Set thinking level: ${CLI_THINKING_LEVELS.join(", ")}`,
 			options: [...CLI_THINKING_LEVELS],
@@ -104,7 +90,7 @@ export const launchHelp = {
 		"max-time": Flags.string({ description: "Stop the session after this duration (e.g., 600, 10m, 1h)" }),
 		"auto-approve": Flags.boolean({
 			aliases: ["yolo"],
-			description: "Auto-approve all tool calls (skip approval prompts)",
+			description: "Auto-approve model-origin IPython cells (skip whole-cell prompts)",
 		}),
 		"approval-mode": Flags.string({
 			options: ["always-ask", "write", "yolo"],

@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getKeybindings, setKeybindings, type KeybindingsManager as TuiKeybindingsManager } from "@oh-my-pi/pi-tui";
 import {
 	dedupeParseErrors,
 	expandKeyHint,
@@ -15,8 +16,7 @@ import {
 	shortenEmbeddedPaths,
 	shortenPath,
 	truncateDiffByHunk,
-} from "@oh-my-pi/pi-coding-agent/tools/render-utils";
-import { getKeybindings, setKeybindings, type KeybindingsManager as TuiKeybindingsManager } from "@oh-my-pi/pi-tui";
+} from "../../src/tools/render-utils.js";
 
 describe("parse error formatting", () => {
 	it("deduplicates parse errors while preserving order", () => {

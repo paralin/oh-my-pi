@@ -23,9 +23,7 @@ function createInitialRenderHarness(): { ctx: InteractiveModeContext; helpers: U
 		chatContainer: new Container(),
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
-		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		ui: { requestRender: vi.fn() },
 		present: (content: Component | readonly Component[]) => {
 			const items = Array.isArray(content) ? content : [content];
@@ -146,7 +144,6 @@ describe("InteractiveMode.showStatus", () => {
 		const ctx = {
 			chatContainer: new Container(),
 			transcriptMessageComponents: new WeakMap(),
-			pendingTools: new Map(),
 			ui: { requestRender: vi.fn() },
 			viewSession: { isStreaming: false },
 			optimisticUserMessageSignature: "hello\u00001",

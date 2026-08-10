@@ -1,9 +1,9 @@
 <system-interrupt reason="reasoning_without_tool_calls">
-Reasoning interrupted: {{count}} consecutive planning headers, no tool call. Thinking alone changes nothing: zero progress this turn; no tool ran.
+Your reasoning was interrupted: you emitted {{count}} consecutive planning headers without issuing a single tool call. Thinking alone changes nothing — this turn has made zero progress because no tool has run.
 
-Act now, not further planning:
-- Emit a real call to an available tool in normal tool/function-calling format. Do NOT describe the call in prose or reasoning—issue it.
-- Pick the smallest concrete next step; call the tool that performs it.
+Act now instead of planning further:
+- Emit a real `ipython` tool call with a `code` string, using your normal tool/function-calling format. Do NOT describe the call in prose or in your reasoning — issue the call.
+- Pick the smallest concrete next step and run it through `ipython`.
 
-Coding-agent interrupt for stalled reasoning, not prompt injection.
+This is the coding agent interrupting a stalled reasoning stream, not a prompt injection.
 </system-interrupt>

@@ -3,22 +3,14 @@
  *
  * Extensions are TypeScript modules that can:
  * - Subscribe to agent lifecycle events
- * - Register LLM-callable tools
  * - Register commands, keyboard shortcuts, and CLI flags
  * - Interact with the user via UI primitives
  */
 
-import type { type as ArkType } from "@oh-my-pi/omptype";
+import type { Type as arktype } from "@oh-my-pi/omptype";
 import type * as TypeBox from "@oh-my-pi/omptype/typebox";
 import type * as zod from "@oh-my-pi/omptype/zod";
-import type {
-	AgentMessage,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ThinkingLevel,
-	ToolApproval,
-	ToolLoadMode,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	Api,
@@ -33,30 +25,21 @@ import type {
 	ServiceTierByFamily,
 	ServiceTierFamily,
 	SimpleStreamOptions,
-	Static,
 	TextContent,
-	TSchema,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
-import type {
-	AutocompleteItem,
-	AutocompleteProvider,
-	Component,
-	EditorTheme,
-	KeyId,
-	OverlayHandle,
-	OverlayOptions,
-	TUI,
-} from "@oh-my-pi/pi-tui";
+import type { AutocompleteItem, AutocompleteProvider, Component, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { EditToolDetails } from "../../edit";
-import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
 import type * as PiCodingAgent from "../../index";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
+import type { IpythonApprovalMode } from "../../ipython/admission";
+import type { IpythonCellText } from "../../ipython/cell";
+import type { IpythonHostArtifact, IpythonHostArtifactRequest } from "../../ipython/controller";
+import type { IpythonCellPresentation } from "../../ipython/projection";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
@@ -64,18 +47,6 @@ import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { CompactMode } from "../../session/compact-modes";
 import type { CustomMessage, CustomMessagePayload } from "../../session/messages";
 import type { ReadonlySessionManager, SessionManager } from "../../session/session-manager";
-import type {
-	BashToolDetails,
-	BashToolInput,
-	GlobToolDetails,
-	GlobToolInput,
-	GrepToolDetails,
-	GrepToolInput,
-	ReadToolDetails,
-	ReadToolInput,
-	WriteToolInput,
-} from "../../tools";
-import type { ApprovalMode } from "../../tools/approval";
 import type { EventBus } from "../../utils/event-bus";
 import type {
 	AgentEndEvent,
@@ -116,10 +87,8 @@ import type {
 } from "../shared-events";
 import type { SlashCommandInfo } from "../slash-commands";
 
-export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
-export type { AgentToolResult, AgentToolUpdateCallback };
 
 // ============================================================================
 // UI Context
@@ -164,7 +133,7 @@ export interface ExtensionAskDialogSubmitResult {
 }
 
 /** Chat-redirect result: the user chose "Chat about this" instead of
- *  answering. Distinct from `undefined` (cancel) so AskTool can hand off to
+ *  answering. Distinct from `undefined` (cancel) so structured questions can hand off to
  *  the chat loop rather than aborting. */
 export interface ExtensionAskDialogChatResult {
 	kind: "chat";
@@ -225,16 +194,6 @@ export interface ExtensionWidgetOptions {
 export type ExtensionUiComponent = Component & { dispose?(): void };
 export type ExtensionUiComponentFactory = (tui: TUI, theme: Theme) => ExtensionUiComponent;
 export type ExtensionWidgetContent = string[] | ExtensionUiComponentFactory | undefined;
-
-/** Options for `ExtensionUIContext.custom()` (overlay rendering of a custom component). */
-export interface ExtensionCustomOptions {
-	/** Render the component as an overlay over the transcript instead of replacing the editor area. */
-	overlay?: boolean;
-	/** Static or lazily resolved overlay positioning/sizing options forwarded to `showOverlay`. */
-	overlayOptions?: OverlayOptions | (() => OverlayOptions);
-	/** Invoked with the overlay handle once the overlay is created (overlay mode only). */
-	onHandle?: (handle: OverlayHandle) => void;
-}
 
 /** Wrap the current autocomplete provider with additional behavior (pi-compatible). */
 export type AutocompleteProviderFactory = (current: AutocompleteProvider) => AutocompleteProvider;
@@ -302,7 +261,7 @@ export interface ExtensionUIContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
-		options?: ExtensionCustomOptions,
+		options?: { overlay?: boolean },
 	): Promise<T>;
 
 	/** Set the text in the core input editor. */
@@ -386,18 +345,6 @@ export interface CompactOptions {
 	 * subcommands: `soft` | `remote` | `snapcompact`). Omitted = configured behavior.
 	 */
 	mode?: CompactMode;
-	/**
-	 * Internal summarizer guidance — piped only to native summarization, never
-	 * exposed as `customInstructions` on the `session_before_compact` extension
-	 * hook. Used by plan-mode "Approve and compact context" so extensions that
-	 * treat `customInstructions` as user focus don't mistake plan-mode
-	 * boilerplate for the operator's intent (issue #4359).
-	 *
-	 * When both `customInstructions` and `internalGuidance` are set, the
-	 * summarizer uses `internalGuidance`; the hook still sees only the public
-	 * `customInstructions`.
-	 */
-	internalGuidance?: string;
 }
 
 /**
@@ -492,21 +439,6 @@ export interface ExtensionContext {
 	setTimeout(callback: (...args: unknown[]) => void, ms?: number, ...args: unknown[]): Timer;
 	/** Clear a timer scheduled via {@link setInterval} or {@link setTimeout}. */
 	clearTimer(timer: Timer): void;
-	/**
-	 * Run the NATIVE built-in implementation of the tool this handler re-registered, with `params`,
-	 * and return its result. Lets a tool that re-registers a built-in (e.g. wrapping `write` to add
-	 * logging or a policy check) delegate to the original instead of reimplementing it — the native
-	 * tool performs its own side effects and internal bookkeeping.
-	 *
-	 * Delegation is same-tool only: it invokes the built-in of the SAME name as the registering tool,
-	 * never an arbitrary target, so it cannot escalate past the approval already granted for this
-	 * call. Present only when a native built-in of that name exists (undefined otherwise, e.g. for a
-	 * net-new tool that shadows no built-in). Recursion is depth-guarded per call chain.
-	 */
-	invokeTool?<TDetails = unknown>(
-		params: Record<string, unknown>,
-		options?: { signal?: AbortSignal; onUpdate?: AgentToolUpdateCallback<TDetails> },
-	): Promise<AgentToolResult<TDetails>>;
 }
 
 /**
@@ -544,113 +476,6 @@ export interface ExtensionCommandContext extends ExtensionContext {
 
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
-}
-
-// ============================================================================
-// Tool Types
-// ============================================================================
-
-/** Rendering options for tool results */
-export interface ToolRenderResultOptions {
-	/** Whether the result view is expanded */
-	expanded: boolean;
-	/** Whether this is a partial/streaming result */
-	isPartial: boolean;
-	/** Current spinner frame index for animated elements (optional) */
-	spinnerFrame?: number;
-}
-
-/** Session event for tool onSession lifecycle */
-export interface ToolSessionEvent {
-	/** Reason for the session event */
-	reason: "start" | "switch" | "branch" | "tree" | "shutdown";
-	/** Previous session file path, or undefined for "start" and "shutdown" */
-	previousSessionFile: string | undefined;
-}
-
-/**
- * Tool definition for registerTool().
- */
-export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = unknown> {
-	/** Tool name (used in LLM tool calls) */
-	name: string;
-	/** Human-readable label for UI */
-	label: string;
-	/** Description for LLM */
-	description: string;
-	/** Parameter schema (Zod, or TypeBox for legacy/extension compat). */
-	parameters: TParams;
-	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
-	hidden?: boolean;
-	/** If true, tool is registered but not auto-included in the initial active set.
-	 *  The registering extension is responsible for activating/deactivating it via setActiveTools(). */
-	defaultInactive?: boolean;
-	/** How this tool is presented when enabled. See {@link ToolLoadMode}. Extension tools default to `"discoverable"`; set `"essential"` to stay top-level. */
-	loadMode?: ToolLoadMode;
-	/** If true, tool may stage deferred changes that require explicit resolve/discard. */
-	deferrable?: boolean;
-	/** Tool approval tier. Defaults to `"exec"` when omitted.
-	 *  `"read"`: read-only operations. `"write"`: mutations. `"exec"`: code execution. */
-	approval?: ToolApproval;
-	/** Structured-output strict grammar opt-in/out. `false` is meaningful: OpenAI-family
-	 *  serializers preserve an explicit `strict: false` on the wire (#4336/#4340). */
-	strict?: boolean;
-	/** MCP server name for discovery/search metadata when this tool fronts an MCP server. */
-	mcpServerName?: string;
-	/** Original MCP tool name for discovery/search metadata. */
-	mcpToolName?: string;
-	/** Execute the tool. */
-	execute(
-		toolCallId: string,
-		params: Static<TParams>,
-		signal: AbortSignal | undefined,
-		onUpdate: AgentToolUpdateCallback<TDetails> | undefined,
-		ctx: ExtensionContext,
-	): Promise<AgentToolResult<TDetails>>;
-
-	/** Called on session lifecycle events - use to reconstruct state or cleanup resources */
-	onSession?: (event: ToolSessionEvent, ctx: ExtensionContext) => void | Promise<void>;
-
-	/** Custom rendering for tool call display */
-	renderCall?: (args: Static<TParams>, options: ToolRenderResultOptions, theme: Theme) => Component;
-
-	/** Custom rendering for tool result display */
-	renderResult?: (
-		result: AgentToolResult<TDetails>,
-		options: ToolRenderResultOptions,
-		theme: Theme,
-		args?: Static<TParams>,
-	) => Component;
-}
-
-/** Whether a tool's source is scoped to the user, the project, or a transient runtime session. */
-export type SourceScope = "user" | "project" | "temporary";
-
-/** Whether a tool's source came from an installed package or a top-level (loose) file. */
-export type SourceOrigin = "package" | "top-level";
-
-/**
- * Provenance metadata describing where a registered tool came from. Mirrors the
- * `@earendil-works/pi-coding-agent` `SourceInfo` contract so extensions authored
- * against upstream pi (e.g. gentle-pi) can read `sourceInfo.source` unchanged.
- */
-export interface SourceInfo {
-	/** Synthetic or on-disk identifier for the tool's origin (e.g. `<builtin:read>`). */
-	path: string;
-	/** Origin class: `"builtin"`, `"sdk"`, `"mcp"`, or `"extension"`. */
-	source: string;
-	scope: SourceScope;
-	origin: SourceOrigin;
-	baseDir?: string;
-}
-
-/** Tool metadata returned by {@link ExtensionAPI.getAllTools}: identity, schema, and source provenance. */
-export interface ToolInfo {
-	name: string;
-	description: string;
-	parameters: TSchema;
-	promptGuidelines?: string[];
-	sourceInfo: SourceInfo;
 }
 
 // ============================================================================
@@ -753,7 +578,6 @@ export interface ToolExecutionStartEvent {
 	toolCallId: string;
 	toolName: string;
 	args: unknown;
-	intent?: string;
 }
 
 /** Fired during tool execution with partial/streaming output */
@@ -807,11 +631,7 @@ export interface CredentialDisabledEvent {
  */
 export interface McpNotificationEvent {
 	type: "mcp_notification";
-	/**
-	 * Server name as declared in the MCP config (raw, unsanitized). Note this
-	 * differs from the sanitized prefix used in `mcp__<sanitized_server>_<tool>`
-	 * tool names — filter by this raw name, not by tool-name prefix matching.
-	 */
+	/** Server name as declared in the MCP config. */
 	server: string;
 	/** JSON-RPC method (e.g. `notifications/tools/list_changed`, or server-custom). */
 	method: string;
@@ -829,21 +649,6 @@ export interface UserBashEvent {
 	/** The command to execute */
 	command: string;
 	/** True if !! prefix was used (excluded from LLM context) */
-	excludeFromContext: boolean;
-	/** Current working directory */
-	cwd: string;
-}
-
-// ============================================================================
-// User Python Events
-// ============================================================================
-
-/** Fired when user executes Python code via $ or $$ prefix */
-export interface UserPythonEvent {
-	type: "user_python";
-	/** The Python code to execute */
-	code: string;
-	/** True if $$ prefix was used (excluded from LLM context) */
 	excludeFromContext: boolean;
 	/** Current working directory */
 	cwd: string;
@@ -871,7 +676,7 @@ export interface ToolApprovalRequestedEvent {
 	toolCallId: string;
 	toolName: string;
 	reason?: string;
-	approvalMode: ApprovalMode;
+	approvalMode: IpythonApprovalMode;
 }
 
 export interface ToolApprovalResolvedEvent {
@@ -883,142 +688,27 @@ export interface ToolApprovalResolvedEvent {
 	reason?: string;
 }
 
-interface ToolCallEventBase {
+/** Fired before the fixed IPython cell executes. Can block or replace its code. */
+export interface IpythonToolCallEvent {
 	type: "tool_call";
+	toolName: "ipython";
 	toolCallId: string;
+	input: { code: string };
 }
 
-export interface BashToolCallEvent extends ToolCallEventBase {
-	toolName: "bash";
-	input: BashToolInput;
-}
-
-export interface ReadToolCallEvent extends ToolCallEventBase {
-	toolName: "read";
-	input: ReadToolInput;
-}
-
-export interface EditToolCallEvent extends ToolCallEventBase {
-	toolName: "edit";
-	input: Record<string, unknown>;
-}
-
-export interface WriteToolCallEvent extends ToolCallEventBase {
-	toolName: "write";
-	input: WriteToolInput;
-}
-
-export interface GrepToolCallEvent extends ToolCallEventBase {
-	toolName: "grep";
-	input: GrepToolInput;
-}
-
-export interface GlobToolCallEvent extends ToolCallEventBase {
-	toolName: "glob";
-	input: GlobToolInput;
-}
-
-export interface CustomToolCallEvent extends ToolCallEventBase {
-	toolName: string;
-	input: Record<string, unknown>;
-}
-
-/** Fired before a tool executes. Can block. */
-export type ToolCallEvent =
-	| BashToolCallEvent
-	| ReadToolCallEvent
-	| EditToolCallEvent
-	| WriteToolCallEvent
-	| GrepToolCallEvent
-	| GlobToolCallEvent
-	| CustomToolCallEvent;
-
-interface ToolResultEventBase {
+/** Fired after the fixed IPython cell executes. Can modify its result. */
+export interface IpythonToolResultEvent {
 	type: "tool_result";
+	toolName: "ipython";
 	toolCallId: string;
-	input: Record<string, unknown>;
+	input: { code: string };
 	content: (TextContent | ImageContent)[];
+	details: unknown;
 	isError: boolean;
 }
 
-export interface BashToolResultEvent extends ToolResultEventBase {
-	toolName: "bash";
-	details: BashToolDetails | undefined;
-}
-
-export interface ReadToolResultEvent extends ToolResultEventBase {
-	toolName: "read";
-	details: ReadToolDetails | undefined;
-}
-
-export interface EditToolResultEvent extends ToolResultEventBase {
-	toolName: "edit";
-	details: EditToolDetails | undefined;
-}
-
-export interface WriteToolResultEvent extends ToolResultEventBase {
-	toolName: "write";
-	details: undefined;
-}
-
-export interface GrepToolResultEvent extends ToolResultEventBase {
-	toolName: "grep";
-	details: GrepToolDetails | undefined;
-}
-
-export interface GlobToolResultEvent extends ToolResultEventBase {
-	toolName: "glob";
-	details: GlobToolDetails | undefined;
-}
-
-export interface CustomToolResultEvent extends ToolResultEventBase {
-	toolName: string;
-	details: unknown;
-}
-
-/** Fired after a tool executes. Can modify result. */
-export type ToolResultEvent =
-	| BashToolResultEvent
-	| ReadToolResultEvent
-	| EditToolResultEvent
-	| WriteToolResultEvent
-	| GrepToolResultEvent
-	| GlobToolResultEvent
-	| CustomToolResultEvent;
-
-/**
- * Type guard for narrowing ToolCallEvent by tool name.
- *
- * Built-in tools narrow automatically (no type params needed):
- * ```ts
- * if (isToolCallEventType("bash", event)) {
- *   event.input.command;  // string
- * }
- * ```
- *
- * Custom tools require explicit type parameters:
- * ```ts
- * if (isToolCallEventType<"my_tool", MyToolInput>("my_tool", event)) {
- *   event.input.action;  // typed
- * }
- * ```
- *
- * Note: Direct narrowing via `event.toolName === "bash"` doesn't work because
- * CustomToolCallEvent.toolName is `string` which overlaps with all literals.
- */
-export function isToolCallEventType(toolName: "bash", event: ToolCallEvent): event is BashToolCallEvent;
-export function isToolCallEventType(toolName: "read", event: ToolCallEvent): event is ReadToolCallEvent;
-export function isToolCallEventType(toolName: "edit", event: ToolCallEvent): event is EditToolCallEvent;
-export function isToolCallEventType(toolName: "write", event: ToolCallEvent): event is WriteToolCallEvent;
-export function isToolCallEventType(toolName: "grep", event: ToolCallEvent): event is GrepToolCallEvent;
-export function isToolCallEventType(toolName: "glob", event: ToolCallEvent): event is GlobToolCallEvent;
-export function isToolCallEventType<TName extends string, TInput extends Record<string, unknown>>(
-	toolName: TName,
-	event: ToolCallEvent,
-): event is ToolCallEvent & { toolName: TName; input: TInput };
-export function isToolCallEventType(toolName: string, event: ToolCallEvent): boolean {
-	return event.toolName === toolName;
-}
+export type ToolCallEvent = IpythonToolCallEvent;
+export type ToolResultEvent = IpythonToolResultEvent;
 
 /** Union of all event types */
 export type ExtensionEvent =
@@ -1051,7 +741,6 @@ export type ExtensionEvent =
 	| CredentialDisabledEvent
 	| McpNotificationEvent
 	| UserBashEvent
-	| UserPythonEvent
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent
@@ -1084,12 +773,6 @@ export interface InputEventResult {
 export interface UserBashEventResult {
 	/** Full replacement: extension handled execution, use this result */
 	result?: BashResult;
-}
-
-/** Result from user_python event handler */
-export interface UserPythonEventResult {
-	/** Full replacement: extension handled execution, use this result */
-	result?: PythonResult;
 }
 
 export type { ToolResultEventResult } from "../shared-events";
@@ -1135,6 +818,78 @@ export type AssistantThinkingRenderer = (
 ) => Component | undefined;
 
 // ============================================================================
+// IPython Extension Contracts
+// ============================================================================
+
+/** Immutable metadata for the active cell that issued an extension host request. */
+export interface IpythonExtensionCellMetadata {
+	readonly id: string;
+	readonly sequence: number;
+	readonly origin: "model" | "direct";
+	readonly authority: "trusted-cell";
+}
+
+/** Narrow capability context for a namespaced IPython extension host handler. */
+export interface IpythonExtensionHostRequest {
+	readonly data: Readonly<Record<string, unknown>>;
+	readonly requestId: string;
+	readonly executionId: string;
+	readonly commId: string;
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly cell: IpythonExtensionCellMetadata;
+	readonly signal: AbortSignal;
+	publishProgress(message: string, data?: Readonly<Record<string, unknown>>): Promise<void>;
+	allocateArtifact(request: IpythonHostArtifactRequest): Promise<IpythonHostArtifact>;
+}
+
+/** A namespaced host handler returns only structured reply data. */
+export type IpythonExtensionHostHandler = (
+	request: IpythonExtensionHostRequest,
+) => Readonly<Record<string, unknown>> | Promise<Readonly<Record<string, unknown>>>;
+
+/** One non-plain MIME value from a display or result event. */
+export interface IpythonMimeItem {
+	readonly kind: "display" | "result";
+	readonly mimeType: string;
+	readonly value: unknown;
+	readonly metadata?: Readonly<Record<string, unknown>>;
+	readonly transient?: Readonly<Record<string, unknown>>;
+	readonly update?: boolean;
+}
+
+/** Renders one rich MIME item while the caller retains safe-text fallback ownership. */
+export type IpythonMimeRenderer = (input: {
+	readonly presentation: IpythonCellPresentation;
+	readonly item: IpythonMimeItem;
+	readonly safeText: IpythonCellText;
+	readonly theme: Theme;
+}) => Component | undefined;
+
+/** A host handler declaration owned by one loaded extension. */
+export interface IpythonExtensionHostHandlerRegistration {
+	readonly namespace: string;
+	readonly operation: string;
+	readonly handler: IpythonExtensionHostHandler;
+}
+
+/** A rich MIME renderer declaration owned by one loaded extension. */
+export interface IpythonMimeRendererRegistration {
+	readonly mimeType: string;
+	readonly renderer: IpythonMimeRenderer;
+}
+
+/** A host handler declaration with its extension source for registry diagnostics. */
+export interface RegisteredIpythonExtensionHostHandler extends IpythonExtensionHostHandlerRegistration {
+	readonly extensionPath: string;
+}
+
+/** A MIME renderer declaration with its extension source for registry diagnostics. */
+export interface RegisteredIpythonMimeRenderer extends IpythonMimeRendererRegistration {
+	readonly extensionPath: string;
+}
+
+// ============================================================================
 // Command Registration
 // ============================================================================
 
@@ -1173,13 +928,12 @@ export interface ExtensionAPI {
 	/** File logger for error/warning/debug messages */
 	logger: typeof PiLogger;
 
-	/** Injected TypeBox shim for legacy `Type.Object(...)` parameter authoring. */
+	/** Injected zod-backed typebox shim for legacy `Type.Object(...)` parameter authoring. */
 	typebox: typeof TypeBox;
 
-	/** Injected omptype schema builder for extension tools. */
-	arktype: typeof ArkType;
-
-	/** Injected Zod-compatible omptype builder for extension tools. */
+	/** Injected arktype module for arktype-authored extension tools (canonical going forward). */
+	arktype: typeof arktype;
+	/** Injected omptype-backed zod facade for extension tool parameter schemas. */
 	zod: typeof zod;
 
 	/** Injected pi-coding-agent exports for accessing SDK utilities */
@@ -1244,15 +998,7 @@ export interface ExtensionAPI {
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
-	on(event: "user_python", handler: ExtensionHandler<UserPythonEvent, UserPythonEventResult>): void;
 	on(event: "mcp_notification", handler: ExtensionHandler<McpNotificationEvent>): void;
-
-	// =========================================================================
-	// Tool Registration
-	// =========================================================================
-
-	/** Register a tool that the LLM can call. */
-	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void;
 
 	// =========================================================================
 	// Command, Shortcut, Flag Registration
@@ -1297,6 +1043,12 @@ export interface ExtensionAPI {
 	// Message Rendering
 	// =========================================================================
 
+	/** Register one handler at extension.<namespace>.<operation>. */
+	registerIpythonHostHandler(namespace: string, operation: string, handler: IpythonExtensionHostHandler): void;
+
+	/** Register a renderer for one non-plain IPython MIME type. */
+	registerIpythonMimeRenderer(mimeType: string, renderer: IpythonMimeRenderer): void;
+
 	/** Register a custom renderer for CustomMessageEntry. */
 	registerMessageRenderer<T = unknown>(customType: string, renderer: MessageRenderer<T>): void;
 
@@ -1330,15 +1082,6 @@ export interface ExtensionAPI {
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
-
-	/** Get the list of currently active tool names. */
-	getActiveTools(): string[];
-
-	/** Get all configured tools (built-in + extension tools) with schema and source metadata. */
-	getAllTools(): ToolInfo[];
-
-	/** Set the active tools by name. */
-	setActiveTools(toolNames: string[]): Promise<void>;
 
 	/** Get available slash commands in the current session. */
 	getCommands(): SlashCommandInfo[];
@@ -1408,14 +1151,6 @@ export interface ExtensionAPI {
 	 * });
 	 */
 	registerProvider(name: string, config: ProviderConfig): void;
-
-	/**
-	 * Unregister a provider previously registered by an extension.
-	 *
-	 * Removes extension-provided models and restores overridden built-in models.
-	 * Has no effect when the provider is not registered.
-	 */
-	unregisterProvider(name: string): void;
 
 	/** Shared event bus for extension communication. */
 	events: EventBus;
@@ -1498,14 +1233,6 @@ export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
 // Loaded Extension Types
 // ============================================================================
 
-export interface RegisteredTool<TParams extends TSchema = TSchema, TDetails = unknown> {
-	definition: ToolDefinition<TParams, TDetails>;
-	extensionPath: string;
-}
-
-/** Internal observer invoked when an already-loaded extension registers or replaces a tool. */
-export type ToolRegistrationListener = (toolName: string) => void;
-
 export interface ExtensionFlag {
 	name: string;
 	description?: string;
@@ -1540,13 +1267,7 @@ export type SendUserMessageHandler = (
 
 export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
 
-export type GetActiveToolsHandler = () => string[];
-
-export type GetAllToolsHandler = () => ToolInfo[];
-
 export type GetCommandsHandler = () => SlashCommandInfo[];
-
-export type SetActiveToolsHandler = (toolNames: string[]) => Promise<void>;
 
 export type SetModelHandler = (model: Model) => Promise<boolean>;
 
@@ -1563,10 +1284,6 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
-	/** Queue a provider registration until initialization, then apply it immediately. */
-	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
-	/** Remove a queued or initialized provider registration. */
-	unregisterProvider(name: string, sourceId: string): void;
 }
 
 /** Action implementations for ExtensionAPI methods. */
@@ -1575,9 +1292,6 @@ export interface ExtensionActions {
 	sendUserMessage: SendUserMessageHandler;
 	appendEntry: AppendEntryHandler;
 	setLabel: (targetId: string, label: string | undefined) => void;
-	getActiveTools: GetActiveToolsHandler;
-	getAllTools: GetAllToolsHandler;
-	setActiveTools: SetActiveToolsHandler;
 	getCommands: GetCommandsHandler;
 	setModel: SetModelHandler;
 	getThinkingLevel: GetThinkingLevelHandler;
@@ -1627,10 +1341,10 @@ export interface Extension {
 	resolvedPath: string;
 	label?: string;
 	handlers: Map<string, HandlerFn[]>;
-	tools: Map<string, RegisteredTool<any, any>>;
-	toolRegistrationListeners?: Set<ToolRegistrationListener>;
 	assistantThinkingRenderers: AssistantThinkingRenderer[];
 	messageRenderers: Map<string, MessageRenderer>;
+	ipythonHostHandlers?: IpythonExtensionHostHandlerRegistration[];
+	ipythonMimeRenderers?: IpythonMimeRendererRegistration[];
 	commands: Map<string, RegisteredCommand>;
 	flags: Map<string, ExtensionFlag>;
 	shortcuts: Map<KeyId, ExtensionShortcut>;

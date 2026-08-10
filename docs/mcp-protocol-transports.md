@@ -14,7 +14,7 @@ Covers:
 - Timeout, cancellation, and auth-refresh behavior
 - Error propagation and malformed payload handling
 - Transport selection boundaries (`stdio` vs `http` vs `sse`)
-- Which reconnect/retry responsibilities are transport-level vs manager/tool-bridge-level
+- Which reconnect/retry responsibilities are transport-level vs manager/capability-service-level
 
 Does not cover extension authoring UX or command UI.
 
@@ -261,11 +261,11 @@ Current transport implementations do **not**:
 
 They fail fast and propagate errors.
 
-## Manager/tool-bridge level
+## Manager/capability-service level
 
 `MCPManager` wires `transport.onClose` for managed connections and runs `reconnectServer(name)` when a transport closes unexpectedly. Reconnect tears down the stale connection, re-resolves auth/config values, retries with backoff (`500`, `1000`, `2000`, `4000` ms), reloads tools, and preserves stale tools while reconnecting.
 
-`MCPTool` and `DeferredMCPTool` also attempt one reconnect + retry for retriable connection errors during a tool call. This is tool availability recovery, not transport-level retry.
+The host MCP capability service also attempts one reconnect and retry for retriable connection errors during a typed call. This is capability recovery, not transport-level retry.
 
 ## Failure scenarios summary
 

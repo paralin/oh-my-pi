@@ -29,10 +29,10 @@ describe("issue #973: legacy Pi plugin imports", () => {
 		fs.writeFileSync(
 			extensionPath,
 			[
-				'import { isToolCallEventType as legacyRoot } from "@mariozechner/pi-coding-agent";',
-				'import { isToolCallEventType as legacyExtensions } from "@mariozechner/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernRoot } from ${JSON.stringify(currentPiCodingAgentPath)};`,
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
+				'import { ExtensionRuntimeNotInitializedError as legacyRoot } from "@mariozechner/pi-coding-agent";',
+				'import { ExtensionRuntimeNotInitializedError as legacyExtensions } from "@mariozechner/pi-coding-agent/extensibility/extensions";',
+				`import { ExtensionRuntimeNotInitializedError as modernRoot } from ${JSON.stringify(currentPiCodingAgentPath)};`,
+				`import { ExtensionRuntimeNotInitializedError as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
 				"",
 				'if (legacyRoot !== modernRoot) throw new Error("legacy root import did not remap");',
 				'if (legacyExtensions !== modernExtensions) throw new Error("legacy extension import did not remap");',

@@ -3,7 +3,6 @@
  *
  * Subagents can call this tool incrementally or terminally depending on `type`.
  */
-import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { TSchema } from "@oh-my-pi/pi-ai/types";
 import {
 	dereferenceJsonSchema,
@@ -13,11 +12,16 @@ import {
 	tryEnforceStrictSchema,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
-import type { ToolSession } from ".";
 import { buildOutputValidator, formatAllValidationIssues } from "./output-schema-validator";
 
 const YIELD_RESULT_FORMAT_HINT =
 	'Submit success as {"result":{"data":<your output>}} or failure as {"result":{"error":"message"}}.';
+
+export const YIELD_TOOL_NAME = "yield";
+export const YIELD_TOOL_DESCRIPTION =
+	"Submit subagent output. Omit `type` for the usual final structured result.\n\n" +
+	'Pass `type: ["section"]` to submit an incremental, non-terminal section that accumulates. Pass `type: "result"` to finalize; when `data` is omitted, your last assistant turn becomes the raw final result.\n' +
+	'Use `result: { data: <your output> }` for success, or `result: { error: "message" }` for failure. Keep the `result` wrapper.';
 
 export interface YieldDetails {
 	/** Successful result payload, or omitted when `useLastTurn` requests last-turn extraction. */
@@ -209,18 +213,17 @@ const MAX_SCHEMA_RETRIES = 3;
  */
 const MAX_EMPTY_RESULT_RETRIES = 3;
 
-export class YieldTool implements AgentTool<TSchema, YieldDetails> {
-	readonly name = "yield";
-	readonly approval = "read" as const;
-	readonly label = "Submit Result";
-	readonly description =
-		"Submit subagent output. Omit `type` for the usual final structured result.\n\n" +
-		'Pass `type: ["section"]` to submit an incremental, non-terminal section that accumulates. Pass `type: "result"` to finalize; when `data` is omitted, your last assistant turn becomes the raw final result.\n' +
-		'Use `result: { data: <your output> }` for success, or `result: { error: "message" }` for failure. Keep the `result` wrapper.';
-	readonly parameters: TSchema;
-	strict = true;
-	readonly intent = "omit" as const;
-	lenientArgValidation = true;
+export interface YieldOperationResult {
+	content: [{ type: "text"; text: string }];
+	details: YieldDetails;
+}
+
+export interface YieldServiceOptions {
+	outputSchema?: unknown;
+}
+
+export class YieldService {
+	readonly schema: TSchema;
 
 	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	readonly #validateSection?: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult>;
@@ -230,7 +233,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	#schemaValidationFailures = 0;
 	#emptyResultFailures = 0;
 
-	constructor(session: ToolSession) {
+	constructor(options: YieldServiceOptions = {}) {
 		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let validateSection: ReadonlyMap<string, (value: unknown) => JsonSchemaValidationResult> | undefined;
 		let rejectUnknownSections = false;
@@ -244,7 +247,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				jsonSchema: normalizedSchema,
 				normalized,
 				error: schemaError,
-			} = buildOutputValidator(session.outputSchema);
+			} = buildOutputValidator(options.outputSchema);
 			if (validator) {
 				validate = value => validator.validate(value);
 				validateSection = validator.validateSection;
@@ -253,7 +256,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				isKnownSection = label => validator.isKnownSection(label);
 			}
 
-			const schemaHint = formatSchema(normalizedSchema ?? session.outputSchema);
+			const schemaHint = formatSchema(normalizedSchema ?? options.outputSchema);
 			const schemaDescription = schemaError
 				? `Structured JSON output (output schema invalid; accepting unconstrained object): ${schemaError}`
 				: `Structured output matching the schema:\n${schemaHint}`;
@@ -264,11 +267,9 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedSchema);
 				} else {
 					sanitizedSchema = normalizedSchema;
-					this.strict = false;
 				}
 			} else if (!schemaError && normalized === true) {
 				sanitizedSchema = {};
-				this.strict = false;
 			}
 
 			let dataSchema: Record<string, unknown>;
@@ -282,7 +283,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				}
 				dataSchema = withSectionVariants(resolved);
 			} else {
-				this.strict = false;
 				dataSchema = looseRecordSchema(
 					schemaError ? schemaDescription : "Structured JSON output (no schema specified)",
 				);
@@ -296,7 +296,6 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 				looseRecordSchema(`Structured JSON output (schema processing failed: ${errorMsg})`),
 			);
 			validate = undefined;
-			this.strict = false;
 		}
 
 		this.#validate = validate;
@@ -304,16 +303,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#rejectUnknownSections = rejectUnknownSections;
 		this.#knownSectionLabels = knownSectionLabels;
 		this.#isKnownSection = isKnownSection;
-		this.parameters = parameters;
+		this.schema = parameters;
 	}
 
-	async execute(
-		_toolCallId: string,
-		params: unknown,
-		_signal?: AbortSignal,
-		_onUpdate?: AgentToolUpdateCallback<YieldDetails>,
-		_context?: AgentToolContext,
-	): Promise<AgentToolResult<YieldDetails>> {
+	async submit(params: unknown): Promise<YieldOperationResult> {
 		const raw = params as Record<string, unknown>;
 		const rawResult = raw.result;
 		if (!rawResult || typeof rawResult !== "object" || Array.isArray(rawResult)) {

@@ -1,87 +1,14 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import { Settings } from "../../src/config/settings";
-import * as taskDiscovery from "../../src/task/discovery";
-import { TaskTool } from "../../src/task/index";
+import { describe, expect, it } from "bun:test";
+import initAgentPrompt from "../../src/prompts/agents/init.md" with { type: "text" };
 import { isScoutSpawnable } from "../../src/task/spawn-policy";
-import type { AgentDefinition } from "../../src/task/types";
 import { getTaskSchema } from "../../src/task/types";
-import type { ToolSession } from "../../src/tools";
 
-const factFinderAgent = {
-	name: "fact-finder",
-	description: "Find facts.",
-	systemPrompt: "Find facts.",
-	source: "project",
-} satisfies AgentDefinition;
-
-const oracleAgent = {
-	name: "oracle",
-	description: "Answer hard questions.",
-	systemPrompt: "Answer hard questions.",
-	source: "bundled",
-} satisfies AgentDefinition;
-
-function makeSession(spawns: string): ToolSession {
-	const settings = Settings.isolated({
-		"async.enabled": false,
-		"task.batch": true,
-		"task.isolation.mode": "none",
-	});
-	return {
-		cwd: process.cwd(),
-		hasUI: false,
-		settings,
-		getSessionFile: () => null,
-		getSessionSpawns: () => spawns,
-	};
-}
-
-describe("task spawn policy surfaces", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
+describe("task spawn policy", () => {
 	it("uses the first allowed spawn as the schema default", () => {
 		const schema = getTaskSchema({ isolationEnabled: false, batchEnabled: false, defaultAgent: "fact-finder" });
 		const parsed = schema({ task: "check" });
 
 		expect(parsed).toEqual({ agent: "fact-finder", task: "check" });
-	});
-
-	it("filters the agent list to the restricted spawn policy in the description", async () => {
-		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
-			agents: [factFinderAgent, oracleAgent],
-			projectAgentsDir: null,
-		});
-
-		const tool = await TaskTool.create(makeSession("fact-finder"));
-		const description = tool.description;
-
-		expect(description).toContain("### fact-finder");
-		expect(description).not.toContain("### oracle");
-	});
-
-	it("refreshes implicit model-role agents in the description without recreating the tool", async () => {
-		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
-			agents: [
-				{
-					name: "task",
-					description: "General-purpose worker.",
-					systemPrompt: "Complete the task.",
-					source: "bundled",
-					model: ["@task"],
-				},
-			],
-			projectAgentsDir: null,
-		});
-		const session = makeSession("*");
-		const tool = await TaskTool.create(session);
-
-		session.settings.override("modelRoles", { luna: "github-copilot/gpt-5.6-luna:high" });
-		expect(tool.description).toContain("### luna");
-
-		session.settings.override("modelRoles", {});
-		expect(tool.description).not.toContain("### luna");
 	});
 });
 
@@ -111,45 +38,9 @@ describe("isScoutSpawnable", () => {
 	});
 });
 
-describe("task tool description scout gating", () => {
-	afterEach(() => {
-		vi.restoreAllMocks();
-	});
-
-	async function renderDescription(disabledScout: boolean): Promise<string> {
-		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
-			agents: [
-				{ name: "scout", description: "Read-only scout.", systemPrompt: "Scout.", source: "bundled" },
-				{ name: "reviewer", description: "Reviewer.", systemPrompt: "Review.", source: "bundled" },
-			],
-			projectAgentsDir: null,
-		});
-		const settings = Settings.isolated({
-			"async.enabled": false,
-			"task.batch": true,
-			"task.isolation.mode": "none",
-			...(disabledScout ? { "task.disabledAgents": ["scout"] } : {}),
-		});
-		const tool = await TaskTool.create({
-			cwd: process.cwd(),
-			hasUI: false,
-			settings,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-		} as unknown as ToolSession);
-		return tool.description;
-	}
-
-	it("mentions scout in the task description when scout is enabled", async () => {
-		expect(await renderDescription(false)).toContain("scout");
-	});
-
-	it("omits every scout reference from the task description when scout is disabled", async () => {
-		const description = await renderDescription(true);
-		expect(description).not.toContain("scout");
-		// The read-only agent remains listed as an available agent (the spawn
-		// policy only filters disabledAgents, so reviewer stays); only the
-		// hard-coded scout guidance is dropped.
-		expect(description).toContain("### reviewer");
+describe("bundled agent prompt scout gating", () => {
+	it("does not hard-code scout in the init agent prompt", () => {
+		expect(initAgentPrompt.toLowerCase()).not.toContain("scout");
+		expect(initAgentPrompt).toContain("multiple research agents");
 	});
 });

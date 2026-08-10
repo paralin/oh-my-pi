@@ -21,9 +21,8 @@ interface CapturedHandlers {
 	before_agent_start?: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>;
 }
 
-function buildHarness(): { handlers: CapturedHandlers; activeTools: string[] } {
+function buildHarness(): { handlers: CapturedHandlers } {
 	const handlers: CapturedHandlers = {};
-	const activeTools: string[] = [];
 	const api = {
 		appendEntry(): void {},
 		exec: async () => ({ code: 0, stderr: "", stdout: "" }),
@@ -32,16 +31,11 @@ function buildHarness(): { handlers: CapturedHandlers; activeTools: string[] } {
 		},
 		registerCommand(): void {},
 		registerShortcut(): void {},
-		registerTool(): void {},
-		getActiveTools: (): string[] => [...activeTools],
-		setActiveTools: async (names: string[]): Promise<void> => {
-			activeTools.splice(0, activeTools.length, ...names);
-		},
 		sendUserMessage(): void {},
 		sendMessage(): void {},
 	} as unknown as ExtensionAPI;
 	createAutoresearchExtension(api);
-	return { handlers, activeTools };
+	return { handlers };
 }
 
 function makeCtx(cwd: string): ExtensionContext {

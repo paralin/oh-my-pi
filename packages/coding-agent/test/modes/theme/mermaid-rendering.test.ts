@@ -8,15 +8,6 @@ import {
 	setMarkdownMermaidRendering,
 	setThemeInstance,
 } from "../../../src/modes/theme/theme";
-import { buildSystemPrompt } from "../../../src/system-prompt";
-
-const workspaceTree = {
-	rootPath: "/tmp/project",
-	rendered: "",
-	truncated: false,
-	totalLines: 0,
-	agentsMdFiles: [],
-};
 
 function stripAnsi(text: string): string {
 	return text.replace(/\x1b\[[0-9;]*m/g, "");
@@ -34,18 +25,6 @@ afterEach(() => {
 });
 
 describe("Mermaid rendering setting", () => {
-	it("removes the Mermaid prompt note when rendering is disabled", async () => {
-		const { systemPrompt } = await buildSystemPrompt({
-			renderMermaid: false,
-			contextFiles: [],
-			skills: [],
-			toolNames: [],
-			workspaceTree,
-		});
-
-		expect(systemPrompt.join("\n")).not.toContain("```mermaid");
-	});
-
 	it("falls back to a highlighted code fence when rendering is disabled", () => {
 		setMarkdownMermaidRendering(false);
 

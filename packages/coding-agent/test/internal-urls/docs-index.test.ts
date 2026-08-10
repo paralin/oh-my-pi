@@ -8,9 +8,9 @@ function embed(files: readonly string[], maintainer: readonly string[], bodies: 
 	return `${header}\n${Buffer.from(gzipSync(Buffer.from(JSON.stringify(bodies)))).toString("base64")}`;
 }
 
-const files = ["agent.md", "tools/read.md"];
-const maintainer = ["tools/read.md"];
-const bodies = ["agent body", "read body"];
+const files = ["agent.md", "ipython.md"];
+const maintainer = ["ipython.md"];
+const bodies = ["agent body", "ipython body"];
 const embedPayload = embed(files, maintainer, bodies);
 
 // The embed path only runs in compiled binaries / the npm bundle; dev tests
@@ -30,7 +30,7 @@ describe("decodeDocsIndex (embedded docs path)", () => {
 		const index = decodeDocsIndex(embedPayload);
 		expect(index).not.toBeNull();
 		expect(await index?.getBody("agent.md")).toBe("agent body");
-		expect(await index?.getBody("tools/read.md")).toBe("read body");
+		expect(await index?.getBody("ipython.md")).toBe("ipython body");
 		expect(await index?.getBody("missing.md")).toBeUndefined();
 	});
 

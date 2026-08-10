@@ -1,8 +1,6 @@
-import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { getBlobsDir, isEnoent, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, logger, type postmortem, VERSION } from "@oh-my-pi/pi-utils";
 import {
 	type Agent,
 	type AgentSideConnection,
@@ -55,12 +53,10 @@ import { runExtensionCompact } from "../../extensibility/extensions/compact-hand
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
-import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
-import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -70,10 +66,7 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { refreshAgentDiscovery } from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
-import { normalizeLocalScheme } from "../../tools/path-utils";
-import { ToolError } from "../../tools/tool-errors";
 import {
 	DEFAULT_TTS_LOCAL_MODEL_KEY,
 	DEFAULT_TTS_VOICE,
@@ -85,15 +78,12 @@ import { createAcpClientBridge } from "./acp-client-bridge";
 import {
 	extractAssistantMessageText,
 	mapAgentSessionEventToAcpSessionUpdates,
+	mapHistoricalAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
-const ACP_PLAN_MODE_ID = "plan";
-const DEFAULT_PLAN_FILE_URL = "local://PLAN.md";
-const APPROVE_OPTION = "Approve and execute";
-const REFINE_OPTION = "Refine plan";
 const MODE_CONFIG_ID = "mode";
 const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
@@ -164,10 +154,6 @@ function isPromptTurnInFlight(turn: PromptTurnState | undefined): turn is Prompt
 type ManagedSessionRecord = {
 	session: AgentSession;
 	mcpManager: MCPManager | undefined;
-	// Ordered queue of MCP tool refreshes for this record. Rebuilt per
-	// `#configureMcpServers` call; drained on reconfigure so a stale in-flight
-	// refresh can never land after a newer configuration's tools.
-	mcpRefreshChain: Promise<void> | undefined;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: PromptQueueState;
 	liveMessageId: string | undefined;
@@ -474,7 +460,6 @@ export class AcpAgent implements Agent {
 	#initialSession: AgentSession | undefined;
 	#createSession: CreateAcpSession;
 	#sessions = new Map<string, ManagedSessionRecord>();
-	#planPreviousTools = new WeakMap<AgentSession, string[]>();
 	#modeTransitionTails = new WeakMap<AgentSession, Promise<void>>();
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
@@ -1154,7 +1139,6 @@ export class AcpAgent implements Agent {
 		return {
 			session,
 			mcpManager: undefined,
-			mcpRefreshChain: undefined,
 			promptTurn: undefined,
 			promptQueue: { promise: Promise.resolve(), release: undefined },
 			liveMessageId: undefined,
@@ -1634,21 +1618,12 @@ export class AcpAgent implements Agent {
 		return `${model.provider}/${model.id}`;
 	}
 
-	#getAvailableModes(session: AgentSession): Array<{ id: string; name: string; description: string }> {
-		const modes = [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
-		if (session.settings.get("plan.enabled")) {
-			modes.push({
-				id: ACP_PLAN_MODE_ID,
-				name: "Plan",
-				description: "Read-only planning mode that drafts a plan to a markdown file before any code changes",
-			});
-		}
-		void session;
-		return modes;
+	#getAvailableModes(_session: AgentSession): Array<{ id: string; name: string; description: string }> {
+		return [{ id: ACP_DEFAULT_MODE_ID, name: "Default", description: "Standard ACP headless mode" }];
 	}
 
-	#getCurrentModeId(session: AgentSession): string {
-		return session.getPlanModeState()?.enabled ? ACP_PLAN_MODE_ID : ACP_DEFAULT_MODE_ID;
+	#getCurrentModeId(_session: AgentSession): string {
+		return ACP_DEFAULT_MODE_ID;
 	}
 
 	async #applyModeChange(session: AgentSession, modeId: string): Promise<void> {
@@ -1663,212 +1638,8 @@ export class AcpAgent implements Agent {
 	}
 
 	async #applyModeChangeSerial(session: AgentSession, modeId: string): Promise<void> {
-		const availableModes = this.#getAvailableModes(session);
-		if (!availableModes.some(mode => mode.id === modeId)) {
-			throw new Error(`Unsupported ACP mode: ${modeId}`);
-		}
-		const goalMode = session.getGoalModeState();
-		if (modeId === ACP_PLAN_MODE_ID && goalMode && (goalMode.enabled || goalMode.goal.status === "paused")) {
-			throw new Error("Cannot enter plan mode while goal mode is active. Exit goal mode first.");
-		}
-		if (modeId === ACP_PLAN_MODE_ID) {
-			const previous = session.getPlanModeState();
-			const previousTools = session.getEnabledToolNames();
-			if (!this.#planPreviousTools.has(session)) this.#planPreviousTools.set(session, previousTools);
-			session.setPlanModeState({
-				enabled: true,
-				planFilePath: previous?.planFilePath ?? DEFAULT_PLAN_FILE_URL,
-				workflow: previous?.workflow ?? "parallel",
-				reentry: previous !== undefined,
-			});
-			try {
-				await session.setActiveToolsByName(
-					session.hasBuiltInTool("goal") ? previousTools.filter(name => name !== "goal") : previousTools,
-				);
-				const currentGoal = session.getGoalModeState();
-				if (currentGoal && (currentGoal.enabled || currentGoal.goal.status === "paused")) {
-					session.setPlanModeState(previous);
-					if (!previous) this.#planPreviousTools.delete(session);
-					await session.setActiveToolsByName(previousTools);
-					throw new Error("Cannot enter plan mode while goal mode is active. Exit goal mode first.");
-				}
-			} catch (error) {
-				session.setPlanModeState(previous);
-				if (!previous) this.#planPreviousTools.delete(session);
-				throw error;
-			}
-			session.setPlanProposalHandler?.(title => this.#handleAcpPlanProposal(session, title));
-		} else {
-			const previous = session.getPlanModeState();
-			session.setPlanProposalHandler?.(null);
-			session.setPlanModeState(undefined);
-			try {
-				const previousTools = this.#planPreviousTools.get(session);
-				if (previousTools) await session.setActiveToolsByName(previousTools);
-			} catch (error) {
-				session.setPlanModeState(previous);
-				if (previous?.enabled) {
-					session.setPlanProposalHandler?.(title => this.#handleAcpPlanProposal(session, title));
-				}
-				throw error;
-			}
-			this.#planPreviousTools.delete(session);
-		}
-	}
-
-	/**
-	 * Plan-proposal handler installed while ACP plan mode is active. The agent
-	 * submits the finalized plan by writing its `<slug>`/title to
-	 * `xd://propose`; this handler validates the plan file, normalizes the
-	 * title, asks the ACP client to confirm (via `unstable_createElicitation`
-	 * when supported), and on approval keeps the chosen plan path, exits plan
-	 * mode, and notifies the client so the agent regains full tools.
-	 *
-	 * Mirrors `InteractiveMode.#handlePlanProposal` for the parts the agent sees
-	 * (same `PlanApprovalDetails` shape). Clients without form-mode elicitation
-	 * get an auto-approve so plan mode is never stranded — the agent always has
-	 * a way out.
-	 */
-	async #handleAcpPlanProposal(session: AgentSession, title: string): Promise<AgentToolResult<unknown>> {
-		const state = session.getPlanModeState();
-		if (!state?.enabled) {
-			throw new ToolError("Plan mode is not active.");
-		}
-		const {
-			planFilePath,
-			planContent,
-			title: resolvedTitle,
-		} = await resolveApprovedPlan({
-			suppliedTitle: title,
-			statePlanFilePath: state.planFilePath,
-			readPlan: url => this.#readAcpPlanFile(session, url),
-			listPlanFiles: () => this.#listAcpLocalPlanFiles(session),
-		});
-		const approved = await this.#requestAcpPlanApprovalChoice(session.sessionId, resolvedTitle, planContent);
-		const details: PlanApprovalDetails = {
-			planFilePath,
-			title: resolvedTitle,
-			planExists: true,
-		};
-		if (!approved) {
-			// Rejection keeps plan mode active for another planning turn. Promote the
-			// reviewed path into plan-mode state so the next `#buildPlanModeMessage()`
-			// targets the plan just reviewed, not the stale state path.
-			if (state.planFilePath !== planFilePath) {
-				session.setPlanModeState({ ...state, planFilePath });
-			}
-			const normalizedTitle = normalizePlanTitle(resolvedTitle).title;
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Plan refinement requested. Update the plan file, then write ${normalizedTitle} to xd://propose again when ready.`,
-					},
-				],
-				details,
-			};
-		}
-		// Approved. Set the plan reference so the next turn injects the plan
-		// content as context (the file keeps its agent-chosen name — no rename),
-		// then exit plan mode so the agent regains full tools.
-		session.setPlanReferencePath(planFilePath);
-		await this.#applyModeChange(session, ACP_DEFAULT_MODE_ID);
-		try {
-			await this.#connection.sessionUpdate({
-				sessionId: session.sessionId,
-				update: this.#buildCurrentModeUpdate(session),
-			});
-			await this.#pushConfigOptionUpdateForSession(session);
-		} catch (error) {
-			logger.warn("Failed to emit mode updates after plan approval", {
-				sessionId: session.sessionId,
-				error,
-			});
-		}
-		return {
-			content: [
-				{
-					type: "text" as const,
-					text: `Plan approved at ${planFilePath}. Plan mode exited; proceed with the implementation.`,
-				},
-			],
-			details,
-		};
-	}
-
-	#resolveAcpPlanFilePath(session: AgentSession, planFilePath: string): string {
-		if (planFilePath.startsWith("local:")) {
-			const normalized = normalizeLocalScheme(planFilePath);
-			return resolveLocalUrlToPath(normalized, {
-				getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
-				getSessionId: () => session.sessionManager.getSessionId(),
-			});
-		}
-		return path.resolve(session.sessionManager.getCwd(), planFilePath);
-	}
-
-	async #readAcpPlanFile(session: AgentSession, planFilePath: string): Promise<string | null> {
-		const resolvedPath = this.#resolveAcpPlanFilePath(session, planFilePath);
-		try {
-			return await Bun.file(resolvedPath).text();
-		} catch (error) {
-			if (isEnoent(error)) {
-				return null;
-			}
-			throw error;
-		}
-	}
-
-	/** `local://` URLs of plan files in the session-local root, newest first —
-	 *  the `resolveApprovedPlan` fallback for a dropped `extra.title`. */
-	async #listAcpLocalPlanFiles(session: AgentSession): Promise<string[]> {
-		const localRoot = this.#resolveAcpPlanFilePath(session, "local://");
-		try {
-			const entries = await fs.readdir(localRoot, { withFileTypes: true });
-			const plans = await Promise.all(
-				entries
-					.filter(entry => entry.isFile() && /plan\.md$/i.test(entry.name))
-					.map(async entry => {
-						const stat = await fs.stat(path.join(localRoot, entry.name)).catch(() => null);
-						return { url: `local://${entry.name}`, mtime: stat?.mtimeMs ?? 0 };
-					}),
-			);
-			return plans.sort((a, b) => b.mtime - a.mtime).map(plan => plan.url);
-		} catch {
-			return [];
-		}
-	}
-
-	/**
-	 * Ask the ACP client to confirm plan approval. Returns `true` only on an
-	 * explicit `APPROVE_OPTION` selection. Refine, dismissal (`undefined`), or
-	 * any unrecognized value falls through to refine semantics — the caller
-	 * keeps plan mode active and surfaces guidance text to the agent. Clients
-	 * without `elicitation.form` support auto-approve because there is no
-	 * confirmation surface available; without that, plan mode would strand
-	 * the agent (the bug this method exists to fix).
-	 */
-	async #requestAcpPlanApprovalChoice(sessionId: string, title: string, planContent: string): Promise<boolean> {
-		const supportsForm = this.#clientCapabilities?.elicitation?.form != null;
-		if (!supportsForm) return true;
-		// Include a short preview of the plan so the user has context in the
-		// dialog. Keep the body bounded — Zed renders elicitation messages
-		// inline and a multi-thousand-line plan blows out the dialog.
-		const previewLines = planContent.split("\n").slice(0, 12).join("\n");
-		const ellipsis = planContent.split("\n").length > 12 ? "\n…" : "";
-		const message = `Approve plan "${title}" and start implementation?\n\n${previewLines}${ellipsis}`;
-		const value = await elicitFromAcpClient(
-			this.#connection,
-			sessionId,
-			"select",
-			message,
-			{ type: "string", enum: [APPROVE_OPTION, REFINE_OPTION] },
-			undefined,
-		);
-		// Approve ONLY on the explicit approve selection. Dismissal, cancel,
-		// timeout, or any other non-approve response falls through to refine
-		// semantics so closing the dialog can never grant write access.
-		return value === APPROVE_OPTION;
+		if (modeId !== ACP_DEFAULT_MODE_ID) throw new Error(`Unsupported ACP mode: ${modeId}`);
+		void session;
 	}
 
 	#buildModeState(session: AgentSession): SessionModeState {
@@ -1973,15 +1744,14 @@ export class AcpAgent implements Agent {
 	/**
 	 * Reload plugin/registry state for an ACP session. Mirrors the interactive
 	 * `/reload-plugins` and `/move` flows: invalidates the plugin-roots cache,
-	 * refreshes task agents, resets the capability cache, refreshes the
-	 * session's slash-command state, then re-advertises commands so the client
-	 * sees newly installed/disabled plugins.
+	 * resets the capability cache, refreshes the session's slash-command state,
+	 * then re-advertises commands so the client sees newly installed/disabled
+	 * plugins.
 	 */
 	async #reloadPluginState(record: ManagedSessionRecord): Promise<void> {
 		const cwd = record.session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await refreshAgentDiscovery(cwd);
 		resetCapabilities();
 		await record.session.refreshSkills();
 		const fileCommands = await loadSlashCommands({ cwd });
@@ -2063,16 +1833,7 @@ export class AcpAgent implements Agent {
 
 	async #findStoredSession(sessionId: string, cwd: string): Promise<StoredSessionInfo | undefined> {
 		const sessions = await this.#listStoredSessions(cwd);
-		const scoped = sessions.find(session => session.id === sessionId);
-		if (scoped) {
-			return scoped;
-		}
-		// The cwd-derived directory only covers sessions stored under the current
-		// naming scheme. Sessions written under a legacy/hashed project directory
-		// (the 17.2.5+ scheme reverted in #7656) live elsewhere, so fall back to a
-		// global by-id scan: the session id is globally unique, and
-		// #openStoredSession reopens the file with the request cwd. See #7779.
-		return this.#findStoredSessionById(sessionId);
+		return sessions.find(session => session.id === sessionId);
 	}
 
 	async #findStoredSessionById(sessionId: string): Promise<StoredSessionInfo | undefined> {
@@ -2228,7 +1989,7 @@ export class AcpAgent implements Agent {
 				) {
 					const args = this.#buildReplayAssistantToolArgs(toolItem);
 					notifications.push(
-						...mapAgentSessionEventToAcpSessionUpdates(
+						...mapHistoricalAgentSessionEventToAcpSessionUpdates(
 							{
 								type: "tool_execution_start",
 								toolCallId: toolItem.id,
@@ -2291,7 +2052,7 @@ export class AcpAgent implements Agent {
 				errorMessage: message.errorMessage,
 			},
 		};
-		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
+		const notifications = mapHistoricalAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
 			cwd,
 			getToolArgs: toolCallId => (toolCallId === message.toolCallId ? options.toolArgs : undefined),
 			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
@@ -2299,7 +2060,7 @@ export class AcpAgent implements Agent {
 		if (options.includeStart === false) {
 			return notifications;
 		}
-		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
+		return [...mapHistoricalAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
 	}
 
 	#buildReplayToolArgs(details: unknown): { path?: string } {
@@ -2400,9 +2161,6 @@ export class AcpAgent implements Agent {
 				setLabel: (targetId, label) => {
 					record.session.sessionManager.appendLabelChange(targetId, label);
 				},
-				getActiveTools: () => record.session.getEnabledToolNames(),
-				getAllTools: () => record.session.getAllToolInfos(),
-				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
 				getCommands: () => getSessionSlashCommands(record.session),
 				setModel: async model => {
 					const apiKey = await record.session.modelRegistry.getApiKey(model);
@@ -2471,42 +2229,13 @@ export class AcpAgent implements Agent {
 		if (record.mcpManager) {
 			await record.mcpManager.disconnectAll();
 		}
-		// Drain any in-flight refresh queued by a previous configuration: a refresh
-		// that already passed its manager guard could otherwise finish applying a
-		// stale tool set after this reconfiguration installs the new one.
-		await record.mcpRefreshChain;
-		record.mcpRefreshChain = undefined;
 		if (servers.length === 0) {
 			record.mcpManager = undefined;
-			await record.session.refreshMCPTools([]);
 			return;
 		}
 
 		const manager = new MCPManager(record.session.sessionManager.getCwd());
-		// MCP servers connect and reconnect independently, so `onToolsChanged` can fire
-		// several times back to back. Each firing is chained onto `record.mcpRefreshChain`
-		// so refreshes apply in order, and each one re-reads `manager.getTools()` at the
-		// time it actually runs rather than the snapshot from when it was queued — so a
-		// refresh can never apply a stale, smaller tool set after a newer one already landed.
-		// The returned promise propagates failures (the initial awaited refresh below must
-		// fail session setup, as the pre-queue code did); the stored chain swallows them
-		// after logging so background firings only warn and the chain never rejects.
-		const enqueueMcpToolsRefresh = (): Promise<void> => {
-			const run = (record.mcpRefreshChain ?? Promise.resolve()).then(async () => {
-				if (record.mcpManager !== manager) return;
-				await record.session.refreshMCPTools(manager.getTools());
-			});
-			record.mcpRefreshChain = run.catch(error => {
-				logger.warn("ACP MCP tool refresh failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
-			return run;
-		};
-		manager.setOnToolsChanged(() => {
-			// Failures are logged once via the stored chain's catch above.
-			enqueueMcpToolsRefresh().catch(() => {});
-		});
+
 		const configs: MCPConfigMap = {};
 		const sources: MCPSourceMap = {};
 		for (const server of servers) {
@@ -2529,7 +2258,6 @@ export class AcpAgent implements Agent {
 		}
 
 		record.mcpManager = manager;
-		await enqueueMcpToolsRefresh();
 	}
 
 	#toMcpConfig(server: McpServer): MCPServerConfig {

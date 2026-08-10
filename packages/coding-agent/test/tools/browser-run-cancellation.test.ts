@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import { postmortem } from "@oh-my-pi/pi-utils";
-import { JsRuntime, type RuntimeHooks } from "../../src/eval/js/shared/runtime";
+import { JsRuntime, type RuntimeHooks } from "../../src/javascript-runtime/runtime";
 import {
 	bindRunFacade,
 	isBrowserRunOwnedRejection,
@@ -479,7 +479,6 @@ describe("browser run cancellation", () => {
 		const hooks: RuntimeHooks = {
 			onText: chunk => state.displays.push(chunk),
 			onDisplay: output => state.displays.push(JSON.stringify(output)),
-			callTool: async () => undefined,
 		};
 		timeoutSignal.addEventListener("abort", () => reject(new Error("Browser code execution timed out after 20ms")), {
 			once: true,

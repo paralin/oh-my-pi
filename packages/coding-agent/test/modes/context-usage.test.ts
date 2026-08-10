@@ -141,12 +141,12 @@ describe("computeNonMessageTokens / computeNonMessageBreakdown memoization", () 
 /**
  * Contract: the Skills category counts only skills actually rendered into the
  * system prompt (mirroring `buildSystemPrompt`'s filter) — hidden/explicit-only
- * skills, and every skill when the `read` tool is absent, contribute zero. The
+ * skills, and every skill when the `ipython` interface is absent, contribute zero. The
  * System-prompt subtraction must not be inflated by unrendered skill metadata
  * and clamped to 0 (issue #6498).
  */
 describe("computeNonMessageBreakdown skills filtering", () => {
-	const readTool = { name: "read", description: "read files", parameters: {} };
+	const ipythonTool = { name: "ipython", description: "run a Python cell", parameters: {} };
 	const hidden = { name: "hidden-skill", description: "X".repeat(4000), filePath: "/s/h.md", hide: true };
 	const visible = { name: "vis", description: "small visible skill", filePath: "/s/v.md" };
 	// First prompt block as rendered: only the visible skill appears.
@@ -157,9 +157,9 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 	}
 
 	it("excludes hidden skills and does not clamp System prompt to 0", () => {
-		const b = computeNonMessageBreakdown(session([readTool], [hidden, visible]));
+		const b = computeNonMessageBreakdown(session([ipythonTool], [hidden, visible]));
 		// Only the visible skill is counted, not the large hidden one.
-		expect(b.skillsTokens).toBe(computeNonMessageBreakdown(session([readTool], [visible])).skillsTokens);
+		expect(b.skillsTokens).toBe(computeNonMessageBreakdown(session([ipythonTool], [visible])).skillsTokens);
 		expect(b.skillsTokens).toBeLessThan(100);
 		expect(b.systemPromptTokens).toBeGreaterThan(0);
 	});

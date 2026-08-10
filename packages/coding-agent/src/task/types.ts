@@ -96,9 +96,7 @@ export interface SubagentLifecyclePayload {
 	index: number;
 	/**
 	 * Spawn runs as a detached background job: the parent turn keeps working
-	 * while this agent runs. Sync task spawns (parent blocked on the call) and
-	 * eval `agent()` bridge spawns (rendered inside their eval cell) leave this
-	 * unset — surfaces like the subagent HUD only list detached spawns.
+	 * while this agent runs. Sync task spawns (parent blocked on the call) leave this unset — surfaces like the subagent HUD only list detached spawns.
 	 */
 	detached?: boolean;
 }
@@ -175,8 +173,8 @@ const taskSchemaBatchNoIsolation = type({
 	"+": "delete",
 });
 export type TaskSchema = typeof taskSchema;
-/** Active task tool parameter schema for the current isolation / batch flags */
-export type TaskToolSchemaInstance = BaseType;
+/** Active Task service schema for the Claude MCP bridge. */
+export type TaskSchemaInstance = BaseType;
 
 const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const taskSchemaCache = new Map<string, BaseType>();
@@ -253,13 +251,13 @@ function createTaskSchema(options: {
 	});
 }
 
-/** Build the task wire schema for the current settings and spawn policy. */
+/** Build the Task MCP schema for the current settings and spawn policy. */
 export function getTaskSchema(options: {
 	isolationEnabled: boolean;
 	batchEnabled: boolean;
 	effortEnabled?: boolean;
 	defaultAgent?: string;
-}): TaskToolSchemaInstance {
+}): TaskSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
 	const effortEnabled = options.effortEnabled ?? false;
 	if (defaultAgent === "task" && !effortEnabled) {
@@ -281,7 +279,7 @@ export function getTaskSchema(options: {
 }
 
 /**
- * Runtime params union over both wire shapes. The model sees exactly one shape
+ * Runtime params union over both MCP shapes. Claude Code sees exactly one shape
  * (`{ context, tasks[] }` when `task.batch` is on, `{ name?, agent?, task }`
  * otherwise); runtime stays permissive so internal callers and stale
  * transcripts using the flat form keep working under either setting.
@@ -327,7 +325,7 @@ export function oneLineLabel(text: string, max = LABEL_MAX): string {
 
 /**
  * Whether an agent at `taskDepth` may still spawn children — i.e. it currently
- * holds the `task` tool. Mirrors the task-tool availability gate;
+ * admits child sessions. Mirrors the child-admission availability gate;
  * `maxRecursionDepth < 0` disables the cap entirely.
  */
 export function canSpawnAtDepth(maxRecursionDepth: number, taskDepth: number): boolean {
@@ -370,12 +368,6 @@ export interface AgentDefinition {
 	output?: unknown;
 	blocking?: boolean;
 	autoloadSkills?: string[];
-	/** When `false`, the agent's `read` tool returns verbatim file content instead of structural summaries. */
-	readSummarize?: boolean;
-	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
-	prewalk?: boolean | string;
-	/** Advisor for spawned sessions of this agent: `true` = advise with the default advisor-role model, string = advise with that model pattern (optional `:level` suffix). Absent/`false` = no advisor. */
-	advisor?: boolean | string;
 	source: AgentSource;
 	filePath?: string;
 }
@@ -464,13 +456,13 @@ export interface AgentProgress {
 		errorMessage: string;
 	};
 	/**
-	 * Snapshot of the most recent `task` tool call's in-flight `TaskToolDetails`,
+	 * Snapshot of the most recent `task` tool call's in-flight `TaskRunDetails`,
 	 * captured from `tool_execution_update`. Lets the parent UI surface live
 	 * nested-subagent progress while this agent is still inside its own `task`
 	 * call. Cleared when the call ends — finalized data lives in
 	 * `extractedToolData.task` after that.
 	 */
-	inflightTaskDetails?: TaskToolDetails;
+	inflightTaskDetails?: TaskRunDetails;
 }
 
 /** Result from a single agent execution */
@@ -544,7 +536,7 @@ export interface SingleResult {
 }
 
 /** Tool details for TUI rendering */
-export interface TaskToolDetails extends Record<string, unknown> {
+export interface TaskRunDetails extends Record<string, unknown> {
 	projectAgentsDir: string | null;
 	results: SingleResult[];
 	totalDurationMs: number;

@@ -23,7 +23,7 @@ _No files to review._
 
 ### Distribution Guidelines
 
-Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
+From IPython, admit reviewer children with `await rlm(...)`; make independent admissions together and collect their replies through `agent_message`.
 {{#when agentCount "==" 1}}Create exactly **1 reviewer task**.{{else}}Spawn **{{agentCount}} reviewer agents** in parallel.{{/when}}
 {{#if multiAgent}}
 Group files by locality, e.g.:

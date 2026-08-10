@@ -279,12 +279,6 @@ describe("AgentSession shake", () => {
 	});
 
 	describe("protected tools", () => {
-		it("never shakes skill results", async () => {
-			seedHeavyToolResult("S".repeat(4000), "skill");
-			const result = await session.shake("elide");
-			expect(result.toolResultsDropped).toBe(0);
-		});
-
 		/** Seed a user → assistant(read toolCall) → toolResult turn recovering an artifact. */
 		function seedArtifactRecoveryResult(text: string, args: Record<string, unknown>, details?: unknown): void {
 			const toolCallId = `call_read_${Math.random().toString(36).slice(2)}`;

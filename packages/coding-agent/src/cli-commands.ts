@@ -91,11 +91,6 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.grepHelp,
 	},
 	{
-		name: "gallery",
-		load: () => import("./commands/gallery").then(m => m.default),
-		help: commandHelp.galleryHelp,
-	},
-	{
 		name: "grievances",
 		load: () => import("./commands/grievances").then(m => m.default),
 		help: commandHelp.grievancesHelp,
@@ -124,11 +119,6 @@ export const commands: CommandEntry[] = [
 		name: "say",
 		load: () => import("./commands/say").then(m => m.default),
 		help: commandHelp.sayHelp,
-	},
-	{
-		name: "share",
-		load: () => import("./commands/share").then(m => m.default),
-		help: commandHelp.shareHelp,
 	},
 	{
 		name: "setup",

@@ -21,7 +21,6 @@ import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type SystemPrompt, systemPromptCapability } from "../capability/system-prompt";
-import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { expandTilde } from "../tools/path-utils";
 import {
@@ -725,122 +724,6 @@ registerProvider<Hook>(hookCapability.id, {
 	description: DESCRIPTION,
 	priority: PRIORITY,
 	load: loadHooks,
-});
-
-// Custom Tools
-async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const items: CustomTool[] = [];
-	const warnings: string[] = [];
-
-	const configDirs = await getConfigDirs(ctx);
-	const entriesResults = await Promise.all(configDirs.map(({ dir }) => readDirEntries(path.join(dir, "tools"))));
-
-	const fileLoadPromises: Array<Promise<{ items: CustomTool[]; warnings?: string[] }>> = [];
-	const subDirCandidates: Array<{
-		indexPath: string;
-		entryName: string;
-		level: "user" | "project";
-	}> = [];
-
-	for (let i = 0; i < configDirs.length; i++) {
-		const { dir, level } = configDirs[i];
-		const toolEntries = entriesResults[i];
-		if (toolEntries.length === 0) continue;
-
-		const toolsDir = path.join(dir, "tools");
-
-		fileLoadPromises.push(
-			loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, level, {
-				extensions: ["json", "md", "ts", "js", "sh", "bash", "py"],
-				transform: (name, content, path, source) => {
-					if (name.endsWith(".json")) {
-						const data = tryParseJson<{ name?: string; description?: string }>(content);
-						const toolName = data?.name || name.replace(/\.json$/, "");
-						const description =
-							typeof data?.description === "string" && data.description.trim()
-								? data.description
-								: `${toolName} custom tool`;
-						return {
-							name: toolName,
-							path,
-							description,
-							level,
-							_source: source,
-						};
-					}
-					if (name.endsWith(".md")) {
-						const { frontmatter } = parseFrontmatter(content, { source: path });
-						const toolName = (frontmatter.name as string) || name.replace(/\.md$/, "");
-						const description =
-							typeof frontmatter.description === "string" && frontmatter.description.trim()
-								? String(frontmatter.description)
-								: `${toolName} custom tool`;
-						return {
-							name: toolName,
-							path,
-							description,
-							level,
-							_source: source,
-						};
-					}
-					// Executable tool files (.ts, .js, .sh, .bash, .py)
-					const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
-					return {
-						name: toolName,
-						path,
-						description: `${toolName} custom tool`,
-						level,
-						_source: source,
-					};
-				},
-			}),
-		);
-
-		for (const entry of toolEntries) {
-			if (entry.name.startsWith(".")) continue;
-			if (!entry.isDirectory()) continue;
-
-			subDirCandidates.push({
-				indexPath: path.join(toolsDir, entry.name, "index.ts"),
-				entryName: entry.name,
-				level,
-			});
-		}
-	}
-
-	const [fileResults, indexContents] = await Promise.all([
-		Promise.all(fileLoadPromises),
-		Promise.all(subDirCandidates.map(({ indexPath }) => readFile(indexPath))),
-	]);
-
-	for (const result of fileResults) {
-		items.push(...result.items);
-		if (result.warnings) warnings.push(...result.warnings);
-	}
-
-	for (let i = 0; i < subDirCandidates.length; i++) {
-		const indexContent = indexContents[i];
-		if (indexContent !== null) {
-			const { indexPath, entryName, level } = subDirCandidates[i];
-			items.push({
-				name: entryName,
-				path: indexPath,
-				description: `${entryName} custom tool`,
-				level,
-				_source: createSourceMeta(PROVIDER_ID, indexPath, level),
-			});
-		}
-	}
-
-	return { items, warnings };
-}
-
-registerProvider<CustomTool>(toolCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: DESCRIPTION,
-	priority: PRIORITY,
-	load: loadTools,
 });
 
 // Settings

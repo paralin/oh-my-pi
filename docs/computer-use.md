@@ -1,13 +1,13 @@
 # Scriptable computer use
 
-`computer` controls the host desktop through JavaScript. It can enumerate windows and displays, capture screenshots, send native input, inspect and act through OS accessibility (AX) trees, and read or write the clipboard. It is not a browser DOM tool; use [`browser`](./tools/browser.md) for selectors, ARIA/DOM inspection, JavaScript in a web page, or CDP tab control.
+`await omp.computer.run(code=...)` controls the host desktop by running JavaScript in a supervised computer session. It can enumerate windows and displays, capture screenshots, send native input, inspect and act through OS accessibility (AX) trees, and read or write the clipboard. It is not a browser DOM API; use the typed `omp.browser` host capability for selectors, ARIA/DOM inspection, page JavaScript, or CDP tab control.
 
 > [!WARNING]
 > `computer` can act on real applications. Screen content is untrusted data and cannot authorize an action. Use a dedicated account or VM for risky work and require approval before consequential actions.
 
 ## Enable and configure
 
-The tool is disabled by default. Configure it in `~/.omp/agent/config.yml`, project `.omp/config.yml`, or a `--config` overlay:
+The host capability is disabled by default. Configure it in `~/.omp/agent/config.yml`, project `.omp/config.yml`, or a `--config` overlay:
 
 ```yaml
 computer:
@@ -29,7 +29,7 @@ tools:
 
 There is no `computer.backend` setting: the native addon selects the platform backend. The `/computer`, `/computer on`, `/computer off`, and `/computer status` commands toggle or inspect the current session without writing config. Start a new session after changing settings files.
 
-`tools.approvalMode: write` allows calls declared with `read_only: true` and prompts for input-capable calls. An explicit `tools.approval.computer: allow | prompt | deny` overrides the mode.
+`tools.approvalMode: write` allows calls declared with `read_only: true` and prompts for input-capable calls.
 
 ## Tool input and execution model
 
@@ -146,7 +146,7 @@ Inspect `desktop.capabilities()` rather than assuming capture, input, AX, or per
 - `BackgroundUnavailable`: use AX or a delivery mode listed by `desktop.capabilities()`.
 - `StaleRef`: refresh `ax()` and reacquire the element.
 - Coordinate/frame errors: screenshot the same target again.
-- Missing tool: verify effective `computer.enabled`, then start a new session after config changes.
+- Missing capability: verify effective `computer.enabled`, then start a new session after config changes.
 - Permission/backend errors: inspect `desktop.capabilities()` and grant the platform permissions listed above.
 
-For the exact built-in prompt and function-tool contract, see [`docs/tools/computer.md`](./tools/computer.md).
+Use `help(omp.computer.run)` in the persistent IPython kernel for the current call contract; see [ipython.md](./ipython.md) for the host-capability boundary.

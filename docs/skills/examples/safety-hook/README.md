@@ -1,12 +1,12 @@
 # safety-hook
 
-An `oh-my-pi` extension that demonstrates `tool_call` blocking. It intercepts `bash` tool calls and returns `{ block: true, reason: "..." }` when the command contains `rm -rf /` with normal whitespace, preventing the tool from executing.
+An `oh-my-pi` extension that demonstrates whole-cell `tool_call` blocking. It inspects the sole `ipython` call's `code` string and returns `{ block: true, reason: "..." }` when a cell contains the literal destructive shell command `rm -rf /`.
 
 ## What it demonstrates
 
-- `pi.on("tool_call", ...)` — pre-execution interception
+- `pi.on("tool_call", ...)` — pre-cell interception
+- `event.input.code` — the complete IPython cell
 - `return { block: true, reason: "..." }` — blocking contract
-- Regex guard on bash input (`/\brm\s+-rf\s+\//`)
 
 ## Install
 
@@ -14,27 +14,6 @@ An `oh-my-pi` extension that demonstrates `tool_call` blocking. It intercepts `b
 cp -r . ~/.omp/agent/extensions/safety-hook
 ```
 
-Restart `omp`. The hook is active for all sessions.
+Restart `omp`, or load it once with `omp --extension ./safety-hook`.
 
-Or load once:
-
-```
-omp --extension ./safety-hook
-```
-
-## How it works
-
-```
-LLM calls bash tool
-       │
-       ▼
-tool_call handlers run
-       │
-       ├─ command matches /\brm\s+-rf\s+\// ?
-       │       yes → { block: true, reason: "..." }  ←  execution stops, reason sent to LLM
-       │       no  → undefined                        ←  execution continues normally
-       ▼
-tool executes (if not blocked)
-```
-
-The `reason` text is what the LLM receives as the tool error, so it can understand why the call was rejected and try a different approach.
+The reason is returned as the cell error so the model can choose a safe action.

@@ -1,4 +1,4 @@
-export * from "./advise-tool";
+export * from "./advice-sink";
 export * from "./config";
 export * from "./emission-guard";
 export * from "./runtime";

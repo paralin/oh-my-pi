@@ -1,49 +1,44 @@
-import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
-import { type } from "@oh-my-pi/omptype";
+import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as path from "node:path";
+import { z } from "@oh-my-pi/omptype/zod";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
-import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-const recordToolSchema = type({ value: type("string") });
+const recordToolSchema = z.object({ code: z.string() });
 
 type Harness = {
 	session: AgentSession;
+	authStorage: AuthStorage;
 	tempDir: TempDir;
 };
 type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 
 const activeHarnesses: Harness[] = [];
-const sharedAuthStorage = createInMemoryAuthStorage();
-sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
-const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
-
-afterAll(() => {
-	sharedAuthStorage.close();
-});
 
 const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
-	name: "record",
+	name: "ipython",
 	label: "Record",
 	description: "Record a value",
 	parameters: recordToolSchema,
 	async execute(_toolCallId, params) {
 		return {
-			content: [{ type: "text", text: `recorded:${params.value}` }],
-			details: { value: params.value },
+			content: [{ type: "text", text: `recorded:${params.code}` }],
+			details: { value: params.code },
 		};
 	},
 };
 
 function recordCall(value: string, id: string): MockResponse {
 	return {
-		content: [{ type: "toolCall", id, name: "record", arguments: { value } }],
+		content: [{ type: "toolCall", id, name: "ipython", arguments: { value } }],
 		stopReason: "toolUse",
 	};
 }
@@ -67,14 +62,15 @@ async function createHarness(
 	settingsOverrides: SettingsOverrides = {},
 ): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-unexpected-stop-guard-");
+	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	authStorage.setRuntimeApiKey("mock", "test-key");
 
 	const mock = createMockModel({ responses });
-	const modelRegistry = sharedModelRegistry;
+	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
 		"todo.enabled": false,
-		"todo.eager": "default",
 		"todo.reminders": false,
 		...settingsOverrides,
 	});
@@ -99,9 +95,8 @@ async function createHarness(
 		sessionManager,
 		settings,
 		modelRegistry,
-		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, tempDir };
+	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
 }
@@ -133,7 +128,8 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 	for (const harness of activeHarnesses) {
 		await harness.session.dispose();
-		harness.tempDir.removeSync();
+		harness.authStorage.close();
+		harness.tempDir.remove();
 	}
 	activeHarnesses.length = 0;
 });

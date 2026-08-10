@@ -8,11 +8,10 @@ import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { extractImagePathFromText } from "../../modes/components/custom-editor";
-import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
+import { HistoricalToolExecutionComponent } from "../../modes/components/historical-tool-execution";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
+import { StrippedToolCallsPlaceholder } from "../../modes/components/stripped-tool-calls-placeholder";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
-import { ToolExecutionComponent } from "../../modes/components/tool-execution";
-import { TreeSelectorComponent } from "../../modes/components/tree-selector";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
 import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
@@ -22,7 +21,6 @@ import type { InteractiveModeContext } from "../../modes/types";
 import manualContinuePrompt from "../../prompts/system/manual-continue.md" with { type: "text" };
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
-import { parseSlashCommand } from "../../slash-commands/helpers/parse";
 import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
@@ -103,26 +101,15 @@ function looksLikePastedShellPrompt(code: string): boolean {
 	);
 }
 
-function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
-	if (trimmedText.charCodeAt(0) !== 36 /* $ */) return 0;
-	if (trimmedText.charCodeAt(1) === 123 /* { */) return 0;
-
-	const prefixLength = trimmedText.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
-	const next = trimmedText.charCodeAt(prefixLength);
-	if (Number.isNaN(next)) return prefixLength;
-	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
-}
-
-function parsePythonCommandInput(text: string): { code: string; isExcluded: boolean } | undefined {
+function parseIpythonCommandInput(text: string): string | undefined {
 	const trimmed = text.trimStart();
-	const prefixLength = pythonCommandPrefixLength(trimmed);
-	if (prefixLength === 0) return undefined;
+	if (trimmed.charCodeAt(0) !== 36 /* $ */ || trimmed.charCodeAt(1) === 123 /* { */) return undefined;
+	const prefixLength = trimmed.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
+	const next = trimmed.charCodeAt(prefixLength);
+	if (!Number.isNaN(next) && next !== 32 && next !== 9 && next !== 10 && next !== 13) return undefined;
 	const code = trimmed.slice(prefixLength).trim();
 	if (prefixLength === 1 && looksLikePastedShellPrompt(code)) return undefined;
-	return {
-		code,
-		isExcluded: prefixLength === 2,
-	};
+	return code;
 }
 
 /** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
@@ -178,7 +165,6 @@ export class InputController {
 	#focusedPasteListenerInstalled = false;
 	#btwBranchListenerInstalled = false;
 	#btwCopyListenerInstalled = false;
-	#expandToolsListenerInstalled = false;
 	// Tap counter for the double-← gesture; reset whenever a quiet gap
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
@@ -280,24 +266,6 @@ export class InputController {
 				return { consume: true };
 			});
 		}
-		if (!this.#expandToolsListenerInstalled) {
-			this.#expandToolsListenerInstalled = true;
-			// `app.tools.expand` (Ctrl+O) toggles the transcript's tool-output
-			// preview. It must fire regardless of focus so a truncated edit stays
-			// expandable while an approval prompt / select dialog holds keyboard
-			// focus (#7837). Defers when the main transcript is not the active
-			// surface (a fullscreen/anchored overlay — agent hub, transcript
-			// viewer, log viewer, model picker) or when the focused component
-			// rebinds Ctrl+O for its own use (the tree selector's filter cycle).
-			this.ctx.ui.addInputListener(data => {
-				if (!this.ctx.keybindings.matches(data, "app.tools.expand")) return undefined;
-				if (this.ctx.ui.hasOverlay()) return undefined;
-				if (this.ctx.ui.getFocused() instanceof TreeSelectorComponent && matchesKey(data, "ctrl+o"))
-					return undefined;
-				this.toggleToolOutputExpansion();
-				return { consume: true };
-			});
-		}
 		this.ctx.editor.onEscape = () => {
 			// Side-channel panels are the topmost view. Esc dismisses them before
 			// touching loop mode, maintenance, or the underlying main turn.
@@ -390,12 +358,6 @@ export class InputController {
 				this.ctx.editor.setText("");
 				this.ctx.isBashMode = false;
 				this.ctx.updateEditorBorderColor();
-			} else if (this.ctx.session.isEvalRunning) {
-				this.ctx.session.abortEval();
-			} else if (this.ctx.isPythonMode) {
-				this.ctx.editor.setText("");
-				this.ctx.isPythonMode = false;
-				this.ctx.updateEditorBorderColor();
 			} else if (this.ctx.session.isStreaming) {
 				this.#abortStreamingTurn();
 			} else if (this.ctx.editor.getText().trim()) {
@@ -476,6 +438,8 @@ export class InputController {
 			this.ctx.keybindings.getKeys("app.clipboard.copyPrompt"),
 		);
 		this.ctx.editor.onCopyPrompt = () => this.handleCopyPrompt();
+		this.ctx.editor.setActionKeys("app.tools.expand", this.ctx.keybindings.getKeys("app.tools.expand"));
+		this.ctx.editor.onExpandTools = () => this.toggleToolOutputExpansion();
 		this.ctx.editor.setActionKeys(
 			"app.tools.toggleVisibility",
 			this.ctx.keybindings.getKeys("app.tools.toggleVisibility"),
@@ -488,10 +452,6 @@ export class InputController {
 		this.ctx.editor.clearCustomKeyHandlers();
 		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
-		const planModeKeys = this.ctx.keybindings.getKeys("app.plan.toggle");
-		for (const key of planModeKeys) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handlePlanModeCommand());
-		}
 
 		for (const key of this.ctx.keybindings.getKeys("app.session.new")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.handleClearCommand());
@@ -552,11 +512,9 @@ export class InputController {
 
 		this.ctx.editor.onChange = (text: string) => {
 			const wasBashMode = this.ctx.isBashMode;
-			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();
 			this.ctx.isBashMode = trimmed.startsWith("!");
-			this.ctx.isPythonMode = parsePythonCommandInput(trimmed) !== undefined;
-			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
+			if (wasBashMode !== this.ctx.isBashMode) {
 				this.ctx.updateEditorBorderColor();
 			}
 		};
@@ -635,7 +593,7 @@ export class InputController {
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 
 			// Focused subagent session: the editor is a plain chat box for it.
-			// Everything below (continue shortcuts, slash/bash/python, loop,
+			// Everything below (continue shortcuts, slash/bash, loop,
 			// compaction queueing) is main-session-only.
 			if (this.ctx.focusedAgentId) {
 				await this.#submitToFocusedSession(text, "steer");
@@ -678,7 +636,6 @@ export class InputController {
 			let inputImageLinks =
 				this.ctx.editor.pendingImageLinks.length > 0 ? [...this.ctx.editor.pendingImageLinks] : undefined;
 			let hasInputImages = (inputImages?.length ?? 0) > 0;
-			const submittedImages = inputImages;
 
 			if (runner?.hasHandlers("input")) {
 				const result = await runner.emitInput(text, inputImages, "interactive");
@@ -698,22 +655,6 @@ export class InputController {
 				}
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
-			const submittedMode = parseSlashCommand(text)?.name;
-			const draftDetached =
-				submittedMode === "plan" ||
-				submittedMode === "vibe" ||
-				submittedMode === "goal" ||
-				submittedMode === "guided-goal";
-			if (
-				draftDetached &&
-				submittedImages?.length &&
-				submittedImages.every((image, index) => this.ctx.editor.pendingImages[index] === image)
-			) {
-				this.ctx.editor.pendingImages.splice(0, submittedImages.length);
-				this.ctx.editor.pendingImageLinks.splice(0, submittedImages.length);
-				this.ctx.editor.imageLinks =
-					this.ctx.editor.pendingImageLinks.length > 0 ? this.ctx.editor.pendingImageLinks : undefined;
-			}
 
 			if (!text && !hasInputImages) return;
 
@@ -729,11 +670,9 @@ export class InputController {
 
 			// Handle built-in slash commands
 			if (text) {
-				const input =
-					(inputImages?.length ?? 0) > 0 || (inputImageLinks?.length ?? 0) > 0
-						? { images: inputImages, imageLinks: inputImageLinks }
-						: undefined;
-				const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input, draftDetached });
+				const slashResult = await executeBuiltinSlashCommand(text, {
+					ctx: this.ctx,
+				});
 				if (slashResult === true) {
 					if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 					return;
@@ -747,8 +686,8 @@ export class InputController {
 				}
 			}
 
-			// Collab guest: prompts execute on the host; local slash/skill/bash/
-			// python execution is host-only (builtins are gated inside
+			// Collab guest: prompts execute on the host; local slash/skill/bash
+			// execution is host-only (builtins are gated inside
 			// executeBuiltinSlashCommand, which already consumed allowed ones).
 			if (this.ctx.collabGuest) {
 				if (text.startsWith("/")) {
@@ -756,7 +695,7 @@ export class InputController {
 					this.ctx.editor.setText("");
 					return;
 				}
-				if (text.startsWith("!") || parsePythonCommandInput(text)) {
+				if (text.startsWith("!") || parseIpythonCommandInput(text) !== undefined) {
 					this.ctx.showStatus("Local execution is host-only during a collab session");
 					this.ctx.editor.setText("");
 					return;
@@ -776,7 +715,7 @@ export class InputController {
 
 			// Handle skill commands (/skill:name [args]). Enter ⇒ steer (matches the
 			// free-text Enter semantics below); Ctrl+Enter routes through `handleFollowUp`.
-			// During compaction, queue immediately so bash/python/loop-mode branches do
+			// During compaction, queue immediately so bash/loop-mode branches do
 			// not consume the skill before the compaction-resume path re-parses it.
 			if (text && isKnownSkillCommand(this.ctx, text)) {
 				if (this.ctx.session.isCompacting) {
@@ -807,23 +746,19 @@ export class InputController {
 				}
 			}
 
-			// Handle python command (`$ <code>` for normal, `$$ <code>` for excluded from context).
-			// Shell-style variables such as `$HOME` are normal prose unless a space follows the sigil.
-			const pythonCommand = parsePythonCommandInput(text);
-			if (pythonCommand) {
-				const { code, isExcluded } = pythonCommand;
-				if (code) {
-					if (this.ctx.session.isEvalRunning) {
-						this.ctx.showWarning("A Python execution is already running. Press Esc to cancel it first.");
-						this.ctx.editor.setText(text);
-						return;
-					}
-					this.ctx.editor.addToHistory(text);
-					await this.ctx.handlePythonCommand(code, isExcluded);
-					this.ctx.isPythonMode = false;
-					this.ctx.updateEditorBorderColor();
-					return;
+			// Run user-entered Python in the session's persistent IPython kernel. Its
+			// direct origin gives the user control while the shared cell projection
+			// renders and journals it like every other kernel cell.
+			const ipythonCode = parseIpythonCommandInput(text);
+			if (ipythonCode) {
+				this.ctx.editor.addToHistory(text);
+				try {
+					await this.ctx.session.executeIpythonCell({ code: ipythonCode, origin: "direct" });
+				} catch (error) {
+					this.ctx.editor.setText(text);
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				}
+				return;
 			}
 
 			// While loop mode is on, every user-typed prompt becomes the new loop
@@ -998,7 +933,7 @@ export class InputController {
 			}
 			return;
 		}
-		if (text && (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text))) {
+		if (text && (text.startsWith("/") || text.startsWith("!") || parseIpythonCommandInput(text) !== undefined)) {
 			this.ctx.showStatus("Commands run in the main session — press ←← to return first");
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
@@ -1090,7 +1025,7 @@ export class InputController {
 		try {
 			// SIGSTOP — not SIGTSTP — to the foreground process group (pid=0).
 			//
-			// SIGTSTP: brush-core (the embedded shell behind every bash tool call)
+			// SIGTSTP: brush-core (the embedded local shell executor)
 			// installs a tokio SIGTSTP listener on `Process::wait` to detect when
 			// its children have been stopped (`crates/vendor/brush-core/src/sys/
 			// unix/signal.rs::tstp_signal_listener` → `tokio::signal::unix::
@@ -1349,8 +1284,9 @@ export class InputController {
 		}
 
 		if (text) {
-			const input = (images?.length ?? 0) > 0 || (imageLinks?.length ?? 0) > 0 ? { images, imageLinks } : undefined;
-			const slashResult = await executeBuiltinSlashCommand(text, { ctx: this.ctx, input });
+			const slashResult = await executeBuiltinSlashCommand(text, {
+				ctx: this.ctx,
+			});
 			if (slashResult === true) {
 				if (!shouldSkipHistory(text)) this.ctx.editor.addToHistory(text);
 				return;
@@ -1786,7 +1722,7 @@ export class InputController {
 	 */
 	async #attachPasteAsFile(text: string, lineCount: number): Promise<void> {
 		try {
-			// Mirror the exact mapping the read tool's local:// resolver uses so a later
+			// Mirror the exact mapping the workspace read service's local:// resolver uses so a later
 			// `read local://paste-N.md` lands on the file written here.
 			const localRoot = resolveLocalRoot({
 				getArtifactsDir: () => this.ctx.sessionManager.getArtifactsDir(),
@@ -1925,16 +1861,12 @@ export class InputController {
 		}
 
 		for (const child of this.ctx.chatContainer.children) {
-			if (
-				!this.ctx.hideToolActivity &&
-				(child instanceof ToolExecutionComponent || child instanceof ReadToolGroupComponent)
-			) {
-				child.setExpanded(false);
-			} else if (child instanceof AssistantMessageComponent) {
-				child.setToolResultImagesVisible(!this.ctx.hideToolActivity);
+			if (child instanceof HistoricalToolExecutionComponent) {
+				child.setToolActivityVisible(!this.ctx.hideToolActivity);
+			} else if (child instanceof StrippedToolCallsPlaceholder) {
+				child.setToolActivityVisible(!this.ctx.hideToolActivity);
 			}
 		}
-		this.ctx.chatContainer.setToolActivityVisible(!this.ctx.hideToolActivity);
 
 		if (this.ctx.hideToolActivity) this.ctx.ui.clearInlineImages();
 		this.ctx.ui.resetDisplay();

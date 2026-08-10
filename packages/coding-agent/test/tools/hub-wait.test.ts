@@ -9,8 +9,8 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { type CoordinationDetails, executeHubOperation } from "../../src/tools/hub/index.js";
 
 const SELF_ID = "Main";
 
@@ -29,7 +29,7 @@ function makeSession(manager: AsyncJobManager | undefined, coordinationBackend?:
 		getAgentId: () => SELF_ID,
 		coordinationBackend,
 	};
-	// Structurally-partial test session: HubTool only touches the fields above.
+	// Structurally-partial test session: the Hub operation only touches the fields above.
 	return stub as unknown as ToolSession;
 }
 
@@ -57,11 +57,11 @@ describe("hub unified wait", () => {
 
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const job = registerHangingJob(manager, "sleep forever");
-		const tool = new HubTool(makeSession(manager));
+		const hubSession = makeSession(manager);
 
 		// The bus waiter is parked synchronously before execute()'s first
 		// suspension, so the send below cannot race the park.
-		const pending = tool.execute("call_1", { op: "wait" });
+		const pending = executeHubOperation(hubSession, { op: "wait" });
 		await IrcBus.global().send({ from: "Peer", to: SELF_ID, body: "shared file is yours" });
 
 		const result = await pending;
@@ -100,9 +100,9 @@ describe("hub unified wait", () => {
 			interrupt: () => Promise.reject(new Error("unused")),
 			close: () => Promise.resolve(),
 		};
-		const tool = new HubTool(makeSession(manager, backend));
+		const hubSession = makeSession(manager, backend);
 
-		const pending = tool.execute("parent_wait", { op: "wait" });
+		const pending = executeHubOperation(hubSession, { op: "wait" });
 		mailbox.resolve({
 			id: "parent-message",
 			from: "foreign",
@@ -126,9 +126,9 @@ describe("hub unified wait", () => {
 
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
 		const job = registerHangingJob(manager, "quick job");
-		const tool = new HubTool(makeSession(manager));
+		const hubSession = makeSession(manager);
 
-		const pending = tool.execute("call_2", { op: "wait", ids: [job.id] });
+		const pending = executeHubOperation(hubSession, { op: "wait", ids: [job.id] });
 		job.finish("done output");
 
 		const result = await pending;
@@ -146,10 +146,10 @@ describe("hub unified wait", () => {
 		registry.register({ id: "Sleeper", displayName: "task", kind: "sub", session: null, status: "idle" });
 
 		const manager = new AsyncJobManager({ onJobComplete: () => {} });
-		const tool = new HubTool(makeSession(manager));
+		const hubSession = makeSession(manager);
 
 		// A regression to a blocking message wait fails via the test timeout.
-		const result = await tool.execute("call_3", { op: "wait" });
+		const result = await executeHubOperation(hubSession, { op: "wait" });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 		expect(text).toContain("No running background jobs to wait for.");
 		expect(result.useless).toBe(true);

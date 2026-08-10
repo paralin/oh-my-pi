@@ -94,7 +94,6 @@ describe("AgentSession per-turn prune persistence", () => {
 			settings: Settings.isolated({
 				"compaction.enabled": false,
 				"compaction.dropUseless": true,
-				"compaction.supersedeReads": true,
 			}),
 			modelRegistry,
 		});

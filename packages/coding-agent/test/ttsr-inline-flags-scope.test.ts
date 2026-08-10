@@ -55,12 +55,52 @@ describe("TTSR inline flags + scope quoting (#4796)", () => {
 
 		expect(
 			manager
-				.checkSnapshot("The CI failure was 4 pre-existing GPS map VR mismatches", { source: "thinking" })
+				.checkDelta("The CI failure was 4 pre-existing GPS map VR mismatches", { source: "thinking" })
 				.map(r => r.name),
 		).toEqual(["fix-failures-now"]);
 
+		expect(manager.checkDelta("Everything also fails on master anyway", { source: "text" }).map(r => r.name)).toEqual(
+			["fix-failures-now"],
+		);
+	});
+});
+
+describe("IPython TTSR tool scope", () => {
+	it("matches raw cell-code deltas only for tool:ipython", () => {
+		const manager = new TtsrManager();
 		expect(
-			manager.checkSnapshot("Everything also fails on master anyway", { source: "text" }).map(r => r.name),
-		).toEqual(["fix-failures-now"]);
+			manager.addRule({
+				name: "no-any",
+				path: "/tmp/no-any.md",
+				content: "Use a concrete type.",
+				condition: [": any"],
+				scope: ["tool:ipython"],
+				_source: { provider: "test", providerName: "test", path: "/tmp/no-any.md", level: "project" },
+			}),
+		).toBe(true);
+		expect(
+			manager.checkDelta("value: any = 1", { source: "tool", toolName: "ipython" }).map(rule => rule.name),
+		).toEqual(["no-any"]);
+		manager.resetBuffer();
+		expect(manager.checkDelta("value: any = 1", { source: "tool", toolName: "edit" })).toEqual([]);
+	});
+
+	it("rejects legacy path-qualified tool scopes", () => {
+		const manager = new TtsrManager();
+		expect(
+			manager.addRule({
+				name: "legacy-path-scope",
+				path: "/tmp/legacy-path-scope.md",
+				content: "Use a concrete type.",
+				condition: [": any"],
+				scope: ["tool:ipython(*.py)"],
+				_source: {
+					provider: "test",
+					providerName: "test",
+					path: "/tmp/legacy-path-scope.md",
+					level: "project",
+				},
+			}),
+		).toBe(false);
 	});
 });

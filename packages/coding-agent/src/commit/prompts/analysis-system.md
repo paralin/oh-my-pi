@@ -56,7 +56,7 @@ Omit changelog_category when user_visible false.
 </instructions>
 
 <output-format>
-Call create_conventional_analysis with:
+Return ONLY the following valid JSON object, with no Markdown fence or prose:
 
 {
 "type": "feat|fix|refactor|docs|test|chore|style|perf|build|ci|revert",

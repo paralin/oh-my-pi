@@ -22,7 +22,6 @@ import type {
 	StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, AgentProgress } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import type {
 	AgentSummary,
@@ -35,6 +34,7 @@ import {
 	ParentSessionState,
 	TaskAgentSource,
 } from "../../src/parent/generated/parent-environment.pb.js";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const PARENT_SESSION = "glados/operators/test/llm-session/root";
 const WORKTREE = path.join(os.homedir(), "wt", "parent-task-test");
@@ -184,7 +184,6 @@ function spawnRequest(peerId = "worker", generated = false): CoordinationSpawnRe
 	};
 	const request: StructuredSubagentRequest = {
 		session,
-		invocationKind: "task",
 		assignment: "Implement durable work",
 		context: "Keep the wire contract exact.",
 		agent: AGENT.name,
@@ -207,7 +206,6 @@ function spawnRequest(peerId = "worker", generated = false): CoordinationSpawnRe
 			mode: "permissive",
 			outputSchemaOverridesAgent: false,
 		},
-		planMode: false,
 		isIsolated: false,
 		mergeMode: "patch",
 		applyChanges: true,

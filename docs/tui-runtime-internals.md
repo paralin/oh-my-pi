@@ -13,7 +13,7 @@ This document maps the non-theme runtime path from terminal input to rendered ou
 ## Runtime layers and ownership
 
 - **`packages/tui` engine**: terminal lifecycle, stdin normalization, focus routing, render scheduling, differential painting, overlay composition, hardware cursor placement.
-- **`packages/coding-agent` interactive mode**: builds component tree, binds editor callbacks and keymaps, reacts to agent/session events, and translates domain state (streaming, tool execution, retries, plan mode) into UI components.
+- **`packages/coding-agent` interactive mode**: builds the component tree, binds editor callbacks and keymaps, reacts to agent/session events, and translates streaming, IPython execution, and retry state into UI components.
 
 Boundary rule: the TUI engine is message-agnostic. It only knows `Component.render(width)`, `handleInput(data)`, focus, and overlays. Agent semantics stay in interactive controllers.
 
@@ -177,12 +177,10 @@ Effects:
 
 - `agent_start`: starts loader in `statusContainer`.
 - `message_start` assistant: creates `streamingComponent` and mounts it.
-- `message_update`: updates streaming assistant content; creates/updates tool execution components as tool calls appear.
-- `tool_execution_update/end`: updates tool result components and completion state.
-- `message_end`: finalizes assistant stream, handles aborted/error annotations, marks pending tool args complete on normal stop.
+- `message_update`: updates streaming assistant content and the live IPython-cell projection.
+- `tool_execution_update/end`: reconciles IPython execution state and retained transient status.
+- `message_end`: finalizes the assistant stream and handles aborted/error annotations.
 - `agent_end`: stops loaders, clears transient stream state, flushes deferred model switch, issues completion notification if backgrounded.
-
-Read-tool grouping is intentionally stateful (`#lastReadGroup`) to coalesce consecutive read tool calls into one visual block until a non-read break occurs.
 
 ## Status and loader orchestration
 
@@ -208,9 +206,7 @@ Input text prefixes toggle editor border mode flags:
 
 Escape exits inactive mode by clearing editor text and restoring border color; when execution is active, escape aborts the running task instead.
 
-### Plan mode
 
-`InteractiveMode` tracks plan mode flags, status-line state, active tools, and model switching. Enter/exit updates session mode entries and status/UI state, including deferred model switch if streaming is active.
 
 ### Suspend/resume (`Ctrl+Z`)
 

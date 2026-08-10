@@ -20,7 +20,7 @@ All exports live under `@oh-my-pi/pi-ai/utils/schema`:
 - `normalizeSchemaForGoogle(value)` — Gemini / Vertex / Gemini CLI.
 - `normalizeSchemaForCCA(value)` — Cloud Code Assist Claude (Antigravity + GCA).
 - `normalizeSchemaForMCP(value)` — MCP inputSchemas before they enter the
-  custom-tool registry. `tool-bridge.ts` runs every MCP `inputSchema` through
+  IPython capability service. The host validates every typed MCP request through
   this dispatcher.
 - `sanitizeSchemaForOpenAIResponses(schema)` (alias
   `normalizeSchemaForOpenAIResponses`) — recursively rewrites `oneOf` →

@@ -1,4 +1,4 @@
-/** Vibe mode session-level state, mirroring {@link ../plan-mode/state.ts}. */
+/** Vibe mode session-level state, for the interactive runtime. */
 export interface VibeModeState {
 	enabled: boolean;
 }
