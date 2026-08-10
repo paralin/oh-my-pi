@@ -5,7 +5,7 @@
 
 import { AckPeerMessageRequest, AckPeerMessageResponse, InteractiveRootBinding, InterruptSessionRequest, InterruptSessionResponse, ListSessionsRequest, ListSessionsResponse, LookupTaskIntentRequest, LookupTaskIntentResponse, OpenEnvironmentRequest, OpenEnvironmentResponse, ReconfigureInteractiveRootRequest, ResolveAgentPeerRequest, ResolveAgentPeerResponse, RotateInteractiveRootRequest, SendPeerMessageRequest, SendPeerMessageResponse, SubmitTaskRequest, SubmitTaskResponse, WatchAgentTreeRequest, WatchAgentTreeResponse, WatchPeerMailboxRequest, WatchPeerMailboxResponse, WatchSessionRequest, WatchSessionResponse } from "./parent-environment.pb.js";
 import { MethodKind } from "@aptre/protobuf-es-lite";
-import { buildDecodeMessageTransform, MessageStream, ProtoRpc } from "starpc";
+import { buildDecodeMessageTransform, MessageStream, ProtoRpc, ServerContext } from "starpc";
 
 /**
  * ParentEnvironmentService binds one OMP process to a provider-neutral parent
@@ -211,6 +211,81 @@ export interface ParentEnvironmentService {
    * @generated from rpc omp.parent.ParentEnvironmentService.InterruptSession
    */
   InterruptSession(request: InterruptSessionRequest, abortSignal?: AbortSignal): Promise<InterruptSessionResponse>;
+}
+
+/**
+ * ParentEnvironmentService binds one OMP process to a provider-neutral parent
+ * environment and carries the Task and Hub coordination contract. OpenEnvironment
+ * is a lifetime stream: closing it releases the environment and its interactive
+ * root, if any. Every other call uses the opaque environment ID returned first.
+ *
+ * @generated from service omp.parent.ParentEnvironmentService
+ */
+export interface ParentEnvironmentServiceHandler {
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.OpenEnvironment
+   */
+  OpenEnvironment(request: OpenEnvironmentRequest, abortSignal: AbortSignal, context: ServerContext): MessageStream<OpenEnvironmentResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.RotateInteractiveRoot
+   */
+  RotateInteractiveRoot(request: RotateInteractiveRootRequest, abortSignal: AbortSignal, context: ServerContext): Promise<InteractiveRootBinding>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.ReconfigureInteractiveRoot
+   */
+  ReconfigureInteractiveRoot(request: ReconfigureInteractiveRootRequest, abortSignal: AbortSignal, context: ServerContext): Promise<InteractiveRootBinding>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.ListSessions
+   */
+  ListSessions(request: ListSessionsRequest, abortSignal: AbortSignal, context: ServerContext): Promise<ListSessionsResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.LookupTaskIntent
+   */
+  LookupTaskIntent(request: LookupTaskIntentRequest, abortSignal: AbortSignal, context: ServerContext): Promise<LookupTaskIntentResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.SubmitTask
+   */
+  SubmitTask(request: SubmitTaskRequest, abortSignal: AbortSignal, context: ServerContext): Promise<SubmitTaskResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.WatchSession
+   */
+  WatchSession(request: WatchSessionRequest, abortSignal: AbortSignal, context: ServerContext): MessageStream<WatchSessionResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.WatchAgentTree
+   */
+  WatchAgentTree(request: WatchAgentTreeRequest, abortSignal: AbortSignal, context: ServerContext): MessageStream<WatchAgentTreeResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.ResolveAgentPeer
+   */
+  ResolveAgentPeer(request: ResolveAgentPeerRequest, abortSignal: AbortSignal, context: ServerContext): Promise<ResolveAgentPeerResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.SendPeerMessage
+   */
+  SendPeerMessage(request: SendPeerMessageRequest, abortSignal: AbortSignal, context: ServerContext): Promise<SendPeerMessageResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.AckPeerMessage
+   */
+  AckPeerMessage(request: AckPeerMessageRequest, abortSignal: AbortSignal, context: ServerContext): Promise<AckPeerMessageResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.WatchPeerMailbox
+   */
+  WatchPeerMailbox(request: WatchPeerMailboxRequest, abortSignal: AbortSignal, context: ServerContext): MessageStream<WatchPeerMailboxResponse>;
+
+  /**
+   * @generated from rpc omp.parent.ParentEnvironmentService.InterruptSession
+   */
+  InterruptSession(request: InterruptSessionRequest, abortSignal: AbortSignal, context: ServerContext): Promise<InterruptSessionResponse>;
 }
 
 export const ParentEnvironmentServiceServiceName = ParentEnvironmentServiceDefinition.typeName

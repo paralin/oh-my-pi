@@ -6,8 +6,7 @@
   "packageManager": "bun@1.3.14",
   "patchedDependencies": {
     "@ark/schema@0.56.2": "patches/@ark%2Fschema@0.56.2.patch",
-    "puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch",
-    "starpc@0.50.0": "patches/starpc@0.50.0.patch"
+    "puppeteer-core@25.3.0": "patches/puppeteer-core@25.3.0.patch"
   },
   "workspaces": {
     "packages": [
@@ -73,7 +72,7 @@
       "react-dom": "19.2.7",
       "regexp-tree": "^0.1.27",
       "solid-js": "^1.9.14",
-      "starpc": "0.50.0",
+      "starpc": "0.52.0",
       "tailwindcss": "^4.3.2",
       "ts-morph": "^28.0.0",
       "typescript": "^7.0.2",
