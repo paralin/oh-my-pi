@@ -100,7 +100,6 @@ function createStubInputControllerContext(opts: {
 			isStreaming: opts.isStreaming,
 			isCompacting: opts.isCompacting ?? false,
 			isBashRunning: false,
-			isEvalRunning: false,
 			extensionRunner: undefined,
 			prompt,
 			promptCustomMessage,
@@ -113,7 +112,6 @@ function createStubInputControllerContext(opts: {
 		goalModeEnabled: false,
 		updatePendingMessagesDisplay,
 		isBashMode: false,
-		isPythonMode: false,
 		loopModeEnabled: false,
 		compactionQueuedMessages: [],
 		locallySubmittedUserSignatures: new Set<string>(),
@@ -1279,7 +1277,6 @@ function createEventControllerFixture() {
 		addMessageToChat,
 		updatePendingMessagesDisplay,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		session: {},
 		get viewSession() {
 			return (this as typeof ctx).session;

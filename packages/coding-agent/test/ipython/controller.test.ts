@@ -2,12 +2,19 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import {
 	IpythonController,
 	type IpythonExecutionEvent,
+	type IpythonExtensionHostHandlerResolver,
 	type IpythonHostHandler,
 	type IpythonProcessIds,
 } from "../../src/ipython/controller.js";
+import { IpythonExtensionRegistry } from "../../src/ipython/extension-registry.js";
+
+function processRunning(pid: number): boolean {
+	return Process.fromPid(pid)?.status() === ProcessStatus.Running;
+}
 
 function processExists(pid: number): boolean {
 	try {
@@ -34,6 +41,7 @@ async function createIntegrationController(
 	prefix: string,
 	hostHandlers?: Readonly<Record<string, IpythonHostHandler>>,
 	onReady?: (processIds: IpythonProcessIds, status: { readonly restart: boolean }) => void,
+	extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver,
 ): Promise<{ controller: IpythonController; tempRoot: string }> {
 	const pythonExecutable = Bun.env.OMP_IPYTHON_TEST_PYTHON;
 	if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");
@@ -59,6 +67,7 @@ async function createIntegrationController(
 				OMP_SESSION_ID: "integration-session",
 			},
 			hostHandlers,
+			extensionHostHandlerResolver,
 			onReady,
 		}),
 		tempRoot,
@@ -66,6 +75,91 @@ async function createIntegrationController(
 }
 
 describe("IPython controller startup diagnostics", () => {
+	test.skipIf(process.platform === "win32")(
+		"kills an uncooperative controller and its recorded kernel process",
+		async () => {
+			const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-forced-dispose-"));
+			const scriptPath = path.join(tempRoot, "uncooperative-controller.js");
+			await Bun.write(
+				scriptPath,
+				`const { spawn } = require("node:child_process");
+const kernel = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)"], { stdio: "ignore" });
+process.stdout.write(JSON.stringify({ event: "ready", controller_pid: process.pid, kernel_pid: kernel.pid }) + "\\n");
+process.stdin.resume();
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1_000);
+`,
+			);
+			const controller = new IpythonController({
+				pythonExecutable: process.execPath,
+				controllerArgs: [],
+				controllerPath: scriptPath,
+				cwd: tempRoot,
+				shutdownGraceMs: 25,
+			});
+			let processIds: IpythonProcessIds | undefined;
+			try {
+				await controller.start();
+				processIds = controller.processIds;
+				if (!processIds) throw new Error("controller did not publish process IDs");
+				await controller.dispose();
+				expect(processRunning(processIds.controllerPid)).toBe(false);
+				expect(processRunning(processIds.kernelPid)).toBe(false);
+			} finally {
+				if (processIds) {
+					for (const pid of [processIds.controllerPid, processIds.kernelPid]) {
+						if (processExists(pid)) process.kill(pid, "SIGKILL");
+					}
+				}
+				await controller.dispose();
+				await fs.rm(tempRoot, { recursive: true, force: true });
+			}
+		},
+		10_000,
+	);
+
+	test("reaps the kernel tree through its stable reference with Windows disposal semantics", async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-windows-forced-dispose-"));
+		const scriptPath = path.join(tempRoot, "uncooperative-controller.js");
+		await Bun.write(
+			scriptPath,
+			`const { spawn } = require("node:child_process");
+const kernel = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1_000)"], { stdio: "ignore" });
+process.stdout.write(JSON.stringify({ event: "ready", controller_pid: process.pid, kernel_pid: kernel.pid }) + "\\n");
+process.stdin.resume();
+process.on("SIGTERM", () => {});
+setInterval(() => {}, 1_000);
+`,
+		);
+		const controller = new IpythonController({
+			pythonExecutable: process.execPath,
+			controllerArgs: [],
+			controllerPath: scriptPath,
+			cwd: tempRoot,
+			shutdownGraceMs: 25,
+		});
+		const platform = process.platform;
+		let processIds: IpythonProcessIds | undefined;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		try {
+			await controller.start();
+			processIds = controller.processIds;
+			if (!processIds) throw new Error("controller did not publish process IDs");
+			await controller.dispose();
+			expect(processRunning(processIds.controllerPid)).toBe(false);
+			expect(processRunning(processIds.kernelPid)).toBe(false);
+		} finally {
+			Object.defineProperty(process, "platform", { value: platform, configurable: true });
+			if (processIds) {
+				for (const pid of [processIds.controllerPid, processIds.kernelPid]) {
+					if (processExists(pid)) process.kill(pid, "SIGKILL");
+				}
+			}
+			await controller.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 10_000);
+
 	test("surfaces an injected controller's stderr when startup exits", async () => {
 		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-startup-failure-"));
 		const sentinel = `OMP_IPYTHON_STARTUP_${crypto.randomUUID()}`;
@@ -437,6 +531,223 @@ handle.update(
 				expect(processExists(processIds.controllerPid)).toBe(false);
 				expect(processExists(processIds.kernelPid)).toBe(false);
 			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	test("routes a namespaced extension handler through one live kernel and aborts it cleanly", async () => {
+		const registry = new IpythonExtensionRegistry();
+		const blockingEntered = Promise.withResolvers<void>();
+		const blockingAborted = Promise.withResolvers<string>();
+		let artifactRoot = "";
+		registry.replace(
+			[
+				{
+					namespace: "demo",
+					operation: "run",
+					extensionPath: "extension-demo",
+					handler: async request => {
+						await request.publishProgress("extension started", { value: request.data.value });
+						const artifact = await request.allocateArtifact({
+							label: "extension result",
+							mimeType: "application/json",
+							suffix: ".json",
+						});
+						if (request.data.block === true) {
+							blockingEntered.resolve();
+							const waiting = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+							const abort = () => {
+								blockingAborted.resolve(
+									request.signal.reason instanceof Error ? request.signal.reason.message : "aborted",
+								);
+								waiting.reject(request.signal.reason);
+							};
+							request.signal.addEventListener("abort", abort, { once: true });
+							if (request.signal.aborted) abort();
+							return await waiting.promise;
+						}
+						return { answer: Number(request.data.value) + 1, artifact: artifact.path };
+					},
+				},
+			],
+			[],
+		);
+		const { controller, tempRoot } = await createIntegrationController(
+			"omp-ipython-extension-handler-",
+			undefined,
+			undefined,
+			operation => registry.getHostHandler(operation),
+		);
+		artifactRoot = path.join(tempRoot, "host-artifacts");
+		const hostContext = {
+			sessionId: "extension-session",
+			cwd: tempRoot,
+			cellId: "extension-cell",
+			sequence: 1,
+			origin: "model" as const,
+			authority: "trusted-cell" as const,
+			allocateArtifact: async (
+				request: { label: string; mimeType: string; suffix: string },
+				signal: AbortSignal,
+			) => {
+				if (signal.aborted) throw signal.reason;
+				await fs.mkdir(artifactRoot, { recursive: true });
+				const artifactPath = path.join(artifactRoot, `extension${request.suffix}`);
+				await fs.writeFile(artifactPath, "");
+				return { path: artifactPath, label: request.label, mimeType: request.mimeType, bytes: 0 };
+			},
+		};
+		let processIds: IpythonProcessIds | undefined;
+		try {
+			await controller.start();
+			processIds = controller.processIds;
+			const heapIdentity = (await controller.execute("extension_heap = object(); id(extension_heap)")).result;
+			const invoke = `
+import asyncio
+from ipykernel.comm import Comm
+kernel = get_ipython().kernel
+kernel.control_handlers.setdefault("comm_msg", kernel.comm_manager.comm_msg)
+
+async def extension_request(payload):
+    loop = asyncio.get_running_loop()
+    reply = loop.create_future()
+    host = Comm(target_name="host.request", primary=False)
+    host.on_msg(lambda message: loop.call_soon_threadsafe(reply.set_result, message["content"]["data"]))
+    host.open(data={"type": "extension.demo.run", **payload})
+    try:
+        response = await reply
+    finally:
+        host.close()
+    if response.get("status") != "ok":
+        raise RuntimeError(response.get("error", "extension request failed"))
+    return response
+`;
+			const completed = await controller.execute(
+				`${invoke}
+(await extension_request({"value": 41}))["answer"]`,
+				{
+					hostContext,
+				},
+			);
+			expect(completed.status).toBe("ok");
+			expect(completed.result).toBe("42");
+			expect(completed.events).toContainEqual({
+				kind: "host_progress",
+				operation: "extension.demo.run",
+				message: "extension started",
+				data: { value: 41 },
+			});
+			expect(completed.hostArtifacts).toMatchObject([
+				{
+					path: path.join(artifactRoot, "extension.json"),
+					label: "extension result",
+					mimeType: "application/json",
+				},
+			]);
+
+			const blocking = controller.execute(
+				`${invoke}
+await extension_request({"block": True})`,
+				{ hostContext },
+			);
+			await blockingEntered.promise;
+			await controller.interrupt();
+			expect(await blockingAborted.promise).toBe("IPython cell interrupted");
+			expect((await blocking).status).toBe("aborted");
+			expect((await controller.execute("20 + 22")).result).toBe("42");
+
+			registry.replace(
+				[
+					{
+						namespace: "demo",
+						operation: "run",
+						extensionPath: "extension-demo-reloaded",
+						handler: request => ({ answer: Number(request.data.value) + 2 }),
+					},
+				],
+				[],
+			);
+			const reloaded = await controller.execute(
+				`${invoke}\n((await extension_request({"value": 41}))["answer"], id(extension_heap))`,
+				{ hostContext },
+			);
+			expect(reloaded.result).toBe(`(43, ${heapIdentity})`);
+			expect(controller.processIds).toEqual(processIds);
+			registry.replace([], []);
+			const removed = await controller.execute(`${invoke}\nawait extension_request({"value": 41})`, { hostContext });
+			expect(removed.status).toBe("error");
+			expect(removed.errors[0]?.evalue).toBe("unknown host request type: extension.demo.run");
+		} finally {
+			await controller.dispose();
+			if (processIds) {
+				expect(processExists(processIds.controllerPid)).toBe(false);
+				expect(processExists(processIds.kernelPid)).toBe(false);
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 30_000);
+
+	test("keeps one host comm open for a cooperative multi-message exchange", async () => {
+		const received: unknown[] = [];
+		const { controller, tempRoot } = await createIntegrationController("omp-ipython-host-channel-", {
+			channel: async request => {
+				if (!request.channel) throw new Error("host request channel is unavailable");
+				await request.channel.send({ kind: "cell-message", value: 1 });
+				const first = await request.channel.receive();
+				received.push(first);
+				await request.channel.send({ kind: "cell-message", value: 2 });
+				const second = await request.channel.receive();
+				received.push(second);
+				return { replies: [first, second] };
+			},
+		});
+		try {
+			await controller.start();
+			const exchange = await controller.execute(
+				`
+import asyncio
+from ipykernel.comm import Comm
+kernel = get_ipython().kernel
+kernel.control_handlers.setdefault("comm_msg", kernel.comm_manager.comm_msg)
+kernel.control_handlers.setdefault("comm_close", kernel.comm_manager.comm_close)
+loop = asyncio.get_running_loop()
+incoming = asyncio.Queue()
+host = Comm(target_name="host.request", primary=False)
+host.on_msg(lambda message: loop.call_soon_threadsafe(incoming.put_nowait, message["content"]["data"]))
+host.open(data={"type": "channel"})
+first = await incoming.get()
+assert first["status"] == "event"
+host.send(data={"kind": "cell-reply", "value": first["value"] + 10})
+second = await incoming.get()
+assert second["status"] == "event"
+host.send(data={"kind": "cell-reply", "value": second["value"] + 10})
+result = {"received": [first, second]}
+result
+`,
+				{
+					hostContext: {
+						sessionId: "channel-session",
+						cwd: tempRoot,
+						cellId: "channel-cell",
+						sequence: 1,
+						origin: "direct",
+						authority: "trusted-cell",
+					},
+				},
+			);
+			expect(exchange.status).toBe("ok");
+			expect(exchange.result).toContain("'cell-message'");
+			expect(exchange.result).toContain("'value': 1");
+			expect(exchange.result).toContain("'value': 2");
+			expect(received).toEqual([
+				{ kind: "cell-reply", value: 11 },
+				{ kind: "cell-reply", value: 12 },
+			]);
+			const reusable = await controller.execute("channel_namespace_value = 73\nchannel_namespace_value");
+			expect(reusable.status).toBe("ok");
+			expect(reusable.result).toBe("73");
+		} finally {
+			await controller.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}
 	}, 30_000);

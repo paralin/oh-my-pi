@@ -40,7 +40,6 @@ import type { ModelRegistry } from "../../config/model-registry";
 import {
 	formatModelString,
 	resolveAgentModelPatterns,
-	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
 } from "../../config/model-resolver";
@@ -49,7 +48,6 @@ import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-ar
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../../sdk";
 import { discoverAgents } from "../../task/discovery";
-import { resolveAgentPrewalkDefault } from "../../task/prewalk";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
 import { getEditorTheme, theme } from "../theme/theme";
@@ -74,8 +72,6 @@ interface SourceTab {
 interface DashboardAgent extends AgentDefinition {
 	disabled: boolean;
 	overrideModel?: string;
-	/** `task.agentPrewalk` value for this agent: "on", "off", or a model pattern. */
-	prewalkOverride?: string;
 }
 
 interface ModelResolution {
@@ -109,7 +105,7 @@ const SOURCE_LABEL: Record<AgentSource, string> = {
 };
 
 const LIST_FOOTER =
-	" ↑/↓: navigate  Space: toggle  Enter: model override  P: prewalk  N: new agent  ←/→: source  Ctrl+R: reload  Esc: close";
+	" ↑/↓: navigate  Space: toggle  Enter: model override  N: new agent  ←/→: source  Ctrl+R: reload  Esc: close";
 
 const IDENTIFIER_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+){1,5}$/;
 function joinPatterns(patterns: string[]): string {
@@ -262,8 +258,6 @@ class AgentInspectorPane implements Component {
 		private readonly defaultResolution: ModelResolution | undefined,
 		private readonly effectivePatterns: string[],
 		private readonly effectiveResolution: ModelResolution | undefined,
-		private readonly prewalkPattern: string | undefined,
-		private readonly prewalkResolution: ModelResolution | undefined,
 	) {}
 
 	render(width: number): readonly string[] {
@@ -293,7 +287,6 @@ class AgentInspectorPane implements Component {
 		lines.push(
 			`${theme.fg("muted", "Effective:")} ${this.effectiveResolution ? this.#formatResolution(this.effectiveResolution) : theme.fg("dim", "(unresolved)")}`,
 		);
-		lines.push(`${theme.fg("muted", "Prewalk:")} ${this.#prewalkLabel()}`);
 
 		if (this.agent.filePath) {
 			lines.push("");
@@ -312,22 +305,6 @@ class AgentInspectorPane implements Component {
 		return lines;
 	}
 	/** "off", "on → target" (with source: agent default vs override), or the unresolved pattern. */
-	#prewalkLabel(): string {
-		if (!this.agent) return theme.fg("dim", "off");
-		const override = this.agent.prewalkOverride?.trim();
-		const sourceTag = override
-			? theme.fg("warning", " (override)")
-			: this.agent.prewalk !== undefined && this.agent.prewalk !== false
-				? theme.fg("dim", " (agent default)")
-				: "";
-		if (!this.prewalkPattern) {
-			return `${theme.fg("dim", "off")}${override ? sourceTag : ""}`;
-		}
-		const target = this.prewalkResolution
-			? this.#formatResolution(this.prewalkResolution)
-			: theme.fg("dim", "(unresolved)");
-		return `${theme.fg("success", "on")} ${theme.fg("dim", `${replaceTabs(this.prewalkPattern)} →`)} ${target}${sourceTag}`;
-	}
 
 	#formatResolution(resolution: ModelResolution): string {
 		return formatResolution(resolution);
@@ -431,10 +408,9 @@ export class AgentDashboard extends Container {
 		try {
 			const selectedName = this.#selectedAgent()?.name;
 			const activeTabId = this.#tabs[this.#activeTabIndex]?.id ?? "all";
-			const { agents } = await discoverAgents(this.cwd, undefined, this.#settingsManager?.getModelRoles() ?? {});
+			const { agents } = await discoverAgents(this.cwd, undefined, this.#settingsManager?.getModelRoles?.() ?? {});
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
-			const prewalkOverrides = this.#settingsManager?.get("task.agentPrewalk") ?? {};
 
 			this.#allAgents = agents
 				.slice()
@@ -447,7 +423,6 @@ export class AgentDashboard extends Container {
 					...agent,
 					disabled: disabled.has(agent.name),
 					overrideModel: overrides[agent.name]?.trim() || undefined,
-					prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
 				}));
 
 			this.#tabs = this.#buildTabs(this.#allAgents);
@@ -581,33 +556,6 @@ export class AgentDashboard extends Container {
 			}
 		}
 		this.#settingsManager.set("task.agentModelOverrides", overrides);
-	}
-	#persistPrewalkOverrides(): void {
-		if (!this.#settingsManager) return;
-		const overrides: Record<string, string> = {};
-		for (const agent of this.#allAgents) {
-			const value = agent.prewalkOverride?.trim();
-			if (value) {
-				overrides[agent.name] = value;
-			}
-		}
-		this.#settingsManager.set("task.agentPrewalk", overrides);
-	}
-
-	/** Cycle the prewalk override for the selected agent: agent default → on → off → agent default. */
-	#cyclePrewalkOverride(): void {
-		const selected = this.#selectedAgent();
-		if (!selected) return;
-		const current = selected.prewalkOverride?.trim().toLowerCase();
-		selected.prewalkOverride = current === undefined || current === "" ? "on" : current === "on" ? "off" : undefined;
-		this.#persistPrewalkOverrides();
-		const pattern = resolveAgentPrewalkPattern({
-			settingsOverride: selected.prewalkOverride,
-			agentPrewalk: resolveAgentPrewalkDefault(selected, this.#settingsManager?.get("task.prewalk") ?? false),
-		});
-		const state = selected.prewalkOverride ?? "agent default";
-		this.#notice = `Prewalk for ${selected.name}: ${state}${pattern ? ` (into ${pattern})` : ""}`;
-		this.#buildLayout();
 	}
 
 	#toggleSelectedAgent(): void {
@@ -760,8 +708,6 @@ export class AgentDashboard extends Container {
 			enableLsp: false,
 			enableMCP: false,
 			disableExtensionDiscovery: true,
-			toolNames: ["__none__"],
-			customTools: [],
 			skills: [],
 			contextFiles: [],
 			promptTemplates: [],
@@ -1079,16 +1025,6 @@ export class AgentDashboard extends Container {
 			const defaultResolution = selected ? this.#resolvePatterns(defaultPatterns) : undefined;
 			const effectivePatterns = selected ? this.#effectivePatternsFor(selected, selected.overrideModel) : [];
 			const effectiveResolution = selected ? this.#resolvePatterns(effectivePatterns) : undefined;
-			const prewalkPattern = selected
-				? resolveAgentPrewalkPattern({
-						settingsOverride: selected.prewalkOverride,
-						agentPrewalk: resolveAgentPrewalkDefault(
-							selected,
-							this.#settingsManager?.get("task.prewalk") ?? false,
-						),
-					})
-				: undefined;
-			const prewalkResolution = prewalkPattern ? this.#resolvePatterns([prewalkPattern]) : undefined;
 
 			const listPane = new AgentListPane(
 				this.#filteredAgents,
@@ -1103,8 +1039,6 @@ export class AgentDashboard extends Container {
 				defaultResolution,
 				effectivePatterns,
 				effectiveResolution,
-				prewalkPattern,
-				prewalkResolution,
 			);
 			const bodyHeight = this.#computeBodyHeight();
 			this.addChild(new TwoColumnBody(listPane, inspector, bodyHeight));
@@ -1226,10 +1160,6 @@ export class AgentDashboard extends Container {
 		}
 		if (data.toLowerCase() === "n") {
 			this.#beginCreateFlow();
-			return;
-		}
-		if (data.toLowerCase() === "p") {
-			this.#cyclePrewalkOverride();
 			return;
 		}
 

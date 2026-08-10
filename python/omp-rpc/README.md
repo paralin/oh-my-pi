@@ -8,12 +8,12 @@ provides:
 - typed command methods for the stable RPC surface
 - typed startup options for common `omp --mode rpc` flags such as thinking level,
   tool selection, prompt appends, provider session IDs, and headless session toggles
-- typed protocol models for state, bash results, compaction, and session stats
+- typed protocol models for state, compaction, and session stats
 - automatic protocol v2 negotiation, lossless chunk reassembly, and stable message pagination
 - a process-backed client that manages request correlation over stdio
 - typed per-event listeners plus a typed catch-all notification hook
 - helpers for collecting prompt runs and handling extension UI requests in manual or headless mode
-- typed host-tool helpers so Python RPC owners can expose custom tools with JSON Schema metadata
+- typed event and UI helpers for Python RPC owners
 
 ## Basic Usage
 
@@ -40,7 +40,6 @@ with RpcClient(
     no_session=True,
     no_skills=True,
     no_rules=True,
-    tools=("read", "edit", "write"),
     append_system_prompt="Focus on reproducible benchmark behavior.",
 ) as client:
     print(client.get_state().thinking_level)
@@ -98,91 +97,6 @@ with RpcClient(
 ) as client:
     print(client.get_state().session_id)
 ```
-
-## Host-Owned Custom Tools
-
-RPC hosts can expose custom tools to the agent with JSON Schema metadata. The
-Python helper keeps the wire format simple while still giving the handler a
-typed signature:
-
-```python
-from typing import TypedDict
-
-from omp_rpc import RpcClient, host_tool
-
-
-class EchoArgs(TypedDict):
-    message: str
-
-
-def echo_host(args: EchoArgs, context) -> str:
-    context.send_update(f"working:{args['message']}")
-    return f"host:{args['message']}"
-
-
-with RpcClient(
-    no_session=True,
-    custom_tools=(
-        host_tool(
-            name="echo_host",
-            description="Echo a value from the Python host",
-            parameters={
-                "type": "object",
-                "properties": {"message": {"type": "string"}},
-                "required": ["message"],
-                "additionalProperties": False,
-            },
-            execute=echo_host,
-        ),
-    ),
-) as client:
-    client.prompt_and_wait("Use the echo_host tool with the value hello")
-```
-
-If you want runtime conversion into a richer Python type, pass `decode=` to
-`host_tool(...)`. That lets you keep the JSON Schema contract on the wire while
-parsing the incoming argument object into a dataclass or model in the handler.
-
-## Host-Owned URI Schemes
-
-Hosts can also expose custom URL schemes that behave like virtual files.
-Registered schemes are routed through the agent's `read` (and `write`) tools
-over the same RPC transport — handlers do the actual I/O on the Python side:
-
-```python
-from omp_rpc import RpcClient, host_uri
-
-rows: dict[str, str] = {"42": "id=42\nname=Alice\n"}
-
-
-def read_row(url: str, _ctx) -> str:
-	row_id = url.removeprefix("db://users/")
-	return rows[row_id]
-
-
-def write_row(url: str, content: str, _ctx) -> None:
-	row_id = url.removeprefix("db://users/")
-	rows[row_id] = content
-
-
-with RpcClient(
-	no_session=True,
-	host_uris=(
-		host_uri(
-			scheme="db",
-			description="Virtual db row files",
-			read=read_row,
-			write=write_row,
-		),
-	),
-) as client:
-	client.prompt_and_wait("Read db://users/42 and rewrite it with name=Bob")
-```
-
-Schemes registered as read-only (no `write=`) reject `write` calls with a
-clear error. The agent's `edit` tool does not target host URIs — hosts that
-want mutation expose `write` and the model uses the `write` tool with the
-full replacement content.
 
 ## Extension UI Requests
 

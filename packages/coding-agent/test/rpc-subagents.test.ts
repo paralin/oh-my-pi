@@ -414,6 +414,10 @@ function handle(frame) {
 	if (frame.type === "prompt") {
 		write({ id: frame.id, type: "response", command: "prompt", success: true });
 		write({ type: "notice", level: "info", message: "subagent test" });
+		write({ type: "tool_execution_start", toolCallId: "legacy-tool", toolName: "read", args: { path: "README.md" } });
+		write({ type: "ipython_cell_start", presentation: { kind: "cell", phase: "live", cellId: "cell-1" } });
+		write({ type: "ipython_cell_update", presentation: { kind: "cell", phase: "live", cellId: "cell-1" } });
+		write({ type: "ipython_cell_end", presentation: { kind: "cell", phase: "complete", cellId: "cell-1" } });
 		write({ type: "subagent_lifecycle", payload: { id: "SubagentA", index: 0, agent: "task", agentSource: "bundled", status: "started", sessionFile: "/tmp/subagent.jsonl" } });
 		write({ type: "subagent_progress", payload: { index: 0, agent: "task", agentSource: "bundled", task: "Do work", assignment: "Implement work", sessionFile: "/tmp/subagent.jsonl", progress } });
 		write({ type: "subagent_event", payload: { id: "SubagentA", event: { type: "agent_start" } } });
@@ -445,5 +449,9 @@ function handle(frame) {
 		expect(progressTasks).toEqual(["Do work"]);
 		expect(rawEventTypes).toEqual(["agent_start"]);
 		expect(sessionEventTypes).toContain("notice");
+		expect(sessionEventTypes).toEqual(
+			expect.arrayContaining(["ipython_cell_start", "ipython_cell_update", "ipython_cell_end"]),
+		);
+		expect(sessionEventTypes).not.toContain("tool_execution_start");
 	});
 });

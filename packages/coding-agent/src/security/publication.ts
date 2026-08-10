@@ -1,6 +1,4 @@
 import { type } from "@oh-my-pi/omptype";
-import type { ToolDefinition } from "../extensibility/extensions";
-import securityPublishDescription from "../prompts/tools/security-publish.md" with { type: "text" };
 import type {
 	SecurityCoverage,
 	SecurityEvidence,
@@ -250,77 +248,62 @@ function buildCoverage(params: SecurityPublishParams, plan: SecurityScanPlan): S
 	return coverage;
 }
 
-export function createSecurityPublicationTool(
-	options: SecurityPublicationOptions,
-): ToolDefinition<typeof securityPublishSchema, SecurityPublishDetails> {
+/** Publishes one validated canonical result for a bounded security scan. */
+export type SecurityPublisher = (params: SecurityPublishParams) => Promise<SecurityPublishDetails>;
+
+export function createSecurityPublisher(options: SecurityPublicationOptions): SecurityPublisher {
 	let published = false;
-	return {
-		name: "security_publish",
-		label: "Publish Security Scan",
-		description: securityPublishDescription.trim(),
-		parameters: securityPublishSchema,
-		approval: "write",
-		strict: true,
-		async execute(_toolCallId, params) {
-			if (published) throw new Error(`Security scan ${options.scanId} has already been published`);
-			published = true;
-			let persisted = false;
-			try {
-				const completedAt = new Date().toISOString();
-				const findingsByFingerprint = new Map<string, SecurityFinding>();
-				for (const input of params.findings) {
-					const finding = buildFinding(input, options, completedAt);
-					if (!findingsByFingerprint.has(finding.fingerprint)) {
-						findingsByFingerprint.set(finding.fingerprint, finding);
-					}
+	return async params => {
+		if (published) throw new Error(`Security scan ${options.scanId} has already been published`);
+		published = true;
+		let persisted = false;
+		try {
+			const completedAt = new Date().toISOString();
+			const findingsByFingerprint = new Map<string, SecurityFinding>();
+			for (const input of params.findings) {
+				const finding = buildFinding(input, options, completedAt);
+				if (!findingsByFingerprint.has(finding.fingerprint)) {
+					findingsByFingerprint.set(finding.fingerprint, finding);
 				}
-				const findings = [...findingsByFingerprint.values()];
-				const producer = createNativeSecurityProducer();
-				const provenance = createNativeSecurityProvenance({
-					createdAt: options.startedAt,
-					account: options.plan.account,
-					planFingerprint: options.plan.fingerprint,
-					workflowFingerprint: options.plan.workflowFingerprint,
-					sessionId: options.sessionId,
-					operationId: options.operationId,
-				});
-				const scan: SecurityScan = {
-					documentType: "omp-security.scan",
-					schemaVersion: "1.0",
-					id: options.scanId,
-					projectKey: options.store.projectKey,
-					status: "completed",
-					createdAt: options.plan.createdAt,
-					startedAt: options.startedAt,
-					completedAt,
-					plan: options.plan,
-					target: options.plan.target,
-					producer,
-					provenance,
-					findingIds: findings.map(finding => finding.id),
-					coverage: buildCoverage(params, options.plan),
-					reportRef: "report.md",
-					sarifRef: "results.sarif",
-				};
-				const provisional: SecurityScanBundle = { scan, findings, report: params.report };
-				const bundle: SecurityScanBundle = { ...provisional, sarif: exportSecurityBundleToSarif(provisional) };
-				await writeSecurityBundleToDirectory(options.plan.output.root, bundle);
-				await options.store.putBundle(bundle);
-				persisted = true;
-				await options.onPublished?.(bundle);
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Published security scan ${options.scanId} with ${findings.length} finding(s).`,
-						},
-					],
-					details: { scanId: options.scanId, findingCount: findings.length, status: "completed" },
-				};
-			} catch (error) {
-				if (!persisted) published = false;
-				throw error;
 			}
-		},
+			const findings = [...findingsByFingerprint.values()];
+			const producer = createNativeSecurityProducer();
+			const provenance = createNativeSecurityProvenance({
+				createdAt: options.startedAt,
+				account: options.plan.account,
+				planFingerprint: options.plan.fingerprint,
+				workflowFingerprint: options.plan.workflowFingerprint,
+				sessionId: options.sessionId,
+				operationId: options.operationId,
+			});
+			const scan: SecurityScan = {
+				documentType: "omp-security.scan",
+				schemaVersion: "1.0",
+				id: options.scanId,
+				projectKey: options.store.projectKey,
+				status: "completed",
+				createdAt: options.plan.createdAt,
+				startedAt: options.startedAt,
+				completedAt,
+				plan: options.plan,
+				target: options.plan.target,
+				producer,
+				provenance,
+				findingIds: findings.map(finding => finding.id),
+				coverage: buildCoverage(params, options.plan),
+				reportRef: "report.md",
+				sarifRef: "results.sarif",
+			};
+			const provisional: SecurityScanBundle = { scan, findings, report: params.report };
+			const bundle: SecurityScanBundle = { ...provisional, sarif: exportSecurityBundleToSarif(provisional) };
+			await writeSecurityBundleToDirectory(options.plan.output.root, bundle);
+			await options.store.putBundle(bundle);
+			persisted = true;
+			await options.onPublished?.(bundle);
+			return { scanId: options.scanId, findingCount: findings.length, status: "completed" };
+		} catch (error) {
+			if (!persisted) published = false;
+			throw error;
+		}
 	};
 }

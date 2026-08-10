@@ -146,7 +146,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 			modelPattern: "runtime-provider/cached-runtime-model",
 		});
 
@@ -196,7 +195,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 			modelPattern: "runtime-provider/runtime-model",
 			modelPatternAuthFallback: `${parentModel.provider}/${parentModel.id}`,
 		});
@@ -282,7 +280,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				slashCommands: [],
 				enableMCP: false,
 				enableLsp: false,
-				skipPythonPreflight: true,
 			});
 
 			try {
@@ -338,7 +335,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				slashCommands: [],
 				enableMCP: false,
 				enableLsp: false,
-				skipPythonPreflight: true,
 			});
 
 			try {
@@ -391,7 +387,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				slashCommands: [],
 				enableMCP: false,
 				enableLsp: false,
-				skipPythonPreflight: true,
 			});
 
 			try {
@@ -445,7 +440,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				slashCommands: [],
 				enableMCP: false,
 				enableLsp: false,
-				skipPythonPreflight: true,
 			});
 
 			try {
@@ -794,7 +788,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {
@@ -863,7 +856,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				slashCommands: [],
 				enableMCP: false,
 				enableLsp: false,
-				skipPythonPreflight: true,
 			});
 
 			try {
@@ -911,7 +903,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {
@@ -950,7 +941,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {
@@ -1015,7 +1005,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {
@@ -1087,7 +1076,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {
@@ -1155,7 +1143,6 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				slashCommands: [],
 				enableMCP: false,
 				enableLsp: false,
-				skipPythonPreflight: true,
 			});
 
 			try {

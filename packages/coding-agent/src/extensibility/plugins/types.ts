@@ -13,8 +13,6 @@ export interface PluginFeature {
 	default?: boolean;
 	/** Additional extension entry points provided by this feature */
 	extensions?: string[];
-	/** Additional tool entry points provided by this feature */
-	tools?: string[];
 	/** Additional hook entry points provided by this feature */
 	hooks?: string[];
 	/** Additional command files provided by this feature */
@@ -31,9 +29,6 @@ export interface PluginManifest {
 	version: string;
 	/** Human-readable description */
 	description?: string;
-
-	/** Entry point for base tools (relative path from package root) */
-	tools?: string;
 	/** Entry point for base hooks (relative path from package root) */
 	hooks?: string;
 	/** Extension entry points (relative paths from package root) */

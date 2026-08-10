@@ -1,7 +1,6 @@
 import { type ResolvedThinkingLevel, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { Effort, type Model, THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel, getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
-import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 
 export { CLI_THINKING_LEVELS } from "./cli/thinking-levels";
 
@@ -143,44 +142,6 @@ export type ConfiguredThinkingLevel = ThinkingLevel | typeof AUTO_THINKING;
 /** Maps the session-level `auto` sentinel to `undefined`; concrete levels pass through. */
 export function concreteThinkingLevel(level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined {
 	return level === AUTO_THINKING ? undefined : level;
-}
-
-/**
- * True when a prewalk hand-off from `current`/`currentLevel` to
- * `target`/`targetLevel` would change nothing observable: same model id, same
- * auto/fixed mode, and the same model-clamped effective effort. Prewalk arms and
- * switches only when this is false.
- *
- * An effort-only delta on the same model id is a legitimate cheapening hand-off
- * — on a reasoning model the effort is the bulk of the cost — so it is NOT a
- * no-op and must still switch. A `targetLevel` of `undefined` means the prewalk
- * pattern carried no explicit `:level` suffix (no effort change requested),
- * which on the same model is a no-op.
- *
- * `auto` mode is compared before efforts: `auto` and a fixed selector that both
- * resolve to `undefined` effort (e.g. `:inherit`) are NOT interchangeable —
- * applying the fixed selector clears per-turn classification, so switching
- * auto↔fixed is always a real change even when the clamped efforts match.
- *
- * Efforts are otherwise compared AFTER model clamping, so a target the model
- * cannot honor (e.g. `:xhigh` on a model capped at `high`) — which
- * `setThinkingLevel` would clamp straight back to the active effort — is
- * recognized as a no-op instead of triggering an ephemeral reset and the
- * plan/checklist nudges for nothing.
- */
-export function prewalkWouldBeNoop(
-	current: Model | undefined,
-	currentLevel: ConfiguredThinkingLevel | undefined,
-	target: Model,
-	targetLevel: ConfiguredThinkingLevel | undefined,
-): boolean {
-	if (!modelsAreEqual(current, target)) return false;
-	if (targetLevel === undefined) return true;
-	if ((targetLevel === AUTO_THINKING) !== (currentLevel === AUTO_THINKING)) return false;
-	return (
-		resolveThinkingLevelForModel(target, concreteThinkingLevel(targetLevel)) ===
-		resolveThinkingLevelForModel(target, concreteThinkingLevel(currentLevel))
-	);
 }
 
 /** Metadata used to render the `auto` selector value alongside concrete levels. */

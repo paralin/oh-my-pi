@@ -178,6 +178,81 @@ export interface CollabPromptDetails {
 // Events (handled subset)
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface IpythonWireText {
+	text: string;
+	truncated: boolean;
+	totalBytes: number;
+	outputBytes: number;
+}
+
+export interface IpythonWireArtifact {
+	id?: string;
+	path: string;
+	mimeType?: string;
+	bytes?: number;
+	label?: string;
+}
+
+export type IpythonWireExecutionEvent =
+	| { kind: "stream"; name: "stdout" | "stderr"; text: string }
+	| { kind: "result"; data: Record<string, unknown> }
+	| {
+			kind: "display";
+			data: Record<string, unknown>;
+			metadata: Record<string, unknown>;
+			transient: Record<string, unknown>;
+			update: boolean;
+			text: string;
+	  }
+	| { kind: "error"; ename: string; evalue: string; traceback: readonly string[] }
+	| { kind: "host_progress"; operation: string; message: string; data: Record<string, unknown> };
+
+export type IpythonWireUpdate =
+	| {
+			kind: "startup";
+			cellId: string;
+			origin: "model" | "direct";
+			progress: { stage: "gate" | "runtime" | "controller" | "restore" | "bootstrap" | "ready"; message: string };
+	  }
+	| { kind: "execution"; cellId: string; origin: "model" | "direct"; event: IpythonWireExecutionEvent };
+
+interface IpythonWirePresentationBase {
+	kind: "cell";
+	origin: "model" | "direct";
+	code: string;
+	events: readonly IpythonWireExecutionEvent[];
+	errors: readonly Extract<IpythonWireExecutionEvent, { kind: "error" }>[];
+	updates: readonly IpythonWireUpdate[];
+	startupProgress: readonly {
+		stage: "gate" | "runtime" | "controller" | "restore" | "bootstrap" | "ready";
+		message: string;
+	}[];
+	safeText: IpythonWireText;
+	artifacts: readonly IpythonWireArtifact[];
+}
+
+export interface IpythonWireLivePresentation extends IpythonWirePresentationBase {
+	phase: "live";
+	cellId: string | undefined;
+	status: "running";
+}
+
+export interface IpythonWireCompletedPresentation extends IpythonWirePresentationBase {
+	phase: "complete";
+	cellId: string;
+	executionId: string | undefined;
+	sequence: number;
+	authority: "trusted-cell";
+	status: "ok" | "error" | "aborted";
+	requestedAt: number;
+	startedAt: number | undefined;
+	finishedAt: number;
+	durationMs: number;
+	stdout: string;
+	stderr: string;
+	result: string | undefined;
+}
+
 export type AgentEvent =
 	| { type: "agent_start" }
 	| { type: "agent_end" }
@@ -195,7 +270,10 @@ export type AgentEvent =
 	| { type: "auto_compaction_end"; aborted: boolean; willRetry: boolean; errorMessage?: string; skipped?: boolean }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
-	| { type: "thinking_level_changed"; thinkingLevel?: string };
+	| { type: "thinking_level_changed"; thinkingLevel?: string }
+	| { type: "ipython_cell_start"; presentation: IpythonWireLivePresentation }
+	| { type: "ipython_cell_update"; presentation: IpythonWireLivePresentation }
+	| { type: "ipython_cell_end"; presentation: IpythonWireCompletedPresentation };
 
 // ═══════════════════════════════════════════════════════════════════════════
 // State & agents
@@ -393,8 +471,11 @@ export type WireFrame = GuestFrame | HostFrame;
  *   answered by the `ui-response` guest frame. Guests that predate the
  *   grammar would silently drop `ui-request` (asks hang forever on the
  *   host), so they must be rejected at hello.
+ * - `4`: host replicates typed IPython cell start/update/end projections.
+ *   Older guests would silently drop these frames, so they must be rejected
+ *   at hello.
  */
-export const COLLAB_PROTO = 3;
+export const COLLAB_PROTO = 4;
 
 /** Parameter key used for intent tracing (e.g. prompt explanation/reasoning) */
 export const INTENT_FIELD = "i";

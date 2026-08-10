@@ -24,7 +24,7 @@ export const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1
 
 /**
  * Per-CDP-message timeout applied to every puppeteer launch/connect. Set above
- * `TOOL_TIMEOUTS.browser.max` (30s) so the agent-side wall-clock is the canonical
+ * the browser operation timeout so the host-side wall-clock is the canonical
  * limit; this constant only catches genuinely stuck CDP sockets (renderer wedged,
  * connection dropped, etc.).
  */

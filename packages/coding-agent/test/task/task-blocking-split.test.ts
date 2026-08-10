@@ -22,11 +22,11 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { AgentDefinition, SingleResult, TaskParams, TaskRunDetails } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -123,9 +123,9 @@ describe("task per-item blocking split", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(createSession({ manager }));
+		const tool = await TaskService.create(createSession({ manager }));
 
-		const executePromise = tool.execute("tc-mixed", {
+		const executePromise = tool.spawn("tc-mixed", {
 			context: "ctx",
 			tasks: [
 				{ name: "ScoutOne", agent: "scout", task: "Research A." },
@@ -181,10 +181,10 @@ describe("task per-item blocking split", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(createSession({ manager }));
+		const tool = await TaskService.create(createSession({ manager }));
 
-		const updates: Array<{ text: string; details: TaskToolDetails }> = [];
-		const executePromise = tool.execute(
+		const updates: Array<{ text: string; details: TaskRunDetails }> = [];
+		const executePromise = tool.spawn(
 			"tc-mixed-settle",
 			{
 				context: "ctx",
@@ -230,9 +230,9 @@ describe("task per-item blocking split", () => {
 		});
 
 		const manager = createManager();
-		const tool = await TaskTool.create(createSession({ manager }));
+		const tool = await TaskService.create(createSession({ manager }));
 
-		const result = await tool.execute("tc-all-blocking", {
+		const result = await tool.spawn("tc-all-blocking", {
 			context: "ctx",
 			tasks: [
 				{ name: "ScoutA", agent: "scout", task: "Research A." },
@@ -259,8 +259,8 @@ describe("task per-item blocking split", () => {
 		managers.push(manager);
 		manager.register("bash", "filler", () => filler.promise, { id: "filler" });
 
-		const tool = await TaskTool.create(createSession({ manager }));
-		const result = await tool.execute("tc-mixed-schedfail", {
+		const tool = await TaskService.create(createSession({ manager }));
+		const result = await tool.spawn("tc-mixed-schedfail", {
 			context: "ctx",
 			tasks: [
 				{ name: "ScoutThree", agent: "scout", task: "Research." },

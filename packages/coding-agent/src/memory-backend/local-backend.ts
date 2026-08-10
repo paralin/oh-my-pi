@@ -1,7 +1,7 @@
 import {
-	buildMemoryToolDeveloperInstructions,
+	buildMemoryDeveloperInstructions,
 	clearMemoryData,
-	clearMemoryToolDeveloperInstructionsCache,
+	clearMemoryDeveloperInstructionsCache,
 	enqueueMemoryConsolidation,
 	saveLearnedLesson,
 	startMemoryStartupTask,
@@ -22,10 +22,10 @@ export const localBackend: MemoryBackend = {
 		startMemoryStartupTask(options);
 	},
 	async buildDeveloperInstructions(agentDir, settings, session) {
-		return buildMemoryToolDeveloperInstructions(agentDir, settings, session);
+		return buildMemoryDeveloperInstructions(agentDir, settings, session);
 	},
 	async clear(agentDir, cwd, session) {
-		clearMemoryToolDeveloperInstructionsCache(session);
+		clearMemoryDeveloperInstructionsCache(session);
 		await clearMemoryData(agentDir, cwd);
 	},
 	async enqueue(agentDir, cwd) {

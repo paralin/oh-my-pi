@@ -13,7 +13,7 @@ from typing import cast
 
 import pytest
 
-from robomp import host_tools
+from robomp import operations
 from robomp.db import Database
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import IssueInfo, RepoInfo
@@ -180,7 +180,7 @@ def _bindings(
     workspace: Workspace,
     upstream: Path,
     slot_uid: int,
-) -> host_tools.ToolBindings:
+) -> operations.ToolBindings:
     repo = RepoInfo(full_name=_REPO, default_branch="main", clone_url=str(upstream), private=False)
     issue = IssueInfo(
         repo=_REPO,
@@ -192,9 +192,9 @@ def _bindings(
         labels=(),
         is_pull_request=False,
     )
-    return host_tools.ToolBindings(
+    return operations.ToolBindings(
         db=db,
-        github=cast(GitHubBackend, object()),  # not used by these local-only host-tool paths
+        github=cast(GitHubBackend, object()),  # not used by these local-only operation paths
         git_transport=LocalGitTransport(token=None),
         repo=repo,
         issue=issue,
@@ -207,19 +207,19 @@ def _bindings(
 
 
 def _run_ok(
-    bindings: host_tools.ToolBindings,
+    bindings: operations.ToolBindings,
     cmd: list[str] | tuple[str, ...],
     *,
     timeout: float = 180.0,
 ) -> subprocess.CompletedProcess[str]:
-    proc = host_tools._run_repo_command(bindings, cmd, timeout=timeout)
+    proc = operations._run_repo_command(bindings, cmd, timeout=timeout)
     assert proc.returncode == 0, (
         f"command failed as slot {bindings.slot_uid}: {' '.join(cmd)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
     )
     return proc
 
 
-def _write_as_slot(bindings: host_tools.ToolBindings, relative_path: str, content: str) -> None:
+def _write_as_slot(bindings: operations.ToolBindings, relative_path: str, content: str) -> None:
     _run_ok(
         bindings,
         [
@@ -279,9 +279,9 @@ def test_slot_workspace_runs_bun_biome_cargo_and_git_after_root_reentry(
     _run_ok(bindings, ["bun", "install", "--no-progress"], timeout=300.0)
     _run_ok(bindings, ["bun", "run", "check:ts"], timeout=180.0)
     _run_ok(bindings, ["cargo", "check", "--workspace"], timeout=600.0)
-    host_tools._run_pre_publish_bun_check(bindings, {}, tool_name="gh_push_branch", stage="push")
+    operations._run_pre_publish_bun_check(bindings, {}, tool_name="gh_push_branch", stage="push")
 
-    runtime_env = host_tools._repo_command_env(bindings)
+    runtime_env = operations._repo_command_env(bindings)
     bun_cache = Path(runtime_env["BUN_INSTALL_CACHE_DIR"])
     assert bun_cache.is_dir()
     assert bun_cache.stat().st_uid == _SLOT_ONE
@@ -311,7 +311,7 @@ def test_git_pool_metadata_survives_root_push_and_retry_slot(
     _run_ok(first_bindings, ["git", "add", "src/first-slot.ts"])
     _run_ok(first_bindings, ["git", "commit", "-m", "first slot commit"])
 
-    first_head = host_tools._guarded_push_branch(first_bindings, {}, "gh_push_branch", first.branch)
+    first_head = operations._guarded_push_branch(first_bindings, {}, "gh_push_branch", first.branch)
     remote_head = _git(["--git-dir", str(upstream_repo), "rev-parse", first.branch], cwd=slot_tmp_path).stdout.strip()
     assert remote_head == first_head
 
@@ -329,7 +329,7 @@ def test_git_pool_metadata_survives_root_push_and_retry_slot(
     _run_ok(retry_bindings, ["git", "add", "src/retry-slot.ts"])
     _run_ok(retry_bindings, ["git", "commit", "-m", "retry slot commit"])
 
-    retry_head = host_tools._guarded_push_branch(retry_bindings, {}, "gh_push_branch", retry.branch)
+    retry_head = operations._guarded_push_branch(retry_bindings, {}, "gh_push_branch", retry.branch)
     remote_retry_head = _git(
         ["--git-dir", str(upstream_repo), "rev-parse", retry.branch], cwd=slot_tmp_path
     ).stdout.strip()
@@ -346,7 +346,7 @@ def _prepare_shared_natives_cache(slot_tmp_path: Path) -> NativesCache:
     return NativesCache(cache_root)
 
 
-def _stage_built_natives(bindings: host_tools.ToolBindings, *, body: str = "ELFx") -> None:
+def _stage_built_natives(bindings: operations.ToolBindings, *, body: str = "ELFx") -> None:
     """Mirror what a napi build would leave in `packages/natives/native/`.
 
     Writes the four cached files AS THE SLOT so ownership matches a real

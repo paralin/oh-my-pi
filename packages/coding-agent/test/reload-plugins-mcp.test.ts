@@ -16,14 +16,14 @@ import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-ut
 const originalProjectDir = getProjectDir();
 
 function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}) {
-	const mcpTools = [{ name: "mcp__srv_do" }];
+	const mcpTools = [{ serverName: "srv", name: "do" }];
 	const mcpManager = {
 		disconnectAll: vi.fn(async () => {}),
 		discoverAndConnect: vi.fn(async (_options?: unknown) => ({ errors: new Map<string, string>() })),
 		getTools: vi.fn(() => mcpTools),
 	};
 	const session = {
-		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
+		refreshMCPInstructions: vi.fn(async () => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};
 	const ctx = {
@@ -53,16 +53,16 @@ describe("/reload-plugins MCP reconnect (#7189)", () => {
 		await removeWithRetries(projectDir);
 	});
 
-	test("reconnects MCP servers, rebinds tools, and clears stale prompt commands", async () => {
-		const { ctx, mcpManager, session, mcpTools } = createFakeCtx(projectDir);
+	test("reconnects MCP servers, refreshes instructions, and clears stale prompt commands", async () => {
+		const { ctx, mcpManager, session } = createFakeCtx(projectDir);
 		const runtime: TuiSlashCommandRuntime = { ctx };
 
 		const result = await executeBuiltinSlashCommand("/reload-plugins", runtime);
 		expect(result).toBe(true);
 		expect(mcpManager.disconnectAll).toHaveBeenCalledTimes(1);
 		expect(mcpManager.discoverAndConnect).toHaveBeenCalledTimes(1);
-		expect(session.refreshMCPTools).toHaveBeenCalledTimes(1);
-		expect(session.refreshMCPTools).toHaveBeenCalledWith(mcpTools);
+		expect(session.refreshMCPInstructions).toHaveBeenCalledTimes(1);
+		expect(session.refreshMCPInstructions).toHaveBeenCalledWith();
 		expect(session.setMCPPromptCommands).toHaveBeenCalledTimes(1);
 		expect(session.setMCPPromptCommands).toHaveBeenCalledWith([]);
 	});

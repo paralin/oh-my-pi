@@ -78,6 +78,9 @@ const WIRE_AGENT_EVENT_TYPES: Record<WireAgentEvent["type"], true> = {
 	auto_retry_start: true,
 	auto_retry_end: true,
 	thinking_level_changed: true,
+	ipython_cell_start: true,
+	ipython_cell_update: true,
+	ipython_cell_end: true,
 };
 
 const WIRE_SESSION_ENTRY_TYPES: Record<WireSessionEntry["type"], true> = {

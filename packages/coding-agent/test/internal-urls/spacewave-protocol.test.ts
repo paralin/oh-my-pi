@@ -22,7 +22,6 @@ import {
 	SpacewaveProtocolHandler,
 	worldAddressFromUrl,
 } from "../../src/internal-urls/spacewave-protocol";
-import type { ProtocolHandler } from "../../src/internal-urls/types";
 import type { WorldRead } from "../../src/world/index.js";
 import {
 	assertCanonicalWorldPath,
@@ -221,14 +220,6 @@ describe("spacewave reads", () => {
 			InternalUrlRouter.resetForTests();
 			create.mockRestore();
 		}
-	});
-
-	// No write hook at all, so the router reports the scheme as not writable
-	// rather than dispatching a mutation at a World.
-	test("the handler is read-only", () => {
-		const handler: ProtocolHandler = new SpacewaveProtocolHandler(fakeClient().client);
-		expect("write" in handler).toBe(false);
-		expect(handler.write).toBeUndefined();
 	});
 });
 

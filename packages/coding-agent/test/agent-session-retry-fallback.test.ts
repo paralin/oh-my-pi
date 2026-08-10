@@ -978,20 +978,20 @@ describe("AgentSession retry fallback", () => {
 		if (!primaryModel) throw new Error("Expected bundled tool-continuation model");
 		const requestedModels: string[] = [];
 		let useReserve = false;
-		const toolSchema = z.object({ value: z.string() });
-		const tool: AgentTool<typeof toolSchema, { value: string }> = {
-			name: "consume",
+		const toolSchema = z.object({ code: z.string() });
+		const tool: AgentTool<typeof toolSchema, { code: string }> = {
+			name: "ipython",
 			label: "Consume",
 			description: "Consume plan quota",
 			parameters: toolSchema,
 			async execute(_toolCallId, params) {
 				useReserve = true;
-				return { content: [{ type: "text", text: params.value }], details: params };
+				return { content: [{ type: "text", text: params.code }], details: params };
 			},
 		};
 		const mock = createMockModel({
 			responses: [
-				{ content: [{ type: "toolCall", id: "tool-1", name: "consume", arguments: { value: "done" } }] },
+				{ content: [{ type: "toolCall", id: "tool-1", name: "ipython", arguments: { code: "done" } }] },
 				{ content: ["must not run"] },
 			],
 		});
@@ -1315,7 +1315,6 @@ describe("AgentSession retry fallback", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorConfigs: [{ name: "fallback-test", model: advisorPrimarySelector }],
 			advisorStreamFn: (model, context, options) => {
 				const selector = `${model.provider}/${model.id}`;
@@ -1325,9 +1324,9 @@ describe("AgentSession retry fallback", () => {
 						throw: "Devin stream error failed_precondition: Your daily usage quota has been exhausted. Your quota will reset after 1s.",
 					});
 				} else if (selector === advisorPrimarySelector) {
-					advisorMock.push({ content: ["Advisor primary restored"] });
+					advisorMock.push({ content: ['{"note":null}'] });
 				} else if (selector === advisorFallbackSelector) {
-					advisorMock.push({ content: ["Advisor recovered"] });
+					advisorMock.push({ content: ['{"note":null}'] });
 				} else {
 					throw new Error(`Unexpected advisor model requested: ${selector}`);
 				}
@@ -1431,7 +1430,6 @@ describe("AgentSession retry fallback", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 			advisorStreamFn: advisorMock.stream,
 		});
 		expect(session.setAdvisorEnabled(true)).toBe(true);

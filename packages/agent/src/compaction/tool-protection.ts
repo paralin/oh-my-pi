@@ -9,8 +9,6 @@ export interface ProtectedToolContext {
 
 export type ProtectedToolMatcher = string | ((context: ProtectedToolContext) => boolean);
 
-const SKILL_INTERNAL_URL_PREFIX = "skill://";
-
 export function collectToolCallsById(entries: readonly SessionEntry[]): Map<string, AgentToolCall> {
 	const toolCalls = new Map<string, AgentToolCall>();
 	for (const entry of entries) {
@@ -33,10 +31,6 @@ export function getReadToolPath({ toolResult, toolCall }: ProtectedToolContext):
 	if (toolResult.toolName !== "read" || toolCall?.name !== "read") return undefined;
 	const path = (toolCall.arguments as Record<string, unknown>).path;
 	return typeof path === "string" ? path : undefined;
-}
-
-export function isSkillReadToolResult(context: ProtectedToolContext): boolean {
-	return getReadToolPath(context)?.startsWith(SKILL_INTERNAL_URL_PREFIX) ?? false;
 }
 
 const ARTIFACT_INTERNAL_URL_PREFIX = "artifact://";

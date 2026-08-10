@@ -26,12 +26,7 @@ describe("issue #1215: legacy @mariozechner/pi-ai imports survive getResolvedSpe
 				'import { z } from "@mariozechner/pi-ai";',
 				"",
 				"export default function(pi) {",
-				"\tpi.registerTool({",
-				`\t\tname: ${JSON.stringify(TOOL_NAME)},`,
-				'\t\tdescription: "Issue #1215 regression test",',
-				"\t\tparameters: z.object({ text: z.string() }),",
-				'\t\texecute: async () => ({ content: [{ type: "text", text: "ok" }] }),',
-				"\t});",
+				`\tpi.registerCommand(${JSON.stringify(TOOL_NAME)}, { handler: async () => { z.string(); } });`,
 				"}",
 			].join("\n"),
 		);
@@ -41,11 +36,11 @@ describe("issue #1215: legacy @mariozechner/pi-ai imports survive getResolvedSpe
 		projectDir.removeSync();
 	});
 
-	it("loads the extension and registers the tool", async () => {
+	it("loads the legacy import and registers its command", async () => {
 		const result = await loadExtensions([extensionPath], projectDir.path());
 
 		expect(result.errors).toEqual([]);
 		expect(result.extensions).toHaveLength(1);
-		expect(result.extensions[0].tools.has(TOOL_NAME)).toBe(true);
+		expect(result.extensions[0].commands.has(TOOL_NAME)).toBe(true);
 	});
 });

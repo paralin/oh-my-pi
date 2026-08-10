@@ -1,7 +1,7 @@
 ---
 description: "Never use `any` in TypeScript annotations or assertions — use `unknown`, generics, a schema parse at trust boundaries, or the actual type"
 condition: ": any|as any"
-scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

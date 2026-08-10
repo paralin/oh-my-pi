@@ -10,7 +10,6 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -24,14 +23,7 @@ describe("AgentSession persistence-keys cache", () => {
 		tempDir = path.join(os.tmpdir(), `pi-cache-test-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 
-		const toolSession: ToolSession = {
-			cwd: tempDir,
-			hasUI: false,
-			getSessionFile: () => null,
-			getSessionSpawns: () => "*",
-			settings: Settings.isolated(),
-		};
-		const tools = await createTools(toolSession);
+		const tools: [] = [];
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("bundled model claude-sonnet-4-5 not found");

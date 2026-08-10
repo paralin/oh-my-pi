@@ -43,6 +43,20 @@ async function fixture() {
 			if (goal.current) goal.current.status = "complete";
 			return host.goalGet();
 		},
+		goalPause: async reason => {
+			if (goal.current) {
+				goal.current.status = "paused";
+				goal.current.reason = reason;
+			}
+			return host.goalGet();
+		},
+		goalResume: async () => {
+			if (goal.current) {
+				goal.current.status = "active";
+				delete goal.current.reason;
+			}
+			return host.goalGet();
+		},
 		contextUsage: () => ({ tokens: 120, contextWindow: 1_000, percent: 12 }),
 		waitForIdle: async () => await wait.promise,
 		runCompaction: async instructions => compacted.resolve(instructions),
@@ -131,6 +145,10 @@ describe("IPython session control host handlers", () => {
 		expect(await call("goal.create", { objective: "Finish the runtime", token_budget: 5_000 })).toMatchObject({
 			goal: { objective: "Finish the runtime", tokenBudget: 5_000, status: "active" },
 		});
+		expect(await call("goal.pause", { reason: "waiting for review" })).toMatchObject({
+			goal: { status: "paused", reason: "waiting for review" },
+		});
+		expect(await call("goal.resume")).toMatchObject({ goal: { status: "active" } });
 		expect(await call("goal.complete")).toMatchObject({ goal: { status: "complete" } });
 		expect(await call("checkpoint.create", { label: "before-rewrite" })).toEqual({
 			scheduled: true,

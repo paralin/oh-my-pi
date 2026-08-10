@@ -87,7 +87,6 @@ describe("issue #6114 fresh launch default role from discovery-only local provid
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {
@@ -127,7 +126,6 @@ describe("issue #6114 fresh launch default role from discovery-only local provid
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {

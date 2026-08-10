@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
+import { arkToWireSchema } from "@oh-my-pi/pi-ai";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
@@ -17,13 +17,13 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, YieldItem } from "@oh-my-pi/pi-coding-agent/task/types";
-import { WorldTool } from "@oh-my-pi/pi-coding-agent/tools/world/index";
 import {
 	WORLD_SESSION_ENV,
 	WORLD_SOCKET_ENV,
 	WorldAuthorityError,
 	WorldClient,
 } from "@oh-my-pi/pi-coding-agent/world/index";
+import { executeWorldOperation, WORLD_TOOL_DESCRIPTION, WORLD_TOOL_SCHEMA } from "../../src/tools/world/index.js";
 import { WorldAuthorityDenialCode, WorldRuntimeOperation } from "../../src/world/generated/llmsession.pb.js";
 
 const CLAUDE_AGENT: AgentDefinition = {
@@ -157,7 +157,7 @@ describe("Claude Code OMP tools", () => {
 		expect(session.additionalDirectories).toBeUndefined();
 	});
 
-	it("delegates synchronous nested work through TaskTool with Claude ownership and depth", async () => {
+	it("delegates synchronous nested work through TaskService with Claude ownership and depth", async () => {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [TASK_AGENT], projectAgentsDir: null });
 		const run = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async nested => result(nested.id));
 		const controller = new AbortController();
@@ -425,7 +425,7 @@ describe("Claude Code OMP tools", () => {
 		});
 	});
 
-	// The write-capable World tool is the native WorldTool, advertised over MCP.
+	// The write-capable World operation is deliberately bridged over MCP.
 	// It is conditional one step further in than world_read: a socket alone
 	// leaves the peer with reads and no identity to be charged for a change.
 	describe("world tool bridge", () => {
@@ -484,17 +484,16 @@ describe("Claude Code OMP tools", () => {
 			expect(bridge.map(tool => tool.name)).not.toContain("world");
 		});
 
-		// One schema, derived from the tool itself. A hand-written copy here is
-		// exactly the drift the shared tool exists to prevent.
-		it("advertises the native tool's own schema and description", async () => {
+		// One schema and description, shared with the operation owner. A hand-written
+		// copy here is exactly the drift the shared constants prevent.
+		it("advertises the shared schema and description", async () => {
 			const bridge = await withWorldEnv("/run/glados/console.sock", "glados/llm-session/caller", () =>
 				tools(options(Settings.isolated())),
 			);
 			const world = bridge.find(tool => tool.name === "world");
 			if (!world) throw new Error("world MCP tool missing");
-			const native = new WorldTool({ canMutate: true } as unknown as WorldClient);
-			expect(world.inputSchema).toEqual(toolWireSchema(native) as typeof world.inputSchema);
-			expect(world.description).toBe(native.description);
+			expect(world.inputSchema).toEqual(arkToWireSchema(WORLD_TOOL_SCHEMA) as typeof world.inputSchema);
+			expect(world.description).toBe(WORLD_TOOL_DESCRIPTION);
 		});
 
 		it("rejects arguments the native schema rejects", async () => {
@@ -508,7 +507,7 @@ describe("Claude Code OMP tools", () => {
 			expect(text(failed)).toContain("Invalid OMP world arguments");
 		});
 
-		it("returns the same rendered denial the native tool returns, with isError", async () => {
+		it("returns the same rendered denial as the shared operation owner, with isError", async () => {
 			const denial = new WorldAuthorityError("session_input", {
 				operation: WorldRuntimeOperation.SESSION_INPUT,
 				callerSessionObjectKey: "glados/llm-session/caller",
@@ -541,10 +540,10 @@ describe("Claude Code OMP tools", () => {
 			};
 			const bridged = await world.handler(call);
 
-			const nativeResult = await new WorldTool(client).execute("call-1", call);
+			const nativeResult = await executeWorldOperation(client, call);
 			expect(bridged.isError).toBe(true);
 			// Byte-identical, because it is one renderer reached two ways.
-			expect(text(bridged)).toBe(text(nativeResult));
+			expect(text(bridged)).toBe(nativeResult.text);
 			expect(text(bridged)).toContain("OPERATION_NOT_ALLOWED");
 		});
 

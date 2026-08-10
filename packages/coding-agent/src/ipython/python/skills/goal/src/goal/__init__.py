@@ -41,6 +41,25 @@ async def create(objective: str, token_budget: int | None = None) -> dict[str, A
     return await host_request("goal.create", payload)
 
 
+async def pause(reason: str) -> dict[str, Any]:
+    """Pause autonomous goal continuation while waiting for external input.
+
+    Errors unless the thread has an active goal. Give the exact blocker; do
+    not keep emitting holding updates.
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise TypeError("reason must be a nonempty str")
+    return await host_request("goal.pause", {"reason": reason})
+
+
+async def resume() -> dict[str, Any]:
+    """Reactivate a paused thread goal after new input resolves the blocker.
+
+    Errors unless the thread currently has a paused goal.
+    """
+    return await host_request("goal.resume")
+
+
 async def complete() -> dict[str, Any]:
     """Mark the existing thread goal achieved.
 

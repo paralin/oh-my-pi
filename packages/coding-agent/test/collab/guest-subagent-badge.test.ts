@@ -69,7 +69,6 @@ function makeGuestContext(counts: number[]): InteractiveModeContext {
 		streamingComponent: undefined,
 		streamingMessage: undefined,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		loadingAnimation: undefined,
 		statusLine: {
 			setSubagentCount: (count: number) => {

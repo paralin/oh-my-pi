@@ -79,7 +79,7 @@ class Settings(BaseSettings):
     event_max_retries: int = Field(3, alias="ROBOMP_EVENT_MAX_RETRIES")
     event_retry_delays_raw: str = Field("30,120,600", alias="ROBOMP_EVENT_RETRY_DELAYS_SECONDS")
     # Premature-end reminder. When a `triage_issue` turn ends without the
-    # agent having reached a terminal tool (`gh_open_pr`,
+    # agent having reached a terminal operation (`gh_open_pr`,
     # `mark_unable_to_reproduce`, `abort_task`) for a `bug`/`documentation`
     # classification, the driver sends up to this many "you stopped before
     # opening a PR — continue" reminder prompts into the same omp session.

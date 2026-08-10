@@ -1,16 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import {
-	pickElectronTarget,
-	shouldPreserveConnectedBrowserFocus,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
+import type { Browser, Page, Target } from "puppeteer-core";
+import { pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "../../src/tools/browser/attach.js";
 import {
 	acquireBrowser,
 	type BrowserHandle,
 	normalizeConnectedCdpUrl,
 	releaseBrowser,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import { acquireTab, releaseTab } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
-import type { Browser, Page, Target } from "puppeteer-core";
+} from "../../src/tools/browser/registry.js";
+import { acquireTab, releaseTab } from "../../src/tools/browser/tab-supervisor.js";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();

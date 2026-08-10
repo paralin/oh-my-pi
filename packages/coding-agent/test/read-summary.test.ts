@@ -3,16 +3,15 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../src/session/tool-session.js";
+import type { ReadResult } from "../src/tools/read.js";
+import { ReadService } from "../src/tools/read.js";
 
 let artifactCounter = 0;
 
-function textOutput(result: AgentToolResult<ReadToolDetails>): string {
+function textOutput(result: ReadResult): string {
 	return result.content
 		.filter(content => content.type === "text")
 		.map(content => content.text)
@@ -70,12 +69,9 @@ describe("read summary", () => {
 			"export function alpha(value: string): string {\n\tconst clean = value.trim();\n\tconst label = clean || 'alpha';\n\treturn label.toUpperCase();\n}\n\nexport function beta(): number {\n\tconst one = 1;\n\tconst two = 2;\n\treturn one + two;\n}\n",
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-ts", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
-		const firstLine = text.split("\n")[0];
-		expect(firstLine).toMatch(/^\[fixture\.ts#[0-9A-F]{4}\]$/);
-
 		expect(text).toContain("export function alpha(value: string): string { … }");
 		expect(text).toContain("export function beta(): number { … }");
 		expect(text).not.toContain("const clean = value.trim()");
@@ -89,43 +85,15 @@ describe("read summary", () => {
 			"# Heading\n\nIntro line.\n\n```ts\nexport function alpha(): string {\n\tconst clean = 'alpha';\n\treturn clean;\n}\n```\n\nMore prose.\n",
 		);
 
-		const defaultTool = new ReadTool(createSession(tmpDir));
-		const defaultResult = await defaultTool.execute("read-summary-md-default", { path: fixture });
+		const defaultTool = new ReadService(createSession(tmpDir));
+		const defaultResult = await defaultTool.read(fixture);
 		expect(textOutput(defaultResult)).toContain("const clean = 'alpha';");
 		expect(defaultResult.details?.summary).toBeUndefined();
 
-		const proseTool = new ReadTool(createSession(tmpDir, { "read.summarize.prose": true }));
-		const proseResult = await proseTool.execute("read-summary-md-prose", { path: fixture });
+		const proseTool = new ReadService(createSession(tmpDir, { "read.summarize.prose": true }));
+		const proseResult = await proseTool.read(fixture);
 		expect(textOutput(proseResult)).not.toContain("const clean = 'alpha';");
 		expect(proseResult.details?.summary?.elidedSpans).toBe(1);
-	});
-
-	it("marks local Markdown-like extensions as markdown only when previews are enabled", async () => {
-		const markdown = "# Heading\n\nSome **bold** text.\n";
-		const extensions = ["md", "markdown", "mdx", "mdc", "mkd", "mdown"] as const;
-		const defaultTool = new ReadTool(createSession(tmpDir));
-		const previewTool = new ReadTool(createSession(tmpDir, { "read.renderMarkdown": true }));
-
-		for (const extension of extensions) {
-			const fixture = path.join(tmpDir, `fixture.${extension}`);
-			await fs.writeFile(fixture, markdown);
-
-			// Default (setting off): no markdown tagging, byte-identical to the pre-setting behavior.
-			const defaultResult = await defaultTool.execute(`read-summary-markdown-default-${extension}`, {
-				path: fixture,
-			});
-			expect(defaultResult.details?.contentType).toBeUndefined();
-
-			// Opt-in: tagged for the TUI preview while the model-facing text stays verbatim.
-			const result = await previewTool.execute(`read-summary-markdown-${extension}`, { path: fixture });
-			const text = textOutput(result);
-
-			expect(result.details?.contentType).toBe("text/markdown");
-			expect(result.details?.displayContent?.text).toBe(markdown);
-			expect(text.split("\n")[0]).toMatch(new RegExp(`^\\[fixture\\.${extension}#[0-9A-F]{4}\\]$`));
-			expect(text).toContain("1:# Heading");
-			expect(text).toContain("3:Some **bold** text.");
-		}
 	});
 
 	it("keeps non-.md markdown flavors verbatim when prose summaries are disabled", async () => {
@@ -135,8 +103,8 @@ describe("read summary", () => {
 			"# Heading\n\nIntro line.\n\n```ts\nexport function alpha(): string {\n\tconst clean = 'alpha';\n\treturn clean;\n}\n```\n\nMore prose.\n",
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-mdx-default", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		expect(textOutput(result)).toContain("const clean = 'alpha';");
 		expect(result.details?.summary).toBeUndefined();
 	});
@@ -150,8 +118,8 @@ describe("read summary", () => {
 		).join("\n\n");
 		await fs.writeFile(fixture, `${source}\n`);
 
-		const tool = new ReadTool(createSession(tmpDir, { "read.defaultLimit": 10 }));
-		const result = await tool.execute("read-summary-no-truncate", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir, { "read.defaultLimit": 10 }));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
 
 		expect(text).toContain("export function fn19(): number {");
@@ -164,8 +132,8 @@ describe("read summary", () => {
 		const fixture = path.join(tmpDir, "fixture.ts");
 		await fs.writeFile(fixture, "export function alpha(): string {\n\tconst clean = 'alpha';\n\treturn clean;\n}\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-range", { path: `${fixture}:1-9999` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${fixture}:1-9999`);
 		const text = textOutput(result);
 
 		expect(text).toContain("const clean = 'alpha';");
@@ -177,8 +145,8 @@ describe("read summary", () => {
 		const fixture = path.join(tmpDir, "fixture.ts");
 		await fs.writeFile(fixture, "export const value = 1;\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-raw", { path: `${fixture}:raw` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${fixture}:raw`);
 		const text = textOutput(result);
 
 		expect(text).toBe("export const value = 1;\n");
@@ -189,10 +157,10 @@ describe("read summary", () => {
 		const fixture = path.join(tmpDir, "compound.ts");
 		await fs.writeFile(fixture, "alpha\nbeta\ngamma\ndelta\nepsilon\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const linesFirst = await tool.execute("read-summary-compound-lines-raw", { path: `${fixture}:2-4:raw` });
+		const tool = new ReadService(createSession(tmpDir));
+		const linesFirst = await tool.read(`${fixture}:2-4:raw`);
 		const linesFirstText = textOutput(linesFirst);
-		// Verbatim: no hashline anchors and no line-number prefix.
+		// Verbatim: no line-number prefix.
 		expect(linesFirstText).toContain("beta");
 		expect(linesFirstText).toContain("gamma");
 		expect(linesFirstText).toContain("delta");
@@ -202,7 +170,7 @@ describe("read summary", () => {
 		// assert on what is excluded — only that the requested range is present
 		// verbatim with no anchor or line-number prefixes.
 
-		const rawFirst = await tool.execute("read-summary-compound-raw-lines", { path: `${fixture}:raw:2-4` });
+		const rawFirst = await tool.read(`${fixture}:raw:2-4`);
 		const rawFirstText = textOutput(rawFirst);
 		expect(rawFirstText).toBe(linesFirstText);
 	});
@@ -213,13 +181,13 @@ describe("read summary", () => {
 		await fs.writeFile(valid, "export function alpha(): string {\n\tconst clean = 'alpha';\n\treturn clean;\n}\n");
 		await fs.writeFile(broken, "export function broken( {\n");
 
-		const disabledTool = new ReadTool(createSession(tmpDir, { "read.summarize.enabled": false }));
-		const disabled = await disabledTool.execute("read-summary-disabled", { path: valid });
+		const disabledTool = new ReadService(createSession(tmpDir, { "read.summarize.enabled": false }));
+		const disabled = await disabledTool.read(valid);
 		expect(textOutput(disabled)).toContain("const clean = 'alpha';");
 		expect(disabled.details?.summary).toBeUndefined();
 
-		const enabledTool = new ReadTool(createSession(tmpDir));
-		const parseFailure = await enabledTool.execute("read-summary-parse-failure", { path: broken });
+		const enabledTool = new ReadService(createSession(tmpDir));
+		const parseFailure = await enabledTool.read(broken);
 		expect(textOutput(parseFailure)).toContain("export function broken( {");
 		expect(parseFailure.details?.summary).toBeUndefined();
 	});
@@ -234,33 +202,30 @@ describe("read summary", () => {
 			db.close();
 		}
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const row = await tool.execute("read-summary-sqlite-row", { path: `${dbPath}:users:42` });
+		const tool = new ReadService(createSession(tmpDir));
+		const row = await tool.read(`${dbPath}:users:42`);
 		const text = textOutput(row);
 
 		expect(text).toContain("id: 42");
 		expect(text).toContain("name: Ada");
 	});
 
-	it("renders brace-pair elisions as a single numbered line with `…`", async () => {
-		// Regression for the read-tool format request: collapse the head /
-		// elided / closing-brace sandwich into one numbered line of the form
-		// `START-END:head { … }` instead of three separate lines.
+	it("renders brace-pair elisions as a single line with `…`", async () => {
+		// Collapse the head / elided / closing-brace sandwich into one line.
 		const fixture = path.join(tmpDir, "merge.ts");
 		await fs.writeFile(
 			fixture,
 			"export function stripNewLinePrefixes(lines: string[]): string[] {\n\tconst out: string[] = [];\n\tfor (const line of lines) {\n\t\tout.push(line.replace(/^\\n+/, ''));\n\t}\n\treturn out;\n}\n",
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-merge", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
 
 		expect(text).toContain("export function stripNewLinePrefixes(lines: string[]): string[] { … }");
 		// The plain `…` ellipsis line must NOT appear once the merge fires.
 		expect(text).not.toContain("\n…\n");
-		// The merged line must use the numbered range shape.
-		expect(text).toMatch(/\b1-7:export function stripNewLinePrefixes/);
+		expect(text).toMatch(/^export function stripNewLinePrefixes/m);
 		expect(result.details?.summary?.elidedSpans).toBe(1);
 	});
 
@@ -270,8 +235,8 @@ describe("read summary", () => {
 		const fixture = path.join(tmpDir, "object.ts");
 		await fs.writeFile(fixture, "export const config = {\n\talpha: 1,\n\tbeta: 2,\n\tgamma: 3,\n\tdelta: 4,\n};\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-merge-trailing", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
 
 		expect(text).toContain("export const config = { … };");
@@ -288,8 +253,8 @@ describe("read summary", () => {
 			"def greet(name: str) -> str:\n    clean = name.strip()\n    label = clean or 'world'\n    upper = label.upper()\n    return f'hello {upper}'\n",
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-no-merge", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
 
 		expect(text).toContain("def greet(name: str) -> str:");
@@ -309,8 +274,8 @@ describe("read summary", () => {
 			"export function alpha(value: string): string {\n\tconst clean = value.trim();\n\tconst label = clean || 'alpha';\n\treturn label.toUpperCase();\n}\n\nexport function beta(): number {\n\tconst one = 1;\n\tconst two = 2;\n\treturn one + two;\n}\n",
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-footer", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
 
 		expect(result.details?.summary?.elidedSpans).toBe(2);
@@ -328,8 +293,8 @@ describe("read summary", () => {
 		const fixture = path.join(tmpDir, "noelide.ts");
 		await fs.writeFile(fixture, "export const x = 1;\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("read-summary-no-footer", { path: fixture });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(fixture);
 		const text = textOutput(result);
 
 		expect(text).not.toContain("elided regions");

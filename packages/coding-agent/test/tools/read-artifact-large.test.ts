@@ -7,8 +7,8 @@ import {
 	registerArtifactsDir,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function getTextOutput(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content
@@ -39,11 +39,11 @@ function largeArtifactText(): string {
 	).join("\n");
 }
 
-describe("read tool large artifact handling", () => {
+describe("read service large artifact handling", () => {
 	let testDir: string;
 	let artifactDir: string;
 	let unregisterArtifactsDir: (() => void) | undefined;
-	let tool: ReadTool;
+	let tool: ReadService;
 
 	beforeEach(async () => {
 		testDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-artifact-large-"));
@@ -52,7 +52,7 @@ describe("read tool large artifact handling", () => {
 		await Bun.write(path.join(artifactDir, "0.mcp.log"), largeArtifactText());
 		resetRegisteredArtifactDirsForTests();
 		unregisterArtifactsDir = registerArtifactsDir(artifactDir);
-		tool = new ReadTool(makeSession(testDir));
+		tool = new ReadService(makeSession(testDir));
 	});
 
 	afterEach(async () => {
@@ -62,7 +62,7 @@ describe("read tool large artifact handling", () => {
 	});
 
 	it("blocks unbounded raw reads and points to bounded artifact workflows", async () => {
-		const result = await tool.execute("call-raw", { path: "artifact://0:raw" });
+		const result = await tool.read("artifact://0:raw");
 		const output = getTextOutput(result);
 
 		expect(output).toContain("Unbounded raw read blocked for artifact://0");
@@ -72,7 +72,7 @@ describe("read tool large artifact handling", () => {
 	});
 
 	it("streams bounded artifact reads without materializing the whole artifact", async () => {
-		const result = await tool.execute("call-range", { path: "artifact://0:1-3" });
+		const result = await tool.read("artifact://0:1-3");
 		const output = getTextOutput(result);
 
 		expect(output).toContain("line-001");
@@ -83,7 +83,7 @@ describe("read tool large artifact handling", () => {
 	});
 
 	it("keeps bounded raw artifact chunks verbatim (no workflow notice appended)", async () => {
-		const result = await tool.execute("call-raw-range", { path: "artifact://0:raw:1-2" });
+		const result = await tool.read("artifact://0:raw:1-2");
 		const output = getTextOutput(result);
 
 		expect(output).toStartWith("line-001");
@@ -96,7 +96,7 @@ describe("read tool large artifact handling", () => {
 	});
 
 	it("returns exactly the requested raw artifact range without context padding", async () => {
-		const result = await tool.execute("call-raw-exact", { path: "artifact://0:raw:31-31" });
+		const result = await tool.read("artifact://0:raw:31-31");
 		const output = getTextOutput(result);
 
 		expect(output).toContain("line-031");
@@ -105,7 +105,7 @@ describe("read tool large artifact handling", () => {
 	});
 
 	it("records the source line count for an open-ended artifact range that reaches EOF", async () => {
-		const result = await tool.execute("call-raw-tail", { path: "artifact://0:raw:301-" });
+		const result = await tool.read("artifact://0:raw:301-");
 
 		expect(result.details?.totalLines).toBe(400);
 	});
@@ -113,7 +113,7 @@ describe("read tool large artifact handling", () => {
 	it("shortens artifact paths under the user's home dir instead of leaking the absolute path", async () => {
 		const homeSpy = spyOn(os, "homedir").mockReturnValue(testDir);
 		try {
-			const result = await tool.execute("call-raw-home", { path: "artifact://0:raw" });
+			const result = await tool.read("artifact://0:raw");
 			const output = getTextOutput(result);
 			// artifactDir sits under the (mocked) home, so shortenPath rewrites the
 			// prefix to `~` — the notice must NOT leak the absolute artifact path.

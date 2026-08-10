@@ -8,11 +8,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
-import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../tools/resolve";
 import { initializeExtensions } from "./runtime-init";
 
 /**
@@ -57,6 +55,9 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
  */
 export function printableEvent(event: AgentSessionEvent): unknown {
 	switch (event.type) {
+		case "act_event":
+			return event;
+
 		case "message_update": {
 			const streamEvent = event.assistantMessageEvent;
 			if (streamEvent.type === "done" || streamEvent.type === "error") {
@@ -128,76 +129,15 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		},
 	});
 
-	// InteractiveMode applies the same startup default during TUI initialization.
-	// Print mode has no TUI bootstrap, so arm the shared session directly before
-	// the first prompt; persisting the mode_change also lets a later interactive
-	// attachment restore and review the generated plan.
-	let abortAfterPlanProposal = false;
-	const planDefaultArmed =
-		session.settings.get("plan.defaultOnStartup") &&
-		session.settings.get("plan.enabled") &&
-		session.sessionManager.buildSessionContext().messages.length === 0 &&
-		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change");
-	if (planDefaultArmed) {
-		const planFilePath = session.getPlanReferencePath() || "local://PLAN.md";
-		const previousTools = session.getEnabledToolNames();
-		const planBaseTools = session.hasBuiltInTool("goal")
-			? previousTools.filter(name => name !== "goal")
-			: previousTools;
-		const planTools = session.hasBuiltInTool("write") ? [...new Set([...planBaseTools, "write"])] : planBaseTools;
-		const planModeState = {
-			enabled: true,
-			planFilePath,
-			workflow: "parallel",
-		} as const;
-		session.setPlanModeState(planModeState);
-		try {
-			await session.setActiveToolsByName(planTools);
-		} catch (error) {
-			session.setPlanModeState(undefined);
-			throw error;
-		}
-		session.sessionManager.appendModeChange("plan", { planFilePath });
-		abortAfterPlanProposal = true;
-		session.setPlanProposalHandler(async title => {
-			const result = await session.preparePlanForReview(title);
-			const details = result.details;
-			if (details) {
-				const state = session.getPlanModeState();
-				if (state?.enabled) {
-					session.setPlanModeState({ ...state, planFilePath: details.planFilePath });
-				}
-				session.sessionManager.appendModeChange("plan", { planFilePath: details.planFilePath });
-			}
-			return result;
-		});
-
-		const resolved = session.resolveRoleModelWithThinking("plan");
-		const transition = resolvePlanModelTransition(session.model, resolved, false);
-		if (transition.kind === "thinking") {
-			session.setThinkingLevel(transition.thinkingLevel);
-		} else if (transition.kind === "apply") {
-			try {
-				await session.setModelTemporary(transition.model, transition.thinkingLevel);
-			} catch (error) {
-				logger.warn("Failed to switch to plan model for print mode", { error: String(error) });
-			}
-		}
-	}
-
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
-		if (abortAfterPlanProposal && event.type === "tool_execution_end" && !event.isError) {
-			const dispatch = writeDeviceDispatch(event.toolName, event.result);
-			if (dispatch?.tool === PROPOSE_DEVICE_NAME && dispatch.mode === "execute") {
-				abortAfterPlanProposal = false;
-				session.markPlanInternalAbortPending();
-				void session.abort().finally(() => {
-					session.clearPlanInternalAbortPending();
-				});
-			}
+		if (mode === "text" && event.type === "act_event" && event.event === "terminal") {
+			process.stderr.write(
+				`Act terminal: ${JSON.stringify({ type: "act_terminal", actId: event.actId, status: event.status, model: event.model, usage: event.usage, error: event.error })}
+`,
+			);
 		}
-		// In JSON mode, output all events
+		// In JSON mode, output all bounded public events.
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);
 		}
@@ -237,7 +177,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		const assistantMsg = session.getLastAssistantMessage();
 
 		if (assistantMsg) {
-			// Check for error/aborted — skip silent-abort (plan-mode compaction transition)
+			// Check for error/aborted
 			if (
 				(assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") &&
 				!isSilentAbort(assistantMsg)
@@ -287,5 +227,9 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// agent_end and late JSON advisor events) has drained; process.exit would
 	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
-	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	try {
+		await flushTelemetryExport();
+	} finally {
+		await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
+	}
 }

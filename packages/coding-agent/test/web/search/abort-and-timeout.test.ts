@@ -15,9 +15,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
-import { runSearchQuery, WebSearchTool } from "@oh-my-pi/pi-coding-agent/web/search";
+import { runSearchQuery } from "@oh-my-pi/pi-coding-agent/web/search";
 import * as provider from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { searchAnthropic } from "@oh-my-pi/pi-coding-agent/web/search/providers/anthropic";
 import type { SearchParams } from "@oh-my-pi/pi-coding-agent/web/search/providers/base";
@@ -28,8 +26,8 @@ import {
 	type SearchProviderId,
 	type SearchResponse,
 } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { ToolAbortError } from "../../../src/tools/tool-errors.js";
 
-const FAKE_SESSION = {} as ToolSession;
 const fakeStorage = {
 	listAuthCredentials: () => [],
 	updateAuthCredential: () => undefined,
@@ -207,7 +205,7 @@ describe("executeSearch abort propagation", () => {
 			}),
 		]);
 
-		const result = await new WebSearchTool(FAKE_SESSION).execute("test-id", { query: "anything" });
+		const result = await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 
 		expect(result.details?.response.provider).toBe("codex");
 		expect(timeoutMs).toBe(180_000);
@@ -228,7 +226,7 @@ describe("executeSearch abort propagation", () => {
 			}),
 		]);
 
-		await new WebSearchTool(FAKE_SESSION).execute("test-id", { query: "anything" });
+		await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 
 		expect(timeoutMs).toBe(300_000);
 	});
@@ -248,7 +246,7 @@ describe("executeSearch abort propagation", () => {
 			}),
 		]);
 
-		await new WebSearchTool(FAKE_SESSION).execute("test-id", { query: "anything" });
+		await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 
 		expect(timeoutMs).toBe(60_000);
 	});
@@ -266,11 +264,12 @@ describe("executeSearch abort propagation", () => {
 			fakeProvider("brave", secondProviderSearch),
 		]);
 
-		const tool = new WebSearchTool(FAKE_SESSION);
 		const ac = new AbortController();
 		ac.abort();
 
-		await expect(tool.execute("test-id", { query: "anything" }, ac.signal)).rejects.toBeInstanceOf(ToolAbortError);
+		await expect(
+			runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage, signal: ac.signal }),
+		).rejects.toBeInstanceOf(ToolAbortError);
 		expect(secondProviderSearch).not.toHaveBeenCalled();
 	});
 
@@ -284,8 +283,7 @@ describe("executeSearch abort propagation", () => {
 			}),
 		]);
 
-		const tool = new WebSearchTool(FAKE_SESSION);
-		const result = await tool.execute("test-id", { query: "anything" });
+		const result = await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 		const block = result.content[0];
 		expect(block?.type).toBe("text");
 		expect(block && "text" in block ? block.text : "").toContain("upstream 500");
@@ -307,8 +305,7 @@ describe("executeSearch abort propagation", () => {
 		);
 		mockProviderChain([fakeProvider("searxng", emptyProviderSearch), fakeProvider("brave", sourceProviderSearch)]);
 
-		const tool = new WebSearchTool(FAKE_SESSION);
-		const result = await tool.execute("test-id", { query: "anything" });
+		const result = await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 
 		expect(emptyProviderSearch).toHaveBeenCalledTimes(1);
 		expect(sourceProviderSearch).toHaveBeenCalledTimes(1);
@@ -328,8 +325,7 @@ describe("executeSearch abort propagation", () => {
 			fakeProvider("duckduckgo", fallbackSearch),
 		]);
 
-		const tool = new WebSearchTool(FAKE_SESSION);
-		const result = await tool.execute("test-id", { query: "anything" });
+		const result = await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 
 		expect(result.details?.response.provider).toBe("exa");
 		expect(getProvider).toHaveBeenCalledTimes(1);
@@ -354,8 +350,7 @@ describe("executeSearch abort propagation", () => {
 			{ explicitFirst: true },
 		);
 
-		const tool = new WebSearchTool(FAKE_SESSION);
-		const result = await tool.execute("test-id", { query: "anything" });
+		const result = await runSearchQuery({ query: "anything" }, { authStorage: {} as AuthStorage });
 
 		expect(result.details?.response.provider).toBe("brave");
 		expect(getProvider).toHaveBeenCalledTimes(2);

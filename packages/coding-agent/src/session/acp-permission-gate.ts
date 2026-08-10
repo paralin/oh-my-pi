@@ -1,16 +1,93 @@
-import { Patch } from "@oh-my-pi/hashline";
-import { isRecord, stringProperty } from "@oh-my-pi/pi-utils";
-import { expandApplyPatchToEntries } from "../edit";
-import { resolveToCwd } from "../tools/path-utils";
-import type { ClientBridgePermissionOption } from "./client-bridge";
+import { ToolAbortError, ToolError } from "../tools/tool-errors";
+import type {
+	ClientBridge,
+	ClientBridgePermissionOption,
+	ClientBridgePermissionOutcome,
+	ClientBridgePermissionToolCall,
+} from "./client-bridge";
 
-/** Tools that require user permission before execution when an ACP client is connected. */
-export const PERMISSION_REQUIRED_TOOLS: Record<string, true> = {
-	bash: true,
-	edit: true,
-	delete: true,
-	move: true,
-};
+/** Decision-cache key for the synthetic ipython execute permission request. */
+export const IPYTHON_PERMISSION_CACHE_KEY = "ipython";
+
+export interface ClientBridgePermissionRequest {
+	readonly bridge: ClientBridge;
+	readonly toolCall: ClientBridgePermissionToolCall;
+	readonly rawInput: unknown;
+	readonly content?: unknown[];
+	readonly locations: { path: string; line?: number }[];
+	readonly signal?: AbortSignal;
+	readonly toolName: string;
+}
+
+/**
+ * Run one ACP `requestPermission` decision, racing the user's answer against
+ * `signal` cancellation. Applies the persisted allow-always / reject-always
+ * preference for `cacheKey` and records a renewed always-decision. Resolves
+ * when the call may proceed; throws `ToolAbortError` on cancellation and
+ * `ToolError` on a reject or an unknown option ID. A call may reject before
+ * the client is consulted only through the persisted always decision.
+ */
+export async function requestClientBridgePermission(
+	request: ClientBridgePermissionRequest,
+	decisions: Map<string, "allow_always" | "reject_always">,
+	cacheKey: string,
+): Promise<void> {
+	const { bridge, signal, toolName } = request;
+	const persisted = decisions.get(cacheKey);
+	if (persisted === "allow_always") return;
+	if (persisted === "reject_always") {
+		throw new ToolError(`Tool call rejected by user (preference)`);
+	}
+	if (signal?.aborted) {
+		throw new ToolAbortError("Permission request cancelled");
+	}
+	type PermissionRaceResult = { kind: "permission"; outcome: ClientBridgePermissionOutcome } | { kind: "aborted" };
+	const { promise: abortPromise, resolve: resolveAbort } = Promise.withResolvers<PermissionRaceResult>();
+	const onAbort = () => resolveAbort({ kind: "aborted" });
+	signal?.addEventListener("abort", onAbort, { once: true });
+	let raced: PermissionRaceResult;
+	try {
+		const permissionPromise = bridge.requestPermission!(
+			{
+				...request.toolCall,
+				status: "pending",
+				rawInput: request.rawInput,
+				...(request.content ? { content: request.content } : {}),
+				locations: request.locations,
+			},
+			PERMISSION_OPTIONS,
+			signal,
+		).then(outcome => ({ kind: "permission" as const, outcome }));
+		raced = await Promise.race([permissionPromise, abortPromise]);
+	} catch (error) {
+		// A client may reject its pending request when the signal aborts; the
+		// signal being aborted is the decisive fact, and it must surface as a
+		// cancellation rather than the client's own rejection.
+		if (signal?.aborted) throw new ToolAbortError("Permission request cancelled");
+		throw error;
+	} finally {
+		signal?.removeEventListener("abort", onAbort);
+	}
+	if (raced.kind === "aborted" || signal?.aborted) {
+		throw new ToolAbortError("Permission request cancelled");
+	}
+	const outcome = raced.outcome;
+	if (outcome.outcome === "cancelled") {
+		throw new ToolAbortError("Permission request cancelled");
+	}
+	const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
+	if (!selectedOption) {
+		throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
+	}
+	if (selectedOption.kind === "allow_always") {
+		decisions.set(cacheKey, "allow_always");
+	} else if (selectedOption.kind === "reject_always") {
+		decisions.set(cacheKey, "reject_always");
+	}
+	if (selectedOption.kind === "reject_once" || selectedOption.kind === "reject_always") {
+		throw new ToolError(`Tool call rejected by user (${toolName})`);
+	}
+}
 
 /** Permission options presented to the client on each gated tool call. */
 export const PERMISSION_OPTIONS: ClientBridgePermissionOption[] = [
@@ -22,144 +99,3 @@ export const PERMISSION_OPTIONS: ClientBridgePermissionOption[] = [
 
 /** Permission options indexed by their wire identifiers; unknown IDs miss and fail closed. */
 export const PERMISSION_OPTIONS_BY_ID = new Map(PERMISSION_OPTIONS.map(option => [option.optionId, option]));
-
-function getEditDestructiveIntent(args: unknown): { kind: "delete" | "move"; paths: string[] } | undefined {
-	if (!isRecord(args)) return undefined;
-
-	const edits = Array.isArray(args.edits) ? args.edits : undefined;
-	if (edits) {
-		const filePath = stringProperty(args, "path");
-		if (filePath) {
-			for (const edit of edits) {
-				if (!isRecord(edit)) continue;
-				if (stringProperty(edit, "op") === "delete") return { kind: "delete", paths: [filePath] };
-			}
-		}
-		for (const edit of edits) {
-			if (!isRecord(edit)) continue;
-			const op = stringProperty(edit, "op");
-			const rename = stringProperty(edit, "rename");
-			if (op !== "create" && rename) return { kind: "move", paths: filePath ? [filePath, rename] : [rename] };
-		}
-	}
-
-	const input = stringProperty(args, "input");
-	if (input) {
-		try {
-			const patch = Patch.parse(input);
-			for (const section of patch.sections) {
-				if (section.fileOp?.kind === "rem") return { kind: "delete", paths: [section.path] };
-				if (section.fileOp?.kind === "move") return { kind: "move", paths: [section.path, section.fileOp.dest] };
-			}
-		} catch {
-			// Not a hashline patch — fall through to apply_patch parsing.
-		}
-		try {
-			const entries = expandApplyPatchToEntries({ input });
-			const deleteEntry = entries.find(entry => entry.op === "delete");
-			if (deleteEntry) return { kind: "delete", paths: [deleteEntry.path] };
-			const moveEntry = entries.find(entry => entry.rename);
-			if (moveEntry?.rename) return { kind: "move", paths: [moveEntry.path, moveEntry.rename] };
-		} catch {
-			// If the edit input is not an apply-patch envelope, it is not a delete/move operation.
-		}
-	}
-
-	return undefined;
-}
-
-/** Describes the permission prompt required for a destructive tool call. */
-export function getPermissionIntent(
-	toolName: string,
-	args: unknown,
-): { toolName: string; title: string; paths?: string[]; cacheKey: string } | undefined {
-	const input = isRecord(args) ? args : {};
-	if (toolName === "bash") {
-		const command = stringProperty(input, "command")?.slice(0, 80);
-		return { toolName, title: command || toolName, cacheKey: toolName };
-	}
-	if (toolName === "delete") {
-		const filePath = stringProperty(input, "path");
-		return {
-			toolName,
-			title: filePath ? `Delete ${filePath}` : toolName,
-			paths: filePath ? [filePath] : undefined,
-			cacheKey: toolName,
-		};
-	}
-	if (toolName === "move") {
-		const from = stringProperty(input, "oldPath") ?? stringProperty(input, "path") ?? stringProperty(input, "from");
-		const to =
-			stringProperty(input, "newPath") ?? stringProperty(input, "to") ?? stringProperty(input, "destination");
-		if (from && to) return { toolName, title: `Move ${from} to ${to}`, paths: [from, to], cacheKey: toolName };
-		return {
-			toolName,
-			title: from ? `Move ${from}` : toolName,
-			paths: from ? [from] : undefined,
-			cacheKey: toolName,
-		};
-	}
-	if (toolName === "edit") {
-		const intent = getEditDestructiveIntent(args);
-		if (!intent) return undefined;
-		if (intent.kind === "delete") {
-			return {
-				toolName,
-				title: `Delete ${intent.paths[0] ?? "edit target"}`,
-				paths: intent.paths,
-				cacheKey: "edit:delete",
-			};
-		}
-		const from = intent.paths[0];
-		const to = intent.paths[1];
-		return {
-			toolName,
-			title: from && to ? `Move ${from} to ${to}` : `Move ${from ?? to ?? "edit target"}`,
-			paths: intent.paths,
-			cacheKey: "edit:move",
-		};
-	}
-	return undefined;
-}
-
-/** Converts tool path arguments into absolute ACP editor locations. */
-export function extractPermissionLocations(
-	args: unknown,
-	cwd: string,
-	explicitPaths?: string[],
-): { path: string; line?: number }[] {
-	if (!isRecord(args)) return [];
-	const out: { path: string; line?: number }[] = [];
-	const pushPath = (value: unknown) => {
-		if (typeof value !== "string" || value.length === 0) return;
-		// ACP locations carry file paths that the editor host will open or focus;
-		// they must be absolute or the client cannot resolve them. Resolve raw
-		// tool args (often cwd-relative) against the session cwd before sending.
-		let resolved: string;
-		try {
-			resolved = resolveToCwd(value, cwd);
-		} catch {
-			return;
-		}
-		if (out.some(location => location.path === resolved)) return;
-		out.push({ path: resolved });
-	};
-	if (explicitPaths) {
-		for (const filePath of explicitPaths) pushPath(filePath);
-		return out;
-	}
-	pushPath(args.path);
-	pushPath(args.file);
-	if (Array.isArray(args.paths)) {
-		for (const filePath of args.paths) {
-			if (typeof filePath === "string") pushPath(filePath);
-		}
-	}
-	pushPath(args.oldPath);
-	pushPath(args.newPath);
-	pushPath(args.from);
-	pushPath(args.to);
-	pushPath(args.source);
-	pushPath(args.destination);
-	return out;
-}

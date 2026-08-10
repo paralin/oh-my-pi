@@ -1114,8 +1114,8 @@ export function prepareSourceDeps(cfg: Config): SourceMount {
 			fs.mkdirSync(path.dirname(dst), { recursive: true });
 			fs.copyFileSync(path.join(REPO_ROOT, rel), dst);
 		}
-		// --ignore-scripts: the skeleton has manifests only, so lifecycle scripts
-		// (root `prepare` → gen:tool-views) would fail; patchedDependencies still apply.
+		// The skeleton has manifests only, so dependency lifecycle scripts that
+		// require package sources cannot run; patchedDependencies still apply.
 		const script =
 			'mkdir -p /deps/bin && cp "$(command -v bun)" /deps/bin/bun && cd /deps && bun install --production --omit=optional --ignore-scripts';
 		const image = `oven/bun:${bunVersion}`;

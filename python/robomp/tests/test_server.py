@@ -2328,7 +2328,7 @@ async def test_handle_comment_finalized_without_directive_still_replies(
 async def test_handle_comment_resumes_needs_info_without_preemptive_cleanup(
     settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
 ) -> None:
-    """A needs-info reply resumes first; host tools clear state only after actionable work."""
+    """A needs-info reply resumes first; operations clear state only after actionable work."""
     from robomp import tasks
     from robomp.github_client import GitHubClient, IssueInfo, RepoInfo
 

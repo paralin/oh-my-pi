@@ -10,10 +10,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { Markit } from "@oh-my-pi/pi-coding-agent/markit";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as markit from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { __resetDirsFromEnvForTests, removeSyncWithRetries, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function restoreEnv(key: string, value: string | undefined): void {
 	if (value === undefined) {
@@ -60,8 +60,8 @@ describe("read PDF with a line-range selector", () => {
 		vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({ ok: true, content: converted });
 
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
-		const result = await tool.execute("call", { path: `${pdfPath}:120-122` });
+		const tool = new ReadService(session);
+		const result = await tool.read(`${pdfPath}:120-122`);
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -80,8 +80,8 @@ describe("read PDF with a line-range selector", () => {
 		vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({ ok: true, content: converted });
 
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
-		const result = await tool.execute("call", { path: `${pdfPath}:50-52,160-162` });
+		const tool = new ReadService(session);
+		const result = await tool.read(`${pdfPath}:50-52,160-162`);
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -99,8 +99,8 @@ describe("read PDF with a line-range selector", () => {
 		vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({ ok: true, content: converted });
 
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
-		const result = await tool.execute("call", { path: pdfPath });
+		const tool = new ReadService(session);
+		const result = await tool.read(pdfPath);
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -120,9 +120,9 @@ describe("read PDF with a line-range selector", () => {
 				.spyOn(Markit.prototype, "convert")
 				.mockResolvedValue({ markdown: "pdf line 1\npdf line 2\npdf line 3\n" });
 
-			const tool = new ReadTool(makeSession(testDir));
+			const tool = new ReadService(makeSession(testDir));
 
-			const full = await tool.execute("full", { path: pdfPath });
+			const full = await tool.read(pdfPath);
 			const fullText = full.content
 				.filter(c => c.type === "text")
 				.map(c => c.text)
@@ -130,7 +130,7 @@ describe("read PDF with a line-range selector", () => {
 			expect(fullText).toContain("pdf line 1");
 			expect(fullText).toContain("pdf line 3");
 
-			const selector = await tool.execute("selector", { path: `${pdfPath}:2-3` });
+			const selector = await tool.read(`${pdfPath}:2-3`);
 			const selectorText = selector.content
 				.filter(c => c.type === "text")
 				.map(c => c.text)

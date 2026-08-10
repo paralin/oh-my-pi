@@ -68,7 +68,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 	});
 
@@ -243,7 +242,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: SessionManager.create(tempDir.path(), tempDir.path()),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		try {
@@ -283,7 +281,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings: session.settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 		expect(customSession.isAdvisorEnabled()).toBe(false);
 
@@ -328,14 +325,12 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager,
 			settings: sharedSettings,
 			modelRegistry,
-			advisorTools: [],
 		});
 		const sessionB = new AgentSession({
 			agent: session.agent,
 			sessionManager,
 			settings: sharedSettings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		expect(sessionA.isAdvisorEnabled()).toBe(false);
@@ -700,7 +695,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: branchManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			advisorTools: [],
 			extensionRunner,
 		});
 		try {
@@ -743,7 +737,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: branchManager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry,
-			advisorTools: [],
 			extensionRunner,
 		});
 		try {
@@ -786,7 +779,6 @@ describe("AgentSession advisor toggle", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
-			advisorTools: [],
 		});
 
 		try {

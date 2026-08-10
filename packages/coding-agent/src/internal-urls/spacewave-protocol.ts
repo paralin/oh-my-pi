@@ -1,9 +1,6 @@
 /**
  * Protocol handler for `spacewave://` URLs.
  *
- * Read-only by construction: there is no `write` hook, so the write tool
- * reports the scheme as not writable rather than reaching a World.
- *
  * The URL is an address into one mounted World, not a path into a filesystem.
  * The local form has an empty authority — three slashes — because the whole
  * address lives in the path:

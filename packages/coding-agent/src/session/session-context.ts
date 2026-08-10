@@ -74,7 +74,7 @@ export interface SessionContext {
 	/**
 	 * Array parallel to messages, indicating which assistant turns should
 	 * have their prompt-cache misses suppressed/explained (because a model,
-	 * compaction, or plan-mode transition directly preceded them).
+	 * compaction directly preceded them).
 	 * Only populated in transcript mode.
 	 */
 	cacheMissExplainedAt?: boolean[];
@@ -307,10 +307,10 @@ export function buildSessionContext(
 		} else if (entry.type === "model_change") {
 			pendingReset = true;
 		} else if (entry.type === "mode_change") {
-			const isPlanTransition = (entry.mode === "plan") !== (currentMode === "plan");
-			if (isPlanTransition) {
-				pendingReset = true;
-			}
+			// Historical plan-mode entries changed the provider prefix, so retain their
+			// cache boundary while reading legacy journals. New sessions never write them.
+			const isLegacyPlanTransition = (entry.mode === "plan") !== (currentMode === "plan");
+			if (isLegacyPlanTransition) pendingReset = true;
 			currentMode = entry.mode;
 		}
 	};

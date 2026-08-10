@@ -10,6 +10,7 @@ import type {
 	IpythonProcessIds,
 } from "../../src/ipython/controller.js";
 import { ipythonEnvironment } from "../../src/ipython/environment.js";
+import { projectIpythonLiveCellPresentation } from "../../src/ipython/projection.js";
 import { IpythonKernelProvisioner } from "../../src/ipython/provisioner.js";
 import type { EnsureIpythonRuntimeOptions, IpythonRuntime } from "../../src/ipython/runtime-bootstrap.js";
 
@@ -325,6 +326,9 @@ function pythonAbiSourcePath(): string {
 		"goal",
 		"refine",
 		"rlm-heartbeat",
+		"websearch",
+		"linear",
+		"notion",
 	];
 	return [root, ...skills.map(skill => path.join(root, "skills", skill, "src"))].join(path.delimiter);
 }
@@ -362,13 +366,24 @@ describeIntegration("IPython cell service real-kernel boundary", () => {
 		const service = new IpythonCellService(provisioner, { maxModelBytes: 512 });
 		let processIds: IpythonProcessIds | undefined;
 		try {
+			const modelUpdates: IpythonCellUpdate[] = [];
 			const model = await service.execute({
 				origin: "model",
 				code: "shared_value = 40\nprint('model-out')\nshared_value + 1",
+				onUpdate: update => {
+					modelUpdates.push(update);
+				},
 			});
 			processIds = provisioner.processIds;
 			expect(model).toMatchObject({ origin: "model", status: "ok", result: "41" });
 			expect(model.modelText.text).toBe("model-out\n41\n");
+			const live = projectIpythonLiveCellPresentation({
+				code: model.code,
+				origin: model.origin,
+				updates: modelUpdates,
+			});
+			expect(live.safeText).toEqual(model.modelText);
+			expect(live.events).toEqual(model.events);
 
 			const direct = await service.execute({ origin: "direct", code: "shared_value += 2\nshared_value" });
 			expect(direct).toMatchObject({ origin: "direct", status: "ok", result: "42" });

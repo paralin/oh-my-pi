@@ -11,13 +11,13 @@
  * - `(idle)` time excluded from on-CPU totals
  * - a profile-wide "top functions by self time" table
  *
- * Consumed by the read tool: `*.cpuprofile` reads show the summary, `:raw`
+ * Consumed by the workspace read service: `*.cpuprofile` reads show the summary, `:raw`
  * returns the original JSON.
  */
 
 import { formatPct, mergeInto, type ProfileNode, type RenderTreeContext, renderProfileNode } from "./profile-tree";
 
-/** Matches paths the read tool should treat as V8 CPU profiles. */
+/** Matches paths the workspace read service should treat as V8 CPU profiles. */
 export function isCpuProfilePath(filePath: string): boolean {
 	return /\.cpuprofile$/i.test(filePath);
 }

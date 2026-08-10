@@ -8,7 +8,7 @@ import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import {
 	decodeExternalSubagentProfile,
-	type ExternalSubagentProfileV1,
+	type ExternalSubagentProfileV2,
 } from "../coordination/external-subagent-profile";
 import { createWorldCoordinationBackend } from "../coordination/world";
 import { loadSkills } from "../extensibility/skills";
@@ -55,7 +55,7 @@ function requireExternalProfilePath(env: Record<string, string | undefined>): st
 /** Reads and validates the lane-private worker profile before provider startup. */
 export async function loadExternalSubagentProfile(
 	env: Record<string, string | undefined> = process.env,
-): Promise<ExternalSubagentProfileV1> {
+): Promise<ExternalSubagentProfileV2> {
 	const profilePath = requireExternalProfilePath(env);
 	const info = await fs.stat(profilePath);
 	if (!info.isFile() || (info.mode & 0o777) !== 0o600) {
@@ -133,7 +133,7 @@ export function externalTaskResultRecord(result: SingleResult): ExternalTaskResu
 	};
 }
 
-function failedResult(profile: ExternalSubagentProfileV1, error: unknown, startedAt: number): SingleResult {
+function failedResult(profile: ExternalSubagentProfileV2, error: unknown, startedAt: number): SingleResult {
 	const message = error instanceof Error ? error.message : String(error);
 	return {
 		index: 0,
@@ -199,13 +199,11 @@ export async function runExternalSubagentMode(
 				tools: profile.agent.tools,
 				spawns: profile.agent.spawns,
 				autoloadSkills: profile.agent.skills,
-				readSummarize: profile.agent.readMode === "summary",
 				source: profile.agent.source,
 			},
 			task: renderStructuredSubagentPrompt(profile.assignment),
 			assignment: profile.assignment,
 			context: profile.batchContext ?? undefined,
-			planReference: profile.planReference ?? undefined,
 			description: profile.label,
 			index: 0,
 			id: profile.peerId,

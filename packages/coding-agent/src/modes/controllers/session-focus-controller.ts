@@ -95,7 +95,7 @@ export class SessionFocusController {
 		// in-flight assistant message predates the attach. message_update carries
 		// the full accumulating message, so synthesize the missing start before
 		// the first orphaned update; every other handler is tolerant of unknown
-		// anchors (guarded by streamingComponent/pendingTools lookups).
+		// anchors (guarded by streaming-component lookups).
 		let assistantStreamSynced = false;
 		this.ctx.unsubscribe = target.subscribe(async event => {
 			if (event.type === "message_start" && event.message.role === "assistant") {

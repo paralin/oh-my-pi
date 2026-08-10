@@ -52,26 +52,16 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 			getSessionId: () => "child-session",
 			getSessionDir: () => tempDir.path(),
 		},
-		getActiveToolNames: () => ["yield"],
-		getEnabledToolNames: () => ["yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {};
 		},
-		prompt: async () => {
-			for (const listener of listeners) {
-				listener({
-					type: "tool_execution_end",
-					toolCallId: "yield",
-					toolName: "yield",
-					result: { content: [], details: { status: "success", data: { ok: true } } },
-					isError: false,
-				} as AgentSessionEvent);
-			}
-		},
+		prompt: async () => {},
 		waitForIdle: async () => {},
-		getLastAssistantMessage: () => undefined,
+		getLastAssistantMessage: () => ({
+			role: "assistant",
+			content: [{ type: "text", text: "Completed." }],
+		}),
 		abort: async () => {},
 		dispose: async () => {},
 		setIrcWakeTurnObserver: () => {},

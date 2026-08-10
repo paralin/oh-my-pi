@@ -1,6 +1,6 @@
 /**
  * PDF image extraction: markit emits inert `<!-- image: <id> ... -->`
- * placeholders for embedded PDF images. The read tool rewrites those into
+ * placeholders for embedded PDF images. The read service rewrites those into
  * browsable `read <pdf>:<id>.png` handles, and serves the actual PNG when that
  * handle is read — extracting via markit's `imageDir` into a session-artifact
  * cache. These lock the rewrite, the member extraction, member validation, and
@@ -10,13 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool, type ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as markit from "@oh-my-pi/pi-coding-agent/utils/markit";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { type ReadResult, ReadService } from "../../src/tools/read.js";
 
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
 const TINY_PNG = Buffer.from(
@@ -50,7 +49,7 @@ function mockExtraction(members: Record<string, Buffer> = { "p11-img0.png": TINY
 	});
 }
 
-function imageBytes(result: AgentToolResult<ReadToolDetails>): Buffer {
+function imageBytes(result: ReadResult): Buffer {
 	const image = result.content.find(content => content.type === "image");
 	if (image?.type !== "image") throw new Error("Expected an image result");
 	return Buffer.from(image.data, "base64");
@@ -117,8 +116,8 @@ describe("read PDF image extraction", () => {
 		].join("\n");
 		vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({ ok: true, content: converted });
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("call", { path: pdfPath });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(pdfPath);
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -136,8 +135,8 @@ describe("read PDF image extraction", () => {
 		lines[9] = "<!-- image: p3-img0 (page 3, 100x50pt) -->"; // line 10
 		vi.spyOn(markit, "convertFileWithMarkit").mockResolvedValue({ ok: true, content: lines.join("\n") });
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("call", { path: `${pdfPath}:8-12` });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(`${pdfPath}:8-12`);
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -149,8 +148,8 @@ describe("read PDF image extraction", () => {
 
 	it("extracts a PDF image member as an inline image block", async () => {
 		const spy = mockExtraction();
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(`${pdfPath}:p11-img0.png`);
 
 		const image = result.content.find(c => c.type === "image");
 		expect(image).toBeDefined();
@@ -167,9 +166,9 @@ describe("read PDF image extraction", () => {
 
 	it("reuses the extraction cache across member reads", async () => {
 		const spy = mockExtraction();
-		const tool = new ReadTool(makeSession(testDir));
-		await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
-		await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const tool = new ReadService(makeSession(testDir));
+		await tool.read(`${pdfPath}:p11-img0.png`);
+		await tool.read(`${pdfPath}:p11-img0.png`);
 		// Second read is served from the `.extracted` cache, not re-converted.
 		expect(spy).toHaveBeenCalledTimes(1);
 	});
@@ -188,13 +187,13 @@ describe("read PDF image extraction", () => {
 			}
 			return { ok: true, content: "" };
 		});
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
 		const originalStat = fs.statSync(pdfPath);
-		const first = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const first = await tool.read(`${pdfPath}:p11-img0.png`);
 		fs.writeFileSync(pdfPath, sourceB);
 		fs.utimesSync(pdfPath, originalStat.atime, originalStat.mtime);
-		const second = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const second = await tool.read(`${pdfPath}:p11-img0.png`);
 
 		expect(imageBytes(first).subarray(TINY_PNG.length)).toEqual(sourceA);
 		expect(imageBytes(second).subarray(TINY_PNG.length)).toEqual(sourceB);
@@ -219,7 +218,7 @@ describe("read PDF image extraction", () => {
 			}
 			return { ok: true, content: "" };
 		});
-		const pending = new ReadTool(makeSession(testDir)).execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const pending = new ReadService(makeSession(testDir)).read(`${pdfPath}:p11-img0.png`);
 
 		await entered.promise;
 		fs.writeFileSync(pdfPath, sourceB);
@@ -231,9 +230,9 @@ describe("read PDF image extraction", () => {
 
 	it("coalesces concurrent cold image extraction", async () => {
 		const { entered, release, spy } = mockBlockedExtraction();
-		const tool = new ReadTool(makeSession(testDir));
-		const first = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
-		const second = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const tool = new ReadService(makeSession(testDir));
+		const first = tool.read(`${pdfPath}:p11-img0.png`);
+		const second = tool.read(`${pdfPath}:p11-img0.png`);
 
 		await entered.promise;
 		const conversionCount = spy.mock.calls.length;
@@ -247,11 +246,11 @@ describe("read PDF image extraction", () => {
 	it("keeps shared extraction running when its owner aborts", async () => {
 		const { entered, release, spy } = mockBlockedExtraction();
 		const bothAttached = extractionWaitersAttached(2);
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 		const ownerController = new AbortController();
-		const owner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` }, ownerController.signal);
+		const owner = tool.read(`${pdfPath}:p11-img0.png`, ownerController.signal);
 		await entered.promise;
-		const joiner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const joiner = tool.read(`${pdfPath}:p11-img0.png`);
 		await bothAttached;
 
 		ownerController.abort();
@@ -266,11 +265,11 @@ describe("read PDF image extraction", () => {
 	it("keeps shared extraction running when a joiner aborts", async () => {
 		const { entered, release, spy } = mockBlockedExtraction();
 		const bothAttached = extractionWaitersAttached(2);
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 		const joinerController = new AbortController();
-		const owner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const owner = tool.read(`${pdfPath}:p11-img0.png`);
 		await entered.promise;
-		const joiner = tool.execute("call", { path: `${pdfPath}:p11-img0.png` }, joinerController.signal);
+		const joiner = tool.read(`${pdfPath}:p11-img0.png`, joinerController.signal);
 		await bothAttached;
 
 		joinerController.abort();
@@ -300,11 +299,7 @@ describe("read PDF image extraction", () => {
 			return { ok: true, content: "" };
 		});
 		const controller = new AbortController();
-		const pending = new ReadTool(makeSession(testDir)).execute(
-			"call",
-			{ path: `${pdfPath}:p11-img0.png` },
-			controller.signal,
-		);
+		const pending = new ReadService(makeSession(testDir)).read(`${pdfPath}:p11-img0.png`, controller.signal);
 
 		await entered.promise;
 		controller.abort();
@@ -334,15 +329,15 @@ describe("read PDF image extraction", () => {
 			}
 			return { ok: true, content: "" };
 		});
-		const tool = new ReadTool(makeSession(testDir));
-		const first = tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const tool = new ReadService(makeSession(testDir));
+		const first = tool.read(`${pdfPath}:p11-img0.png`);
 		await firstEntered.promise;
 		fs.writeFileSync(pdfPath, sourceB);
 
-		const replacement = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const replacement = await tool.read(`${pdfPath}:p11-img0.png`);
 		failFirst.resolve();
 		await expect(first).rejects.toThrow(/Cannot extract images/);
-		const cachedReplacement = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const cachedReplacement = await tool.read(`${pdfPath}:p11-img0.png`);
 
 		expect(imageBytes(replacement).subarray(TINY_PNG.length)).toEqual(sourceB);
 		expect(imageBytes(cachedReplacement)).toEqual(imageBytes(replacement));
@@ -368,10 +363,10 @@ describe("read PDF image extraction", () => {
 				}
 				return { ok: true, content: "" };
 			});
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
-		const first = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
-		const second = await tool.execute("call", { path: `${otherPdfPath}:p11-img0.png` });
+		const first = await tool.read(`${pdfPath}:p11-img0.png`);
+		const second = await tool.read(`${otherPdfPath}:p11-img0.png`);
 
 		expect(imageBytes(first).subarray(TINY_PNG.length).toString()).toBe("1");
 		expect(imageBytes(second).subarray(TINY_PNG.length).toString()).toBe("2");
@@ -383,33 +378,29 @@ describe("read PDF image extraction", () => {
 		fs.writeFileSync(longPdfPath, "%PDF-stub");
 		mockExtraction();
 
-		const result = await new ReadTool(makeSession(testDir)).execute("call", {
-			path: `${longPdfPath}:p11-img0.png`,
-		});
+		const result = await new ReadService(makeSession(testDir)).read(`${longPdfPath}:p11-img0.png`);
 
 		expect(result.content.some(content => content.type === "image")).toBe(true);
 	});
 
 	it("errors with the available members for an unknown member", async () => {
 		mockExtraction();
-		const tool = new ReadTool(makeSession(testDir));
-		await expect(tool.execute("call", { path: `${pdfPath}:does-not-exist.png` })).rejects.toThrow(
-			/not found.*p11-img0\.png/s,
-		);
+		const tool = new ReadService(makeSession(testDir));
+		await expect(tool.read(`${pdfPath}:does-not-exist.png`)).rejects.toThrow(/not found.*p11-img0\.png/s);
 	});
 
 	it("rejects member traversal attempts", async () => {
 		mockExtraction();
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 		// `../../escape.png` matches the image-member shape but is not a known
 		// basename, so it must be refused rather than joined into the cache path.
-		await expect(tool.execute("call", { path: `${pdfPath}:../../escape.png` })).rejects.toThrow(/not found/);
+		await expect(tool.read(`${pdfPath}:../../escape.png`)).rejects.toThrow(/not found/);
 	});
 
 	it("lists extractable members for a trailing-colon read", async () => {
 		mockExtraction({ "p1-img0.png": TINY_PNG, "p2-img0.png": TINY_PNG });
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("call", { path: `${pdfPath}:` });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(`${pdfPath}:`);
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)
@@ -427,8 +418,8 @@ describe("read PDF image extraction", () => {
 			failedImageDir = options?.imageDir;
 			return { ok: false, content: "", error: "boom" };
 		});
-		const tool = new ReadTool(makeSession(testDir));
-		await expect(tool.execute("call", { path: `${pdfPath}:p11-img0.png` })).rejects.toThrow(/Cannot extract images/);
+		const tool = new ReadService(makeSession(testDir));
+		await expect(tool.read(`${pdfPath}:p11-img0.png`)).rejects.toThrow(/Cannot extract images/);
 		if (!failedSnapshotPath || !failedImageDir) throw new Error("Expected failed extraction paths");
 		expect(fs.existsSync(path.dirname(failedSnapshotPath))).toBe(false);
 		expect(fs.existsSync(path.join(failedImageDir, ".extracted"))).toBe(false);
@@ -440,7 +431,7 @@ describe("read PDF image extraction", () => {
 			}
 			return { ok: true, content: "" };
 		});
-		const result = await tool.execute("call", { path: `${pdfPath}:p11-img0.png` });
+		const result = await tool.read(`${pdfPath}:p11-img0.png`);
 		expect(result.content.some(c => c.type === "image")).toBe(true);
 		expect(spy).toHaveBeenCalledTimes(2);
 	});

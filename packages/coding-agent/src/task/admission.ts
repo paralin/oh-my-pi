@@ -10,6 +10,7 @@ export interface TaskAdmissionRequest {
 	assignment: string;
 	name?: string;
 	model?: string;
+	serviceTier?: "auto" | "default" | "flex" | "scale" | "priority" | null;
 	isolation?: TaskIsolationControls;
 	sourceId: string;
 	signal?: AbortSignal;
@@ -50,9 +51,11 @@ export interface TaskModelProjection {
 	id: string;
 	name: string;
 	selector: string;
+	concreteSelector?: string;
+	available?: boolean;
 }
 
-/** Direct service API; callers never dispatch through AgentTool.execute. */
+/** Direct service API; callers never dispatch through a provider tool wrapper. */
 export interface TaskAdmissionService {
 	admit(request: TaskAdmissionRequest): Promise<TaskChildAdmission>;
 	findModels(query: string, limit: number): TaskModelProjection[];

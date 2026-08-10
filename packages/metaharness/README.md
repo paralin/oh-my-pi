@@ -1,9 +1,9 @@
 # @oh-my-pi/pi-metaharness
 
-One manager for repository benchmarks. Harbor, TypeScript edit, and SnapCompact
-runs use the same experiment → run → trace model, SQLite store, REST/SSE API,
-and dashboard. Benchmark-native artifacts remain on disk; adapters normalize
-their live progress, scores, token usage, costs, and traces.
+One manager for repository benchmarks. Harbor and SnapCompact runs use the
+same experiment → run → trace model, SQLite store, REST/SSE API, and dashboard.
+Benchmark-native artifacts remain on disk; adapters normalize their live
+progress, scores, token usage, costs, and traces.
 
 ```bash
 # Dashboard + API on :4700; launch every benchmark from the same “new run” form
@@ -47,20 +47,20 @@ bun run serve --port 4700
 
   ```json
   {
-    "benchmark": "edit",
+    "benchmark": "harbor",
     "model": "anthropic/claude-opus-4-8",
     "tasks": 20,
     "concurrency": 4,
     "attempts": 2,
-    "jobName": "edit-baseline",
+    "jobName": "harbor-baseline",
     "role": "baseline",
-    "goal": "compare edit strategies"
+    "goal": "compare model configurations"
   }
   ```
 
-  `benchmark` is `harbor`, `edit`, or `snapcompact`. Harbor uses `dataset`,
-  `include`, `timeoutMultiplier`, and `prewalk`; edit uses `include` as task IDs;
-  SnapCompact uses `conditions` and treats `tasks` as the passage limit.
+  `benchmark` is `harbor` or `snapcompact`. Harbor uses `dataset`, `include`,
+  and `timeoutMultiplier`; SnapCompact uses `conditions` and treats
+  `tasks` as the passage limit.
 - `GET /api/runs/:name` — `{ run, traces }` (syncs native artifacts on read).
 - `POST /api/runs/:name/cancel` — cancel a manager-launched run.
 - `DELETE /api/runs/:name` — permanently delete a finished run (DB row **and**

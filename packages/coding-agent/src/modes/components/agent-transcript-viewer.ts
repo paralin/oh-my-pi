@@ -18,7 +18,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Component, Editor, matchesKey, routeSgrMouseInput, ScrollView, type TUI } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
-import type { MessageRenderer } from "../../extensibility/extensions/types";
+import type { IpythonMimeRenderer, MessageRenderer } from "../../extensibility/extensions/types";
 import type { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import type { AgentRegistry, AgentStatus } from "../../registry/agent-registry";
 import { isAgentSession } from "../../session/agent-session";
@@ -45,6 +45,7 @@ export interface AgentTranscriptViewerDeps {
 	ui: TUI;
 	getTool?: (name: string) => AgentTool | undefined;
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	getIpythonMimeRenderer?: (mimeType: string) => IpythonMimeRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
@@ -163,6 +164,7 @@ export class AgentTranscriptViewer implements Component {
 			ui: deps.ui,
 			getTool: deps.getTool,
 			getMessageRenderer: deps.getMessageRenderer,
+			getIpythonMimeRenderer: deps.getIpythonMimeRenderer,
 			cwd: deps.cwd,
 			hideThinkingBlock: deps.hideThinkingBlock,
 			proseOnlyThinking: deps.proseOnlyThinking,

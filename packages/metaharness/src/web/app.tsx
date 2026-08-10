@@ -17,7 +17,7 @@ import { createRoot } from "react-dom/client";
 type RunRole = "baseline" | "variant" | "";
 
 interface RunRow {
-	benchmark: "harbor" | "edit" | "snapcompact";
+	benchmark: "harbor" | "snapcompact";
 	jobName: string;
 	dataset: string;
 	agent: string;
@@ -747,7 +747,7 @@ const CELL_CLASS: Record<string, string> = {
 
 /**
  * The comparison anchor for an experiment: the completed baseline arm with the
- * highest pass rate (the "ceiling" a prewalk arm tries to preserve). Ties
+ * highest pass rate (the "ceiling" a candidate arm tries to preserve). Ties
  * break toward the cheaper arm. Returns null when no baseline has finished data.
  */
 function pickReferenceArm(arms: ArmSummary[]): ArmSummary | null {
@@ -799,7 +799,7 @@ function Delta({
 /**
  * Launch a new arm into an existing experiment. The server inherits the
  * experiment's dataset and exact task sample from a sibling arm, so only the
- * arm-specific knobs (name, model, role, note, optional prewalk) are collected here.
+ * arm-specific knobs (name, model, role, and note) are collected here.
  */
 function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: () => void }) {
 	const [msg, setMsg] = useState("");
@@ -810,9 +810,6 @@ function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: ()
 			const body: Record<string, unknown> = { arm: f.get("arm"), model: f.get("model") };
 			if (f.get("role")) body.role = f.get("role");
 			if (f.get("note")) body.note = f.get("note");
-			if (f.get("prewalkInto") || f.get("prewalk")) {
-				body.prewalk = f.get("prewalkInto") ? { into: f.get("prewalkInto") } : {};
-			}
 			setMsg("launching…");
 			const res = await fetch(`/api/experiments/${encodeURIComponent(experimentId)}/arms`, {
 				method: "POST",
@@ -838,10 +835,6 @@ function AddArmForm({ experimentId, onDone }: { experimentId: string; onDone: ()
 				<option value="variant">variant</option>
 			</select>
 			<input name="note" placeholder="note (what this arm tests)" className={INPUT_CLASS} />
-			<input name="prewalkInto" placeholder="prewalk into (model, optional)" className={INPUT_CLASS} />
-			<label className="flex items-center gap-1 text-xs text-zinc-400">
-				<input type="checkbox" name="prewalk" /> prewalk (default smol)
-			</label>
 			<div className="col-span-4 flex items-center gap-3">
 				<button type="submit" className="rounded border border-zinc-600 px-3 py-1 hover:border-sky-400">
 					launch arm
@@ -1880,9 +1873,6 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 			if (f.get("goal")) body.goal = f.get("goal");
 			if (f.get("role")) body.role = f.get("role");
 			if (f.get("note")) body.note = f.get("note");
-			if (f.get("prewalkInto") || f.get("prewalk")) {
-				body.prewalk = f.get("prewalkInto") ? { into: f.get("prewalkInto") } : {};
-			}
 			setMsg("launching…");
 			const res = await fetch("/api/runs", {
 				method: "POST",
@@ -1900,7 +1890,6 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 		<form onSubmit={submit} className="grid grid-cols-4 gap-2 border-b border-zinc-800 bg-zinc-900/70 p-4 text-sm">
 			<select name="benchmark" className={input}>
 				<option value="harbor">Harbor</option>
-				<option value="edit">TypeScript edit</option>
 				<option value="snapcompact">SnapCompact</option>
 			</select>
 			<input name="model" placeholder="model (required)" required className={input} />
@@ -1909,10 +1898,6 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 			<input name="tasks" type="number" placeholder="task/passages limit" className={input} />
 			<input name="concurrency" type="number" placeholder="concurrency" className={input} />
 			<input name="timeoutMultiplier" type="number" step="0.5" placeholder="timeout ×" className={input} />
-			<input name="prewalkInto" placeholder="prewalk into (model)" className={input} />
-			<label className="flex items-center gap-2 text-xs text-zinc-400">
-				<input type="checkbox" name="prewalk" /> prewalk (default smol)
-			</label>
 			<input name="include" placeholder="include tasks, comma-sep" className={`${input} col-span-2`} />
 			<input name="conditions" placeholder="SnapCompact conditions, comma-sep" className={`${input} col-span-2`} />
 			<input
@@ -1925,7 +1910,7 @@ function LaunchForm({ onDone }: { onDone: () => void }) {
 				<option value="baseline">baseline</option>
 				<option value="variant">variant</option>
 			</select>
-			<input name="note" placeholder="arm note (e.g. prewalk flash)" className={input} />
+			<input name="note" placeholder="arm note" className={input} />
 			<div className="col-span-4 flex items-center gap-3">
 				<button type="submit" className="rounded border border-zinc-600 px-3 py-1 hover:border-sky-400">
 					launch

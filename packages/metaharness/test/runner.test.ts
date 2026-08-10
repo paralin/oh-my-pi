@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { harborRunnerArgs, type LaunchRequest } from "../src/launch-args";
 import {
 	buildHarborEnv,
 	buildResumeArgs,
@@ -17,16 +18,24 @@ describe("generic agent-arg / env passthrough", () => {
 			"--model",
 			"anthropic/claude-opus-4-8",
 			"--agent-arg",
-			"--prewalk",
+			"--thinking",
 			"--agent-arg",
-			"--prewalk-into",
-			"--agent-arg",
-			"google/gemini-3.5-flash",
+			"high",
 		]);
-		expect(cfg.agentArgs).toEqual(["--prewalk", "--prewalk-into", "google/gemini-3.5-flash"]);
+		expect(cfg.agentArgs).toEqual(["--thinking", "high"]);
 
 		const env = buildHarborEnv(cfg, "/tmp/models.yml", null, "test");
 		expect(JSON.parse(env.OMP_BENCH_AGENT_ARGS ?? "[]")).toEqual(cfg.agentArgs);
+	});
+
+	it("ignores a retired policy property from an untyped request", () => {
+		const request = {
+			model: "anthropic/claude-opus-4-8",
+			prewalk: { into: "google/gemini-3.5-flash" },
+		} as unknown as LaunchRequest;
+		const args = harborRunnerArgs(request, { jobsDir: "/tmp/jobs", jobName: "test" });
+		expect(args).not.toContain("--prewalk");
+		expect(args).not.toContain("--prewalk-into");
 	});
 
 	it("omits OMP_BENCH_AGENT_ARGS when no --agent-arg was passed", () => {

@@ -1,11 +1,9 @@
 /**
  * LSP-based linter client.
- * Uses the Language Server Protocol for formatting and diagnostics.
+ * Uses the Language Server Protocol for diagnostics.
  */
-import { getOrCreateClient, notifySaved, sendRequest, syncContent } from "../../lsp/client";
-import { applyTextEditsToString } from "../../lsp/edits";
-import { resolveFormatOptions } from "../../lsp/format-options";
-import type { Diagnostic, LinterClient, LspClient, ServerConfig, TextEdit } from "../../lsp/types";
+import { getOrCreateClient, notifySaved } from "../../lsp/client";
+import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "../../lsp/types";
 import { fileToUri } from "../../lsp/utils";
 
 /**
@@ -30,32 +28,6 @@ export class LspLinterClient implements LinterClient {
 			this.#client = await getOrCreateClient(this.config, this.cwd);
 		}
 		return this.#client;
-	}
-
-	async format(filePath: string, content: string): Promise<string> {
-		const client = await this.#getClient();
-		const uri = fileToUri(filePath);
-
-		// Sync content to LSP
-		await syncContent(client, filePath, content);
-
-		// Check if server supports formatting
-		const caps = client.serverCapabilities;
-		if (!caps?.documentFormattingProvider) {
-			return content;
-		}
-
-		// Request formatting
-		const edits = (await sendRequest(client, "textDocument/formatting", {
-			textDocument: { uri },
-			options: resolveFormatOptions(filePath, content),
-		})) as TextEdit[] | null;
-
-		if (!edits || edits.length === 0) {
-			return content;
-		}
-
-		return applyTextEditsToString(content, edits);
 	}
 
 	async lint(filePath: string): Promise<Diagnostic[]> {

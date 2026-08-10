@@ -313,6 +313,13 @@ export async function collectMcpServerNames(
 export class MCPCommandController {
 	constructor(private ctx: InteractiveModeContext) {}
 
+	async #refreshMCPInstructions(): Promise<void> {
+		const session = this.ctx.session as typeof this.ctx.session & {
+			refreshMCPInstructions?: () => Promise<void>;
+		};
+		await session.refreshMCPInstructions?.();
+	}
+
 	/**
 	 * Handle /mcp command and route to subcommands
 	 */
@@ -1190,7 +1197,6 @@ export class MCPCommandController {
 			const state = this.ctx.mcpManager.getConnectionStatus(name);
 			if (state === "connected") {
 				// Connection may complete after initial reload; rebind runtime MCP tools now.
-				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 			}
 			if (state === "connected") {
 				block.setStatus(theme.fg("success", `${theme.status.enabled} Connected to "${name}"`));
@@ -1214,7 +1220,6 @@ export class MCPCommandController {
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
 		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
 		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
-			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		}
 	}
 
@@ -1245,20 +1250,6 @@ export class MCPCommandController {
 					await this.#syncManagerConnection(name, config);
 				} catch {
 					// Keep disconnected status
-				}
-			}
-
-			// refreshMCPTools preserves the prior MCP tool selection, so tools from
-			// brand-new servers are registered in the registry but never activated.
-			// Explicitly activate the newly added server's tools now.
-			if (isConnected && this.ctx.mcpManager) {
-				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
-				if (serverTools.length > 0) {
-					const currentActive = this.ctx.session.getEnabledToolNames();
-					const toActivate = serverTools.map(t => t.name).filter(n => this.ctx.session.getToolByName(n));
-					if (toActivate.length > 0) {
-						await this.ctx.session.setActiveToolsByName([...new Set([...currentActive, ...toActivate])]);
-					}
 				}
 			}
 
@@ -1645,7 +1636,7 @@ export class MCPCommandController {
 					);
 				} else {
 					await this.ctx.mcpManager?.disconnectServer(name);
-					await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
+					await this.#refreshMCPInstructions();
 					this.#showMessage(["", theme.fg("muted", `${theme.status.disabled} Disabled "${name}"`), ""].join("\n"));
 				}
 				return;
@@ -1666,8 +1657,8 @@ export class MCPCommandController {
 				await this.#connectEnabledMCPServer(name);
 			} else {
 				await this.ctx.mcpManager?.disconnectServer(name);
-				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager?.getTools() ?? []);
 			}
+			await this.#refreshMCPInstructions();
 
 			let status = "";
 			if (enabled) {
@@ -1930,11 +1921,8 @@ export class MCPCommandController {
 		try {
 			const connection = await this.ctx.mcpManager.reconnectServer(name, { manual: true });
 			if (connection) {
-				// refreshMCPTools re-registers tools and preserves the user's prior
-				// MCP tool selection. No need to call activateDiscoveredMCPTools —
-				// that would broaden the selection to all server tools.
-				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
-				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
+				// Refresh host-owned instructions after reconnect; the provider roster is fixed.
+				const serverTools = this.ctx.mcpManager.getTools().filter(tool => tool.serverName === name);
 				this.#showMessage(
 					[
 						"\n",
@@ -1961,13 +1949,11 @@ export class MCPCommandController {
 		const { configs, sources } = await loadAllMCPConfigs(getProjectDir());
 		const config = configs[name];
 		if (!config) {
-			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 			return;
 		}
 
 		const source = sources[name];
 		const result = await this.ctx.mcpManager.connectServers({ [name]: config }, source ? { [name]: source } : {});
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 		this.#showMCPConnectionErrors(result.errors);
 	}
 
@@ -1985,11 +1971,10 @@ export class MCPCommandController {
 	}
 
 	/**
-	 * Reconnect every configured MCP server and rebind the session's MCP tools.
+	 * Reconnect every configured MCP server.
 	 *
-	 * Disconnects all live connections, rediscovers `.mcp.json` configs, and
-	 * calls `session.refreshMCPTools(...)` so config edits take effect without a
-	 * restart. Public because `/reload-plugins` reuses it alongside `/mcp reload`
+	 * Disconnects all live connections and rediscovers `.mcp.json` configs.
+	 * Public because `/reload-plugins` reuses it alongside `/mcp reload`
 	 * and the config-mutation flows in this controller.
 	 *
 	 * Discovery options are derived from settings so the reload honors the same
@@ -2014,9 +1999,9 @@ export class MCPCommandController {
 			filterExa: true,
 			filterBrowser: this.ctx.settings.get("browser.enabled") ?? false,
 		});
-		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
 		this.#showMCPConnectionErrors(result.errors);
+		await this.#refreshMCPInstructions();
 	}
 
 	/**

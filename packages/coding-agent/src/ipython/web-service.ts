@@ -1,5 +1,5 @@
 import * as fs from "node:fs/promises";
-import type { ToolSession } from "../tools";
+import type { ToolSession } from "../session/tool-session";
 import { fetchReadUrl } from "../tools/fetch";
 import { runSearchQuery, type SearchQueryParams } from "../web/search";
 import { isSearchProviderId } from "../web/search/types";

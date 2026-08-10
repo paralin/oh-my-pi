@@ -22,9 +22,7 @@ Run from `packages/coding-agent/` (or add `--cwd=packages/coding-agent`):
 | Autofix: lint + format prompts | `bun run fix` |
 | Build the `dist/omp` binary | `bun run build` |
 
-Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate. After
-changing the React tool renderers under `collab-web/src/tool-render/`, rebuild them
-with `bun run gen:tool-views`.
+Never invoke `tsc`/`npx tsc` directly — `bun run check` is the typecheck gate.
 
 ## Boot flow
 
@@ -63,14 +61,14 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | `cli/`, `commands/`, `commit/`, `export/` | Command-line adapters and concrete subcommands | — |
 | `modes/` | Interactive TUI, print, and RPC runtimes | [rpc.md](../../docs/rpc.md), [sdk.md](../../docs/sdk.md) |
 | `session/` | `AgentSession`, JSONL session tree, storage, history | [session.md](../../docs/session.md), [session-tree-plan.md](../../docs/session-tree-plan.md) |
-| `config/`, `registry/`, `secrets/` | Settings, model/provider registry, secret obfuscation | [settings.md](../../docs/settings.md), [config-usage.md](../../docs/config-usage.md), [models.md](../../docs/models.md), [secrets.md](../../docs/secrets.md) |
-| `tools/` | Built-in tool implementations + render/meta helpers | [custom-tools.md](../../docs/custom-tools.md), [`tools/`](../../docs/tools/) |
-| `exec/`, `eval/`, `ssh/`, `dap/`, `debug/` | Execution backends (shell, py/js kernels, ssh, debugger) | [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [python-repl.md](../../docs/python-repl.md) |
-| `lsp/` | Language-server client/runtime | [lsp-config.md](../../docs/lsp-config.md), [tools/lsp.md](../../docs/tools/lsp.md) |
-| `task/`, `swarm/`, `irc/`, `goals/`, `plan-mode/` | Subagent delegation, parallelism, inter-agent IRC, plan mode | [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md) |
-| `web/`, `exa/` | Fetch, browser automation, search providers, scrapers | [tools/web_search.md](../../docs/tools/web_search.md), [tools/browser.md](../../docs/tools/browser.md) |
-| `mcp/` | MCP transport / manager / loader / tool bridge | [mcp-config.md](../../docs/mcp-config.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md) |
-| `extensibility/`, `slash-commands/` | Extensions, hooks, custom tools/commands, skills, plugins | [extensions.md](../../docs/extensions.md), [hooks.md](../../docs/hooks.md), [skills.md](../../docs/skills.md) |
+| `config/`, `registry/` | Settings and model/provider registry | [settings.md](../../docs/settings.md), [config-usage.md](../../docs/config-usage.md), [models.md](../../docs/models.md) |
+| `tools/` | Retained autonomous-mode components and shared host-service types | [ipython.md](../../docs/ipython.md) |
+| `exec/`, `ipython/`, `ssh/`, `dap/`, `debug/` | IPython, shell, remote, and debugger runtime components | [ipython.md](../../docs/ipython.md) |
+| `lsp/` | Language-server client/runtime used by typed IPython host capabilities | [lsp-config.md](../../docs/lsp-config.md), [ipython.md](../../docs/ipython.md) |
+| `task/`, `swarm/`, `irc/`, `goals/` | Retained subagent delegation, parallelism, inter-agent IRC, goals | [task-agent-discovery.md](../../docs/task-agent-discovery.md) |
+| `web/`, `exa/` | Typed IPython browser/search host services and provider adapters | [ipython.md](../../docs/ipython.md), [environment-variables.md](../../docs/environment-variables.md) |
+| `mcp/` | MCP transport, manager, loader, and typed IPython host service | [mcp-config.md](../../docs/mcp-config.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md) |
+| `extensibility/`, `slash-commands/` | Extensions, hooks, custom commands, skills, plugins | [extensions.md](../../docs/extensions.md), [hooks.md](../../docs/hooks.md), [skills.md](../../docs/skills.md) |
 | `capability/`, `discovery/` | Capability registry + provider discovery modules | [extension-loading.md](../../docs/extension-loading.md), [context-files.md](../../docs/context-files.md) |
 | `advisor/`, `autolearn/`, `autoresearch/` | Advisor/watchdog, managed skills, background research | [advisor-watchdog.md](../../docs/advisor-watchdog.md) |
 | `memories/`, `memory-backend/`, `mnemopi/`, `hindsight/` | Memory subsystems and backends | [memory.md](../../docs/memory.md), [mnemosyne-memory-backend.md](../../docs/mnemosyne-memory-backend.md) |
@@ -78,7 +76,7 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 | `tui/`, `collab/` | Low-level TUI primitives, live session sharing | [tui.md](../../docs/tui.md), [collab.md](../../docs/collab.md) |
 | `tts/`, `stt/` | Text-to-speech / speech-to-text | — |
 | `tiny/`, `auto-thinking/` | Embedded tiny-model experiments, auto thinking level | [local-models.md](../../docs/local-models.md) |
-| `async/`, `lib/`, `utils/`, `prompts/`, `edit/` | Shared plumbing, prompt assets, patch/diff engine | [tools/edit.md](../../docs/tools/edit.md) |
+| `async/`, `lib/`, `utils/`, `prompts/`, `edit/` | Shared plumbing, retained prompt assets, and patch/diff engine | [ipython.md](../../docs/ipython.md) |
 
 ## Subsystem reference
 
@@ -98,28 +96,26 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 - [models.md](../../docs/models.md), [providers.md](../../docs/providers.md), [adding-a-provider.md](../../docs/adding-a-provider.md)
 - [local-models.md](../../docs/local-models.md)
 - [provider-streaming-internals.md](../../docs/provider-streaming-internals.md), [ai-schema-normalize.md](../../docs/ai-schema-normalize.md)
-- [toolconv/](../../docs/toolconv/) — per-family tool-call conversion (anthropic, harmony, qwen3, deepseek, glm-4.5, kimi-k2, gemini, gemma, pi-native); see also [ERRATA-GPT5-HARMONY.md](../../docs/ERRATA-GPT5-HARMONY.md)
 - [keybindings.md](../../docs/keybindings.md)
-- [secrets.md](../../docs/secrets.md), [auth-broker-gateway.md](../../docs/auth-broker-gateway.md), [install-id.md](../../docs/install-id.md)
+[auth-broker-gateway.md](../../docs/auth-broker-gateway.md), [install-id.md](../../docs/install-id.md)
 - [system-prompt-customization.md](../../docs/system-prompt-customization.md)
 
-### Tools framework and built-in tools
-- Authoring + registry: [custom-tools.md](../../docs/custom-tools.md)
+### IPython and typed host capabilities
+- Runtime and capability boundary: [ipython.md](../../docs/ipython.md)
 - Output/artifacts: [blob-artifact-architecture.md](../../docs/blob-artifact-architecture.md)
-- Gating/approval: [approval-mode.md](../../docs/approval-mode.md), [resolve-tool-runtime.md](../../docs/resolve-tool-runtime.md)
-- Per-tool reference: [`docs/tools/`](../../docs/tools/) — `read`, `write`, `edit`, `ast-edit`, `ast-grep`, `grep`, `glob`, `bash`, `eval`, `hub`, `lsp`, `debug`, `task`, `web_search`, `browser`, `github`, `inspect_image`, `ask`, `todo`, `recall`, `retain`, `reflect`, `checkpoint`, `rewind`
+- Gating and whole-cell approval: [approval-mode.md](../../docs/approval-mode.md)
+- The injected `omp` object and Python docstrings are the authoritative host-capability reference.
 
 ### Execution backends
-- [bash-tool-runtime.md](../../docs/bash-tool-runtime.md), [tools/bash.md](../../docs/tools/bash.md)
-- [python-repl.md](../../docs/python-repl.md), [notebook-tool-runtime.md](../../docs/notebook-tool-runtime.md), [tools/eval.md](../../docs/tools/eval.md), [tools/hub.md](../../docs/tools/hub.md)
-- [tools/debug.md](../../docs/tools/debug.md), [tools/lsp.md](../../docs/tools/lsp.md), [lsp-config.md](../../docs/lsp-config.md)
+- [ipython.md](../../docs/ipython.md), [lsp-config.md](../../docs/lsp-config.md)
+- [rpc.md](../../docs/rpc.md)
 
 ### Task delegation and subagents
-- [task-agent-discovery.md](../../docs/task-agent-discovery.md), [tools/task.md](../../docs/tools/task.md)
-- [collab.md](../../docs/collab.md), [tools/hub.md](../../docs/tools/hub.md)
+- [task-agent-discovery.md](../../docs/task-agent-discovery.md)
+- [collab.md](../../docs/collab.md)
 
 ### Web I/O and retrieval
-- [tools/web_search.md](../../docs/tools/web_search.md), [tools/browser.md](../../docs/tools/browser.md), [tools/github.md](../../docs/tools/github.md)
+- [ipython.md](../../docs/ipython.md), [environment-variables.md](../../docs/environment-variables.md)
 
 ### MCP
 - [mcp-config.md](../../docs/mcp-config.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md)
@@ -127,7 +123,6 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 
 ### Memory
 - [memory.md](../../docs/memory.md), [mnemosyne-memory-backend.md](../../docs/mnemosyne-memory-backend.md)
-- Memory tools: [tools/recall.md](../../docs/tools/recall.md), [tools/retain.md](../../docs/tools/retain.md), [tools/reflect.md](../../docs/tools/reflect.md)
 
 ### Discovery, context, and rules
 - [context-files.md](../../docs/context-files.md), [rulebook-matching-pipeline.md](../../docs/rulebook-matching-pipeline.md)
@@ -150,14 +145,14 @@ Top-level entry modules: `cli.ts`, `main.ts`, `sdk.ts`, `index.ts` (SDK barrel),
 
 | To add… | Start here |
 |---|---|
-| A built-in tool | `src/tools/index.ts` (`BUILTIN_TOOLS` / `HIDDEN_TOOLS`) + [custom-tools.md](../../docs/custom-tools.md) |
+| A typed host capability | [ipython.md](../../docs/ipython.md) and the responsible `src/ipython/*-service.ts` component |
 | An extension (TS/JS module) | [extensions.md](../../docs/extensions.md), [extension-loading.md](../../docs/extension-loading.md), [skills/authoring-extensions.md](../../docs/skills/authoring-extensions.md) |
 | A hook | `src/extensibility/hooks/types.ts` + [hooks.md](../../docs/hooks.md), [skills/authoring-hooks.md](../../docs/skills/authoring-hooks.md) |
 | A slash command | [slash-command-internals.md](../../docs/slash-command-internals.md) |
 | An RPC command | `src/modes/rpc/rpc-types.ts` + [rpc.md](../../docs/rpc.md) |
 | A skill | [skills.md](../../docs/skills.md) |
 | A marketplace plugin | [marketplace.md](../../docs/marketplace.md), [plugin-manager-installer-plumbing.md](../../docs/plugin-manager-installer-plumbing.md), [skills/authoring-marketplaces.md](../../docs/skills/authoring-marketplaces.md), [gemini-manifest-extensions.md](../../docs/gemini-manifest-extensions.md) |
-| A custom MCP tool/server | [mcp-server-tool-authoring.md](../../docs/mcp-server-tool-authoring.md), [custom-tools.md](../../docs/custom-tools.md) |
+| An MCP tool/server | [mcp-server-tool-authoring.md](../../docs/mcp-server-tool-authoring.md), [mcp-runtime-lifecycle.md](../../docs/mcp-runtime-lifecycle.md) |
 | A provider | [adding-a-provider.md](../../docs/adding-a-provider.md) |
 | Programmatic/SDK use | [sdk.md](../../docs/sdk.md) |
 

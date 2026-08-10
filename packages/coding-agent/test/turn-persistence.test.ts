@@ -54,10 +54,10 @@ function toolResult(overrides: Partial<Extract<AgentMessage, { role: "toolResult
 describe("sessionMessagePersistenceKey", () => {
 	test("assistant identity covers timestamp/provider/model/responseId/stopReason — different content keeps the same key", () => {
 		// Two assistant variants emitted for the same logical turn (one streamed,
-		// one finalized; or one obfuscated, one deobfuscated for display) must
+		// one finalized, or two equivalent representations for display) must
 		// share a key so we never double-persist them on the branch.
 		const a = assistant({ content: [{ type: "text", text: "foo" }], responseId: "resp-1" });
-		const b = assistant({ content: [{ type: "text", text: "foo (deobfuscated)" }], responseId: "resp-1" });
+		const b = assistant({ content: [{ type: "text", text: "foo (display copy)" }], responseId: "resp-1" });
 		expect(sessionMessagePersistenceKey(a)).toBeDefined();
 		expect(sessionMessagePersistenceKey(a)).toBe(sessionMessagePersistenceKey(b));
 	});

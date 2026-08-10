@@ -595,7 +595,7 @@ class Database:
         Returns elapsed-time inputs (`started_at`) plus per-run telemetry:
         - `model`: the omp model the worker picked for this run, set after
           `pick_model()` so it reflects the actual pool selection.
-        - `last_tool` / `last_tool_ts`: the most recent host-tool call audited
+        - `last_tool` / `last_tool_ts`: the most recent operation call audited
           on the same `issue_key` since `started_at`. Scoping by start time
           prevents stale entries from a prior run on the same issue leaking
           into the dashboard before this run has emitted any tool calls.

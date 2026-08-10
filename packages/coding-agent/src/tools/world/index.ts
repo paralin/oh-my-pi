@@ -1,28 +1,14 @@
 /**
- * World tool — the five authority-checked GLaDOS World operations.
+ * World operation schema, description, rendering, and execution.
  *
- * One tool, one schema, one renderer. Native OMP constructs {@link WorldTool}
- * from the tool registry; the Claude MCP bridge constructs the same class and
- * advertises the same wire schema, so the two runtimes cannot answer the same
- * call differently — there is one operation and one rendering, reached two ways.
- *
- * Nothing here decides whether an operation is allowed. GLaDOS reads the bound
- * caller's frozen capability manifest, checks the operation's permission ID
- * before it touches the target, and answers with a structured denial. This tool
- * sends typed requests and renders what comes back, including the refusals.
- *
- * The tool exists only where both halves of the configuration are present: a
- * daemon socket and a caller session key. A socket-only root keeps its read-only
- * `spacewave://` access and is not given this tool, because a caller with no
- * identity could only ever collect denials.
+ * The operation executor is neutral and shared with the typed `omp.world`
+ * service. This module keeps only the schema and rendering needed by the
+ * Claude Code MCP adapter; no provider-facing AgentTool is constructed here.
  */
 
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ToolExample } from "@oh-my-pi/pi-ai";
 import {
 	WorldAuthorityError,
-	WorldClient,
 	type WorldDispatchSnapshot,
 	type WorldDispatchSubmitResult,
 	WorldOperationError,
@@ -30,20 +16,18 @@ import {
 	type WorldSessionControlResult,
 	type WorldWatchStop,
 } from "../../world/client.js";
-import { isWorldRuntimeConfigured } from "../../world/config.js";
+import { DEFAULT_DISPATCH_REPOSITORY } from "../../world/intent-key.js";
 import {
-	DEFAULT_DISPATCH_REPOSITORY,
-	defaultCheckoutIdentity,
-	defaultIntentOwnerArtifact,
-	semanticWorkingDirectory,
-} from "../../world/intent-key.js";
+	executeWorldOperation as executeNeutralWorldOperation,
+	type WorldOperationOwner,
+	type WorldOperationParams,
+} from "../../world/operation-executor.js";
 import { WORLD_CHILD_PERMISSIONS, WORLD_OPERATION_PERMISSIONS, type WorldOperation } from "../../world/operations.js";
-import type { ToolSession } from "..";
 
 /** Registry name of the World operations tool. */
 export const WORLD_TOOL_NAME = "world";
 
-const worldSchema = type({
+export const WORLD_TOOL_SCHEMA = type({
 	op: type(
 		"'dispatch_submit' | 'dispatch_watch' | 'question_answer' | 'session_input' | 'session_interrupt'",
 	).describe("world operation"),
@@ -87,10 +71,26 @@ const worldSchema = type({
 	"reason?": type("string").describe("session_interrupt: reason recorded on the cancellation request"),
 });
 
-type WorldParams = typeof worldSchema.infer;
+/** Description advertised by the deliberate Claude Code MCP bridge. */
+export const WORLD_TOOL_DESCRIPTION = [
+	"Perform one authority-checked GLaDOS World operation.",
+	"",
+	"Every call is charged to this root's caller LlmSession. GLaDOS reads that session's frozen",
+	"capability manifest and checks the operation's permission before it reads the target, so a",
+	"refusal leaves the World, custody, inbox, and executor untouched.",
+	"",
+	"Operations and the permission each requires:",
+	...Object.entries(WORLD_OPERATION_PERMISSIONS).map(([operation, permission]) => `- ${operation} — ${permission}`),
+	"",
+	"Retries are explicit. `request_id` names the retry; repeating it with the same content returns",
+	"the stored effect instead of making a second one, and repeating it with different content is a",
+	"conflict rather than a silent overwrite. `dispatch_submit` retries on its intent key.",
+].join("\n");
+
+type WorldParams = typeof WORLD_TOOL_SCHEMA.infer;
 
 /** One rendered World operation, kept structured for the UI and for tests. */
-export type WorldToolDetails =
+export type WorldOperationDetails =
 	| { op: "dispatch_submit"; result: WorldDispatchSubmitResult }
 	| { op: "dispatch_watch"; intentKey: string; stop: WorldWatchStop; snapshot: WorldDispatchSnapshot | null }
 	| { op: "question_answer"; result: WorldQuestionAnswerResult }
@@ -98,68 +98,24 @@ export type WorldToolDetails =
 	| { op: WorldOperation; denial: WorldAuthorityError }
 	| { op: WorldOperation; failure: WorldOperationError };
 
-/**
- * Run one World operation and render it.
- *
- * This is the whole tool. Both runtimes call it with their own client and
- * signal, which is what makes their answers byte-identical rather than merely
- * similar.
- */
+/** Run the neutral owner executor and preserve the established rendered result. */
 export async function executeWorldOperation(
-	client: WorldClient,
+	client: WorldOperationOwner,
 	params: WorldParams,
 	signal?: AbortSignal,
-): Promise<{ text: string; details: WorldToolDetails; isError: boolean }> {
-	const op = params.op;
+): Promise<{ text: string; details: WorldOperationDetails; isError: boolean }> {
 	try {
-		switch (op) {
-			case "dispatch_submit": {
-				const result = await client.submitDispatch(buildDispatchSubmit(params), signal);
-				return ok(renderDispatchSubmit(result), { op, result });
-			}
-			case "dispatch_watch": {
-				const intentKey = required(params.intent_key, "intent_key", op);
-				const stop: WorldWatchStop = params.stop ?? "terminal";
-				let snapshot: WorldDispatchSnapshot | null = null;
-				for await (const next of client.watchDispatch({ intentKey, stop }, signal)) {
-					snapshot = next;
-					if (next.completionMet) break;
-				}
-				return ok(renderDispatchWatch(intentKey, stop, snapshot), { op, intentKey, stop, snapshot });
-			}
-			case "question_answer": {
-				const result = await client.answerQuestion(
-					{
-						requestId: required(params.request_id, "request_id", op),
-						questionObjectKey: required(params.question, "question", op),
-						summary: required(params.summary, "summary", op),
-					},
-					signal,
-				);
-				return ok(renderQuestionAnswer(result), { op, result });
-			}
-			case "session_input": {
-				const result = await client.sendSessionInput(
-					{
-						requestId: required(params.request_id, "request_id", op),
-						targetSessionObjectKey: required(params.session, "session", op),
-						text: required(params.text, "text", op),
-					},
-					signal,
-				);
-				return ok(renderSessionControl(result), { op, result });
-			}
-			case "session_interrupt": {
-				const result = await client.interruptSession(
-					{
-						requestId: required(params.request_id, "request_id", op),
-						targetSessionObjectKey: required(params.session, "session", op),
-						reason: params.reason ?? "",
-					},
-					signal,
-				);
-				return ok(renderSessionControl(result), { op, result });
-			}
+		const result = await executeNeutralWorldOperation(client, params as WorldOperationParams, signal);
+		switch (result.op) {
+			case "dispatch_submit":
+				return ok(renderDispatchSubmit(result.result), result);
+			case "dispatch_watch":
+				return ok(renderDispatchWatch(result.intentKey, result.stop, result.snapshot), result);
+			case "question_answer":
+				return ok(renderQuestionAnswer(result.result), result);
+			case "session_input":
+			case "session_interrupt":
+				return ok(renderSessionControl(result.result), result);
 		}
 	} catch (error) {
 		if (error instanceof WorldAuthorityError) {
@@ -176,61 +132,11 @@ export async function executeWorldOperation(
 	}
 }
 
-function ok(text: string, details: WorldToolDetails): { text: string; details: WorldToolDetails; isError: boolean } {
+function ok(
+	text: string,
+	details: WorldOperationDetails,
+): { text: string; details: WorldOperationDetails; isError: boolean } {
 	return { text, details, isError: false };
-}
-
-/**
- * Read one field an operation cannot proceed without.
- *
- * The schema cannot express "required for this op" across a flat union of
- * operations, so the check lives here — once, for both runtimes.
- */
-function required(value: string | undefined, field: string, op: WorldOperation): string {
-	const trimmed = value?.trim();
-	if (!trimmed) throw new Error(`world ${op} requires \`${field}\`.`);
-	return trimmed;
-}
-
-/**
- * Build the submission and its identity tuple from flat tool arguments.
- *
- * The daemon re-derives the intent key from exactly the tuple it receives, so
- * every default applied here is the value the daemon would have chosen. An
- * absolute working directory is projected into the worktree because the tuple
- * carries the semantic path while the run carries the real one.
- */
-function buildDispatchSubmit(params: WorldParams) {
-	const op: WorldOperation = "dispatch_submit";
-	const objective = required(params.objective, "objective", op);
-	const worktreePath = required(params.worktree_path, "worktree_path", op);
-	const workingDirectory = required(params.working_directory, "working_directory", op);
-	const repository = params.repository?.trim() || DEFAULT_DISPATCH_REPOSITORY;
-	const deliverablePaths = params.deliverable_paths ?? [];
-	const writeSurfaces = params.write_surfaces ?? [];
-	if (deliverablePaths.length === 0)
-		throw new Error("world dispatch_submit requires at least one `deliverable_paths`.");
-	if (writeSurfaces.length === 0) throw new Error("world dispatch_submit requires at least one `write_surfaces`.");
-	return {
-		identity: {
-			ownerArtifact: params.owner_artifact?.trim() || defaultIntentOwnerArtifact(repository),
-			objective,
-			repository,
-			checkoutIdentity: params.checkout_identity?.trim() || defaultCheckoutIdentity(repository),
-			worktreeIdentity: required(params.worktree_identity, "worktree_identity", op),
-			workingDirectory: semanticWorkingDirectory(worktreePath, workingDirectory),
-			deliverablePaths,
-			writeSurfaces,
-		},
-		doneCriteria: params.done_criteria ?? "",
-		adapterArgv: params.adapter_argv ?? [],
-		worktreePath,
-		workingDirectory,
-		maxRuntimeSeconds: params.max_runtime_seconds ?? 0,
-		model: params.model ?? "",
-		childWorldOperations: params.child_operations ?? [],
-		requestId: params.request_id?.trim() || "",
-	};
 }
 
 function renderDispatchSubmit(result: WorldDispatchSubmitResult): string {
@@ -345,7 +251,7 @@ function renderSessionControl(result: WorldSessionControlResult): string {
  * only said "not allowed" would leave the agent guessing which of the five
  * permissions its manifest is missing.
  */
-export function renderAuthorityDenial(error: WorldAuthorityError): string {
+function renderAuthorityDenial(error: WorldAuthorityError): string {
 	const lines = [
 		`# world ${error.operation} denied`,
 		"",
@@ -364,7 +270,7 @@ export function renderAuthorityDenial(error: WorldAuthorityError): string {
 }
 
 /** Render one permitted operation that GLaDOS refused or could not complete. */
-export function renderOperationFailure(error: WorldOperationError): string {
+function renderOperationFailure(error: WorldOperationError): string {
 	const lines = [`# world ${error.operation} failed`, "", `Code: ${error.codeName}`];
 	if (error.requestId) lines.push(`Request id: \`${error.requestId}\``);
 	if (error.targetObjectKey) lines.push(`Target: \`${error.targetObjectKey}\``);
@@ -390,133 +296,4 @@ export function renderOperationFailure(error: WorldOperationError): string {
 		);
 	}
 	return `${lines.join("\n")}\n`;
-}
-
-/**
- * The World client native tool calls share for one process.
- *
- * One client per process means one caller identity and one connection for every
- * native World operation, which is the same discipline the `spacewave://` router
- * applies to reads. The process deliberately keeps this client open until exit.
- * An owner that already holds a client supplies it through
- * `ToolSession.worldClient` instead, so its operations ride the client its own
- * lifetime closes; the Claude task bridge does that by constructing this tool
- * with its peer's client directly.
- */
-let sharedClient: WorldClient | undefined | null = null;
-
-function sharedWorldClient(): WorldClient | undefined {
-	if (sharedClient === null) sharedClient = WorldClient.create();
-	return sharedClient;
-}
-
-export class WorldTool implements AgentTool<typeof worldSchema, WorldToolDetails> {
-	readonly name = WORLD_TOOL_NAME;
-	readonly approval = "exec" as const;
-	readonly label = "World";
-	readonly summary = "Submit and watch GLaDOS dispatches, answer Questions, and steer or interrupt sessions";
-	readonly description = [
-		"Perform one authority-checked GLaDOS World operation.",
-		"",
-		"Every call is charged to this root's caller LlmSession. GLaDOS reads that session's frozen",
-		"capability manifest and checks the operation's permission before it reads the target, so a",
-		"refusal leaves the World, custody, inbox, and executor untouched.",
-		"",
-		"Operations and the permission each requires:",
-		...Object.entries(WORLD_OPERATION_PERMISSIONS).map(([operation, permission]) => `- ${operation} — ${permission}`),
-		"",
-		"Retries are explicit. `request_id` names the retry; repeating it with the same content returns",
-		"the stored effect instead of making a second one, and repeating it with different content is a",
-		"conflict rather than a silent overwrite. `dispatch_submit` retries on its intent key.",
-	].join("\n");
-	readonly parameters = worldSchema;
-	readonly strict = true;
-	readonly loadMode = "essential";
-	readonly interruptible = (params: Partial<WorldParams>): boolean => params.op === "dispatch_watch";
-
-	readonly examples: readonly ToolExample<typeof worldSchema.infer>[] = [
-		{
-			caption: "Submit a child dispatch that may itself answer Questions",
-			call: {
-				op: "dispatch_submit",
-				objective: "Fix the flaky auth test",
-				worktree_path: "/Users/me/wt/fix-auth",
-				working_directory: "/Users/me/wt/fix-auth",
-				worktree_identity: "fix-auth",
-				deliverable_paths: ["notes/2026/20260803.org"],
-				write_surfaces: ["src/auth"],
-				child_operations: ["world.question.answer"],
-			},
-		},
-		{
-			caption: "Wait for a dispatch to settle",
-			call: { op: "dispatch_watch", intent_key: "di:abc123", stop: "terminal" },
-		},
-		{
-			caption: "Read current dispatch state without waiting",
-			call: { op: "dispatch_watch", intent_key: "di:abc123", stop: "current" },
-		},
-		{
-			caption: "Answer one Question",
-			call: {
-				op: "question_answer",
-				request_id: "answer-auth-scope-1",
-				question: "glados/questions/auth-scope",
-				summary: "Session cookies; JWT stays for service-to-service only.",
-			},
-		},
-		{
-			caption: "Steer a running session",
-			call: {
-				op: "session_input",
-				request_id: "steer-1",
-				session: "glados/llm-session/abc",
-				text: "Skip the migration; land the read path first.",
-			},
-		},
-		{
-			caption: "Interrupt a session",
-			call: {
-				op: "session_interrupt",
-				request_id: "stop-1",
-				session: "glados/llm-session/abc",
-				reason: "Superseded by a newer dispatch",
-			},
-		},
-	];
-
-	readonly #client: WorldClient;
-
-	constructor(client: WorldClient) {
-		this.#client = client;
-	}
-
-	/**
-	 * Build the tool when this session's World client can mutate.
-	 *
-	 * Interactive roots carry their identity through Resource attachment, so an
-	 * owner-supplied client can be ready before it has a static session key.
-	 * Process-shared clients still require the complete environment or settings
-	 * configuration.
-	 */
-	static createIf(session: ToolSession): WorldTool | null {
-		const owned = session.worldClient?.();
-		if (owned) return owned.canMutate ? new WorldTool(owned) : null;
-		if (!isWorldRuntimeConfigured()) return null;
-		const client = sharedWorldClient();
-		return client?.canMutate ? new WorldTool(client) : null;
-	}
-
-	async execute(
-		_toolCallId: string,
-		params: WorldParams,
-		signal?: AbortSignal,
-	): Promise<AgentToolResult<WorldToolDetails>> {
-		const rendered = await executeWorldOperation(this.#client, params, signal);
-		return {
-			content: [{ type: "text", text: rendered.text }],
-			details: rendered.details,
-			isError: rendered.isError,
-		};
-	}
 }

@@ -35,8 +35,6 @@ import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
-	DEFAULT_PREWALK_TARGET,
-	expandRoleAlias,
 	getModelMatchPreferences,
 	resolveCliModel,
 	resolveModelRoleValue,
@@ -61,6 +59,7 @@ import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
+import type { LspStartupServerInfo } from "./lsp";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -95,7 +94,6 @@ import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prom
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
-import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
 import { withTimeoutSignal } from "./utils/fetch-timeout";
@@ -113,6 +111,15 @@ type RunRpcMode = (
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
+}
+
+/** Route settings-load warnings without writing into a noninteractive result stream. */
+export function routeSettingsStartupWarnings(warnings: string[], interactive: boolean): InteractiveModeNotify[] {
+	if (interactive) return warnings.map(message => ({ kind: "warn", message }));
+	for (const message of warnings) {
+		process.stderr.write(`${chalk.yellow(`Warning: ${message}`)}\n`);
+	}
+	return [];
 }
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
@@ -145,13 +152,11 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.apply",
 	"task.isolation.merge",
 	"task.isolation.commits",
-	"task.eager",
 	"task.batch",
 	"task.maxConcurrency",
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
-	"task.agentPrewalk",
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",
@@ -383,8 +388,8 @@ export interface AcpSessionFactoryOptions {
  * supplies them through `session/new.mcpServers` and re-applies them via
  * {@link AcpAgent#configureMcpServers}. We therefore force `enableMCP: false`
  * on every session created here so {@link createAgentSession} skips the on-disk
- * `.mcp.json` discovery path — otherwise host MCP tools land in the session's
- * tool registry and shadow the client-supplied servers (issue #1234).
+ * `.mcp.json` discovery path — otherwise host MCP connections shadow the
+ * client-supplied servers (issue #1234).
  */
 export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
 	return async cwd => {
@@ -407,7 +412,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			modelRegistry: args.modelRegistry,
 			agentId,
 			// Preserve reserve-policy confirmation until ACP capabilities are known
-			// without enabling AskTool or other UI-only session behavior.
+			// without enabling interactive session behavior.
 			deferUsageReserveConfirmation: true,
 			enableMCP: false,
 			titleSystemPrompt,
@@ -919,9 +924,7 @@ export async function buildSessionOptions(
 			parsed.model !== undefined ||
 			parsed.thinking !== undefined ||
 			parsed.systemPrompt !== undefined ||
-			parsed.appendSystemPrompt !== undefined ||
-			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.appendSystemPrompt !== undefined;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -1013,70 +1016,6 @@ export async function buildSessionOptions(
 		if (!options.model && !deferredDefaultRole) options.model = scopedModels[0].model;
 	}
 
-	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
-		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
-	}
-	const prewalkEnabled = parsed.noPrewalk
-		? false
-		: parsed.prewalk === true || parsed.prewalkInto !== undefined
-			? true
-			: activeSettings.get("prewalk.enabled");
-	if (prewalkEnabled) {
-		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({
-			cliModel: rolePattern,
-			modelRegistry,
-			preferences: modelMatchPreferences,
-		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
-		} else {
-			options.prewalk = {
-				target: resolved.model,
-				thinkingLevel: resolved.thinkingLevel,
-			};
-		}
-	}
-
-	if (parsed.planYoloInto !== undefined && !parsed.planYolo) {
-		throw new Error("--plan-yolo-into requires --plan-yolo");
-	}
-	if (parsed.planYolo) {
-		const rolePattern = expandRoleAlias(parsed.planYoloInto ?? "@smol", activeSettings);
-		const resolved = resolveCliModel({
-			cliModel: rolePattern,
-			modelRegistry,
-			preferences: modelMatchPreferences,
-		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		if (resolved.error || !resolved.model) {
-			throw new Error(resolved.error ?? `Model "${parsed.planYoloInto ?? "@smol"}" not found`);
-		}
-		if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			throw new Error(`No API key for ${resolved.model.provider}/${resolved.model.id}`);
-		}
-		options.planYolo = {
-			target: resolved.model,
-			thinkingLevel: resolved.thinkingLevel,
-		};
-	}
-
 	// Thinking level
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
@@ -1118,13 +1057,6 @@ export async function buildSessionOptions(
 	// (`AgentSession.#refreshTitleAfterReplan`) on one source of truth.
 	if (titleSystemPrompt) {
 		options.titleSystemPrompt = titleSystemPrompt;
-	}
-
-	// Tools
-	if (parsed.noTools) {
-		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
-	} else if (parsed.tools) {
-		options.toolNames = parsed.tools;
 	}
 
 	if (parsed.noLsp) {
@@ -1246,7 +1178,7 @@ export async function runRootCommand(
 	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
 	// Only the interactive host renders a focusable Agent Hub / subagent session
 	// tree; declare it so headless subagent optimizations (e.g. skipping replan
-	// title refresh) can tell a focusable process from a print/RPC/eval one.
+	// title refresh) can tell a focusable process from a print/RPC one.
 	setInteractiveHost(isInteractive);
 	// Create AuthStorage and ModelRegistry upfront
 	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
@@ -1258,6 +1190,7 @@ export async function runRootCommand(
 			cwd,
 			configFiles: parsedArgs.config,
 		}));
+	notifs.push(...routeSettingsStartupWarnings(settingsInstance.takeStartupWarnings(), isInteractive));
 	const worldInteractive =
 		isInteractive &&
 		resolveWorldInteractive({
@@ -1310,12 +1243,10 @@ export async function runRootCommand(
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
-	const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
-	if (smolModel || slowModel || planModel) {
+	if (smolModel || slowModel) {
 		settingsInstance.overrideModelRoles({
 			smol: smolModel,
 			slow: slowModel,
-			plan: planModel,
 		});
 	}
 

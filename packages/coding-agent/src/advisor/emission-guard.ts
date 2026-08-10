@@ -1,5 +1,5 @@
 /**
- * Per-session policy gate for advisor `advise()` calls.
+ * Per-session policy gate for advisor responses.
  *
  * The advisor system prompt tells the watcher model:
  *
@@ -15,8 +15,7 @@
  * over-budget calls at the `enqueueAdvice` boundary so the primary stays
  * clean even when the advisor misbehaves.
  *
- * The gate is intentionally invisible to the advisor model — `AdviseTool`
- * still returns `Recorded.` for a suppressed call. Surfacing "suppressed"
+ * The gate is intentionally invisible to the advisor model. Surfacing "suppressed"
  * back into advisor context risks the model rephrasing the same useless note
  * to bypass the dedupe ("Stop.", then "Halt." then "Stop now.").
  */
@@ -101,9 +100,9 @@ const SUPPRESSED_NORMALIZED_PHRASES: Record<string, true> = {
 const DEFAULT_HISTORY_CAPACITY = 4096;
 
 /**
- * Decides whether an advisor `advise()` call should reach the primary agent.
+ * Decides whether an advisor note should reach the primary agent.
  *
- * Enforces — in this order — the noise filter, session-scoped exact-text
+ * Enforces — in this order — the noise filter, session-scoped equal-or-lower-severity
  * dedupe (FIFO-evicted at {@link DEFAULT_HISTORY_CAPACITY}), and a per-update
  * rate limit of one accepted note per advisor model prompt. Suppressed calls
  * never consume the per-update budget — a noise call doesn't burn the slot
@@ -114,7 +113,7 @@ const DEFAULT_HISTORY_CAPACITY = 4096;
  * `agent.prompt()` cycle via {@link beginUpdate}.
  */
 export class AdvisorEmissionGuard {
-	#seen = new Set<string>();
+	#seen = new Map<string, number>();
 	/** Insertion-order log to drive FIFO eviction without an extra Map. */
 	#seenOrder: string[] = [];
 	#consumedThisUpdate = false;
@@ -139,7 +138,7 @@ export class AdvisorEmissionGuard {
 	/**
 	 * Clear the per-update rate-limit gate. Called by `AdvisorRuntime` right
 	 * before each `agent.prompt(batch)` invocation so the next advisor model
-	 * cycle starts with a fresh budget of one advise.
+	 * cycle starts with a fresh budget of one note.
 	 */
 	beginUpdate(): void {
 		this.#consumedThisUpdate = false;
@@ -148,20 +147,22 @@ export class AdvisorEmissionGuard {
 	/**
 	 * Whether the proposed note should reach the primary. On `true` the gate
 	 * has already recorded the note (consumed the per-update budget and added
-	 * it to the dedupe history) — caller delivers the note. On `false` the
+	 * its severity to the dedupe history) — caller delivers the note. On `false` the
 	 * caller drops it.
 	 *
 	 * Empty / whitespace-only notes are suppressed; the model's
 	 * tool-args contract still requires a non-empty string but defense-in-depth.
 	 */
-	accept(note: string): boolean {
+	accept(note: string, severity?: "nit" | "concern" | "blocker"): boolean {
 		const key = normalizeAdvisorNote(note);
 		if (!key) return false;
 		if (SUPPRESSED_NORMALIZED_PHRASES[key]) return false;
-		if (this.#seen.has(key)) return false;
+		const rank = severity === "blocker" ? 3 : severity === "concern" ? 2 : 1;
+		const previousRank = this.#seen.get(key) ?? 0;
+		if (rank <= previousRank) return false;
 		if (this.#consumedThisUpdate) return false;
 		this.#consumedThisUpdate = true;
-		this.#seen.add(key);
+		this.#seen.set(key, rank);
 		this.#seenOrder.push(key);
 		if (this.#seenOrder.length > this.#capacity) {
 			const stale = this.#seenOrder.shift();

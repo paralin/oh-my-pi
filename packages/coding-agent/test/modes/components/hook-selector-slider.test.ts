@@ -30,7 +30,7 @@ function makeHarness(slider?: HookSelectorSlider, opts?: { onLeft?: () => void; 
 	let cancelled = 0;
 	if (slider) slider.onChange = index => changes.push(index);
 	const component = new HookSelectorComponent(
-		"Plan mode - next step",
+		"Next step",
 		["Approve and execute", "Refine plan"],
 		option => selected.push(option),
 		() => {

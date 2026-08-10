@@ -3,11 +3,16 @@ import * as path from "node:path";
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ExtensionContext, ExtensionFactory } from "../extensibility/extensions";
+import { truncateHeadBytes } from "../session/streaming-output-constants";
 import * as git from "../utils/git";
 import commandResumeTemplate from "./command-resume.md" with { type: "text" };
 import { createDashboardController } from "./dashboard";
 import { ensureAutoresearchBranch } from "./git";
 import { formatNum } from "./helpers";
+import { executeInitExperimentOwner } from "./operations/init-experiment";
+import { executeLogExperimentOwner } from "./operations/log-experiment";
+import { executeRunExperimentOwner } from "./operations/run-experiment";
+import { executeUpdateNotesOwner } from "./operations/update-notes";
 import promptTemplate from "./prompt.md" with { type: "text" };
 import setupPromptTemplate from "./prompt-setup.md" with { type: "text" };
 import resumeMessageTemplate from "./resume-message.md" with { type: "text" };
@@ -22,13 +27,7 @@ import {
 	reconstructControlState,
 } from "./state";
 import { openAutoresearchStorage, openAutoresearchStorageIfExists, type RunRow, type SessionRow } from "./storage";
-import { createInitExperimentTool } from "./tools/init-experiment";
-import { createLogExperimentTool } from "./tools/log-experiment";
-import { createRunExperimentTool } from "./tools/run-experiment";
-import { createUpdateNotesTool } from "./tools/update-notes";
 import type { AutoresearchRuntime, ExperimentResult, PendingRunSummary } from "./types";
-
-const EXPERIMENT_TOOL_NAMES = ["init_experiment", "run_experiment", "log_experiment", "update_notes"];
 
 export const createAutoresearchExtension: ExtensionFactory = api => {
 	const runtimeStore = createRuntimeStore();
@@ -36,6 +35,208 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 
 	const getSessionKey = (ctx: ExtensionContext): string => ctx.sessionManager.getSessionId();
 	const getRuntime = (ctx: ExtensionContext): AutoresearchRuntime => runtimeStore.ensure(getSessionKey(ctx));
+	const hostContexts = new Map<string, ExtensionContext>();
+	const ownerOptions = { dashboard, getRuntime, pi: api };
+	// Older focused extension harnesses predate the optional item-9 registration API.
+	const registerIpythonHostHandler = api.registerIpythonHostHandler?.bind(api);
+	const hostContext = (sessionId: string, cwd: string): ExtensionContext => {
+		const context = hostContexts.get(sessionId);
+		if (!context) throw new Error("Autoresearch is not initialized for this IPython session");
+		if (context.cwd === cwd) return context;
+		return Object.assign(Object.create(context) as ExtensionContext, { cwd });
+	};
+	const text = (value: unknown, name: string, max = 16_384): string => {
+		if (typeof value !== "string" || value.trim().length === 0)
+			throw new TypeError(`${name} must be a nonempty string`);
+		if (value.length > max) throw new RangeError(`${name} is too large`);
+		return value.trim();
+	};
+	const optionalText = (data: Readonly<Record<string, unknown>>, name: string, max = 16_384): string | undefined =>
+		data[name] === undefined ? undefined : text(data[name], name, max);
+	const fields = (data: Readonly<Record<string, unknown>>, allowed: readonly string[]): void => {
+		const unknown = Object.keys(data).find(key => !allowed.includes(key));
+		if (unknown) throw new TypeError(`unknown field: ${unknown}`);
+	};
+	const list = (data: Readonly<Record<string, unknown>>, name: string): string[] | undefined => {
+		const value = data[name];
+		if (value === undefined) return undefined;
+		if (!Array.isArray(value) || value.length > 64) throw new TypeError(`${name} must contain at most 64 strings`);
+		return value.map((item, index) => text(item, `${name}[${index}]`, 1024));
+	};
+	const boundedJsonObject = (
+		value: unknown,
+		name: string,
+		maxBytes: number,
+	): Readonly<Record<string, unknown>> | undefined => {
+		if (value === undefined) return undefined;
+		if (typeof value !== "object" || value === null || Array.isArray(value)) {
+			throw new TypeError(`${name} must be an object`);
+		}
+		const serialized = JSON.stringify(value);
+		if (Buffer.byteLength(serialized, "utf8") > maxBytes) throw new RangeError(`${name} is too large`);
+		return Object.fromEntries(Object.entries(value));
+	};
+	const result = (value: {
+		content: readonly { type: string; text?: string }[];
+		details?: unknown;
+	}): Readonly<Record<string, unknown>> => {
+		const sourceText = value.content.find(part => part.type === "text")?.text ?? "";
+		const textProjection = truncateHeadBytes(sourceText, 50 * 1024);
+		const textTruncated = Buffer.byteLength(sourceText, "utf8") > textProjection.bytes;
+		const detailsJson = JSON.stringify(value.details ?? null);
+		const detailsBytes = Buffer.byteLength(detailsJson, "utf8");
+		return {
+			text: textProjection.text,
+			text_truncated: textTruncated,
+			details: detailsBytes <= 256 * 1024 ? (value.details ?? null) : { truncated: true, total_bytes: detailsBytes },
+		};
+	};
+	registerIpythonHostHandler?.("autoresearch", "init", async request => {
+		fields(request.data, [
+			"name",
+			"goal",
+			"primary_metric",
+			"metric_unit",
+			"direction",
+			"secondary_metrics",
+			"scope_paths",
+			"off_limits",
+			"constraints",
+			"max_iterations",
+			"new_segment",
+		]);
+		request.signal.throwIfAborted();
+		const direction = request.data.direction;
+		if (direction !== undefined && direction !== "lower" && direction !== "higher")
+			throw new TypeError("direction must be lower or higher");
+		const maxIterations = request.data.max_iterations;
+		if (
+			maxIterations !== undefined &&
+			(typeof maxIterations !== "number" ||
+				!Number.isFinite(maxIterations) ||
+				maxIterations <= 0 ||
+				maxIterations > 100_000)
+		)
+			throw new RangeError("max_iterations must be between 1 and 100000");
+		if (request.data.new_segment !== undefined && typeof request.data.new_segment !== "boolean")
+			throw new TypeError("new_segment must be a boolean");
+		await request.publishProgress("Autoresearch initialization started");
+		const value = await executeInitExperimentOwner(ownerOptions, hostContext(request.sessionId, request.cwd), {
+			name: text(request.data.name, "name", 256),
+			goal: optionalText(request.data, "goal"),
+			primary_metric: text(request.data.primary_metric, "primary_metric", 256),
+			metric_unit: optionalText(request.data, "metric_unit", 64),
+			direction: direction as "lower" | "higher" | undefined,
+			secondary_metrics: list(request.data, "secondary_metrics"),
+			scope_paths: list(request.data, "scope_paths"),
+			off_limits: list(request.data, "off_limits"),
+			constraints: list(request.data, "constraints"),
+			max_iterations: maxIterations as number | undefined,
+			new_segment: request.data.new_segment as boolean | undefined,
+		});
+		request.signal.throwIfAborted();
+		await request.publishProgress("Autoresearch initialization completed");
+		return result(value);
+	});
+	registerIpythonHostHandler?.("autoresearch", "run", async request => {
+		fields(request.data, ["timeout_seconds"]);
+		request.signal.throwIfAborted();
+		const timeout = request.data.timeout_seconds;
+		if (
+			timeout !== undefined &&
+			(typeof timeout !== "number" || !Number.isFinite(timeout) || timeout <= 0 || timeout > 3600)
+		)
+			throw new RangeError("timeout_seconds must be between 0 and 3600");
+		await request.publishProgress("Autoresearch experiment started");
+		const value = await executeRunExperimentOwner(
+			ownerOptions,
+			hostContext(request.sessionId, request.cwd),
+			{ timeout_seconds: timeout as number | undefined },
+			request.signal,
+			_update => request.publishProgress("Autoresearch experiment running"),
+		);
+		request.signal.throwIfAborted();
+		await request.publishProgress("Autoresearch experiment completed");
+		return result(value);
+	});
+	registerIpythonHostHandler?.("autoresearch", "log", async request => {
+		fields(request.data, [
+			"metric",
+			"status",
+			"description",
+			"metrics",
+			"asi",
+			"commit",
+			"justification",
+			"flag_runs",
+		]);
+		const metric = request.data.metric;
+		const status = request.data.status;
+		if (typeof metric !== "number" || !Number.isFinite(metric)) throw new TypeError("metric must be a finite number");
+		if (status !== "keep" && status !== "discard" && status !== "crash" && status !== "checks_failed")
+			throw new TypeError("invalid status");
+		const rawMetrics = request.data.metrics;
+		let metrics: Record<string, number> | undefined;
+		if (rawMetrics !== undefined) {
+			if (
+				typeof rawMetrics !== "object" ||
+				rawMetrics === null ||
+				Array.isArray(rawMetrics) ||
+				Object.keys(rawMetrics).length > 64
+			)
+				throw new TypeError("metrics must be a bounded object");
+			metrics = {};
+			for (const [key, value] of Object.entries(rawMetrics)) {
+				if (key.length > 256 || typeof value !== "number" || !Number.isFinite(value))
+					throw new TypeError("metrics entries must be finite numbers");
+				metrics[key] = value;
+			}
+		}
+		const asi = boundedJsonObject(request.data.asi, "asi", 64 * 1024);
+		const rawFlags = request.data.flag_runs;
+		let flagRuns: Array<{ run_id: number; reason: string }> | undefined;
+		if (rawFlags !== undefined) {
+			if (!Array.isArray(rawFlags) || rawFlags.length > 64) throw new TypeError("flag_runs must be a bounded array");
+			flagRuns = rawFlags.map((entry, index) => {
+				const value = boundedJsonObject(entry, `flag_runs[${index}]`, 4 * 1024)!;
+				const unknown = Object.keys(value).find(key => key !== "run_id" && key !== "reason");
+				if (unknown) throw new TypeError(`unknown flag_runs field: ${unknown}`);
+				if (!Number.isSafeInteger(value.run_id) || (value.run_id as number) <= 0)
+					throw new TypeError(`flag_runs[${index}].run_id must be a positive integer`);
+				return { run_id: value.run_id as number, reason: text(value.reason, `flag_runs[${index}].reason`, 1024) };
+			});
+		}
+		request.signal.throwIfAborted();
+		await request.publishProgress("Autoresearch logging started");
+		const value = await executeLogExperimentOwner(ownerOptions, hostContext(request.sessionId, request.cwd), {
+			metric,
+			status,
+			description: text(request.data.description, "description", 16_384),
+			metrics,
+			asi,
+			commit: optionalText(request.data, "commit", 256),
+			justification: optionalText(request.data, "justification", 16_384),
+			flag_runs: flagRuns,
+		});
+		request.signal.throwIfAborted();
+		await request.publishProgress("Autoresearch logging completed");
+		return result(value);
+	});
+	registerIpythonHostHandler?.("autoresearch", "notes", async request => {
+		fields(request.data, ["body", "append_idea"]);
+		const body = optionalText(request.data, "body", 64 * 1024);
+		const appendIdea = optionalText(request.data, "append_idea", 16_384);
+		if (body === undefined && appendIdea === undefined) throw new TypeError("body or append_idea is required");
+		request.signal.throwIfAborted();
+		await request.publishProgress("Autoresearch notes update started");
+		const value = await executeUpdateNotesOwner(ownerOptions, hostContext(request.sessionId, request.cwd), {
+			body: body ?? "",
+			append_idea: appendIdea,
+		});
+		request.signal.throwIfAborted();
+		await request.publishProgress("Autoresearch notes update completed");
+		return result(value);
+	});
 
 	const loadActiveSession = async (
 		ctx: ExtensionContext,
@@ -90,18 +291,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		runtime.lastRunNumber = runtime.lastRunSummary?.runNumber ?? null;
 		runtime.runningExperiment = null;
 		dashboard.updateWidget(ctx, runtime);
-
-		const activeTools = api.getActiveTools();
-		const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
-		const nextActiveTools = runtime.autoresearchMode
-			? [...new Set([...activeTools, ...EXPERIMENT_TOOL_NAMES])]
-			: activeTools.filter(name => !experimentTools.has(name));
-		const toolsChanged =
-			nextActiveTools.length !== activeTools.length ||
-			nextActiveTools.some((name, index) => name !== activeTools[index]);
-		if (toolsChanged) {
-			await api.setActiveTools(nextActiveTools);
-		}
 	};
 
 	const setMode = (
@@ -117,11 +306,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		runtime.lastAutoResumePendingRunNumber = null;
 		api.appendEntry("autoresearch-control", goal ? { mode, goal } : { mode });
 	};
-
-	api.registerTool(createInitExperimentTool({ dashboard, getRuntime, pi: api }));
-	api.registerTool(createRunExperimentTool({ dashboard, getRuntime, pi: api }));
-	api.registerTool(createLogExperimentTool({ dashboard, getRuntime, pi: api }));
-	api.registerTool(createUpdateNotesTool({ dashboard, getRuntime, pi: api }));
 
 	api.registerCommand("autoresearch", {
 		description: "Toggle builtin autoresearch mode, or pass off / clear, or a goal message.",
@@ -147,8 +331,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			if (trimmed === "" && runtime.autoresearchMode) {
 				setMode(ctx, false, runtime.goal, "off");
 				dashboard.updateWidget(ctx, runtime);
-				const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
-				await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
 				ctx.ui.notify("Autoresearch mode disabled", "info");
 				return;
 			}
@@ -156,8 +338,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			if (trimmed === "off") {
 				setMode(ctx, false, runtime.goal, "off");
 				dashboard.updateWidget(ctx, runtime);
-				const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
-				await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
 				ctx.ui.notify("Autoresearch mode disabled", "info");
 				return;
 			}
@@ -203,7 +383,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				runtime.goal = refreshed.goal ?? goalArg;
 				setMode(ctx, true, runtime.goal, "on");
 				dashboard.updateWidget(ctx, runtime);
-				await api.setActiveTools([...new Set([...api.getActiveTools(), ...EXPERIMENT_TOOL_NAMES])]);
 				api.sendUserMessage(
 					prompt.render(commandResumeTemplate, {
 						branch_status_line: branchStatusLine,
@@ -216,7 +395,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 
 			setMode(ctx, true, goalArg, "on");
 			dashboard.updateWidget(ctx, runtime);
-			await api.setActiveTools([...new Set([...api.getActiveTools(), ...EXPERIMENT_TOOL_NAMES])]);
 			if (goalArg !== null) {
 				api.sendUserMessage(goalArg);
 			} else {
@@ -245,11 +423,18 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		},
 	});
 
-	api.on("session_start", (_event, ctx) => rehydrate(ctx));
-	api.on("session_switch", (_event, ctx) => rehydrate(ctx));
+	api.on("session_start", async (_event, ctx) => {
+		hostContexts.set(getSessionKey(ctx), ctx);
+		await rehydrate(ctx);
+	});
+	api.on("session_switch", async (_event, ctx) => {
+		hostContexts.set(getSessionKey(ctx), ctx);
+		await rehydrate(ctx);
+	});
 	api.on("session_branch", (_event, ctx) => rehydrate(ctx));
 	api.on("session_tree", (_event, ctx) => rehydrate(ctx));
 	api.on("session_shutdown", (_event, ctx) => {
+		hostContexts.delete(getSessionKey(ctx));
 		dashboard.clear(ctx);
 		runtimeStore.clear(getSessionKey(ctx));
 	});
@@ -306,8 +491,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			runtime.lastRunSummary = null;
 			runtime.runningExperiment = null;
 			dashboard.updateWidget(ctx, runtime);
-			const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
-			await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
 			return;
 		}
 		const storage = await openAutoresearchStorageIfExists(ctx.cwd);
@@ -359,7 +542,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			const onAutoresearchBranch = currentBranch?.startsWith("autoresearch/") ?? false;
 			const baselineWarning = onAutoresearchBranch
 				? null
-				: "Heads up: you are not on a dedicated `autoresearch/*` branch. `log_experiment discard` will only revert run-modified files, not reset to baseline — so harness files written before `init_experiment` may not survive a discard. Clean the worktree and re-run `/autoresearch` if you want full revert safety.";
+				: "Heads up: you are not on a dedicated `autoresearch/*` branch. `omp.autoresearch.log` with `status='discard'` will only revert run-modified files, not reset to baseline — so harness files written before `omp.autoresearch.init` may not survive a discard. Clean the worktree and re-run `/autoresearch` if you want full revert safety.";
 			return {
 				systemPrompt: [
 					prompt.render(setupPromptTemplate, {
@@ -455,8 +638,6 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		runtime.lastRunSummary = null;
 		setMode(ctx, false, null, "clear");
 		dashboard.updateWidget(ctx, runtime);
-		const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
-		await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
 		ctx.ui.notify("Autoresearch session cleared.", "info");
 	}
 };

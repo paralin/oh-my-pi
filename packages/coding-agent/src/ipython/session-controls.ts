@@ -14,6 +14,8 @@ export interface SessionControlHost {
 	goalGet(): SessionGoalResponse;
 	goalCreate(objective: string, tokenBudget?: number): Promise<SessionGoalResponse>;
 	goalComplete(): Promise<SessionGoalResponse>;
+	goalPause?(reason: string): Promise<SessionGoalResponse>;
+	goalResume?(): Promise<SessionGoalResponse>;
 	contextUsage(): { tokens: number | null; contextWindow: number | null; percent: number | null };
 	waitForIdle(): Promise<void>;
 	runCompaction(instructions?: string): Promise<void>;
@@ -177,6 +179,18 @@ export class OmpSessionControlService {
 	async goalComplete(signal?: AbortSignal): Promise<SessionGoalResponse> {
 		aborted(signal);
 		return await this.#host.goalComplete();
+	}
+
+	async goalPause(reason: string, signal?: AbortSignal): Promise<SessionGoalResponse> {
+		aborted(signal);
+		if (!this.#host.goalPause) throw new Error("Goal pause is unavailable in this session");
+		return await this.#host.goalPause(reason);
+	}
+
+	async goalResume(signal?: AbortSignal): Promise<SessionGoalResponse> {
+		aborted(signal);
+		if (!this.#host.goalResume) throw new Error("Goal resume is unavailable in this session");
+		return await this.#host.goalResume();
 	}
 
 	compactStatus(): Record<string, unknown> {
@@ -512,6 +526,17 @@ export function createSessionControlIpythonHostHandlers(service: OmpSessionContr
 	add("goal.complete", async request => {
 		assertFields(request.data, [], "goal.complete");
 		return (await service.goalComplete(request.signal)) as unknown as Record<string, unknown>;
+	});
+	add("goal.pause", async request => {
+		assertFields(request.data, ["reason"], "goal.pause");
+		return (await service.goalPause(
+			requiredString(request.data.reason, "goal.pause reason", 1000),
+			request.signal,
+		)) as unknown as Record<string, unknown>;
+	});
+	add("goal.resume", async request => {
+		assertFields(request.data, [], "goal.resume");
+		return (await service.goalResume(request.signal)) as unknown as Record<string, unknown>;
 	});
 	add("compact.status", async request => {
 		assertFields(request.data, [], "compact.status");

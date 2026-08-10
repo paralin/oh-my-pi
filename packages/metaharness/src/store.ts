@@ -16,7 +16,7 @@ import { readJobResult } from "./runner";
 export type RunStatus = "running" | "complete" | "failed" | "cancelled";
 
 /** Benchmark implementation that produced a run. */
-export type BenchmarkKind = "harbor" | "edit" | "snapcompact";
+export type BenchmarkKind = "harbor" | "snapcompact";
 
 /** How a run relates to its experiment's question. */
 export type RunRole = "baseline" | "variant" | "";
@@ -27,13 +27,13 @@ export interface RunRow {
 	dataset: string;
 	agent: string;
 	models: string;
-	/** JSON prewalk config (`{ into?: string }`); older rows may hold legacy reasoning-slide JSON. */
+	/** Read-only legacy policy data retained for historical run records. */
 	prewalk: string | null;
 	/** Benchmark-specific launch configuration. */
 	config: Record<string, unknown>;
 	/** Role inside the experiment (baseline vs treatment); "" when unspecified. */
 	role: RunRole;
-	/** One-line description of what this arm tests (e.g. "prewalk→flash at first edit/write"). */
+	/** One-line description of what this arm tests. */
 	note: string;
 	/** Display-name override for the arm; "" falls back to the jobName-derived arm label. */
 	label: string;
@@ -85,7 +85,6 @@ export interface LaunchRecord {
 	dataset: string;
 	agent: string;
 	models: string[];
-	prewalk?: { into?: string };
 	pid: number;
 	role?: RunRole;
 	note?: string;
@@ -243,7 +242,7 @@ export class RunStore {
 				launch.dataset,
 				launch.agent,
 				launch.models.join(","),
-				launch.prewalk ? JSON.stringify(launch.prewalk) : null,
+				null,
 				launch.role ?? "",
 				launch.note ?? "",
 				JSON.stringify(launch.config ?? {}),

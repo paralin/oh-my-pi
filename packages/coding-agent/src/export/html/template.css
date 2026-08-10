@@ -715,17 +715,6 @@
       margin-left: 10px;
     }
 
-    /* Tool calls render inside the <omp-tool-view> web component, which draws
-       its own card chrome; the host box collapses to a plain block. */
-    omp-tool-view.tool-execution {
-      display: block;
-      padding: 0;
-      background: none;
-      border: none;
-      border-radius: 0;
-      overflow: visible;
-    }
-
     .tool-command {
       font-weight: 600;
       white-space: pre-wrap;
@@ -905,6 +894,29 @@
       text-transform: uppercase;
       color: var(--customMessageLabel, var(--muted));
       margin-bottom: 2px;
+    }
+
+    .ipython-code,
+    .ipython-output,
+    .ipython-diff pre {
+      overflow-x: auto;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+    }
+
+    .ipython-image {
+      display: block;
+      max-width: 100%;
+      max-height: 480px;
+      border: 1px solid var(--hairline);
+      border-radius: var(--radius-ctl);
+      margin: 8px 0;
+      object-fit: contain;
+    }
+
+    .ipython-artifacts {
+      overflow-wrap: anywhere;
+      margin-bottom: 0;
     }
 
     /* Error */

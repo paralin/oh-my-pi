@@ -1,7 +1,7 @@
 ---
 description: "Do not use `await import()` — use static imports unless dynamic loading is unavoidable"
 condition: "await import\\("
-scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

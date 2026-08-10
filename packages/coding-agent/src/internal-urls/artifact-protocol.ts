@@ -7,7 +7,7 @@
  * URL form:
  * - artifact://<id> - Full artifact content
  *
- * Pagination is handled by the read tool via offset/limit parameters.
+ * The workspace read service handles pagination through offset/limit parameters.
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";

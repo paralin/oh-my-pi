@@ -1,7 +1,7 @@
 /**
  * Types for the internal URL routing system.
  *
- * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`) are resolved by tools like read,
+ * Internal URLs (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, and `vault://`) are resolved by the workspace read service,
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
@@ -28,9 +28,8 @@ export interface InternalResource {
 	notes?: string[];
 	/**
 	 * True when the resolved content cannot be edited by the agent (e.g. sealed
-	 * artifacts, harness docs, machine-generated memory summaries). Hashline
-	 * anchors and similar edit affordances are suppressed for immutable
-	 * resources. Mutable resources (e.g. local://) behave like editable files.
+	 * artifacts, harness docs, machine-generated memory summaries). Mutable resources
+	 * (e.g. local://) behave like editable files.
 	 */
 	immutable?: boolean;
 	/**
@@ -81,7 +80,7 @@ export interface InternalUrl extends URL {
 /**
  * Caller-supplied context that the router threads into protocol handlers.
  *
- * Read tool calls `InternalUrlRouter.resolve(url, { cwd, settings, signal })`
+ * The workspace read service calls `InternalUrlRouter.resolve(url, { cwd, settings, signal })`
  * so handlers can resolve relative defaults (e.g. `issue://N` → which repo?)
  * against the actual session that initiated the read, not whichever session
  * happens to be registered first in the global `AgentRegistry`.
@@ -106,10 +105,6 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
-	/** Session-bound `xd://` documentation resolver. */
-	xd?: {
-		read(name: string | null): Promise<string>;
-	};
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory
 	 * listing (e.g. the ssh:// handler draining a full remote `ls`) instead return
@@ -130,33 +125,14 @@ export interface ResolveContext {
 }
 
 /**
- * Caller context for write operations dispatched to host-owned URI handlers.
- * Mirrors {@link ResolveContext} so handlers that share read/write state can
- * accept the same shape.
- */
-export interface WriteContext {
-	/** Working directory of the calling session. */
-	cwd?: string;
-	/** Caller's abort signal. */
-	signal?: AbortSignal;
-	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
-	localProtocolOptions?: LocalProtocolOptions;
-	/** Session-bound `xd://` device dispatcher. */
-	xd?: {
-		write(name: string | null, content: string): Promise<void>;
-	};
-}
-
-/**
- * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://, xd://).
+ * Handler for a specific internal URL scheme (e.g., agent://, memory://, skill://).
  */
 export interface ProtocolHandler {
 	/** The scheme this handler processes (without trailing ://) */
 	readonly scheme: string;
 	/**
 	 * Whether resources produced by this handler are immutable (cannot be
-	 * edited by the agent). When true, callers suppress hashline anchors and
-	 * other edit affordances. When false, resources behave like editable files.
+	 * edited by the agent). When false, resources behave like editable files.
 	 */
 	readonly immutable: boolean;
 	/**
@@ -170,15 +146,6 @@ export interface ProtocolHandler {
 	 * @throws Error with user-friendly message if resolution fails
 	 */
 	resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource>;
-	/**
-	 * Optional write hook. When present, the write tool dispatches
-	 * `write(url, content)` to this handler instead of writing to a filesystem
-	 * path. The handler is responsible for any persistence and validation.
-	 *
-	 * Handlers that omit this method are treated as read-only; the write tool
-	 * surfaces a clear "not writable" error when invoked against them.
-	 */
-	write?(url: InternalUrl, content: string, context?: WriteContext): Promise<void>;
 	/**
 	 * Optional autocomplete hook. Returns candidate completions for the
 	 * host/path portion of a `scheme://` URL while the user composes a prompt.

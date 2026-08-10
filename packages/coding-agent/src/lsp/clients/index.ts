@@ -4,8 +4,7 @@ import { LspLinterClient } from "./lsp-linter-client";
 /**
  * Linter client implementations.
  *
- * The LinterClient interface provides a common API for formatters and linters.
- * Different implementations can use LSP protocol, CLI tools, or other mechanisms.
+ * The LinterClient interface provides diagnostics through LSP or CLI implementations.
  */
 
 export { BiomeClient } from "./biome-client";

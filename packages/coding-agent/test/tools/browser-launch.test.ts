@@ -1,11 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
 import * as path from "node:path";
-import {
-	stealthIgnoreDefaultArgsForTest,
-	systemChromiumCandidatesForTest,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/launch";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { stealthIgnoreDefaultArgsForTest, systemChromiumCandidatesForTest } from "../../src/tools/browser/launch.js";
 
 const EXECUTABLE_PROBE = path.resolve(import.meta.dir, "../fixtures/browser-executable-probe.ts");
 

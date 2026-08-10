@@ -1,8 +1,6 @@
 import { pyCall } from "./rendering";
 import type { InbandTool } from "./types";
 
-const INTENT_PLACEHOLDER = "…";
-
 /**
  * Render a tool's examples as an `<examples>` block. Calls render in Python
  * keyword-argument syntax (`name(key="value", n=1)`) regardless of the model's
@@ -11,22 +9,13 @@ const INTENT_PLACEHOLDER = "…";
  * argument is a string renders as the bare value — the block already names the
  * tool, and payload args (commands, code, patches) read best verbatim.
  */
-export function renderToolExamples(tool: InbandTool, intentField?: string): string {
+export function renderToolExamples(tool: InbandTool): string {
 	const examples = tool.examples;
 	if (!examples?.length) return "";
 	const renderCall = (args: Record<string, unknown>): string => {
 		const bare = bareStringArg(args);
-		if (bare !== undefined) {
-			// Bare payload. The intent placeholder still rides on the envelope so
-			// intent-traced schemas (where `i` is required) keep teaching it.
-			const intentAttr = intentField ? ` ${intentField}="${INTENT_PLACEHOLDER}"` : "";
-			return `<example${intentAttr}>\n${bare}\n</example>`;
-		}
-		// When intent tracing injects `i` into the schema, examples must show a
-		// placeholder so the model learns to emit it. Keep it first, matching the
-		// schema injection order.
-		const finalArgs = intentField ? { [intentField]: INTENT_PLACEHOLDER, ...args } : args;
-		return `<example>\n${pyCall(tool.name, finalArgs)}\n</example>`;
+		if (bare !== undefined) return `<example>\n${bare}\n</example>`;
+		return `<example>\n${pyCall(tool.name, args)}\n</example>`;
 	};
 	const parts = examples.map(ex => {
 		const head = ex.caption ? `# ${ex.caption}\n` : "";

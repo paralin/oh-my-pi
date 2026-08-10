@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SecurityScanPlan } from "../../src/security";
-import { createSecurityPublicationTool, SecurityStore } from "../../src/security";
+import { createSecurityPublisher, SecurityStore } from "../../src/security";
 
 let temporaryRoot = "";
 let repositoryRoot = "";
@@ -47,56 +47,44 @@ afterEach(async () => {
 describe("security publication", () => {
 	test("rejects absolute and traversing source locations", async () => {
 		for (const invalidPath of ["../outside.ts", "/etc/passwd", "C:/Windows/System32/config"]) {
-			const tool = createSecurityPublicationTool({
+			const publisher = createSecurityPublisher({
 				plan,
 				scanId: "secscan_fixture",
 				store,
 				startedAt: "2026-07-29T00:00:00.000Z",
 			});
 			await expect(
-				tool.execute(
-					"tool-call",
-					{
-						findings: [
-							{
-								rule_id: "fixture.rule",
-								title: "Fixture finding",
-								summary: "Fixture summary",
-								severity: "high",
-								confidence: "high",
-								category: "fixture",
-								locations: [{ path: invalidPath, start_line: 1 }],
-							},
-						],
-						coverage: { completeness: "partial" },
-						report: "# Fixture\n",
-					},
-					undefined,
-					undefined,
-					undefined as never,
-				),
+				publisher({
+					findings: [
+						{
+							rule_id: "fixture.rule",
+							title: "Fixture finding",
+							summary: "Fixture summary",
+							severity: "high",
+							confidence: "high",
+							category: "fixture",
+							locations: [{ path: invalidPath, start_line: 1 }],
+						},
+					],
+					coverage: { completeness: "partial" },
+					report: "# Fixture\n",
+				}),
 			).rejects.toThrow("repository-relative");
 		}
 	});
 
 	test("creates an absent approved output directory and writes the complete bundle", async () => {
-		const tool = createSecurityPublicationTool({
+		const publisher = createSecurityPublisher({
 			plan,
 			scanId: "secscan_output",
 			store,
 			startedAt: "2026-07-29T00:00:00.000Z",
 		});
-		await tool.execute(
-			"publish",
-			{
-				findings: [],
-				coverage: { completeness: "complete" },
-				report: "# No findings\n",
-			},
-			undefined,
-			undefined,
-			undefined as never,
-		);
+		await publisher({
+			findings: [],
+			coverage: { completeness: "complete" },
+			report: "# No findings\n",
+		});
 		expect((await fs.stat(plan.output.root)).isDirectory()).toBeTrue();
 		expect((await fs.stat(plan.output.root)).mode & 0o777).toBe(0o700);
 		expect((await fs.readdir(plan.output.root)).sort()).toEqual([
@@ -124,7 +112,7 @@ describe("security publication", () => {
 				await releasePut.promise;
 			},
 		} as unknown as SecurityStore;
-		const tool = createSecurityPublicationTool({
+		const publisher = createSecurityPublisher({
 			plan,
 			scanId: "secscan_fixture",
 			store: delayedStore,
@@ -135,11 +123,9 @@ describe("security publication", () => {
 			coverage: { completeness: "complete" as const },
 			report: "# Fixture\n",
 		};
-		const first = tool.execute("first", params, undefined, undefined, undefined as never);
+		const first = publisher(params);
 		await putStarted.promise;
-		await expect(tool.execute("second", params, undefined, undefined, undefined as never)).rejects.toThrow(
-			"already been published",
-		);
+		await expect(publisher(params)).rejects.toThrow("already been published");
 		expect(putCalls).toBe(1);
 		releasePut.resolve();
 		await first;

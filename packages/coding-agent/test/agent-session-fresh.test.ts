@@ -69,7 +69,7 @@ describe("AgentSession fresh provider state", () => {
 		const appendOnlyContext = new AppendOnlyContextManager();
 		agent.setAppendOnlyContext(appendOnlyContext);
 		appendOnlyContext.syncMessages([{ role: "user", content: "cached context" }]);
-		appendOnlyContext.build({ systemPrompt: ["Test"], messages: [], tools: [] }, { intentTracing: false });
+		appendOnlyContext.build({ systemPrompt: ["Test"], messages: [], tools: [] });
 
 		const result = session.freshSession();
 

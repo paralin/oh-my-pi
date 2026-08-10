@@ -79,7 +79,6 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 			isStreaming: false,
 			isCompacting: false,
 			isBashRunning: false,
-			isEvalRunning: false,
 			extensionRunner: undefined,
 			settings: Settings.isolated({}),
 			steer,
@@ -126,7 +125,6 @@ function createContext(sessionOverride?: InteractiveModeContext["session"]) {
 		flushPendingBashComponents,
 		showError,
 		isBashMode: false,
-		isPythonMode: false,
 	} as unknown as InteractiveModeContext;
 
 	return {

@@ -211,7 +211,7 @@ export class OmfgController {
 				request.component.setStatus("confirming", "Describe how to amend the rule…");
 				const amendment = await this.ctx.showHookInput(
 					"Amend TTSR rule",
-					"e.g. Make it specific to Ruby string eval in tool:write(*.rb)",
+					"e.g. Make it specific to Ruby string eval in tool:ipython",
 				);
 				if (!this.#isActiveRequest(request)) return { kind: "aborted" };
 				const feedback = amendment?.trim();

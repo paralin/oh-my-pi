@@ -2,11 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { buildSpecializationAdvisory, TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { buildSpecializationAdvisory, TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 // Contract: the task tool appends an advisory (never a rejection) steering the
 // spawner toward more specific agent types when one call resolves ≥2 items to
@@ -113,8 +113,8 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 				requests: 1,
 			}),
 		);
-		const tool = await TaskTool.create(s);
-		const result = await tool.execute("tc", {
+		const tool = await TaskService.create(s);
+		const result = await tool.spawn("tc", {
 			context: "shared fan-out background",
 			tasks: [
 				{ name: "First", task: "do the thing" },

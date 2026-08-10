@@ -1,5 +1,5 @@
 /**
- * Show what the read tool will return for a path, URL, or internal URI.
+ * Read a path, URL, or internal URI through the host service.
  */
 
 import { Args, Command } from "@oh-my-pi/pi-utils/cli";

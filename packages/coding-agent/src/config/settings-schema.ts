@@ -36,7 +36,6 @@ import {
 	TTS_LOCAL_VOICE_OPTIONS,
 	TTS_LOCAL_VOICE_VALUES,
 } from "../tts/models";
-import { EDIT_MODES } from "../utils/edit-mode";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
 	MAX_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -126,7 +125,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Vision"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -142,7 +141,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	context: ["General", "Compaction", "Rules (TTSR)", "Scratch Handoff", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
-	shell: ["Bash", "Eval & Runtimes"],
+	shell: ["Bash"],
 	tools: [
 		"Available Tools",
 		"Todos",
@@ -321,6 +320,8 @@ export interface CodexHomeSettingsEntry {
 }
 
 const EMPTY_STRING_ARRAY: string[] = [];
+type RlmAllowedServiceTier = "auto" | "default" | "flex" | "scale" | "priority" | null;
+const EMPTY_RLM_ALLOWED_SERVICE_TIERS: RlmAllowedServiceTier[] = [];
 const EMPTY_CODEX_HOMES: CodexHomeSettingsEntry[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const EMPTY_NUMBER_RECORD: Record<string, number> = {};
@@ -328,70 +329,6 @@ const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
-export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
-	{
-		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
-		tool: "read",
-		message: "Use the `read` tool instead of cat/head/tail. It provides better context and handles binary files.",
-	},
-	{
-		pattern: "^\\s*(grep|rg|ripgrep|ag|ack)\\s+",
-		tool: "grep",
-		message: "Use the `grep` tool instead of grep/rg. It respects .gitignore and provides structured output.",
-	},
-	{
-		pattern: "^\\s*(find|fd|locate)\\s+.*(-name|-iname|-type|--type|-glob)",
-		tool: "glob",
-		message: "Use the `glob` tool instead of find/fd. It respects .gitignore and is faster for glob patterns.",
-	},
-	{
-		pattern: "^\\s*sed\\s+(-i|--in-place)",
-		tool: "edit",
-		message: "Use the `edit` tool instead of sed -i. It provides diff preview and fuzzy matching.",
-	},
-	{
-		pattern: "^\\s*perl\\s+.*-[pn]?i",
-		tool: "edit",
-		message: "Use the `edit` tool instead of perl -i. It provides diff preview and fuzzy matching.",
-	},
-	{
-		pattern: "^\\s*awk\\s+.*-i\\s+inplace",
-		tool: "edit",
-		message: "Use the `edit` tool instead of awk -i inplace. It provides diff preview and fuzzy matching.",
-	},
-	{
-		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
-		// followed by a plausible filename — including `$VAR` targets; `>|`
-		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is
-		// not matched. Allowed device sinks are consumed while looking for later
-		// real file redirects because the write tool cannot replace shell
-		// output/discard targets.
-		pattern:
-			"^\\s*(echo|printf|cat\\s*<<)\\s+(?:(?:[^\"'>]|\"[^\"]*\"|'[^']*')|(?<!\\|)>{1,2}\\|?\\s*(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))*(?<!\\|)>{1,2}\\|?\\s*(?!(?:\"/dev/(?:null|tty|stdout|stderr)\"|'/dev/(?:null|tty|stdout|stderr)'|/dev/(?:null|tty|stdout|stderr))(?:[\\s;&|]|$))[$\\w./~\"'-]",
-		tool: "write",
-		message: "Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation.",
-	},
-	{
-		pattern: "^\\s*nohup\\s+|(?<!&)\\&\\s*$",
-		tool: "hub",
-		message:
-			'Use the `hub` tool (`op:"start"`) instead of nohup or background shell syntax so the process stays observable and managed.',
-	},
-	{
-		pattern:
-			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?(?:dev|start)(?:\\s|$)|(?:vite|next\\s+dev|nuxt\\s+dev|nodemon|lldb|gdb|tail\\s+-f)(?:\\s|$)|docker\\s+compose\\s+up(?!.*(?:\\s-d(?:\\s|$)|--detach))(?:\\s|$))",
-		tool: "hub",
-		message:
-			'Use the `hub` tool (`op:"start"`) for services, watchers, and debuggers so other omp instances can observe and control them.',
-	},
-	{
-		pattern:
-			"^\\s*(?:(?:bun|npm|pnpm|yarn)\\s+(?:run\\s+)?\\S+|cargo\\s+watch|watchexec|pytest|vitest|jest|tsc)(?:.|\\n)*(?:--watch|-w)(?:\\s|$)",
-		tool: "hub",
-		message: 'Use the `hub` tool (`op:"start"`) for watch mode so its output, input, and lifecycle stay managed.',
-	},
-];
-
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
@@ -468,17 +405,6 @@ export const SETTINGS_SCHEMA = {
 				"Pair a second model (assigned to the 'advisor' role) that passively reviews each turn and injects notes.",
 		},
 	},
-	"prewalk.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "model",
-			group: "Prewalk",
-			label: "Enable Prewalk",
-			description:
-				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
-		},
-	},
 	"advisor.subagents": {
 		type: "boolean",
 		default: false,
@@ -486,7 +412,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "model",
 			group: "Advisor",
 			label: "Advisor for Subagents",
-			description: "Also enable the advisor on spawned task/eval subagents.",
+			description: "Also enable the advisor on spawned task subagents.",
 			condition: "advisorEnabled",
 		},
 	},
@@ -794,7 +720,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Output Limits",
 			label: "Output Column Cap",
 			description:
-				"Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0 disables.",
+				"Per-line byte cap for streaming tool outputs (bash, python, JavaScript) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0 disables.",
 			options: [
 				{ value: "0", label: "Off", description: "No per-line cap" },
 				{ value: "256", label: "256", description: "Tight" },
@@ -1219,28 +1145,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	inlineToolDescriptors: {
-		type: "enum",
-		values: ["auto", "on", "off"] as const,
-		default: "auto",
-		ui: {
-			tab: "model",
-			group: "Prompt",
-			label: "Inline Tool Descriptors",
-			description:
-				"Render full tool descriptors in the system prompt and strip top-level/nested descriptions from provider tool schemas so descriptor text is sent once. Auto enables this for Gemini models and disables it otherwise",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Inline descriptors for Gemini models; keep them in tool schemas otherwise",
-				},
-				{ value: "on", label: "On", description: "Always inline descriptors in the system prompt" },
-				{ value: "off", label: "Off", description: "Keep descriptors in provider tool schemas only" },
-			],
-		},
-	},
-
 	includeModelInPrompt: {
 		type: "boolean",
 		default: true,
@@ -1476,6 +1380,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	rlmAllowedServiceTiers: {
+		type: "array",
+		default: EMPTY_RLM_ALLOWED_SERVICE_TIERS,
+		ui: {
+			tab: "model",
+			group: "Sampling",
+			label: "RLM Allowed Service Tiers",
+			description:
+				"Service tiers that rlm() children may explicitly request. Empty (default) allows only the effective tier.subagent value; null allows omitting the provider tier.",
+		},
+	},
+
 	"tier.subagent": {
 		type: "enum",
 		values: SERVICE_TIER_INHERIT_SETTING_VALUES,
@@ -1485,7 +1401,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Sampling",
 			label: "Service Tier — Subagent",
 			description:
-				"Service Tier for spawned task/eval subagents. Inherit = match the main agent's live per-family tiers (tracks /fast); pick a value to apply it to whichever family the subagent's model belongs to.",
+				"Service Tier for spawned task subagents. Inherit = match the main agent's live per-family tiers (tracks /fast); pick a value to apply it to whichever family the subagent's model belongs to.",
 			options: SERVICE_TIER_INHERIT_OPTIONS,
 		},
 	},
@@ -1888,7 +1804,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Magic Keywords",
 			label: "Magic Keywords",
-			description: "Enable hidden notices for standalone ultrathink, orchestrate, and workflowz keywords",
+			description: "Enable hidden notices for standalone ultrathink and orchestrate keywords",
 		},
 	},
 
@@ -1911,17 +1827,6 @@ export const SETTINGS_SCHEMA = {
 			group: "Magic Keywords",
 			label: "Orchestrate Keyword",
 			description: "Let standalone orchestrate append its hidden multi-agent orchestration notice",
-		},
-	},
-
-	"magicKeywords.workflow": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Magic Keywords",
-			label: "Workflow Keyword",
-			description: "Let standalone workflowz append its hidden eval workflow notice",
 		},
 	},
 
@@ -1976,36 +1881,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Notifications",
 			label: "Ask Notification",
-			description: "Notify when the ask tool is waiting for input",
-		},
-	},
-
-	"recap.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Notifications",
-			label: "Idle Recap",
-			description: "Generate a brief LLM recap of where things stand after the terminal has been idle",
-		},
-	},
-
-	"recap.idleSeconds": {
-		type: "number",
-		default: 240,
-		ui: {
-			tab: "interaction",
-			group: "Notifications",
-			label: "Idle Recap Delay",
-			description: "Seconds to wait while idle before showing the recap",
-			options: [
-				{ value: "60", label: "1 minute" },
-				{ value: "120", label: "2 minutes" },
-				{ value: "240", label: "4 minutes" },
-				{ value: "300", label: "5 minutes" },
-				{ value: "600", label: "10 minutes" },
-			],
+			description: "Notify when the question service is waiting for input",
 		},
 	},
 
@@ -2077,17 +1953,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Push to a secret gist (needs authenticated gh), falling back to the share server",
 				},
 			],
-		},
-	},
-
-	"share.redactSecrets": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Share Secret Redaction",
-			description: "Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config)",
 		},
 	},
 
@@ -2439,17 +2304,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"compaction.supersedeReads": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "context",
-			group: "Compaction",
-			label: "Supersede Stale Reads",
-			description: "Prune older read results when the same file is read again (cache-aware, runs every turn)",
-		},
-	},
-
 	"compaction.dropUseless": {
 		type: "boolean",
 		default: true,
@@ -2498,52 +2352,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Snapcompact Tool Results",
 			description:
 				"Experimental: render large historical tool results as dense PNG image(s) instead of text (vision models only). Saves tokens on accumulated read/search output.",
-		},
-	},
-
-	"tools.format": {
-		type: "enum",
-		values: [
-			"auto",
-			"native",
-			"glm",
-			"hermes",
-			"kimi",
-			"xml",
-			"anthropic",
-			"deepseek",
-			"harmony",
-			"qwen3",
-			"gemini",
-			"gemma",
-			"minimax",
-		] as const,
-		default: "auto",
-		ui: {
-			tab: "context",
-			group: "Experimental",
-			label: "Tool Calling Mode",
-			description:
-				"Controls how tools are exposed to the model. Auto uses provider-native tool calls unless the selected model is marked as not supporting them, then falls back to the GLM owned dialect. Native forces provider-native tools; the other values force the named owned dialect. Applies on session start.",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Use native tool calls unless the model is known not to support them.",
-				},
-				{ value: "native", label: "Native", description: "Use provider-native tool calls." },
-				{ value: "glm", label: "GLM", description: "Use GLM-style in-band tool calls." },
-				{ value: "hermes", label: "Hermes", description: "Use Hermes-style in-band tool calls." },
-				{ value: "kimi", label: "Kimi", description: "Use Kimi-style in-band tool calls." },
-				{ value: "xml", label: "XML", description: "Use generic XML in-band tool calls." },
-				{ value: "anthropic", label: "Anthropic", description: "Use Anthropic-style in-band tool calls." },
-				{ value: "deepseek", label: "DeepSeek", description: "Use DeepSeek-style in-band tool calls." },
-				{ value: "harmony", label: "Harmony", description: "Use Harmony-style in-band tool calls." },
-				{ value: "qwen3", label: "Qwen3", description: "Use the Qwen3 owned dialect." },
-				{ value: "gemini", label: "Gemini", description: "Use the Gemini owned dialect." },
-				{ value: "gemma", label: "Gemma", description: "Use the Gemma owned dialect." },
-				{ value: "minimax", label: "MiniMax", description: "Use the MiniMax owned dialect." },
-			],
 		},
 	},
 
@@ -3251,17 +3059,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"ttsr.apertureRules": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "context",
-			group: "Rules (TTSR)",
-			label: "Aperture Rules",
-			description: "Load the embedded Aperture rules (disabled by default)",
-		},
-	},
-
 	"ttsr.disabledRules": {
 		type: "array",
 		default: [] as string[],
@@ -3273,84 +3070,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// ────────────────────────────────────────────────────────────────────────
-	// Editing
-	// ────────────────────────────────────────────────────────────────────────
-
-	// Edit tool
-	"edit.mode": {
-		type: "enum",
-		values: EDIT_MODES,
-		default: "hashline",
-		ui: {
-			tab: "files",
-			group: "Editing",
-			label: "Edit Mode",
-			description: "Select the edit tool variant (replace, patch, hashline, or apply_patch)",
-		},
-	},
-
-	"edit.fuzzyMatch": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "files",
-			group: "Editing",
-			label: "Fuzzy Match",
-			description: "Accept high-confidence fuzzy matches for whitespace differences",
-		},
-	},
-
-	"edit.fuzzyThreshold": {
-		type: "number",
-		default: 0.95,
-		ui: {
-			tab: "files",
-			group: "Editing",
-			label: "Fuzzy Match Threshold",
-			description: "Similarity threshold (0-1) for accepting fuzzy matches",
-			options: [
-				{ value: "0.85", label: "0.85", description: "Lenient" },
-				{ value: "0.90", label: "0.90", description: "Moderate" },
-				{ value: "0.95", label: "0.95", description: "Default" },
-				{ value: "0.98", label: "0.98", description: "Strict" },
-			],
-		},
-	},
-
-	"edit.streamingAbort": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "files",
-			group: "Editing",
-			label: "Abort on Failed Preview",
-			description: "Abort streaming edit tool calls when patch preview fails",
-		},
-	},
-
-	"edit.blockAutoGenerated": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "files",
-			group: "Editing",
-			label: "Block Auto-Generated Files",
-			description: "Prevent editing of files that appear to be auto-generated (protoc, sqlc, swagger, etc.)",
-		},
-	},
-
-	"edit.enforceSeenLines": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "files",
-			group: "Editing",
-			label: "Enforce Seen-Line Guard",
-			description: "Reject edits anchored on lines a prior read/search never displayed in full",
-		},
-	},
-
 	readLineNumbers: {
 		type: "boolean",
 		default: false,
@@ -3358,7 +3077,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "files",
 			group: "Reading",
 			label: "Line Numbers",
-			description: "Prepend line numbers to read tool output by default",
+			description: "Prepend line numbers to workspace read service output by default",
 		},
 	},
 
@@ -3377,17 +3096,6 @@ export const SETTINGS_SCHEMA = {
 				{ value: "1000", label: "1000 lines" },
 				{ value: "5000", label: "5000 lines" },
 			],
-		},
-	},
-
-	"read.renderMarkdown": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "files",
-			group: "Reading",
-			label: "Markdown Previews",
-			description: "Render Markdown read results as formatted terminal Markdown previews instead of raw source",
 		},
 	},
 
@@ -3470,17 +3178,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"read.toolResultPreview": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "files",
-			group: "Reading",
-			label: "Inline Read Previews",
-			description: "Render read tool results inline in the transcript instead of summary rows",
-		},
-	},
-
 	// LSP
 	"lsp.enabled": {
 		type: "boolean",
@@ -3489,7 +3186,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "files",
 			group: "LSP",
 			label: "LSP",
-			description: "Enable the lsp tool for code intelligence (definitions, references, diagnostics, rename)",
+			description: "Enable the LSP service for code intelligence (definitions, references, diagnostics, rename)",
 		},
 	},
 
@@ -3501,7 +3198,7 @@ export const SETTINGS_SCHEMA = {
 			group: "LSP",
 			label: "Lazy LSP Startup",
 			description:
-				"Start language servers on first use (lsp tool or editing a matching file type) instead of at session startup",
+				"Start language servers on first use (LSP service or editing a matching file type) instead of at session startup",
 		},
 	},
 
@@ -3517,61 +3214,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"lsp.formatOnWrite": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "files",
-			group: "LSP",
-			label: "Format on Write",
-			description: "Automatically format code files using LSP after writing",
-		},
-	},
-
-	"lsp.diagnosticsOnWrite": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "files",
-			group: "LSP",
-			label: "Diagnostics on Write",
-			description: "Return LSP diagnostics after writing code files",
-		},
-	},
-
-	"lsp.diagnosticsOnEdit": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "files",
-			group: "LSP",
-			label: "Diagnostics on Edit",
-			description: "Return LSP diagnostics after editing code files",
-		},
-	},
-
-	"lsp.diagnosticsDeduplicate": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "files",
-			group: "LSP",
-			label: "Deduplicate Diagnostics",
-			description: "Suppress post-edit LSP diagnostics already shown for a file; only surface new or changed ones",
-		},
-	},
-
-	"bash.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "shell",
-			group: "Bash",
-			label: "Bash",
-			description: "Enable the bash tool for shell command execution",
-		},
-	},
-
 	"bash.autoBackground.enabled": {
 		type: "boolean",
 		default: false,
@@ -3582,30 +3224,6 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically background long-running bash commands and deliver the result later",
 		},
 	},
-	"bash.patterns": {
-		type: "array",
-		default: [],
-		ui: {
-			tab: "shell",
-			group: "Bash",
-			label: "Bash Approval Patterns",
-			description:
-				"Ordered bash command approval rules. Each item has match and approval fields; only '*' wildcards are supported.",
-		},
-	},
-
-	// Bash interceptor
-	"bashInterceptor.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "shell",
-			group: "Bash",
-			label: "Bash Interceptor",
-			description: "Block shell commands that have dedicated tools",
-		},
-	},
-	"bashInterceptor.patterns": { type: "array", default: DEFAULT_BASH_INTERCEPTOR_RULES },
 
 	"bash.direnv": {
 		type: "enum",
@@ -3667,118 +3285,12 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
-	// Eval (per-backend toggles; add more as new backends ship, e.g. eval.ts)
-	"eval.py": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Python Eval Backend",
-			description: "Allow the eval tool to dispatch Python cells to the IPython kernel",
-		},
-	},
-
-	"eval.js": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "JavaScript Eval Backend",
-			description: "Allow the eval tool to dispatch JavaScript cells to the in-process runtime",
-		},
-	},
-
-	"eval.rb": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Ruby Eval Backend",
-			description: "Allow the eval tool to dispatch Ruby cells to the persistent Ruby kernel",
-		},
-	},
-
-	"eval.jl": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Julia Eval Backend",
-			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
-		},
-	},
-
-	// Runtime knobs (consumed by eval backends and the /python slash command)
-	"python.kernelMode": {
-		type: "enum",
-		values: ["session", "per-call"] as const,
-		default: "session",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Python Kernel Mode",
-			description: "Keep the IPython kernel alive across eval calls or start fresh each time",
-		},
-	},
-	"python.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Python Interpreter",
-			description:
-				"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
-		},
-	},
-	"ruby.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Ruby Interpreter",
-			description:
-				"Optional path to an exact Ruby executable. When set, automatic Ruby runtime discovery is skipped.",
-		},
-	},
-	"julia.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Julia Interpreter",
-			description:
-				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
-		},
-	},
-
 	// ────────────────────────────────────────────────────────────────────────
 	// Tools
 	// ────────────────────────────────────────────────────────────────────────
 
 	// Tool approval policies
-	"tools.approval": {
-		type: "record",
-		default: {},
-		ui: {
-			tab: "interaction",
-			group: "Approvals",
-			label: "Tool Approval Policies",
-			description:
-				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.",
-		},
-	},
 
-	// Default tool approval mode (interaction tab, but governs the tool wrapper).
-	//   "always-ask" — auto-approves read-tier tools only; prompts for write/exec.
-	//   "write"      — auto-approves read and write-tier tools; prompts for exec.
-	//   "yolo"       — auto-approves every tier.
 	"tools.approvalMode": {
 		type: "enum",
 		values: ["always-ask", "write", "yolo"] as const,
@@ -3786,32 +3298,30 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "interaction",
 			group: "Approvals",
-			label: "Tool Approval",
+			label: "IPython Cell Approval",
 			description:
-				"Default approval behavior for tool calls. 'Always ask' auto-approves read-only tools only. 'Write' auto-approves read and workspace-write tools. 'Yolo' auto-approves all tiers; user policy may still prompt or block.",
+				"Approval behavior for model-origin IPython cells. Cells are exec-tier: Always ask and Write require confirmation; Yolo admits them automatically. User policy may still prompt or block.",
 			options: [
 				{
 					value: "always-ask",
 					label: "Always ask",
-					description: "Auto-approve read-only tools; require confirmation for write and exec tools.",
+					description: "Require confirmation before each model-origin IPython cell.",
 				},
 				{
 					value: "write",
 					label: "Write",
-					description:
-						"Auto-approve read-only and write tools; require confirmation for exec tools such as bash, eval, browser, and task.",
+					description: "Require confirmation before each model-origin IPython cell.",
 				},
 				{
 					value: "yolo",
 					label: "Yolo",
-					description:
-						"Auto-approve read, write, and exec tools. User policy can still require confirmation or block calls.",
+					description: "Admit model-origin IPython cells automatically; user policy can still prompt or block.",
 				},
 			],
 		},
 	},
 
-	// Todo tool
+	// Task ledger
 	"todo.enabled": {
 		type: "boolean",
 		default: true,
@@ -3819,7 +3329,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Todos",
-			description: "Enable the todo tool for task tracking",
+			description: "Enable the task ledger for task tracking",
 		},
 	},
 
@@ -3851,122 +3361,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"todo.eager": {
-		type: "enum",
-		values: ["default", "preferred", "always"] as const,
-		default: "default",
-		ui: {
-			tab: "tools",
-			group: "Todos",
-			label: "Create Todos Automatically",
-			description: "How strongly to push automatic todo-list creation after the first message",
-			options: [
-				{ value: "default", label: "Default", description: "Model decides; no automatic todo list" },
-				{
-					value: "preferred",
-					label: "Preferred",
-					description: "Suggests a todo list on the first message (reminder, not forced)",
-				},
-				{ value: "always", label: "Always", description: "Forces a comprehensive todo list on the first message" },
-			],
-		},
-	},
-
-	// Grep, glob, and AST tools
-	"glob.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Glob",
-			description: "Enable the glob tool for glob-based file lookup",
-		},
-	},
-
-	"grep.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Grep",
-			description: "Enable the grep tool for regex content search",
-		},
-	},
-
-	"grep.contextBefore": {
-		type: "number",
-		default: 1,
-		ui: {
-			tab: "tools",
-			group: "Grep & Browser",
-			label: "Grep Context Before",
-			description: "Lines of context before each grep match",
-			options: [
-				{ value: "0", label: "0 lines" },
-				{ value: "1", label: "1 line" },
-				{ value: "2", label: "2 lines" },
-				{ value: "3", label: "3 lines" },
-				{ value: "5", label: "5 lines" },
-			],
-		},
-	},
-
-	"grep.contextAfter": {
-		type: "number",
-		default: 3,
-		ui: {
-			tab: "tools",
-			group: "Grep & Browser",
-			label: "Grep Context After",
-			description: "Lines of context after each grep match",
-			options: [
-				{ value: "0", label: "0 lines" },
-				{ value: "1", label: "1 line" },
-				{ value: "2", label: "2 lines" },
-				{ value: "3", label: "3 lines" },
-				{ value: "5", label: "5 lines" },
-				{ value: "10", label: "10 lines" },
-			],
-		},
-	},
-
-	"astGrep.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "AST Grep",
-			description: "Enable the ast_grep tool for structural AST search",
-		},
-	},
-
-	"astEdit.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "AST Edit",
-			description: "Enable the ast_edit tool for structural AST rewrites",
-		},
-	},
-
-	// Optional tools
-
-	"debug.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Debug",
-			description: "Enable the debug tool for DAP-based debugging",
-		},
-	},
-
 	"launch.enabled": {
 		type: "boolean",
 		default: true,
@@ -3995,44 +3389,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Generate Image",
-			description:
-				"Enable the generate_image tool (text-to-image generation and editing). Exposed as an xd:// device when tools.xdev is on.",
-		},
-	},
-
-	// Legacy boolean kept only for back-compat migration to `inspect_image.mode`
-	// (see config/settings.ts). Hidden from UI.
-	"inspect_image.enabled": {
-		type: "boolean",
-		default: false,
-	},
-
-	"inspect_image.mode": {
-		type: "enum",
-		values: ["auto", "on", "off"] as const,
-		default: "auto",
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Inspect Image",
-			description:
-				"Controls the inspect_image tool, which delegates image understanding to a vision-capable model. 'auto' exposes it only when the active model lacks native image input; 'on' always exposes it; 'off' never does.",
-			options: [
-				{ value: "auto", label: "Auto (only for models without vision)" },
-				{ value: "on", label: "On" },
-				{ value: "off", label: "Off" },
-			],
-		},
-	},
-
-	"computer.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Computer",
-			description: "Enable the scriptable host-desktop control tool (screenshots, input, accessibility)",
+			description: "Enable the generate_image tool (text-to-image generation and editing).",
 		},
 	},
 
@@ -4069,37 +3426,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"inspect_image.timeoutMs": {
-		type: "number",
-		default: 300_000,
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Inspect Image Timeout",
-			description:
-				"Per-request timeout for the inspect_image vision-model call, in milliseconds. A stalled provider fails fast with a timeout error instead of blocking until manual abort. Set to 0 to disable the timeout.",
-			options: [
-				{ value: "0", label: "Disabled" },
-				{ value: "60000", label: "1 minute" },
-				{ value: "120000", label: "2 minutes" },
-				{ value: "180000", label: "3 minutes" },
-				{ value: "300000", label: "5 minutes" },
-			],
-		},
-	},
-
-	"checkpoint.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Checkpoint/Rewind",
-			description: "Enable the checkpoint and rewind tools for context checkpointing",
-		},
-	},
-
-	// Fetching and browser
 	"fetch.enabled": {
 		type: "boolean",
 		default: true,
@@ -4107,7 +3433,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Read URLs",
-			description: "Allow the read tool to fetch and process URLs",
+			description: "Allow the workspace read service to fetch and process URLs",
 		},
 	},
 
@@ -4131,7 +3457,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "GitHub CLI",
 			description:
-				"Enable the github tool (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)",
+				"Enable the GitHub host service (op-based dispatch for repository, issue, pull request, diff, search, checkout, push, and Actions watch workflows)",
 		},
 	},
 
@@ -4170,17 +3496,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"web_search.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Web Search",
-			description: "Enable the web_search tool for live web results",
-		},
-	},
-
 	"security.enabled": {
 		type: "boolean",
 		default: false,
@@ -4200,7 +3515,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Ask",
-			description: "Enable the ask tool for interactive user questions",
+			description: "Enable the question service for interactive user questions",
 		},
 	},
 
@@ -4211,7 +3526,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Browser",
-			description: "Enable the browser tool for scripted Chromium automation (puppeteer)",
+			description: "Enable the browser host service for scripted Chromium automation (puppeteer)",
 		},
 	},
 
@@ -4223,7 +3538,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Grep & Browser",
 			label: "Browser CDP URL",
 			description:
-				"Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. Explicit app.cdp_url or app.path on the tool call take precedence.",
+				"Default HTTP CDP discovery endpoint (for example http://127.0.0.1:9222) to attach to instead of launching a browser. Explicit app.cdp_url or app.path on the browser request take precedence.",
 		},
 	},
 
@@ -4235,7 +3550,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Grep & Browser",
 			label: "Browser Relay",
 			description:
-				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser tool needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
+				"Drive your own Chrome tabs through the omp browser relay. Install the extension once (`omp browser-relay install`); the relay server auto-starts when the browser host service needs it. Takes precedence over Browser CDP URL; set PI_BROWSER_RELAY=0 or PI_BROWSER_RELAY=1 to override.",
 		},
 	},
 
@@ -4285,16 +3600,6 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Tool execution
-	"tools.intentTracing": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Execution",
-			label: "Intent Tracing",
-			description: "Ask the agent to describe the intent of each tool call before executing it",
-		},
-	},
 	"tools.abortOnFabricatedResult": {
 		type: "boolean",
 		default: true,
@@ -4388,52 +3693,6 @@ export const SETTINGS_SCHEMA = {
 		default: 60_000,
 	},
 
-	"tools.xdev": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			group: "Discovery & MCP",
-			label: "xd:// Tools",
-			description:
-				"Mount rarely-used (discoverable) tools under xd:// device URLs driven via read/write instead of shipping their schemas on every request. Sessions without a granted write tool skip mounting and expose every tool top-level. Disable to expose every enabled tool top-level.",
-		},
-	},
-
-	"tools.xdevDocs": {
-		type: "enum",
-		values: ["inline", "builtins", "catalog"] as const,
-		default: "builtins",
-		ui: {
-			tab: "tools",
-			group: "Discovery & MCP",
-			label: "xd:// Prompt Docs",
-			description:
-				"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
-			options: [
-				{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
-				{
-					value: "builtins",
-					label: "Built-ins Only",
-					description: "Inline built-in docs; fetch MCP and extension docs on demand.",
-				},
-				{ value: "catalog", label: "Catalog Only", description: "List every device; fetch all docs on demand." },
-			],
-		},
-	},
-
-	"tools.xdevInlineDevices": {
-		type: "array",
-		default: EMPTY_STRING_ARRAY,
-		ui: {
-			tab: "tools",
-			group: "Discovery & MCP",
-			label: "xd:// Inline Devices",
-			description:
-				"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
-		},
-	},
-
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",
@@ -4483,30 +3742,6 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────
-
-	// Plan mode
-	"plan.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tasks",
-			group: "Modes",
-			label: "Plan Mode",
-			description: "Enable plan mode for read-only exploration and planning before execution",
-		},
-	},
-
-	"plan.defaultOnStartup": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tasks",
-			group: "Modes",
-			label: "Start in Plan Mode",
-			description: "Automatically enter plan mode at the start of every new session",
-			condition: "planModeEnabled",
-		},
-	},
 
 	"goal.enabled": {
 		type: "boolean",
@@ -4657,23 +3892,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"task.eager": {
-		type: "enum",
-		values: ["default", "preferred", "always"] as const,
-		default: "default",
-		ui: {
-			tab: "tasks",
-			group: "Subagents",
-			label: "Prefer Task Delegation",
-			description: "How strongly to push delegating work to subagents",
-			options: [
-				{ value: "default", label: "Default", description: "Model decides when to delegate" },
-				{ value: "preferred", label: "Preferred", description: "Adds delegation guidance to the system prompt" },
-				{ value: "always", label: "Always", description: "Prompt guidance plus a first-turn delegation reminder" },
-			],
-		},
-	},
-
 	"task.batch": {
 		type: "boolean",
 		default: true,
@@ -4682,7 +3900,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Batch Task Calls",
 			description:
-				"Switch the task tool to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
+				"Switch the tquestion service to its batch shape: one call carries { context, tasks[] } — one subagent per item, with an optional per-item agent (defaulting to the session spawn-policy agent), per-item isolation, and a required shared context prepended to every assignment. With async.enabled=true, each spawn runs as an independent background agent with the normal idle/parked lifecycle; otherwise the call blocks for merged results. Disable to restore the flat single-spawn schema.",
 		},
 	},
 
@@ -4727,7 +3945,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "LSP in Subagents",
 			description:
-				"Allow subagents spawned via the task tool to use the lsp tool. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
+				"Allow subagents spawned via the tquestion service to use the LSP service. Off by default to keep subagents cheap; enable when LSP-aware delegation is worth the extra tokens.",
 		},
 	},
 
@@ -4819,7 +4037,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Subagents",
 			label: "Maximum Per-Spawn Effort",
 			description:
-				"Maximum reasoning effort allowed for the task tool's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
+				"Maximum reasoning effort allowed for the tquestion service's per-spawn effort hint. Lower values prevent callers from escalating subagents above this ceiling; the default preserves the model's full range.",
 			options: THINKING_EFFORTS.map(getThinkingLevelMetadata),
 		},
 	},
@@ -4845,19 +4063,16 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: {} as Record<string, string>,
 	},
-	"task.agentPrewalk": {
-		type: "record",
-		default: {} as Record<string, string>,
-	},
-	"task.prewalk": {
-		type: "boolean",
-		default: false,
+
+	rlmActDefaultModel: {
+		type: "string",
+		default: undefined,
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
-			label: "Generic Task Prewalk",
+			label: "Act Default Model",
 			description:
-				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, toggled with P in /agents) and user agent `prewalk` frontmatter apply regardless of this toggle.",
+				"Model used by retained Act actions when no model is supplied; Act actions usually take about 30 seconds to 5 minutes.",
 		},
 	},
 
@@ -4975,18 +4190,6 @@ export const SETTINGS_SCHEMA = {
 	// Providers
 	// ────────────────────────────────────────────────────────────────────────
 
-	// Secret handling
-	"secrets.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Privacy",
-			label: "Hide Secrets",
-			description: "Obfuscate configured secrets and redact credential-shaped tokens before sending to AI providers",
-		},
-	},
-
 	// Provider selection
 	"providers.ollama-cloud.maxConcurrency": {
 		type: "number",
@@ -5007,7 +4210,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Web Search Provider Order",
 			description:
-				"Prioritized providers for the web_search tool; unlisted providers retain their default order afterward",
+				"Prioritized providers for the web search host service; unlisted providers retain their default order afterward",
 			options: SEARCH_PROVIDER_CHOICES,
 			ordered: true,
 		},
@@ -5019,7 +4222,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Excluded Web Search Providers",
-			description: "Providers that web_search should never use, even as fallbacks",
+			description: "Providers that the web-search host service should never use, even as fallbacks",
 			options: SEARCH_PROVIDER_CHOICES,
 		},
 	},
@@ -5030,7 +4233,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			group: "Services",
 			label: "Web Search Timeout",
-			description: `Hard timeout for each provider's search transport before web_search advances to the next fallback, in seconds (maximum ${MAX_WEB_SEARCH_TIMEOUT_SECONDS})`,
+			description: `Hard timeout for each provider's search transport before the web-search host service advances to the next fallback, in seconds (maximum ${MAX_WEB_SEARCH_TIMEOUT_SECONDS})`,
 			options: [
 				{ value: "30", label: "30 seconds" },
 				{ value: "60", label: "1 minute" },
@@ -5050,7 +4253,7 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "providers",
 			group: "Services",
-			label: "Gemini web_search model",
+			label: "Gemini web-search model",
 			description: "Model ID for Gemini Google Search grounding. Defaults to gemini-2.5-flash.",
 		},
 	},
@@ -5127,30 +4330,6 @@ export const SETTINGS_SCHEMA = {
 			options: LIVE_VOICE_OPTIONS,
 		},
 	},
-	"providers.tts": {
-		type: "enum",
-		values: ["auto", "local", "xai"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Text-to-Speech Provider",
-			description: "Backend for the tts tool: local on-device neural TTS (Kokoro-82M) or xAI Grok Voice",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
-				},
-				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
-				{
-					value: "xai",
-					label: "xAI Grok Voice",
-					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
-				},
-			],
-		},
-	},
 	"tts.localModel": {
 		type: "enum",
 		values: TTS_LOCAL_MODEL_VALUES,
@@ -5187,18 +4366,18 @@ export const SETTINGS_SCHEMA = {
 	},
 	"speech.mode": {
 		type: "enum",
-		values: ["all", "assistant", "yield"] as const,
+		values: ["all", "assistant", "final"] as const,
 		default: "assistant",
 		ui: {
 			tab: "providers",
 			group: "Services",
 			label: "Speech Vocalization Mode",
 			description:
-				"What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end",
+				"What to speak: all = assistant messages + thinking; assistant = messages only; final = only the final message at turn end",
 			options: [
 				{ value: "all", label: "All (messages + thinking)" },
 				{ value: "assistant", label: "Assistant messages" },
-				{ value: "yield", label: "Final message only" },
+				{ value: "final", label: "Final message only" },
 			],
 		},
 	},
@@ -5642,7 +4821,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Developer",
 			label: "Auto QA",
 			description:
-				"Automated tool issue reporting (xd://report_issue). On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
+				"Automated tool issue reporting. On by default; the first report asks for consent, and denying it disables reporting until re-enabled explicitly",
 		},
 	},
 
@@ -5839,13 +5018,7 @@ export interface CompactionSettings {
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
 	idleTimeoutSeconds: number;
-	supersedeReads: boolean;
 	dropUseless: boolean;
-}
-
-export interface RecapSettings {
-	enabled: boolean;
-	idleSeconds: number;
 }
 
 export interface TitleSettings {
@@ -5928,8 +5101,6 @@ export interface TtsrSettings {
 	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
 	builtinRules?: boolean;
 	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
-	apertureRules?: boolean;
-	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
 	disabledRules?: string[];
 }
 
@@ -5964,14 +5135,6 @@ export interface SttSettings {
 	language: string | undefined;
 	modelName: string;
 	streaming: boolean;
-}
-
-export interface BashInterceptorRule {
-	pattern: string;
-	flags?: string;
-	tool: string;
-	message: string;
-	allowSubcommands?: string[];
 }
 
 export interface ShellMinimizerSettings {
@@ -6027,7 +5190,7 @@ export interface WorldSettings {
 	 * the local Unix socket's job.
 	 *
 	 * Unset with a socket set is a complete configuration: that root keeps
-	 * read-only `spacewave://` access and is not given the `world` tool.
+	 * read-only `spacewave://` access without World mutation authority.
 	 * `OMP_WORLD_SESSION` takes precedence over this value, matching
 	 * `world.socket`.
 	 */
@@ -6038,7 +5201,6 @@ export interface WorldSettings {
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
-	recap: RecapSettings;
 	title: TitleSettings;
 	contextPromotion: ContextPromotionSettings;
 	retry: RetrySettings;

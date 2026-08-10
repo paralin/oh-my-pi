@@ -129,14 +129,6 @@ describe("SshProtocolHandler", () => {
 		await expect(handler.resolve(parseInternalUrl("ssh://icaro/big.log"))).rejects.toThrow(/exceeds the 1 MiB limit/);
 	});
 
-	it("writes content byte-exact through writeRemoteFile", async () => {
-		mockHosts();
-		const spy = vi.spyOn(fileTransfer, "writeRemoteFile").mockResolvedValue(undefined);
-		await handler.write(parseInternalUrl("ssh://icaro/tmp/x"), "hi\n\t!\n");
-		expect(spy).toHaveBeenCalledTimes(1);
-		expect(spy.mock.calls[0]?.[2]).toEqual(new TextEncoder().encode("hi\n\t!\n"));
-	});
-
 	it("lists a remote directory when the path is not a readable file", async () => {
 		mockHosts();
 		vi.spyOn(fileTransfer, "readRemoteFile").mockRejectedValue(
@@ -320,7 +312,7 @@ describe("SshProtocolHandler", () => {
 	it("rejects ssh:// URL queries and fragments instead of operating on the truncated path", async () => {
 		mockHosts();
 		// `?`/`#` are URL delimiters, so the query/fragment is stripped from the path;
-		// `ssh://h/tmp/a?draft` would otherwise read/write `/tmp/a`, the wrong file.
+		// `ssh://h/tmp/a?draft` would otherwise read `/tmp/a`, the wrong file.
 		await expect(handler.resolve(parseInternalUrl("ssh://h/tmp/a?draft"))).rejects.toThrow(/quer/i);
 		await expect(handler.resolve(parseInternalUrl("ssh://h/tmp/a#draft"))).rejects.toThrow(/fragment/i);
 		// A literal `?` in a filename must be percent-encoded (`%3F`) and is then accepted.

@@ -145,7 +145,7 @@ describe("RunStore", () => {
 		store.discover();
 		store.setExperimentGoal("exp", "does the treatment beat the baseline?");
 		expect(store.setRunMeta("exp-base", { role: "baseline", note: "plain model" })).toBe(true);
-		expect(store.setRunMeta("exp-treat", { role: "variant", note: "prewalk flash", label: "flash@edit" })).toBe(true);
+		expect(store.setRunMeta("exp-treat", { role: "variant", note: "flash variant", label: "flash" })).toBe(true);
 		expect(store.setRunMeta("exp-missing", { role: "variant" })).toBe(false);
 
 		const detail = experimentDetail(store, "exp");
@@ -153,15 +153,15 @@ describe("RunStore", () => {
 		// ArmSummary.arm resolves to the display label when one is set.
 		expect(detail?.arms.map(a => [a.arm, a.run.role, a.run.note, a.run.label])).toEqual([
 			["base", "baseline", "plain model", ""],
-			["flash@edit", "variant", "prewalk flash", "flash@edit"],
+			["flash", "variant", "flash variant", "flash"],
 		]);
 
 		// Partial updates keep the omitted fields.
-		expect(store.setRunMeta("exp-treat", { note: "prewalk flash v2" })).toBe(true);
+		expect(store.setRunMeta("exp-treat", { note: "flash variant v2" })).toBe(true);
 		const treat = store.getRun("exp-treat");
-		expect(treat?.label).toBe("flash@edit");
+		expect(treat?.label).toBe("flash");
 		expect(treat?.role).toBe("variant");
-		expect(treat?.note).toBe("prewalk flash v2");
+		expect(treat?.note).toBe("flash variant v2");
 	});
 
 	it("releases a dead runner's pid without failing a possibly-live orphan", () => {
@@ -231,6 +231,13 @@ describe("ManagerServer API", () => {
 		const missing = await fetch(`${base}/api/runs/nope`);
 		expect(missing.status).toBe(404);
 
+		const legacyBenchmarkLaunch = await fetch(`${base}/api/runs`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ benchmark: "edit", model: "test/model" }),
+		});
+		expect(legacyBenchmarkLaunch.status).toBe(400);
+
 		const badLaunch = await fetch(`${base}/api/runs`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -247,43 +254,18 @@ describe("ManagerServer API", () => {
 		expect(deleteUnknown.status).toBe(404);
 	});
 
-	it("serves edit and SnapCompact metrics and native traces through one API", async () => {
+	it("serves SnapCompact metrics and native traces through one API", async () => {
 		const jobsDir = makeJobsDir();
 		const manager = new ManagerServer(jobsDir);
-		for (const benchmark of ["edit", "snapcompact"] as const) {
-			const jobName = `${benchmark}-arm`;
-			manager.store.registerLaunch({
-				benchmark,
-				jobName,
-				dataset: benchmark === "edit" ? "typescript-edit" : "squad-dev",
-				agent: benchmark,
-				models: ["test/model"],
-				pid: process.pid,
-			});
-			manager.store.markExit(jobName, 0);
-		}
-		const editDir = path.join(jobsDir, "edit-arm");
-		fs.writeFileSync(
-			path.join(editDir, "result.json"),
-			JSON.stringify({
-				tasks: [
-					{
-						id: "rename",
-						name: "Rename",
-						runs: [{ runIndex: 0, success: true, duration: 10, tokens: { input: 8, output: 2, reasoning: 0 } }],
-					},
-				],
-				summary: {
-					totalRuns: 1,
-					successfulRuns: 1,
-					taskSuccessRate: 1,
-					editSuccessRate: 1,
-					totalTokens: { input: 8, output: 2 },
-				},
-			}),
-		);
-		fs.mkdirSync(path.join(editDir, "result.dump", "rename"), { recursive: true });
-		fs.writeFileSync(path.join(editDir, "result.dump", "rename", "run-1.md"), "# conversation\n\nassistant answer");
+		manager.store.registerLaunch({
+			benchmark: "snapcompact",
+			jobName: "snapcompact-arm",
+			dataset: "squad-dev",
+			agent: "snapcompact",
+			models: ["test/model"],
+			pid: process.pid,
+		});
+		manager.store.markExit("snapcompact-arm", 0);
 		const snapDir = path.join(jobsDir, "snapcompact-arm");
 		fs.writeFileSync(
 			path.join(snapDir, "records.jsonl"),
@@ -302,16 +284,6 @@ describe("ManagerServer API", () => {
 		});
 		const base = `http://localhost:${server.port}`;
 
-		const edit = (await (await fetch(`${base}/api/runs/edit-arm`)).json()) as {
-			run: { benchmark: string; metrics: Record<string, number> };
-			traces: Array<{ name: string }>;
-		};
-		expect(edit.run).toMatchObject({ benchmark: "edit", metrics: { task_success_rate: 1, edit_success_rate: 1 } });
-		const editTrace = (await (
-			await fetch(`${base}/api/runs/edit-arm/traces/${encodeURIComponent(edit.traces[0].name)}`)
-		).json()) as { entries: Array<{ kind: string; text: string }> };
-		expect(editTrace.entries).toEqual([{ kind: "conversation", text: "# conversation\n\nassistant answer" }]);
-
 		const snap = (await (await fetch(`${base}/api/runs/snapcompact-arm`)).json()) as {
 			run: { benchmark: string; metrics: Record<string, number> };
 			traces: Array<{ name: string }>;
@@ -326,14 +298,14 @@ describe("ManagerServer API", () => {
 		const jobsDir = makeJobsDir();
 		const manager = new ManagerServer(jobsDir);
 		manager.store.registerLaunch({
-			benchmark: "edit",
-			jobName: "edit-x",
-			dataset: "typescript-edit",
-			agent: "edit",
+			benchmark: "snapcompact",
+			jobName: "snapcompact-x",
+			dataset: "squad-dev",
+			agent: "snapcompact",
 			models: ["m/x"],
 			pid: process.pid,
 		});
-		manager.store.markExit("edit-x", 1);
+		manager.store.markExit("snapcompact-x", 1);
 		// A live harbor run: pid is this test process, never marked exited.
 		manager.store.registerLaunch({
 			benchmark: "harbor",
@@ -365,7 +337,7 @@ describe("ManagerServer API", () => {
 		};
 
 		expect(await resumeError("nope")).toMatch(/not found/);
-		expect(await resumeError("edit-x")).toMatch(/only harbor/);
+		expect(await resumeError("snapcompact-x")).toMatch(/only harbor/);
 		expect(await resumeError("job-live")).toMatch(/already running/);
 		expect(await resumeError("job-bare")).toMatch(/no harbor config.json/);
 	});
@@ -489,8 +461,7 @@ describe("resolveArmLaunch", () => {
 			arm: "n8",
 			model: "google/gemini-3.5-flash",
 			role: "variant",
-			note: "prewalk@flash",
-			prewalk: { into: "google/gemini-3.5-flash" },
+			note: "flash variant",
 		});
 
 		expect(launch.jobName).toBe("exp-n8");
@@ -501,7 +472,6 @@ describe("resolveArmLaunch", () => {
 		expect(launch.timeoutMultiplier).toBe(2);
 		expect(launch.model).toBe("google/gemini-3.5-flash");
 		expect(launch.role).toBe("variant");
-		expect(launch.prewalk?.into).toBe("google/gemini-3.5-flash");
 	});
 
 	it("prefers the sibling with a recorded include list over newer include-less siblings", () => {

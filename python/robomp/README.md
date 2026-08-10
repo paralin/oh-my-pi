@@ -40,8 +40,8 @@ Flow: webhook → HMAC verify → `github_events.route` → sqlite `events`
 persistent `session_dir`, model randomly drawn from `ROBOMP_MODEL` (CSV).
 
 The agent uses omp's built-in tools (`read`/`edit`/`bash`/`lsp`, scoped to
-the worktree) plus the host tools in `src/host_tools.py` — the
-exclusive surface for GitHub writes. Every host-tool invocation is audited
+the worktree) plus the operations in `src/operations.py` — the
+exclusive surface for GitHub writes. Every operation invocation is audited
 into the `tool_calls` table with credential-redacted args and results.
 
 ## Setup
@@ -144,7 +144,7 @@ The integration test spawns a real `omp --mode rpc` against an
   `5xx`.
 - `git` errors flow through `git_ops.GitCommandError` which redacts
   `https://user:pw@host` to `https://***@host` from argv, stdout, stderr
-  before raising. `host_tools._audit` only records agent-supplied args.
+  before raising. `operations._audit` only records agent-supplied args.
 - Pre-push gates (`gh_push_branch`): branch matches the workspace
   branch, working tree clean, every commit on
   `origin/<default>..HEAD` carries `ROBOMP_GIT_AUTHOR_NAME` +
@@ -155,7 +155,7 @@ The integration test spawns a real `omp --mode rpc` against an
   runs first (any diff amended into the agent's HEAD commit — no
   standalone `style:` noise commits) and then
   `bun check`. A failing `bun check` returns to the agent as
-  `RpcCommandError` for iteration.
+  `OperationError` for iteration.
 - `gh_open_pr` validates `## Repro` / `## Cause` / `## Fix` /
   `## Verification` headers and a `Fixes`/`Closes`/`Resolves #N`
   reference before opening.
@@ -201,7 +201,7 @@ src/
   queue.py           WorkerPool, dispatch loop, per-issue _inflight serialization
   tasks.py           triage_issue, handle_comment, handle_pr_conversation, handle_review, cleanup_workspace
   worker.py          synchronous omp RPC driver, prompt assembly, env scrubbing
-  host_tools.py      classify_issue, set_issue_labels, gh_post_comment, repro_record,
+  operations.py      classify_issue, set_issue_labels, gh_post_comment, repro_record,
                      gh_push_branch, gh_open_pr, gh_request_review,
                      mark_unable_to_reproduce, abort_task, fetch_issue_thread
   sandbox.py         clone pool + worktree lifecycle

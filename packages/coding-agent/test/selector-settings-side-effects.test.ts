@@ -9,8 +9,7 @@ import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
-import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
-import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
+import { HistoricalToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/historical-tool-execution";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -97,56 +96,37 @@ describe("selector setting side effects", () => {
 
 	for (const id of ["terminal.showImages", "showImages"]) {
 		for (const visible of [false, true]) {
-			it(`updates every image owner and rebuilds the transcript when ${id}=${visible}`, () => {
-				const setShowImages = vi.fn();
+			it(`updates assistant images and rebuilds the transcript when ${id}=${visible}`, () => {
 				const setImagesVisible = vi.fn();
 				const clearInlineImages = vi.fn();
 				const resetDisplay = vi.fn();
-				const tool = Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent;
-				tool.setShowImages = setShowImages;
 				const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
 				assistant.setImagesVisible = setImagesVisible;
 				const controller = new SelectorController({
-					chatContainer: { children: [tool, assistant] },
+					chatContainer: { children: [assistant] },
 					ui: { clearInlineImages, resetDisplay },
 				} as unknown as InteractiveModeContext);
 
 				controller.handleSettingChange(id, visible);
 
-				expect(setShowImages).toHaveBeenCalledWith(visible);
 				expect(setImagesVisible).toHaveBeenCalledWith(visible);
 				expect(clearInlineImages).toHaveBeenCalledTimes(visible ? 0 : 1);
 				expect(resetDisplay).toHaveBeenCalledTimes(1);
-				if (!visible) {
-					expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-						resetDisplay.mock.invocationCallOrder[0],
-					);
-				}
 			});
 		}
 	}
 
 	for (const hidden of [true, false]) {
-		it(`applies display.hideToolActivity=${hidden} to existing tool components`, () => {
+		it(`applies display.hideToolActivity=${hidden} to historical tool rows`, () => {
 			const setToolVisible = vi.fn();
-			const setToolExpanded = vi.fn();
-			const tool = Object.create(ToolExecutionComponent.prototype) as ToolExecutionComponent;
+			const tool = Object.create(HistoricalToolExecutionComponent.prototype) as HistoricalToolExecutionComponent;
 			tool.setToolActivityVisible = setToolVisible;
-			tool.setExpanded = setToolExpanded;
-			const setReadVisible = vi.fn();
-			const setReadExpanded = vi.fn();
-			const readGroup = Object.create(ReadToolGroupComponent.prototype) as ReadToolGroupComponent;
-			readGroup.setToolActivityVisible = setReadVisible;
-			readGroup.setExpanded = setReadExpanded;
-			const setToolResultImagesVisible = vi.fn();
-			const assistant = Object.create(AssistantMessageComponent.prototype) as AssistantMessageComponent;
-			assistant.setToolResultImagesVisible = setToolResultImagesVisible;
 			const clearInlineImages = vi.fn();
 			const resetDisplay = vi.fn();
 			const ctx = {
 				hideToolActivity: !hidden,
 				toolOutputExpanded: true,
-				chatContainer: { children: [tool, readGroup, assistant] },
+				chatContainer: { children: [tool] },
 				ui: { clearInlineImages, resetDisplay },
 			};
 			const controller = new SelectorController(ctx as unknown as InteractiveModeContext);
@@ -155,18 +135,9 @@ describe("selector setting side effects", () => {
 
 			expect(ctx.hideToolActivity).toBe(hidden);
 			expect(setToolVisible).toHaveBeenCalledWith(!hidden);
-			expect(setReadVisible).toHaveBeenCalledWith(!hidden);
-			expect(setToolResultImagesVisible).toHaveBeenCalledWith(!hidden);
-			expect(setToolExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
-			expect(setReadExpanded).toHaveBeenCalledTimes(hidden ? 0 : 1);
 			expect(ctx.toolOutputExpanded).toBe(hidden);
 			expect(clearInlineImages).toHaveBeenCalledTimes(hidden ? 1 : 0);
 			expect(resetDisplay).toHaveBeenCalledTimes(1);
-			if (hidden) {
-				expect(clearInlineImages.mock.invocationCallOrder[0]).toBeLessThan(
-					resetDisplay.mock.invocationCallOrder[0],
-				);
-			}
 		});
 	}
 

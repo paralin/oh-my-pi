@@ -4,8 +4,8 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import type { MCPResource, MCPResourceReadResult, MCPResourceTemplate } from "@oh-my-pi/pi-coding-agent/mcp/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function createMockManager(opts: {
 	servers?: string[];
@@ -121,9 +121,7 @@ describe("McpProtocolHandler", () => {
 		});
 		MCPManager.setInstance(manager);
 
-		const result = await new ReadTool(createToolSession()).execute("read-ags-resource", {
-			path: "ags://capabilities/current-host",
-		});
+		const result = await new ReadService(createToolSession()).read("ags://capabilities/current-host");
 		const output = result.content.find(block => block.type === "text");
 
 		expect(output?.type).toBe("text");
@@ -150,9 +148,7 @@ describe("McpProtocolHandler", () => {
 		});
 		MCPManager.setInstance(manager);
 
-		const result = await new ReadTool(createToolSession()).execute("read-delayed-ags-resource", {
-			path: "ags://capabilities/current-host",
-		});
+		const result = await new ReadService(createToolSession()).read("ags://capabilities/current-host");
 		const output = result.content.find(block => block.type === "text");
 
 		expect(ensureCalls).toBe(1);
@@ -193,9 +189,7 @@ describe("McpProtocolHandler", () => {
 		});
 		MCPManager.setInstance(manager);
 
-		const result = await new ReadTool(createToolSession()).execute("read-opaque-resource", {
-			path: "urn:example:document",
-		});
+		const result = await new ReadService(createToolSession()).read("urn:example:document");
 		const output = result.content.find(block => block.type === "text");
 
 		expect(output?.type).toBe("text");

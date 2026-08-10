@@ -99,8 +99,6 @@ export type SymbolKey =
 	| "sep.pipe"
 	// Icons
 	| "icon.model"
-	| "icon.plan"
-	| "icon.prewalk"
 	| "icon.goal"
 	| "icon.pause"
 	| "icon.loop"
@@ -230,7 +228,6 @@ export type SymbolKey =
 	| "tool.webSearch"
 	| "tool.exa"
 	| "tool.browser"
-	| "tool.eval"
 	| "tool.debug"
 	| "tool.mcp"
 	| "tool.job"
@@ -241,7 +238,6 @@ export type SymbolKey =
 	| "tool.ask"
 	| "tool.resolve"
 	| "tool.review"
-	| "tool.inspectImage"
 	| "tool.goal"
 	| "tool.irc"
 	| "tool.delete"
@@ -309,8 +305,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"sep.pipe": " │ ",
 	// Icons
 	"icon.model": "⬢",
-	"icon.plan": "🗺",
-	"icon.prewalk": "🏃",
 	"icon.goal": "🎯",
 	"icon.pause": "⏸",
 	"icon.loop": "↻",
@@ -440,7 +434,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.webSearch": "⌕",
 	"tool.exa": "🔭",
 	"tool.browser": "🌐",
-	"tool.eval": "▶",
 	"tool.debug": "🐞",
 	"tool.mcp": "🔌",
 	"tool.job": "⚙",
@@ -451,7 +444,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tool.ask": "?",
 	"tool.resolve": "✓",
 	"tool.review": "◉",
-	"tool.inspectImage": "🖼",
 	"tool.goal": "◎",
 	"tool.irc": "✉",
 	"tool.delete": "🗑",
@@ -571,8 +563,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick:  | alt:   ◆
 	"icon.model": "\uec19",
 	// pick:  | alt:  
-	"icon.plan": "\uf2d2",
-	"icon.prewalk": "\uf29d",
 	// pick:  (nf-fa-bullseye) | alt:  (nf-md-target) ◎ ⌖
 	"icon.goal": "\uf140",
 	// pick:  (nf-fa-pause) | alt: ⏸ ||
@@ -751,7 +741,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.webSearch": "\uEB01",
 	"tool.exa": "\uEB68",
 	"tool.browser": "\uEAAE",
-	"tool.eval": "\uEBAF",
 	"tool.debug": "\uEAD8",
 	"tool.mcp": "\uEB2D",
 	"tool.job": "\uEBA2",
@@ -762,7 +751,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tool.ask": "\uEAC7",
 	"tool.resolve": "\uEBB1",
 	"tool.review": "\uEA70",
-	"tool.inspectImage": "\uEAEA",
 	"tool.goal": "\uEBF8",
 	"tool.irc": "\uF086",
 	"tool.delete": "\uf12d",
@@ -829,8 +817,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"sep.pipe": " | ",
 	// Icons
 	"icon.model": "[M]",
-	"icon.plan": "plan",
-	"icon.prewalk": "prewalk",
 	"icon.goal": "goal",
 	"icon.pause": "||",
 	"icon.loop": "loop",
@@ -957,7 +943,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.webSearch": "web",
 	"tool.exa": "exa",
 	"tool.browser": "[w]",
-	"tool.eval": ">_",
 	"tool.debug": "dbg",
 	"tool.mcp": "<>",
 	"tool.job": "job",
@@ -968,7 +953,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tool.ask": "[?]",
 	"tool.resolve": "[v]",
 	"tool.review": "rev",
-	"tool.inspectImage": "[i]",
 	"tool.goal": "(o)",
 	"tool.irc": "irc",
 	"tool.delete": "rm",
@@ -1830,8 +1814,6 @@ export class Theme {
 	get icon() {
 		return {
 			model: this.#symbols["icon.model"],
-			plan: this.#symbols["icon.plan"],
-			prewalk: this.#symbols["icon.prewalk"],
 			goal: this.#symbols["icon.goal"],
 			pause: this.#symbols["icon.pause"],
 			loop: this.#symbols["icon.loop"],
@@ -2265,7 +2247,7 @@ export async function setTheme(
 		currentThemeName = "dark";
 		theme = await loadTheme("dark", getCurrentThemeOptions());
 		// The active theme just changed to the fallback — bump the epoch so memoized
-		// renderers (e.g. ToolExecutionComponent) re-shape with the fallback colors
+		// memoized renderers re-shape with the fallback colors
 		// instead of holding the failed theme's stale styling.
 		notifyThemeChange();
 		// Don't start watcher for fallback theme

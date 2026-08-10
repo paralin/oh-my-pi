@@ -110,12 +110,6 @@ export interface IpythonDebugManager {
 	): Promise<unknown>;
 	modules(startModule?: number, moduleCount?: number, signal?: AbortSignal, timeoutMs?: number): Promise<unknown>;
 	loadedSources(signal?: AbortSignal, timeoutMs?: number): Promise<unknown>;
-	customRequest(
-		command: string,
-		args?: Record<string, unknown>,
-		signal?: AbortSignal,
-		timeoutMs?: number,
-	): Promise<unknown>;
 	terminate(signal?: AbortSignal, timeoutMs?: number): Promise<unknown>;
 	dispose?(): Promise<void>;
 }
@@ -611,18 +605,6 @@ export class IpythonDebugService {
 				requireCapability(manager, "supportsLoadedSourcesRequest", "loaded-source enumeration");
 				return manager.loadedSources(request.signal, timeoutMs(data));
 			}),
-			"debug.custom_request": call("custom request", ["command", "arguments", "timeout"], (data, request) => {
-				const args = data.arguments === undefined ? undefined : record(data.arguments, "arguments");
-				return manager.customRequest(
-					stringValue(data, "command", { max: 4_096 }),
-					args ? { ...args } : undefined,
-					request.signal,
-					timeoutMs(data),
-				);
-			}),
-			"debug.terminate": call("terminate", ["timeout"], (data, request) =>
-				manager.terminate(request.signal, timeoutMs(data)),
-			),
 		};
 	}
 

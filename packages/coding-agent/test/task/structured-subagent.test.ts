@@ -7,7 +7,6 @@ import {
 	artifactsDirsFromRegistry,
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
-import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as claudeCodeRuntime from "@oh-my-pi/pi-coding-agent/task/claude-code-runtime";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -17,11 +16,10 @@ import {
 	buildStructuredSubagentRecoveryHint,
 	resolveEffectiveSubagentPolicy,
 	runStructuredSubagent,
-	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const AGENT: AgentDefinition = {
 	name: "worker",
@@ -34,7 +32,6 @@ const AGENT: AgentDefinition = {
 
 function session(
 	options: {
-		planMode?: boolean;
 		outputSchema?: unknown;
 		maxDepth?: number;
 		isolationMode?: "none" | "worktree";
@@ -55,14 +52,12 @@ function session(
 		}),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
 
 function request(overrides: Partial<StructuredSubagentRequest> = {}): StructuredSubagentRequest {
 	return {
 		session: session(),
-		invocationKind: "task",
 		assignment: "Inspect the target.",
 		agent: "worker",
 		...overrides,
@@ -139,52 +134,6 @@ describe("structured subagent primitive", () => {
 		expect(policy.modelOverride).toEqual(["openai-codex/gpt-5.6-luna:high"]);
 	});
 
-	it("gives task and eval invocations identical blocked-agent preflight errors", async () => {
-		const previous = Bun.env.PI_BLOCKED_AGENT;
-		Bun.env.PI_BLOCKED_AGENT = "worker";
-		try {
-			const discover = vi.spyOn(discoveryModule, "discoverAgents");
-			const taskRequest = request();
-			const evalRequest = request({ session: taskRequest.session, invocationKind: "eval" });
-			const messages: string[] = [];
-			for (const candidate of [taskRequest, evalRequest]) {
-				try {
-					await resolveEffectiveSubagentPolicy(candidate);
-				} catch (error) {
-					expect(error).toBeInstanceOf(StructuredSubagentError);
-					messages.push((error as Error).message);
-				}
-			}
-			expect(messages).toEqual([
-				"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
-				"Cannot spawn worker agent from within itself (recursion prevention). Use a different agent type.",
-			]);
-			expect(discover).not.toHaveBeenCalled();
-		} finally {
-			if (previous === undefined) delete Bun.env.PI_BLOCKED_AGENT;
-			else Bun.env.PI_BLOCKED_AGENT = previous;
-		}
-	});
-
-	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {
-		mockDiscovery();
-		const policy = await resolveEffectiveSubagentPolicy(
-			request({ session: session({ planMode: true }), enableLsp: true, enableIrc: true }),
-		);
-		expect(policy.effectiveAgent.tools).toEqual(["read", "grep", "glob", "web_search", "ast_grep"]);
-		expect(policy.effectiveAgent.spawns).toBeUndefined();
-		expect(policy.enableLsp).toBe(false);
-		expect(policy.enableIrc).toBe(false);
-
-		vi.restoreAllMocks();
-		const discover = vi.spyOn(discoveryModule, "discoverAgents");
-		await expect(
-			resolveEffectiveSubagentPolicy(
-				request({ session: session({ planMode: true }), isolation: { requested: false } }),
-			),
-		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
-		expect(discover).not.toHaveBeenCalled();
-	});
 	it("propagates a custom thinking-suffixed role alias through policy, dispatch, and settlement", async () => {
 		const customAgent = { ...AGENT, model: ["@reviewer:high"] };
 		mockDiscovery(customAgent);
@@ -292,65 +241,6 @@ describe("structured subagent primitive", () => {
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("rejects plan-mode Claude before executor, artifact, and registry work", async () => {
-		mockDiscovery();
-		const planSession = session({ planMode: true });
-		const getSessionFile = vi.fn(() => null);
-		const allocate = vi.fn(async () => "Worker");
-		Object.assign(planSession, { getSessionFile, agentOutputManager: { allocate } });
-		const claude = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess");
-		const pi = vi.spyOn(executorModule, "runSubprocess");
-		const register = vi.spyOn(AgentRegistry.global(), "register");
-
-		const error = await runStructuredSubagent(
-			request({
-				session: planSession,
-				model: "claude-code/claude-opus-5",
-			}),
-		).catch(caught => caught);
-
-		expect(error).toBeInstanceOf(StructuredSubagentError);
-		expect((error as StructuredSubagentError).kind).toBe("preflight");
-		expect((error as Error).message).toContain("Plan mode is unavailable");
-		expect(claude).not.toHaveBeenCalled();
-		expect(pi).not.toHaveBeenCalled();
-		expect(getSessionFile).not.toHaveBeenCalled();
-		expect(allocate).not.toHaveBeenCalled();
-		expect(register).not.toHaveBeenCalled();
-		expect(artifactsDirsFromRegistry()).toEqual([]);
-	});
-
-	it("rejects eval Claude before executor, artifact, id, and registry work", async () => {
-		mockDiscovery();
-		const evalSession = session();
-		const getSessionFile = vi.fn(() => {
-			throw new Error("artifact leasing reached");
-		});
-		const allocate = vi.fn(async () => "Worker");
-		Object.assign(evalSession, { getSessionFile, agentOutputManager: { allocate } });
-		const claude = vi.spyOn(claudeCodeRuntime, "runClaudeCodeSubprocess");
-		const pi = vi.spyOn(executorModule, "runSubprocess");
-		const register = vi.spyOn(AgentRegistry.global(), "register");
-
-		const error = await runStructuredSubagent(
-			request({
-				session: evalSession,
-				invocationKind: "eval",
-				model: "claude-code/claude-opus-5",
-			}),
-		).catch(caught => caught);
-
-		expect(error).toBeInstanceOf(StructuredSubagentError);
-		expect((error as StructuredSubagentError).kind).toBe("preflight");
-		expect((error as Error).message).toContain("available only for task invocations");
-		expect(claude).not.toHaveBeenCalled();
-		expect(pi).not.toHaveBeenCalled();
-		expect(getSessionFile).not.toHaveBeenCalled();
-		expect(allocate).not.toHaveBeenCalled();
-		expect(register).not.toHaveBeenCalled();
-		expect(artifactsDirsFromRegistry()).toEqual([]);
-	});
-
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
@@ -372,16 +262,14 @@ describe("structured subagent primitive", () => {
 		expect(path.basename(settled.artifactsDir)).toStartWith("omp-task-");
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
-	it("uses identical non-plan LSP and IRC policy for task and eval invocations", async () => {
+	it("applies configured LSP and IRC policy to Task invocations", async () => {
 		mockDiscovery();
-		const taskPolicy = await resolveEffectiveSubagentPolicy(request());
-		const evalPolicy = await resolveEffectiveSubagentPolicy(request({ invocationKind: "eval" }));
+		const policy = await resolveEffectiveSubagentPolicy(request());
 
-		expect(evalPolicy.enableLsp).toBe(taskPolicy.enableLsp);
-		expect(evalPolicy.enableIrc).toBe(taskPolicy.enableIrc);
+		expect(policy.enableLsp).toBe(true);
+		expect(policy.enableIrc).toBe(true);
 	});
-
-	it("rejects an invalid caller schema before executor dispatch in both modes", async () => {
+	it("rejects an invalid caller schema before executor dispatch in either schema mode", async () => {
 		mockDiscovery();
 		const dispatch = vi.spyOn(executorModule, "runSubprocess");
 
@@ -479,71 +367,6 @@ describe("structured subagent primitive", () => {
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
 	});
 
-	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
-		mockDiscovery();
-		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;
-		const extensionPaths = ["/plugins/example.ts"];
-		const customToolPaths = [{ path: "/tools/example.ts", source: "project" }] as unknown as NonNullable<
-			ToolSession["customToolPaths"]
-		>;
-		const planSession = session({ planMode: true });
-		Object.assign(planSession, { mcpManager, extensionPaths, customToolPaths });
-		const nonPlanSession = session();
-		Object.assign(nonPlanSession, { mcpManager, extensionPaths, customToolPaths });
-		const mcpDisabledSession = session();
-		mcpDisabledSession.enableMCP = false;
-		const restrictedSession = session();
-		const getApiKey = async () => "exact-account-key";
-		Object.assign(restrictedSession, {
-			restrictToolNames: true,
-			getApiKey,
-			mcpManager,
-			extensionPaths,
-			customToolPaths,
-		});
-		const options = [] as executorModule.ExecutorOptions[];
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
-			options.push(executorOptions);
-			return result();
-		});
-
-		const planRun = await runStructuredSubagent(request({ session: planSession, retainArtifacts: true }));
-		const nonPlanRun = await runStructuredSubagent(request({ session: nonPlanSession, retainArtifacts: true }));
-		const mcpDisabledRun = await runStructuredSubagent(
-			request({ session: mcpDisabledSession, retainArtifacts: true }),
-		);
-		const restrictedRun = await runStructuredSubagent(request({ session: restrictedSession, retainArtifacts: true }));
-
-		expect(options[0]).toMatchObject({
-			enableMCP: false,
-			restrictToolNames: true,
-			preloadedExtensionPaths: [],
-			preloadedCustomToolPaths: [],
-		});
-		expect(options[0]?.mcpManager).toBeUndefined();
-		expect(options[1]).toMatchObject({
-			enableMCP: true,
-			mcpManager,
-			preloadedExtensionPaths: extensionPaths,
-			preloadedCustomToolPaths: customToolPaths,
-		});
-		expect(options[1]?.restrictToolNames).toBe(false);
-		expect(options[2]).toMatchObject({ enableMCP: false });
-		expect(options[2]?.mcpManager).toBeUndefined();
-		expect(options[3]).toMatchObject({
-			enableMCP: false,
-			restrictToolNames: true,
-			preloadedExtensionPaths: [],
-			preloadedCustomToolPaths: [],
-		});
-		expect(options[3]?.mcpManager).toBeUndefined();
-		expect(options[3]?.getApiKey).toBe(getApiKey);
-		await fs.rm(planRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(nonPlanRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(mcpDisabledRun.artifactsDir, { recursive: true, force: true });
-		await fs.rm(restrictedRun.artifactsDir, { recursive: true, force: true });
-	});
-
 	it("unregisters and removes a temporary lease when output ID allocation fails", async () => {
 		mockDiscovery();
 		const failingSession = session();
@@ -564,19 +387,6 @@ describe("structured subagent primitive", () => {
 		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
 	});
 
-	it("unregisters and removes a temporary lease when plan reference loading fails", async () => {
-		mockDiscovery();
-		vi.spyOn(planHandoff, "loadOverallPlanReference").mockRejectedValue(new Error("plan unavailable"));
-		const remove = vi.spyOn(fs, "rm");
-
-		await expect(runStructuredSubagent(request())).rejects.toThrow("Subagent execution failed: plan unavailable");
-
-		const artifactsDir = remove.mock.calls[0]?.[0];
-		expect(typeof artifactsDir).toBe("string");
-		expect(artifactsDirsFromRegistry()).toEqual([]);
-		await expect(fs.stat(artifactsDir as string)).rejects.toThrow();
-	});
-
 	it("cleans failed nonisolated handle artifacts", async () => {
 		mockDiscovery();
 		let artifactsDir: string | undefined;
@@ -585,7 +395,7 @@ describe("structured subagent primitive", () => {
 			return { ...result(), exitCode: 1, error: "agent failed" };
 		});
 
-		await runStructuredSubagent(request({ invocationKind: "eval", retainArtifacts: true }));
+		await runStructuredSubagent(request({ retainArtifacts: true }));
 
 		expect(artifactsDirsFromRegistry()).toEqual([]);
 		await expect(fs.stat(artifactsDir ?? "")).rejects.toThrow();
@@ -659,15 +469,6 @@ describe("structured subagent primitive", () => {
 			}),
 		);
 		expect(capturePolicy.applyChanges).toBe(false);
-
-		const evalPolicy = await resolveEffectiveSubagentPolicy(
-			request({
-				invocationKind: "eval",
-				session: session({ isolationMode: "worktree", isolationApply: false }),
-				isolation: { requested: true },
-			}),
-		);
-		expect(evalPolicy.applyChanges).toBe(true);
 	});
 
 	it("retains successful isolated task artifacts when auto-apply is disabled", async () => {

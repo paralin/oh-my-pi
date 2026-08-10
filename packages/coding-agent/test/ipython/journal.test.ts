@@ -1,6 +1,10 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import type { TUI } from "@oh-my-pi/pi-tui";
-import type { IpythonCellResult } from "../../src/ipython/cell.js";
+import * as os from "node:os";
+import { Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Settings } from "../../src/config/settings.js";
+import type { IpythonMimeRenderer } from "../../src/extensibility/extensions/types.js";
+import type { IpythonCellResult, IpythonCellUpdate } from "../../src/ipython/cell.js";
+import type { IpythonErrorEvent } from "../../src/ipython/controller.js";
 import {
 	createIpythonCellJournalDetail,
 	createIpythonLifecycleJournalDetail,
@@ -8,9 +12,15 @@ import {
 	isIpythonJournalDetail,
 	renderIpythonJournalText,
 } from "../../src/ipython/journal.js";
+import {
+	createIpythonCellText,
+	projectIpythonCellPresentation,
+	projectIpythonLiveCellPresentation,
+} from "../../src/ipython/projection.js";
 import { ChatTranscriptBuilder } from "../../src/modes/components/chat-transcript-builder.js";
 import { IpythonCellMessageComponent } from "../../src/modes/components/ipython-cell-message.js";
 import { getThemeByName, setThemeInstance } from "../../src/modes/theme/theme.js";
+import type { SessionMessageEntry } from "../../src/session/session-entries.js";
 
 const rawHtml = "<script>globalThis.pwned = true</script><b>unsafe</b>";
 
@@ -62,6 +72,7 @@ function cellResult(): IpythonCellResult {
 
 describe("IPython replay journal", () => {
 	beforeAll(async () => {
+		await Settings.init({ inMemory: true });
 		const selected = await getThemeByName("dark");
 		if (!selected) throw new Error("dark test theme is unavailable");
 		setThemeInstance(selected);
@@ -74,6 +85,8 @@ describe("IPython replay journal", () => {
 		const replayed = JSON.parse(JSON.stringify(detail)) as unknown;
 		expect(isIpythonJournalDetail(replayed)).toBe(true);
 		expect(isIpythonJournalDetail({ ...detail, updates: [null] })).toBe(false);
+		expect(isIpythonJournalDetail({ ...detail, events: [{ kind: "stream", name: "stdout" }] })).toBe(false);
+		expect(isIpythonJournalDetail({ ...detail, stdout: undefined })).toBe(false);
 		expect(isIpythonJournalDetail({ ...detail, artifacts: [{ path: 42 }] })).toBe(false);
 		const text = renderIpythonJournalText(detail);
 		expect(text).toContain("displayed MIME types: text/html");
@@ -95,6 +108,7 @@ describe("IPython replay journal", () => {
 	test("uses one expandable component for safe live and replay rendering", () => {
 		const detail = createIpythonCellJournalDetail(cellResult(), [
 			{ path: "/tmp/plot.png", mimeType: "image/png", label: "plot" },
+			{ path: `${os.homedir()}/private.png`, mimeType: "image/png" },
 		]);
 		const component = new IpythonCellMessageComponent(detail);
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
@@ -109,6 +123,8 @@ describe("IPython replay journal", () => {
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
 		expect(expanded).toContain("startup · restore: Restoring IPython state...");
 		expect(expanded).toContain("artifact · plot (image/png)");
+		expect(expanded).toContain("artifact · ~/private.png (image/png)");
+		expect(expanded).not.toContain(os.homedir());
 		expect(expanded).not.toContain(rawHtml);
 
 		const lifecycle = new IpythonCellMessageComponent(
@@ -155,10 +171,47 @@ describe("IPython replay journal", () => {
 		expect(complete).toContain("25ms");
 	});
 
+	test("uses one MIME renderer across live and completed cells while retaining safe fallback", () => {
+		const renderer: IpythonMimeRenderer = input =>
+			new Text(`rich:${input.item.kind}:${String(input.item.update)}:${String(input.item.transient?.display_id)}`);
+		const resolveRenderer = (mimeType: string): IpythonMimeRenderer | undefined =>
+			mimeType === "text/html" ? renderer : undefined;
+		const update: IpythonCellUpdate = {
+			kind: "execution",
+			cellId: "cell-live",
+			origin: "direct",
+			event: cellResult().events[0]!,
+		};
+		const live = new IpythonCellMessageComponent({ code: "display(unsafe_html)", origin: "direct" }, resolveRenderer);
+		live.applyUpdate(update);
+		const liveText = Bun.stripANSI(live.render(100).join("\n"));
+		const completed = new IpythonCellMessageComponent(createIpythonCellJournalDetail(cellResult()), resolveRenderer);
+		const completedText = Bun.stripANSI(completed.render(100).join("\n"));
+		for (const text of [liveText, completedText]) {
+			expect(text).toContain("displayed MIME types: text/html");
+			expect(text).toContain("rich:display:false:display-1");
+			expect(text).not.toContain(rawHtml);
+		}
+
+		const failedRenderer = new IpythonCellMessageComponent(createIpythonCellJournalDetail(cellResult()), () => () => {
+			throw new Error("renderer failed");
+		});
+		const fallback = Bun.stripANSI(failedRenderer.render(100).join("\n"));
+		expect(fallback).toContain("displayed MIME types: text/html");
+		expect(fallback).not.toContain(rawHtml);
+	});
+
 	test("routes persisted cell details through the same replay component", () => {
 		const detail = createIpythonCellJournalDetail(cellResult());
 		const builder = new ChatTranscriptBuilder({
 			ui: { requestRender() {} } as unknown as TUI,
+			getIpythonMimeRenderer: mimeType =>
+				mimeType === "text/html"
+					? input =>
+							new Text(
+								`rich:${input.item.kind}:${String(input.item.update)}:${String(input.item.metadata?.source)}`,
+							)
+					: undefined,
 			cwd: "/work",
 			requestRender() {},
 		});
@@ -181,9 +234,236 @@ describe("IPython replay journal", () => {
 		]);
 		const collapsed = Bun.stripANSI(builder.container.render(100).join("\n"));
 		expect(collapsed).toContain("In [7]");
+		expect(collapsed).toContain("rich:display:false:test");
 		expect(collapsed).not.toContain(rawHtml);
 		builder.setExpanded(true);
 		const expanded = Bun.stripANSI(builder.container.render(100).join("\n"));
 		expect(expanded).toContain("startup · restore: Restoring IPython state...");
+	});
+
+	test("projects ordered live and replayed output through one structured record", () => {
+		const error: IpythonErrorEvent = {
+			kind: "error",
+			ename: "ValueError",
+			evalue: "broken",
+			traceback: ["ValueError: broken"],
+		};
+		const events: IpythonCellResult["events"] = [
+			{ kind: "stream", name: "stdout", text: "left" },
+			{ kind: "stream", name: "stdout", text: "right\n" },
+			{ kind: "stream", name: "stderr", text: "warning\n" },
+			{ kind: "result", data: { "text/plain": "42", "application/vnd.omp.attachment+json": { id: "a-1" } } },
+			{
+				kind: "display",
+				data: { "text/x-diff": "-old\n+new", "text/html": rawHtml },
+				metadata: { source: "projection-test" },
+				transient: { display_id: "diff-1" },
+				update: false,
+				text: "[displayed MIME types: text/html, text/x-diff]",
+			},
+			{ kind: "host_progress", operation: "omp.code.search", message: "2 matches", data: { files: 2 } },
+			error,
+		];
+		const updates: IpythonCellUpdate[] = [
+			{
+				kind: "startup",
+				cellId: "cell-projection",
+				origin: "model",
+				progress: { stage: "runtime", message: "Preparing runtime..." },
+			},
+			...events.map(event => ({
+				kind: "execution" as const,
+				cellId: "cell-projection",
+				origin: "model" as const,
+				event,
+			})),
+		];
+		const modelText = createIpythonCellText(events, [error], "error");
+		const result: IpythonCellResult = {
+			cellId: "cell-projection",
+			executionId: "execute-projection",
+			sequence: 8,
+			origin: "model",
+			authority: "trusted-cell",
+			code: "print('left', end=''); print('right')",
+			status: "error",
+			requestedAt: 200,
+			startedAt: 210,
+			finishedAt: 250,
+			durationMs: 40,
+			stdout: "leftright\n",
+			stderr: "warning\n",
+			result: "42",
+			events,
+			errors: [error],
+			updates,
+			artifacts: [{ path: "/tmp/diff.patch", mimeType: "text/x-diff", bytes: 9, label: "diff" }],
+			modelText,
+		};
+
+		const live = projectIpythonLiveCellPresentation({ code: result.code, origin: result.origin, updates });
+		const completed = projectIpythonCellPresentation(result);
+		const replayed = projectIpythonCellPresentation(createIpythonCellJournalDetail(result));
+
+		expect(live.safeText.text).toBe(completed.safeText.text);
+		expect(replayed).toEqual(completed);
+		expect(completed.stdout).toBe("leftright\n");
+		expect(completed.stderr).toBe("warning\n");
+		expect(completed.result).toBe("42");
+		expect(completed.durationMs).toBe(40);
+		expect(completed.startupProgress).toEqual([{ stage: "runtime", message: "Preparing runtime..." }]);
+		expect(completed.events[3]).toEqual(events[3]);
+		expect(completed.events[4]).toEqual(events[4]);
+		expect(completed.artifacts).toEqual(result.artifacts);
+		expect(completed.safeText.text).toContain("leftright");
+		expect(completed.safeText.text).toContain("[omp.code.search] 2 matches");
+		expect(completed.safeText.text).toContain("ValueError: broken");
+		expect(completed.safeText.text).not.toContain("left\nright");
+		expect(completed.safeText.text).not.toContain(rawHtml);
+
+		const liveComponent = new IpythonCellMessageComponent({ code: result.code, origin: result.origin });
+		for (const update of updates) liveComponent.applyUpdate(update);
+		const liveText = Bun.stripANSI(liveComponent.render(120).join("\n"));
+		const replayText = Bun.stripANSI(
+			new IpythonCellMessageComponent(createIpythonCellJournalDetail(result)).render(120).join("\n"),
+		);
+		expect(liveText).toContain("leftright");
+		expect(replayText).toContain("leftright");
+		expect(liveText).not.toContain(rawHtml);
+		expect(replayText).not.toContain(rawHtml);
+	});
+
+	test("renders removed tool history generically and one authoritative IPython cell", () => {
+		const detail = createIpythonCellJournalDetail(cellResult());
+		const entries = [
+			{
+				type: "message",
+				id: "legacy-call-entry",
+				parentId: null,
+				timestamp: new Date(90).toISOString(),
+				message: {
+					role: "assistant",
+					content: [
+						{
+							type: "toolCall",
+							id: "legacy-call",
+							name: "read",
+							arguments: { path: `old-${"x".repeat(5_000)}\u001b[31m` },
+						},
+					],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "legacy",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 90,
+				},
+			},
+			{
+				type: "message",
+				id: "legacy-result-entry",
+				parentId: "legacy-call-entry",
+				timestamp: new Date(91).toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "legacy-call",
+					toolName: "read",
+					content: [{ type: "text", text: "old result\u001b[2J" }],
+					isError: false,
+					timestamp: 91,
+				},
+			},
+			{
+				type: "message",
+				id: "ipython-call-entry",
+				parentId: "legacy-result-entry",
+				timestamp: new Date(99).toISOString(),
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "ipython-call", name: "ipython", arguments: { code: "42" } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "current",
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: 99,
+				},
+			},
+			{
+				type: "message",
+				id: "cell-entry",
+				parentId: "ipython-call-entry",
+				timestamp: new Date(100).toISOString(),
+				message: {
+					role: "custom",
+					customType: IPYTHON_JOURNAL_MESSAGE_TYPE,
+					content: "",
+					display: true,
+					details: detail,
+					attribution: "assistant",
+					timestamp: 100,
+				},
+			},
+			{
+				type: "message",
+				id: "ipython-result-entry",
+				parentId: "cell-entry",
+				timestamp: new Date(101).toISOString(),
+				message: {
+					role: "toolResult",
+					toolCallId: "ipython-call",
+					toolName: "ipython",
+					content: [{ type: "text", text: "42" }],
+					isError: false,
+					timestamp: 101,
+				},
+			},
+		] as SessionMessageEntry[];
+		const builder = new ChatTranscriptBuilder({
+			ui: { requestRender() {} } as unknown as TUI,
+			getTool: () => {
+				throw new Error("historical replay must not resolve tools");
+			},
+			cwd: "/work",
+			requestRender() {},
+		});
+		builder.rebuild(entries);
+		const rendered = Bun.stripANSI(builder.container.render(100).join("\n"));
+		expect(rendered).toContain("Removed tool: read");
+		expect(rendered).toContain("old result");
+		expect(rendered).not.toContain("\u001b");
+		expect(rendered.match(/In \[7\]/g)).toHaveLength(1);
+		expect(rendered).not.toContain("Removed tool: ipython");
+		expect(rendered.length).toBeLessThan(9_000);
+	});
+
+	test("bounds live safe text and preserves empty abort status", () => {
+		const updates: IpythonCellUpdate[] = [
+			{
+				kind: "execution",
+				cellId: "cell-long",
+				origin: "model",
+				event: { kind: "stream", name: "stdout", text: "x".repeat(500) },
+			},
+		];
+		const live = projectIpythonLiveCellPresentation({ code: "print(long)", origin: "model", updates }, 80);
+		expect(live.safeText.truncated).toBe(true);
+		expect(live.safeText.totalBytes).toBe(500);
+		expect(live.safeText.outputBytes).toBeLessThanOrEqual(80);
+		expect(createIpythonCellText([], [], "aborted").text).toBe("IPython cell aborted.\n");
 	});
 });

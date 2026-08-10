@@ -123,9 +123,9 @@ export function isWorldConfigured(sources: WorldSocketSources = {}): boolean {
 /**
  * Whether this root may perform authority-checked World operations.
  *
- * Both halves are required. This is what decides whether the `world` tool is
- * registered, so it must not report true for a root that could only receive a
- * denial it has no caller identity to be denied under.
+ * Both halves are required before a root can receive authority-checked World
+ * operations. A socket without caller identity can only receive read-only
+ * references, not a meaningful authorization decision.
  */
 export function isWorldRuntimeConfigured(sources: WorldSources = {}): boolean {
 	try {

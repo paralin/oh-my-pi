@@ -98,7 +98,7 @@ class GitHubProxyClient:
 
     Implements `GitHubBackend` (duck-typed). Returns the same typed
     dataclasses as the in-process `GitHubClient`, so call sites in worker,
-    tasks, host_tools, server, and CLI work unchanged.
+    tasks, operations, server, and CLI work unchanged.
     """
 
     def __init__(

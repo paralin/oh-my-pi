@@ -1,7 +1,7 @@
 ---
 description: "Use `import type`, not `import('pkg').Type` in type positions"
 condition: "import\\("
-scope: "tool:edit(*.ts), tool:edit(*.tsx), tool:write(*.ts), tool:write(*.tsx)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

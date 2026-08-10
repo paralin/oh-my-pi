@@ -1,5 +1,4 @@
 import type { IrcMessage } from "../irc/bus";
-import type { OverallPlanReference } from "../plan-mode/plan-handoff";
 import type { AgentPeer, AgentRef } from "../registry/agent-registry";
 import type {
 	EffectiveSubagentPolicy,
@@ -15,7 +14,6 @@ export interface CoordinationSpawnRequest {
 	generated: boolean;
 	request: StructuredSubagentRequest;
 	policy: EffectiveSubagentPolicy;
-	planReference?: OverallPlanReference;
 	artifactsDir: string;
 	temporaryArtifacts: boolean;
 }

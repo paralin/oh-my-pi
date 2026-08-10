@@ -29,7 +29,7 @@ import {
 import { formatAge, formatNumber, getProjectDir, logger } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import type { Settings } from "../../config/settings";
-import type { MessageRenderer } from "../../extensibility/extensions/types";
+import type { IpythonMimeRenderer, MessageRenderer } from "../../extensibility/extensions/types";
 import { IrcBus } from "../../irc/bus";
 import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
@@ -126,6 +126,8 @@ export interface AgentHubDeps {
 	getTool?: (name: string) => AgentTool | undefined;
 	/** Extension message renderers for custom messages in the transcript. */
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
+	/** Extension rich MIME renderers for IPython cells in the transcript. */
+	getIpythonMimeRenderer?: (mimeType: string) => IpythonMimeRenderer | undefined;
 	/** Cwd used by tool renderers for path shortening; defaults to the project dir. */
 	cwd?: string;
 	/** Mirrors the main transcript's thinking-block visibility. */
@@ -208,6 +210,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#ui: TUI;
 	#getTool: ((name: string) => AgentTool | undefined) | undefined;
 	#getMessageRenderer: ((customType: string) => MessageRenderer | undefined) | undefined;
+	#getIpythonMimeRenderer: ((mimeType: string) => IpythonMimeRenderer | undefined) | undefined;
 	#cwd: string;
 	#hideThinkingBlock: (() => boolean) | undefined;
 	#proseOnlyThinking: (() => boolean) | undefined;
@@ -240,6 +243,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			} as unknown as TUI);
 		this.#getTool = deps.getTool;
 		this.#getMessageRenderer = deps.getMessageRenderer;
+		this.#getIpythonMimeRenderer = deps.getIpythonMimeRenderer;
 		this.#cwd = deps.cwd ?? getProjectDir();
 		this.#hideThinkingBlock = deps.hideThinkingBlock;
 		this.#proseOnlyThinking = deps.proseOnlyThinking;
@@ -366,6 +370,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			ui: this.#ui,
 			getTool: this.#getTool,
 			getMessageRenderer: this.#getMessageRenderer,
+			getIpythonMimeRenderer: this.#getIpythonMimeRenderer,
 			cwd: this.#cwd,
 			hideThinkingBlock: this.#hideThinkingBlock,
 			proseOnlyThinking: this.#proseOnlyThinking,
@@ -485,7 +490,12 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 
 	#fallbackStatsSession(ref: AgentRef, observed: ObservableSession | undefined): AgentSession | undefined {
 		if (observed?.progress) return undefined;
-		return isAgentSession(ref.session) ? ref.session : undefined;
+		if (isAgentSession(ref.session)) return ref.session;
+		// Registry tests and lightweight integrations may expose only the
+		// session statistics seam; treat that as a valid fallback source too.
+		return ref.session && typeof (ref.session as { getSessionStats?: unknown }).getSessionStats === "function"
+			? (ref.session as AgentSession)
+			: undefined;
 	}
 
 	// ========================================================================

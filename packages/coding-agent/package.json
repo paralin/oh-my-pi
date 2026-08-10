@@ -2,7 +2,7 @@
   "type": "module",
   "name": "@oh-my-pi/pi-coding-agent",
   "version": "17.2.9",
-  "description": "Coding agent CLI with read, bash, edit, write tools and session management",
+  "description": "Coding agent CLI with a persistent IPython runtime and session management",
   "homepage": "https://omp.sh",
   "author": "Can Boluk",
   "contributors": [
@@ -39,13 +39,12 @@
     "fix": "biome check --write --unsafe . && bun run format-prompts",
     "fmt": "biome format --write . && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",
-    "gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
     "gen:bundle": "bun scripts/bundle-dist.ts",
     "gen:mupdf": "bun scripts/embed-mupdf-wasm.ts --generate",
     "gen:mupdf:reset": "bun scripts/embed-mupdf-wasm.ts --reset",
     "gen:native": "bun --cwd=../natives run gen:native",
     "gen:native:reset": "bun --cwd=../natives run gen:native:reset",
-    "prepack": "bun run gen:tool-views && bun run gen:bundle",
+    "prepack": "bun run gen:bundle",
     "bench:guard": "bun scripts/bench-guard.ts"
   },
   "dependencies": {
@@ -54,7 +53,6 @@
     "@aptre/protobuf-es-lite": "catalog:",
     "@babel/parser": "catalog:",
     "@mozilla/readability": "catalog:",
-    "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
@@ -113,7 +111,6 @@
     "dist/template-*.css",
     "dist/template-*.html",
     "dist/template-*.js",
-    "dist/tool-views.generated-*.js",
     "scripts",
     "examples",
     "README.md",
@@ -144,9 +141,9 @@
       "types": "./src/autoresearch/*.ts",
       "import": "./src/autoresearch/*.ts"
     },
-    "./autoresearch/tools/*": {
-      "types": "./src/autoresearch/tools/*.ts",
-      "import": "./src/autoresearch/tools/*.ts"
+    "./autoresearch/operations/*": {
+      "types": "./src/autoresearch/operations/*.ts",
+      "import": "./src/autoresearch/operations/*.ts"
     },
     "./capability": {
       "types": "./src/capability/index.ts",
@@ -159,14 +156,6 @@
     "./cli/*": {
       "types": "./src/cli/*.ts",
       "import": "./src/cli/*.ts"
-    },
-    "./cli/gallery-fixtures": {
-      "types": "./src/cli/gallery-fixtures/index.ts",
-      "import": "./src/cli/gallery-fixtures/index.ts"
-    },
-    "./cli/gallery-fixtures/*": {
-      "types": "./src/cli/gallery-fixtures/*.ts",
-      "import": "./src/cli/gallery-fixtures/*.ts"
     },
     "./cli/commands/*": {
       "types": "./src/cli/commands/*.ts",
@@ -191,14 +180,6 @@
     "./commit/agentic/*": {
       "types": "./src/commit/agentic/*.ts",
       "import": "./src/commit/agentic/*.ts"
-    },
-    "./commit/agentic/tools": {
-      "types": "./src/commit/agentic/tools/index.ts",
-      "import": "./src/commit/agentic/tools/index.ts"
-    },
-    "./commit/agentic/tools/*": {
-      "types": "./src/commit/agentic/tools/*.ts",
-      "import": "./src/commit/agentic/tools/*.ts"
     },
     "./commit/analysis": {
       "types": "./src/commit/analysis/index.ts",
@@ -260,18 +241,6 @@
       "types": "./src/discovery/*.ts",
       "import": "./src/discovery/*.ts"
     },
-    "./edit": {
-      "types": "./src/edit/index.ts",
-      "import": "./src/edit/index.ts"
-    },
-    "./edit/*": {
-      "types": "./src/edit/*.ts",
-      "import": "./src/edit/*.ts"
-    },
-    "./edit/modes/*": {
-      "types": "./src/edit/modes/*.ts",
-      "import": "./src/edit/modes/*.ts"
-    },
     "./exa": {
       "types": "./src/exa/index.ts",
       "import": "./src/exa/index.ts"
@@ -316,14 +285,6 @@
       "types": "./src/extensibility/custom-commands/bundled/review/index.ts",
       "import": "./src/extensibility/custom-commands/bundled/review/index.ts"
     },
-    "./extensibility/custom-tools": {
-      "types": "./src/extensibility/custom-tools/index.ts",
-      "import": "./src/extensibility/custom-tools/index.ts"
-    },
-    "./extensibility/custom-tools/*": {
-      "types": "./src/extensibility/custom-tools/*.ts",
-      "import": "./src/extensibility/custom-tools/*.ts"
-    },
     "./extensibility/extensions": {
       "types": "./src/extensibility/extensions/index.ts",
       "import": "./src/extensibility/extensions/index.ts"
@@ -363,18 +324,6 @@
     "./internal-urls/*": {
       "types": "./src/internal-urls/*.ts",
       "import": "./src/internal-urls/*.ts"
-    },
-    "./eval": {
-      "types": "./src/eval/index.ts",
-      "import": "./src/eval/index.ts"
-    },
-    "./eval/js/*": {
-      "types": "./src/eval/js/*.ts",
-      "import": "./src/eval/js/*.ts"
-    },
-    "./eval/py/*": {
-      "types": "./src/eval/py/*.ts",
-      "import": "./src/eval/py/*.ts"
     },
     "./lsp": {
       "types": "./src/lsp/index.ts",
@@ -508,19 +457,7 @@
       "types": "./src/modes/utils/*.ts",
       "import": "./src/modes/utils/*.ts"
     },
-    "./plan-mode/*": {
-      "types": "./src/plan-mode/*.ts",
-      "import": "./src/plan-mode/*.ts"
-    },
     "./prompts/*": "./src/prompts/*.md",
-    "./secrets": {
-      "types": "./src/secrets/index.ts",
-      "import": "./src/secrets/index.ts"
-    },
-    "./secrets/*": {
-      "types": "./src/secrets/*.ts",
-      "import": "./src/secrets/*.ts"
-    },
     "./session/*": {
       "types": "./src/session/*.ts",
       "import": "./src/session/*.ts"
@@ -553,18 +490,7 @@
       "types": "./src/tools/index.ts",
       "import": "./src/tools/index.ts"
     },
-    "./tools/hub": {
-      "types": "./src/tools/hub/index.ts",
-      "import": "./src/tools/hub/index.ts"
-    },
-    "./tools/hub/*": {
-      "types": "./src/tools/hub/*.ts",
-      "import": "./src/tools/hub/*.ts"
-    },
-    "./tools/*": {
-      "types": "./src/tools/*.ts",
-      "import": "./src/tools/*.ts"
-    },
+    "./tools/*": null,
     "./tui": {
       "types": "./src/tui/index.ts",
       "import": "./src/tui/index.ts"

@@ -21,6 +21,7 @@ import {
 	scratchHandoffIsComplete,
 	scratchHandoffRecentContextBudget,
 } from "./scratch-handoff";
+import { ScratchHandoffController, type ScratchHandoffHost } from "./scratch-handoff-controller";
 import type { SessionEntry } from "./session-entries";
 import { resolveAutoCompactionAction } from "./session-maintenance";
 
@@ -221,6 +222,34 @@ function scratchWriteEntry(id: string, scratchPath = "agent/current.org"): Sessi
 	};
 }
 
+function scratchControllerForTest(cwd: string, entries: SessionEntry[]): ScratchHandoffController {
+	let nextId = 0;
+	const sessionManager = {
+		getBranch: () => entries,
+		getCwd: () => cwd,
+		appendCustomEntry: (customType: string, data?: unknown) => {
+			entries.push({
+				type: "custom",
+				customType,
+				data,
+				id: `entry-${++nextId}`,
+				parentId: null,
+				timestamp: "2026-06-29T00:00:00.000Z",
+			} as SessionEntry);
+			return `entry-${nextId}`;
+		},
+	};
+	return new ScratchHandoffController({ sessionManager } as ScratchHandoffHost, {
+		displayPath: "agent/current.org",
+		rootCwd: cwd,
+		parentDisplayPath: undefined,
+	});
+}
+
+function scratchWriteMarkers(entries: SessionEntry[]): SessionEntry[] {
+	return entries.filter(entry => entry.type === "custom" && entry.customType === SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE);
+}
+
 function userEntry(id: string, text: string): SessionEntry {
 	return {
 		type: "message",
@@ -264,9 +293,9 @@ function assistantToolEntry(id: string): SessionEntry {
 			content: [
 				{
 					type: "toolCall",
-					id: "call-read",
-					name: "read",
-					arguments: { path: "src/file.ts" },
+					id: "call-ipython",
+					name: "ipython",
+					arguments: { code: "print(1)" },
 				},
 			],
 			provider: "test",
@@ -299,8 +328,8 @@ function toolResultEntry(id: string, text: string): SessionEntry {
 		timestamp: "2026-06-29T00:00:00.000Z",
 		message: {
 			role: "toolResult",
-			toolCallId: "call-read",
-			toolName: "read",
+			toolCallId: "call-ipython",
+			toolName: "ipython",
 			content: [{ type: "text", text }],
 			timestamp: Date.parse("2026-06-29T00:00:00.000Z"),
 		} as AgentMessage,
@@ -318,6 +347,57 @@ function skillPromptMessage(text: string): AgentMessage {
 		timestamp: Date.parse("2026-06-29T00:00:00.000Z"),
 	};
 }
+
+describe("scratch handoff IPython closeout tracking", () => {
+	it("records a created checkpoint only after a successful IPython completion", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
+		try {
+			const entries: SessionEntry[] = [];
+			const controller = scratchControllerForTest(cwd, entries);
+			expect(controller.stageCloseout("agent/current.org", undefined, "manual")).toBe(true);
+
+			controller.recordToolExecutionEnd("ipython", false);
+			expect(scratchWriteMarkers(entries)).toHaveLength(0);
+
+			const scratchPath = path.join(cwd, "agent/current.org");
+			await fs.mkdir(path.dirname(scratchPath), { recursive: true });
+			await fs.writeFile(scratchPath, "* TODO Current\n- Objective: preserve state\n", "utf8");
+			controller.recordToolExecutionEnd("ipython", true);
+			expect(scratchWriteMarkers(entries)).toHaveLength(0);
+
+			controller.recordToolExecutionEnd("ipython", false);
+			expect(scratchWriteMarkers(entries)).toEqual([
+				expect.objectContaining({ data: { path: "agent/current.org" } }),
+			]);
+			controller.recordToolExecutionEnd("ipython", false);
+			expect(scratchWriteMarkers(entries)).toHaveLength(1);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("requires an existing checkpoint to change from its closeout baseline", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-scratch-handoff-"));
+		try {
+			const scratchPath = path.join(cwd, "agent/current.org");
+			await fs.mkdir(path.dirname(scratchPath), { recursive: true });
+			await fs.writeFile(scratchPath, "* TODO Previous\n- Objective: keep state\n", "utf8");
+			const entries: SessionEntry[] = [];
+			const controller = scratchControllerForTest(cwd, entries);
+			controller.stageCloseout("agent/current.org", undefined, "manual");
+
+			controller.recordToolExecutionEnd("ipython", false);
+			expect(scratchWriteMarkers(entries)).toHaveLength(0);
+			await fs.writeFile(scratchPath, "* TODO Current\n- Objective: updated state\n", "utf8");
+			controller.recordToolExecutionEnd("ipython", false);
+			expect(scratchWriteMarkers(entries)).toEqual([
+				expect.objectContaining({ data: { path: "agent/current.org" } }),
+			]);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+});
 
 describe("scratch handoff path selection", () => {
 	it("reuses the latest persisted scratch path for a resumed successor session", () => {
@@ -388,7 +468,7 @@ describe("scratch handoff prompt", () => {
 			expect(context?.prompt).toContain("Scratch = bounded current-state checkpoint");
 			expect(context?.prompt).toContain("exactly one root `* TODO`");
 			expect(context?.prompt).toContain("NEVER replay full stack");
-			expect(context?.prompt).toContain("do not duplicate it in todo tool");
+			expect(context?.prompt).toContain("do not duplicate it in `omp.harness.todo`");
 			expect(context?.prompt).toContain("No update needed? Leave unchanged");
 			const synthetic = renderScratchHandoffSyntheticRead(context!);
 			expect(synthetic).toContain("No scratch checkpoint exists yet");
@@ -420,17 +500,21 @@ describe("scratch handoff prompt", () => {
 		}
 	}, 15_000);
 
-	it("forces edit for existing checkpoints and write only for lazy creation", () => {
-		const editPrompt = renderScratchHandoffCloseoutMessage("agent/current.org");
+	it("uses one pathlib IPython cell for creation and updates", () => {
+		const updatePrompt = renderScratchHandoffCloseoutMessage("agent/current.org");
 		const createPrompt = renderScratchHandoffCloseoutMessage("agent/current.org", true);
 
-		expect(editPrompt).toContain("PENCILS DOWN");
-		expect(editPrompt).toContain("edit `agent/current.org` using the `edit` tool");
-		expect(editPrompt).toContain("NEVER clear, recreate, rename, or replace");
-		expect(editPrompt).toContain("exactly one active `* TODO`");
-		expect(editPrompt).toContain("Remove completed-history subtrees");
-		expect(editPrompt).toContain("END TURN immediately");
-		expect(createPrompt).toContain("create `agent/current.org` using the `write` tool");
+		expect(updatePrompt).toContain("PENCILS DOWN");
+		expect(updatePrompt).toContain("one `ipython {code}` cell");
+		expect(updatePrompt).toContain("`from pathlib import Path`");
+		expect(updatePrompt).toContain('`scratch = Path("agent/current.org")`');
+		expect(updatePrompt).toContain('`scratch.write_text(..., encoding="utf-8")`');
+		expect(updatePrompt).toContain("exactly one active `* TODO`");
+		expect(updatePrompt).toContain("Remove completed-history subtrees");
+		expect(updatePrompt).toContain("END TURN immediately");
+		expect(updatePrompt).not.toContain("`edit` tool");
+		expect(createPrompt).toContain("to create that exact path");
+		expect(createPrompt).not.toContain("`write` tool");
 	});
 
 	it("resumes with judgment instead of replaying historical skills", () => {
@@ -464,7 +548,7 @@ describe("scratch handoff prompt", () => {
 		expect(countTokens(preview.text)).toBeLessThanOrEqual(256);
 		expect(preview.text).toContain("preserve beginning");
 		expect(message).toContain("Only checkpoint beginning is injected");
-		expect(message).toContain("Read `agent/current.org` only if");
+		expect(message).toContain("`ipython {code}` cell with `pathlib.Path` to read `agent/current.org` only if");
 	});
 });
 

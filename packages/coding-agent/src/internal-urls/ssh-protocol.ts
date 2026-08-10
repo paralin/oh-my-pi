@@ -3,7 +3,7 @@
  *
  * Resolves a remote text file or directory listing on a pre-configured SSH host — or any
  * destination OpenSSH can resolve itself (e.g. a `~/.ssh/config` alias) — for
- * the read, search, and write tools, reusing the shared ControlMaster
+ * workspace reads and searches, reusing the shared ControlMaster
  * connection in `../ssh/connection-manager`.
  *
  * A remote path resolves to a UTF-8 text file (≤ 1 MiB) or, when it is a
@@ -28,17 +28,9 @@ import {
 	type RemotePathKind,
 	readRemoteFile,
 	statRemotePath,
-	writeRemoteFile,
 } from "../ssh/file-transfer";
 import { isMarkdownPath } from "../utils/lang-from-path";
-import type {
-	InternalResource,
-	InternalUrl,
-	ProtocolHandler,
-	ResolveContext,
-	UrlCompletion,
-	WriteContext,
-} from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /** Largest remote text file `ssh://` will materialize (mirrors the local:// cap). */
 const SSH_TEXT_MAX_BYTES = 1024 * 1024;
@@ -358,11 +350,5 @@ export class SshProtocolHandler implements ProtocolHandler {
 			label: host.name,
 			description: host.description ?? hostAddress(host),
 		}));
-	}
-
-	async write(url: InternalUrl, content: string, context?: WriteContext): Promise<void> {
-		const target = await resolveTarget(url, context?.cwd);
-		const remotePath = remotePathFromUrl(url);
-		await writeRemoteFile(target, remotePath, new TextEncoder().encode(content), { signal: context?.signal });
 	}
 }

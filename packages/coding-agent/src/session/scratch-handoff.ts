@@ -11,6 +11,7 @@ import scratchHandoffResumeTemplate from "../prompts/system/scratch-handoff-resu
 
 import { resolveToCwd } from "../tools/path-utils";
 
+import { projectIpythonJournalSummaryMessage } from "./ipython-summary";
 import { createCustomMessage } from "./messages";
 import type { SessionEntry } from "./session-entries";
 
@@ -24,9 +25,9 @@ export interface ScratchHandoffSettings {
 }
 
 export interface ScratchHandoffContext {
-	/** Path the agent should use in tool calls. */
+	/** Path the agent should use in IPython cells. */
 	displayPath: string;
-	/** Absolute path used by the runtime to create/read the file. */
+	/** Absolute path used by the runtime to read the file. */
 	absolutePath: string;
 	/** Developer instruction block appended to the system prompt. */
 	prompt: string;
@@ -208,13 +209,15 @@ function sessionEntryMessage(entry: SessionEntry): AgentMessage | undefined {
 	if (entry.type === "message") return entry.message;
 	if (entry.type !== "custom_message") return undefined;
 	if (entry.customType === SCRATCH_HANDOFF_READ_CUSTOM_TYPE) return undefined;
-	return createCustomMessage(
-		entry.customType,
-		entry.content,
-		entry.display,
-		entry.details,
-		entry.timestamp,
-		entry.attribution,
+	return projectIpythonJournalSummaryMessage(
+		createCustomMessage(
+			entry.customType,
+			entry.content,
+			entry.display,
+			entry.details,
+			entry.timestamp,
+			entry.attribution,
+		),
 	);
 }
 
@@ -440,7 +443,6 @@ export function renderScratchHandoffCloseoutMessage(displayPath: string, create 
 	return prompt.render(scratchHandoffCloseoutTemplate, {
 		displayPath,
 		create,
-		toolName: create ? "write" : "edit",
 	});
 }
 

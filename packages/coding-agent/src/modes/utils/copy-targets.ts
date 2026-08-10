@@ -1,5 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
+import type { IpythonCellJournalDetail } from "../../ipython/journal";
+import { renderIpythonJournalText } from "../../ipython/journal";
 
 /** A fenced code block extracted from assistant markdown. */
 export interface CodeBlock {
@@ -20,9 +22,9 @@ export type MessageBlock = ({ kind: "code" } & CodeBlock) | ({ kind: "quote" } &
 
 /** A runnable command found in the transcript. */
 export interface LastCommand {
-	kind: "bash" | "eval";
+	kind: "bash";
 	code: string;
-	/** Highlight language: "bash" for bash, or the resolved eval language ("python"/"javascript"/"ruby"/"julia"). */
+	/** Highlight language. */
 	language: string;
 }
 
@@ -53,6 +55,7 @@ export interface CopyTarget {
 export interface CopySource {
 	readonly messages: readonly AgentMessage[];
 	getLastVisibleHandoffText(): string | undefined;
+	getIpythonCellJournalDetails?(limit?: number): readonly IpythonCellJournalDetail[];
 }
 
 /** Cap on how many recent assistant messages the picker lists. */
@@ -137,46 +140,14 @@ export function extractQuoteBlocks(text: string): QuoteBlock[] {
 		.map(b => ({ text: b.text }));
 }
 
-function extractEvalCode(args: unknown): { code: string; language: string } | undefined {
-	if (!args || typeof args !== "object") return undefined;
-	const argsObj = args as { cells?: unknown; code?: unknown };
-	const cells = Array.isArray(argsObj.cells)
-		? argsObj.cells
-		: typeof argsObj.code === "string"
-			? [argsObj]
-			: undefined;
-	if (!cells) return undefined;
-
-	const codeBlocks: string[] = [];
-	let language = "python";
-	let languageResolved = false;
-	for (const cell of cells) {
-		if (!cell || typeof cell !== "object") continue;
-		const code = (cell as { code?: unknown }).code;
-		if (typeof code !== "string" || code.length === 0) continue;
-		codeBlocks.push(code);
-		if (!languageResolved) {
-			const lang = (cell as { language?: unknown }).language;
-			language = lang === "js" ? "javascript" : lang === "rb" ? "ruby" : lang === "jl" ? "julia" : "python";
-			languageResolved = true;
-		}
-	}
-
-	return codeBlocks.length > 0 ? { code: codeBlocks.join("\n\n"), language } : undefined;
-}
-
 function commandFromToolCall(tc: ToolCall): LastCommand | undefined {
 	if (tc.name === "bash" && typeof tc.arguments.command === "string") {
 		return { kind: "bash", code: tc.arguments.command, language: "bash" };
 	}
-	if (tc.name === "eval") {
-		const evalResult = extractEvalCode(tc.arguments);
-		if (evalResult) return { kind: "eval", code: evalResult.code, language: evalResult.language };
-	}
 	return undefined;
 }
 
-/** Walk the transcript backwards for the most recent bash command or eval code. */
+/** Walk the transcript backwards for the most recent bash command. */
 export function extractLastCommand(messages: readonly AgentMessage[]): LastCommand | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
@@ -299,12 +270,12 @@ function messageTarget(text: string, rank: number): CopyTarget {
 	return { id, label, hint, preview: text, content: text, copyMessage: messageCopy, children };
 }
 
-function commandTitle(command: LastCommand): string {
-	return command.kind === "bash" ? "Bash command" : "Eval code";
+function commandTitle(): string {
+	return "Bash command";
 }
 
 function commandTarget(command: LastCommand, rank: number): CopyTarget {
-	const title = commandTitle(command);
+	const title = commandTitle();
 	return {
 		id: `cmd:${rank}`,
 		label: firstLine(command.code) || title,
@@ -316,6 +287,76 @@ function commandTarget(command: LastCommand, rank: number): CopyTarget {
 	};
 }
 
+function ipythonDiffs(detail: IpythonCellJournalDetail): Array<{ path: string; diff: string }> {
+	const diffs: Array<{ path: string; diff: string }> = [];
+	for (const event of detail.events) {
+		if (event.kind !== "display" && event.kind !== "result") continue;
+		const value = event.data["application/vnd.omp.diff+json"];
+		if (typeof value !== "object" || value === null) continue;
+		const path = Reflect.get(value, "path");
+		const diff = Reflect.get(value, "diff");
+		if (typeof path === "string" && path && typeof diff === "string" && diff) diffs.push({ path, diff });
+	}
+	return diffs;
+}
+
+function ipythonCellTarget(detail: IpythonCellJournalDetail, rank: number): CopyTarget {
+	const id = `cell:${detail.cellId}`;
+	const children: CopyTarget[] = [
+		{
+			id: `${id}:code`,
+			label: "Python code",
+			hint: pluralLines(detail.code),
+			preview: detail.code,
+			language: "python",
+			content: detail.code,
+			copyMessage: `Copied IPython cell ${detail.sequence} code to clipboard`,
+		},
+	];
+	if (detail.safeText) {
+		children.push({
+			id: `${id}:output`,
+			label: "Safe output",
+			hint: pluralLines(detail.safeText),
+			preview: detail.safeText,
+			content: detail.safeText,
+			copyMessage: `Copied IPython cell ${detail.sequence} output to clipboard`,
+		});
+	}
+	for (const [index, diff] of ipythonDiffs(detail).entries()) {
+		children.push({
+			id: `${id}:diff:${index}`,
+			label: `Diff: ${diff.path}`,
+			hint: pluralLines(diff.diff),
+			preview: diff.diff,
+			language: "diff",
+			content: diff.diff,
+			copyMessage: `Copied IPython cell ${detail.sequence} diff to clipboard`,
+		});
+	}
+	if (detail.artifacts.length > 0) {
+		const paths = detail.artifacts.map(artifact => artifact.path).join("\n");
+		children.push({
+			id: `${id}:artifacts`,
+			label: "Artifact references",
+			hint: `${detail.artifacts.length} artifact${detail.artifacts.length === 1 ? "" : "s"}`,
+			preview: paths,
+			content: paths,
+			copyMessage: `Copied IPython cell ${detail.sequence} artifact references to clipboard`,
+		});
+	}
+	const rendered = renderIpythonJournalText(detail);
+	return {
+		id,
+		label: `In [${detail.sequence}] ${detail.status}`,
+		hint: `${detail.origin} · ${detail.durationMs}ms · ${pluralLines(rendered)}`,
+		preview: rendered,
+		content: rendered,
+		copyMessage: rank === 1 ? "Copied last IPython cell to clipboard" : "Copied IPython cell to clipboard",
+		children,
+	};
+}
+
 /**
  * Assemble the unified `/copy` target tree: recent assistant messages
  * (most recent first, each drillable into its code blocks), runnable command
@@ -324,6 +365,10 @@ function commandTarget(command: LastCommand, rank: number): CopyTarget {
  */
 export function buildCopyTargets(source: CopySource): CopyTarget[] {
 	const targets: CopyTarget[] = [];
+	const cells = source.getIpythonCellJournalDetails?.(MAX_MESSAGES) ?? [];
+	for (let index = cells.length - 1, rank = 1; index >= 0 && rank <= MAX_MESSAGES; index--, rank++) {
+		targets.push(ipythonCellTarget(cells[index]!, rank));
+	}
 	const pendingCommands: LastCommand[] = [];
 	let messageRank = 0;
 	let commandRank = 0;

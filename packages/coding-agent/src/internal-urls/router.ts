@@ -1,5 +1,5 @@
 /**
- * Internal URL router for internal protocols (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`).
+ * Internal URL router for internal protocols (`agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, and `vault://`).
  *
  * One process-global router with one handler per scheme. Access via
  * `InternalUrlRouter.instance()`. Handlers are stateless; per-session and
@@ -21,16 +21,8 @@ import { SecurityProtocolHandler } from "./security-protocol";
 import { SkillProtocolHandler } from "./skill-protocol";
 import { SpacewaveProtocolHandler } from "./spacewave-protocol";
 import { SshProtocolHandler } from "./ssh-protocol";
-import type {
-	InternalResource,
-	InternalUrl,
-	ProtocolHandler,
-	ResolveContext,
-	UrlCompletion,
-	WriteContext,
-} from "./types";
+import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 import { VaultProtocolHandler } from "./vault-protocol";
-import { XdProtocolHandler } from "./xd-protocol";
 
 export class InternalUrlRouter {
 	static #instance: InternalUrlRouter | undefined;
@@ -54,7 +46,6 @@ export class InternalUrlRouter {
 		this.register(new PrProtocolHandler());
 		this.register(new HistoryProtocolHandler());
 		this.register(new SshProtocolHandler());
-		this.register(new XdProtocolHandler());
 		// Registered only where it can resolve, and bound to one client for the
 		// life of this router. `create` dials nothing and returns undefined when
 		// no socket is configured, so an unconfigured root simply has no
@@ -161,15 +152,5 @@ export class InternalUrlRouter {
 		const { parsed, handler } = this.#route(input, true);
 		const resource = await handler.resolve(parsed, context);
 		return { ...resource, immutable: resource.immutable ?? handler.immutable };
-	}
-
-	/** Write an internal URL through its registered protocol handler. */
-	async write(input: string, content: string, context?: WriteContext): Promise<void> {
-		const { parsed, handler } = this.#route(input);
-		if (!handler.write) {
-			const scheme = parsed.protocol.replace(/:$/, "").toLowerCase();
-			throw new Error(`${scheme}:// URLs are read-only for write; use the protocol-specific tool for mutations.`);
-		}
-		await handler.write(parsed, content, context);
 	}
 }

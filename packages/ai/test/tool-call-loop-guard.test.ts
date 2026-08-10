@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { ToolCallLoopGuard } from "@oh-my-pi/pi-ai/utils/tool-call-loop-guard";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 
 const zeroUsage = {
 	input: 0,
@@ -53,15 +52,13 @@ describe("ToolCallLoopGuard", () => {
 		});
 	});
 
-	test("canonicalizes argument key order and ignores harness intent fields", () => {
+	test("canonicalizes argument key order", () => {
 		const guard = new ToolCallLoopGuard({ threshold: 2, exemptTools: [] });
 		expect(
 			guard.recordTurn({
 				message: {
 					role: "assistant",
-					content: [
-						{ type: "toolCall", id: "first", name: "read", arguments: { path: "a.ts", [INTENT_FIELD]: "first" } },
-					],
+					content: [{ type: "toolCall", id: "first", name: "read", arguments: { path: "a.ts", line: 1 } }],
 					api: "openai-responses",
 					provider: "openai",
 					model: "test-model",
@@ -90,7 +87,7 @@ describe("ToolCallLoopGuard", () => {
 							type: "toolCall",
 							id: "second",
 							name: "read",
-							arguments: { [INTENT_FIELD]: "second", path: "a.ts" },
+							arguments: { line: 1, path: "a.ts" },
 						},
 					],
 					api: "openai-responses",

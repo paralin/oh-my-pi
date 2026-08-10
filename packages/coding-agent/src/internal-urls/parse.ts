@@ -16,9 +16,9 @@ const PATHNAME_RE = /^[a-z][a-z0-9+.-]*:\/\/[^/?#]*(\/[^?#]*)?/i;
 // Opaque URI form (`urn:example:document`, `custom:item`) — an RFC 3986 scheme
 // followed by `:` without `//`. Guarded separately in `extractUriScheme`.
 const OPAQUE_URI_RE = /^([a-z][a-z0-9+.-]*):(.+)$/is;
-// A read-tool selector chain (`12`, `1-20,30+5`, `raw`, `raw:2-4`, `conflicts`)
+// A workspace read-service selector chain (`12`, `1-20,30+5`, `raw`, `raw:2-4`)
 // so `Makefile:12` or `notes:raw` is not mistaken for an opaque URI.
-const SELECTOR_CHUNK_SRC = String.raw`(?:raw|conflicts|-?\d+(?:[-+]\d+)?(?:,\d+(?:[-+]\d+)?)*)`;
+const SELECTOR_CHUNK_SRC = String.raw`(?:raw|-?\d+(?:[-+]\d+)?(?:,\d+(?:[-+]\d+)?)*)`;
 const SELECTOR_CHAIN_RE = new RegExp(`^${SELECTOR_CHUNK_SRC}(?::${SELECTOR_CHUNK_SRC})*$`, "i");
 
 /**
@@ -30,7 +30,7 @@ const SELECTOR_CHAIN_RE = new RegExp(`^${SELECTOR_CHUNK_SRC}(?::${SELECTOR_CHUNK
  * The opaque form is guarded against path-like false positives:
  * - Windows drive paths (`C:\…`, `C:/…`, `C:foo`) — single-letter scheme.
  * - Filenames with extensions (`foo.ts:50`) — dot in the scheme segment.
- * - Read-tool selector tails (`Makefile:12`, `README:raw:1-20`).
+ * - Workspace read-service selector tails (`Makefile:12`, `README:raw:1-20`).
  */
 export function extractUriScheme(input: string): string | undefined {
 	const hierarchical = input.match(SCHEME_HOST_RE);

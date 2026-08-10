@@ -1,6 +1,6 @@
 /**
  * Markdown structure awareness for the magic-keyword affordances
- * ("ultrathink"/"orchestrate"/"workflowz").
+ * ("ultrathink"/"orchestrate").
  *
  * Keyword detection and editor/transcript highlighting must fire only on prose
  * the user is actually addressing to the model — never on a word that happens to

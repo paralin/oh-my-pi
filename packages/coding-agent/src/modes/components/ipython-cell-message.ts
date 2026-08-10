@@ -1,8 +1,16 @@
 import { Container, Text } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { IpythonMimeRenderer } from "../../extensibility/extensions/types";
 import type { IpythonCellUpdate } from "../../ipython/cell";
-import type { IpythonExecutionEvent } from "../../ipython/controller";
+import { collectIpythonMimeItems } from "../../ipython/extension-registry";
 import type { IpythonCellJournalDetail, IpythonJournalDetail } from "../../ipython/journal";
+import {
+	type IpythonCellPresentation,
+	projectIpythonCellPresentation,
+	projectIpythonLiveCellPresentation,
+} from "../../ipython/projection";
+import type { ActProjectionEvent } from "../../session/act-events";
+import { shortenPath, truncateToWidth } from "../../tools/render-utils";
 import { highlightCode, theme } from "../theme/theme";
 
 const COLLAPSED_OUTPUT_LINES = 20;
@@ -10,8 +18,7 @@ const COLLAPSED_CODE_LINES = 12;
 const MAX_DISPLAY_LINE_CHARS = 4_000;
 
 function clampLine(line: string): string {
-	if (line.length <= MAX_DISPLAY_LINE_CHARS) return line;
-	return `${line.slice(0, MAX_DISPLAY_LINE_CHARS)}… [${line.length - MAX_DISPLAY_LINE_CHARS} chars omitted]`;
+	return truncateToWidth(line, MAX_DISPLAY_LINE_CHARS);
 }
 
 function statusLabel(detail: IpythonCellJournalDetail): string {
@@ -29,26 +36,17 @@ export interface IpythonLiveCellView {
 	readonly origin: "model" | "direct";
 }
 
-function safeEventText(event: IpythonExecutionEvent): string {
-	if (event.kind === "stream") return sanitizeText(event.text);
-	if (event.kind === "display") return sanitizeText(event.text);
-	if (event.kind === "host_progress") return sanitizeText(`[${event.operation}] ${event.message}`);
-	if (event.kind === "error") {
-		return sanitizeText(event.traceback.length > 0 ? event.traceback.join("\n") : `${event.ename}: ${event.evalue}`);
-	}
-	const plain = event.data["text/plain"];
-	if (typeof plain === "string") return sanitizeText(plain);
-	const mimeTypes = Object.keys(event.data).sort();
-	return mimeTypes.length > 0 ? `[result MIME types: ${mimeTypes.join(", ")}]` : "[result data]";
-}
-
 /** Renders live or replayed IPython journal details without evaluating rich MIME data. */
 export class IpythonCellMessageComponent extends Container {
 	readonly #live: { code: string; origin: "model" | "direct"; updates: IpythonCellUpdate[] } | undefined;
 	#detail: IpythonJournalDetail | undefined;
 	#expanded = false;
+	readonly #actEvents = new Map<string, ActProjectionEvent[]>();
 
-	constructor(detail: IpythonJournalDetail | IpythonLiveCellView) {
+	constructor(
+		detail: IpythonJournalDetail | IpythonLiveCellView,
+		readonly getMimeRenderer?: (mimeType: string) => IpythonMimeRenderer | undefined,
+	) {
 		super();
 		if ("version" in detail) this.#detail = detail;
 		else this.#live = { ...detail, updates: [] };
@@ -63,6 +61,14 @@ export class IpythonCellMessageComponent extends Container {
 
 	complete(detail: IpythonCellJournalDetail): void {
 		this.#detail = detail;
+		this.#rebuild();
+	}
+
+	appendActEvent(event: ActProjectionEvent): void {
+		const events = this.#actEvents.get(event.actId) ?? [];
+		if (events.some(entry => entry.sequence >= event.sequence)) return;
+		events.push(event);
+		this.#actEvents.set(event.actId, events);
 		this.#rebuild();
 	}
 
@@ -100,9 +106,10 @@ export class IpythonCellMessageComponent extends Container {
 			return;
 		}
 
-		const origin = detail.origin === "direct" ? "direct" : "model";
-		const heading = `${theme.fg("pythonMode", theme.bold(`In [${detail.sequence}]`))} ${theme.fg("muted", `· ${origin} · `)}${statusLabel(detail)}${theme.fg("muted", ` · ${durationLabel(detail.durationMs)}`)}`;
-		const codeLines = highlightCode(sanitizeText(detail.code), "python");
+		const presentation = projectIpythonCellPresentation(detail);
+		const origin = presentation.origin === "direct" ? "direct" : "model";
+		const heading = `${theme.fg("pythonMode", theme.bold(`In [${presentation.sequence}]`))} ${theme.fg("muted", `· ${origin} · `)}${statusLabel(detail)}${theme.fg("muted", ` · ${durationLabel(presentation.durationMs)}`)}`;
+		const codeLines = highlightCode(sanitizeText(presentation.code), "python");
 		const shownCode = this.#expanded ? codeLines : codeLines.slice(0, COLLAPSED_CODE_LINES);
 		const codeOmitted = codeLines.length - shownCode.length;
 		const code = shownCode
@@ -116,7 +123,7 @@ export class IpythonCellMessageComponent extends Container {
 			),
 		);
 
-		const cleanOutput = sanitizeText(detail.safeText);
+		const cleanOutput = sanitizeText(presentation.safeText.text);
 		const outputLines = cleanOutput ? cleanOutput.split("\n").map(clampLine) : [];
 		const shownOutput = this.#expanded ? outputLines : outputLines.slice(-COLLAPSED_OUTPUT_LINES);
 		const outputOmitted = outputLines.length - shownOutput.length;
@@ -126,12 +133,12 @@ export class IpythonCellMessageComponent extends Container {
 		}
 
 		if (this.#expanded) {
-			const progress = detail.updates
-				.filter(update => update.kind === "startup")
-				.map(update => `${update.progress.stage}: ${sanitizeText(update.progress.message)}`);
-			const artifacts = detail.artifacts.map(artifact => {
+			const progress = presentation.startupProgress.map(
+				update => `${update.stage}: ${sanitizeText(update.message)}`,
+			);
+			const artifacts = presentation.artifacts.map(artifact => {
 				const type = artifact.mimeType ? ` (${artifact.mimeType})` : "";
-				return `${sanitizeText(artifact.label ?? artifact.path)}${type}`;
+				return `${sanitizeText(artifact.label ?? shortenPath(artifact.path))}${type}`;
 			});
 			const metadata = [
 				...progress.map(message => `startup · ${message}`),
@@ -141,11 +148,13 @@ export class IpythonCellMessageComponent extends Container {
 				this.addChild(new Text(`\n${metadata.map(line => theme.fg("dim", line)).join("\n")}`, 1, 0));
 		}
 
-		if (detail.safeTextTruncated) {
+		if (presentation.safeText.truncated) {
 			this.addChild(
-				new Text(theme.fg("warning", `\nOutput truncated from ${detail.totalOutputBytes} bytes.`), 1, 0),
+				new Text(theme.fg("warning", `\nOutput truncated from ${presentation.safeText.totalBytes} bytes.`), 1, 0),
 			);
 		}
+		this.#appendMimeComponents(presentation);
+		this.#rebuildActs();
 	}
 
 	#rebuildLive(): void {
@@ -158,10 +167,8 @@ export class IpythonCellMessageComponent extends Container {
 			.map((line, index) => `${theme.fg("pythonMode", index === 0 ? ">>>" : "...")} ${clampLine(line)}`)
 			.join("\n");
 		this.addChild(new Text(`${heading}\n${code}`, 1, 0));
-		const records = live.updates.flatMap(update =>
-			update.kind === "execution" ? [safeEventText(update.event)] : [],
-		);
-		const outputLines = sanitizeText(records.join("\n"))
+		const presentation = projectIpythonLiveCellPresentation(live);
+		const outputLines = sanitizeText(presentation.safeText.text)
 			.split("\n")
 			.map(clampLine)
 			.filter((line, index, lines) => line.length > 0 || index < lines.length - 1);
@@ -169,11 +176,76 @@ export class IpythonCellMessageComponent extends Container {
 		if (shownOutput.length > 0) {
 			this.addChild(new Text(`\n${shownOutput.map(line => theme.fg("muted", line)).join("\n")}`, 1, 0));
 		}
-		const progress = live.updates.filter(update => update.kind === "startup").at(-1);
-		if (progress?.kind === "startup") {
-			this.addChild(
-				new Text(theme.fg("dim", `\n${progress.progress.stage}: ${sanitizeText(progress.progress.message)}`), 1, 0),
-			);
+		const progress = presentation.startupProgress.at(-1);
+		if (progress) {
+			this.addChild(new Text(theme.fg("dim", `\n${progress.stage}: ${sanitizeText(progress.message)}`), 1, 0));
+		}
+		this.#appendMimeComponents(presentation);
+		this.#rebuildActs();
+	}
+
+	#appendMimeComponents(presentation: IpythonCellPresentation): void {
+		if (!this.getMimeRenderer) return;
+		for (const item of collectIpythonMimeItems(presentation)) {
+			try {
+				const renderer = this.getMimeRenderer(item.mimeType);
+				if (!renderer) continue;
+				const component = renderer({ presentation, item, safeText: presentation.safeText, theme });
+				if (component) this.addChild(component);
+			} catch {
+				// The shared safe-text projection remains visible when an extension renderer fails.
+			}
+		}
+	}
+
+	#rebuildActs(): void {
+		for (const events of this.#actEvents.values()) {
+			const lines: string[] = [];
+			for (const event of events) {
+				switch (event.event) {
+					case "start":
+						lines.push(
+							theme.fg("accent", `Act · ${sanitizeText(event.model.name?.trim() || event.model.id)} · running`),
+						);
+						break;
+					case "assistant_delta":
+						lines.push(
+							theme.fg(event.stream === "thinking" ? "dim" : "muted", clampLine(sanitizeText(event.text))),
+						);
+						break;
+					case "cell_start":
+						lines.push(
+							theme.fg(
+								"pythonMode",
+								`cell ${sanitizeText(event.cellId)} >>> ${clampLine(sanitizeText(event.code))}`,
+							),
+						);
+						break;
+					case "cell_terminal": {
+						const output = [event.stdout, event.stderr, event.result, event.error]
+							.filter((value): value is string => typeof value === "string" && value.length > 0)
+							.map(value => clampLine(sanitizeText(value)))
+							.join(" · ");
+						lines.push(
+							theme.fg(
+								event.status === "ok" ? "success" : event.status === "cancelled" ? "warning" : "error",
+								`cell ${sanitizeText(event.cellId)} · ${event.status}${output ? ` · ${output}` : ""}`,
+							),
+						);
+						break;
+					}
+					case "terminal":
+						lines.push(
+							theme.fg(
+								event.status === "done" ? "success" : event.status === "cancelled" ? "warning" : "error",
+								`Act · ${event.status}${event.error ? ` · ${clampLine(sanitizeText(event.error))}` : ""}`,
+							),
+						);
+						break;
+				}
+			}
+			const shown = this.#expanded ? lines : lines.slice(-COLLAPSED_OUTPUT_LINES);
+			if (shown.length > 0) this.addChild(new Text(`\n${shown.join("\n")}`, 2, 0));
 		}
 	}
 }

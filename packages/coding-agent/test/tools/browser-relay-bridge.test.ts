@@ -1,10 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { RelayBridge, type RelaySocket } from "@oh-my-pi/pi-coding-agent/tools/browser/relay/bridge";
-import type {
-	RelayRpcRequest,
-	RelayToExtMessage,
-	TabSnapshot,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/relay/protocol";
+import { RelayBridge, type RelaySocket } from "../../src/tools/browser/relay/bridge.js";
+import type { RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "../../src/tools/browser/relay/protocol.js";
 
 /** A relay→extension RPC narrowed to one op, tabIds/title/etc. included. */
 type ExtRpc<Op extends RelayRpcRequest["op"]> = { t: "rpc"; id: number } & Extract<RelayRpcRequest, { op: Op }>;

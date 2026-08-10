@@ -5,12 +5,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { zip } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 function makeSession(testDir: string): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
@@ -119,8 +119,8 @@ describe("read URL binary dispatch", () => {
 		const url = uniqueUrl("archive", ".zip");
 		stubUrlBytes(zipBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-zip", { path: url });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(url);
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("archive");
@@ -145,8 +145,8 @@ describe("read URL binary dispatch", () => {
 			error: "content-length 52428801 exceeds 52428800",
 		});
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-zip-too-large", { path: url });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(url);
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("binary");
@@ -160,8 +160,8 @@ describe("read URL binary dispatch", () => {
 		const url = uniqueUrl("data", ".db");
 		stubUrlBytes(sqliteBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-sqlite", { path: url });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(url);
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("sqlite");
@@ -174,8 +174,8 @@ describe("read URL binary dispatch", () => {
 		const url = uniqueUrl("notebook", ".ipynb");
 		stubUrlBytes(notebookBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-notebook", { path: url });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(url);
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("notebook");
@@ -190,8 +190,8 @@ describe("read URL binary dispatch", () => {
 		const url = uniqueUrl("payload", ".bin");
 		stubUrlBytes(binaryBytes, "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-binary", { path: url });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(url);
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("binary");
@@ -205,8 +205,8 @@ describe("read URL binary dispatch", () => {
 		const url = uniqueUrl("plain", ".txt");
 		const fetchBinarySpy = stubUrlText("plain UTF-8 text\nsecond line", "application/octet-stream");
 
-		const tool = new ReadTool(makeSession(testDir));
-		const result = await tool.execute("read-url-text-octet", { path: url });
+		const tool = new ReadService(makeSession(testDir));
+		const result = await tool.read(url);
 		const text = textOutput(result);
 
 		expect(result.details?.method).toBe("raw");

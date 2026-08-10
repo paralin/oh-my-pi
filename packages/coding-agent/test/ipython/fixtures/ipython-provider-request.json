@@ -1,0 +1,55 @@
+{
+  "fixtureVersion": 1,
+  "provider": "anthropic-messages",
+  "categories": {
+    "fixedOmp": {
+      "bytes": 897,
+      "tokens": 225
+    },
+    "generatedOmp": {
+      "bytes": 185,
+      "tokens": 47
+    },
+    "projectAuthored": {
+      "bytes": 82,
+      "tokens": 21
+    },
+    "projectContextEnvelope": {
+      "bytes": 315,
+      "tokens": 79
+    },
+    "providerWrapper": {
+      "bytes": 99,
+      "tokens": 25
+    },
+    "toolSchemas": {
+      "bytes": 227,
+      "tokens": 57
+    }
+  },
+  "totalFirstRequest": {
+    "bytes": 2051,
+    "tokens": 513
+  },
+  "bodySha256": "4fee87b4436e09335175cf206dbf291d0821678ff3fc06402c4358242700336e",
+  "systemPromptParts": 3,
+  "toolNames": [
+    "ipython"
+  ],
+  "toolSchema": {
+    "type": "object",
+    "properties": {
+      "code": {
+        "type": "string"
+      }
+    },
+    "required": [
+      "code"
+    ],
+    "additionalProperties": false
+  },
+  "toolConcurrency": "exclusive",
+  "projectContextIndex": 1,
+  "runtimeInstructionIndex": 0,
+  "volatileNoticeIndex": 2
+}

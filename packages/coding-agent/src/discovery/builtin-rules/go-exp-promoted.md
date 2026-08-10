@@ -3,7 +3,7 @@ description: "Use the standard library slices and maps packages instead of golan
 condition:
   - '"golang.org/x/exp/slices"'
   - '"golang.org/x/exp/maps"'
-scope: "tool:edit(*.go), tool:write(*.go)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

@@ -4,7 +4,7 @@ condition:
   - "\\.lock\\(\\)\\.unwrap\\(\\)"
   - "\\.read\\(\\)\\.unwrap\\(\\)"
   - "\\.write\\(\\)\\.unwrap\\(\\)"
-scope: "tool:edit(*.rs), tool:write(*.rs)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

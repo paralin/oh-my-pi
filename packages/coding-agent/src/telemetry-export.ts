@@ -42,6 +42,9 @@ import { BatchLogRecordProcessor, LoggerProvider } from "@opentelemetry/sdk-logs
 import { MeterProvider, PeriodicExportingMetricReader } from "@opentelemetry/sdk-metrics";
 import { BatchSpanProcessor } from "@opentelemetry/sdk-trace-base";
 import { NodeTracerProvider } from "@opentelemetry/sdk-trace-node";
+import type { IpythonCompletedCellPresentation } from "./ipython/projection";
+import { createIpythonCellTelemetryRecord, type IpythonCellTelemetryRecord } from "./ipython/telemetry";
+import type { ActProjectionEvent } from "./session/act-events";
 
 /**
  * Periodic flush interval. A long-lived `omp` process (the ACP server is
@@ -125,6 +128,61 @@ export function createTelemetryExportConfig(
 			emitTelemetryWarningLog(warning);
 		},
 	};
+}
+
+/** Record one admitted model cell as the provider-level =ipython= tool. */
+export function recordIpythonCellTelemetry(
+	presentation: IpythonCompletedCellPresentation,
+): IpythonCellTelemetryRecord | undefined {
+	if (presentation.origin !== "model") return undefined;
+	const record = createIpythonCellTelemetryRecord(presentation);
+	metricRecorder?.recordIpythonCell(record);
+	emitOtelLog(
+		"info",
+		"IPython cell completed",
+		{
+			"gen_ai.tool.name": record.toolName,
+			"pi.omp.tool.status": record.status,
+			"pi.omp.agent.tool.duration_ms": record.durationMs,
+			"pi.omp.ipython.capability_operations":
+				record.capabilityOperations.length > 0 ? record.capabilityOperations.join(",") : undefined,
+		},
+		"pi.omp.ipython.cell.completed",
+	);
+	return record;
+}
+
+export interface ActTelemetryRecord {
+	readonly status: "done" | "cancelled" | "error";
+	readonly model: { readonly provider: string; readonly id: string };
+	readonly usage: Extract<ActProjectionEvent, { event: "terminal" }>["usage"];
+}
+
+/** Project one terminal Act into telemetry-safe status, model, and usage facets. */
+export function createActTelemetryRecord(
+	event: Extract<ActProjectionEvent, { event: "terminal" }>,
+): ActTelemetryRecord {
+	return { status: event.status, model: { provider: event.model.provider, id: event.model.id }, usage: event.usage };
+}
+
+/** Record one terminal Act without prompt, code, output, transcript, or return values. */
+export function recordActTelemetry(event: Extract<ActProjectionEvent, { event: "terminal" }>): ActTelemetryRecord {
+	const record = createActTelemetryRecord(event);
+	emitOtelLog(
+		"info",
+		"Act completed",
+		{
+			"pi.omp.act.status": record.status,
+			"pi.omp.act.model.provider": record.model.provider,
+			"pi.omp.act.model.id": record.model.id,
+			"gen_ai.usage.input_tokens": record.usage.input,
+			"gen_ai.usage.output_tokens": record.usage.output,
+			"pi.omp.act.usage.total_tokens": record.usage.totalTokens,
+			"pi.omp.act.usage.cost": record.usage.cost.total,
+		},
+		"pi.omp.act.completed",
+	);
+	return record;
 }
 
 /**
@@ -326,6 +384,18 @@ class AgentMetricRecorder {
 		if (event.cost && "usd" in event.cost && event.cost.usd > 0) {
 			this.#chatCostUsd.add(event.cost.usd, baseAttrs);
 		}
+	}
+
+	recordIpythonCell(record: IpythonCellTelemetryRecord): void {
+		const status: ToolStatus = record.status;
+		const attributes = metricAttributes({
+			"gen_ai.tool.name": record.toolName,
+			"pi.omp.tool.status": status,
+			"pi.omp.ipython.capability_operations":
+				record.capabilityOperations.length > 0 ? record.capabilityOperations.join(",") : undefined,
+		});
+		this.#toolCalls.add(1, attributes);
+		this.#toolDurationMs.record(record.durationMs, attributes);
 	}
 
 	recordRun(summary: AgentRunSummary, coverage: AgentRunCoverage): void {

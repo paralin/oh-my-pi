@@ -39,9 +39,6 @@ class _FakeRpcClient:
     def install_headless_ui(self) -> None:
         pass
 
-    def on_tool_execution_end(self, _cb) -> None:
-        pass
-
     def on_message_update(self, _cb) -> None:
         pass
 
@@ -147,7 +144,7 @@ def _reset_fake() -> None:
 def _patch_worker(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("robomp.worker.RpcClient", _FakeRpcClient)
     monkeypatch.setattr("robomp.worker._AGENT_HOME_STAGE", tmp_path / "missing-agent-home-stage")
-    monkeypatch.setattr("robomp.worker.host_tools.build", lambda _b: ())
+    monkeypatch.setattr("robomp.worker.operations.operations", lambda _b: ())
     monkeypatch.setattr(
         "robomp.worker.persona.system_append",
         lambda *, repo, issue, workspace, bot_login: "SYS",
@@ -205,7 +202,7 @@ async def test_run_task_preserves_impl_authorized_when_resuming(
         captured["impl_authorized"] = bindings.impl_authorized
         return ()
 
-    monkeypatch.setattr(worker.host_tools, "build", capture_build)
+    monkeypatch.setattr(worker.operations, "operations", capture_build)
 
     result = await worker.run_task(
         task_kind="handle_comment",
@@ -215,7 +212,7 @@ async def test_run_task_preserves_impl_authorized_when_resuming(
 
     assert result == "ok"
     assert captured == {"impl_authorized": True}
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"][-1:] == ("--continue",)
 
 
 @pytest.mark.asyncio
@@ -232,7 +229,7 @@ async def test_run_rpc_passes_continue_when_session_jsonl_present(tmp_path: Path
         )
     finally:
         loop.close()
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ("--continue",)
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"][-1:] == ("--continue",)
 
 
 @pytest.mark.asyncio
@@ -255,7 +252,10 @@ async def test_run_rpc_omits_continue_when_session_empty(
         )
     finally:
         loop.close()
-    assert _FakeRpcClient.instances[0].kwargs["extra_args"] == ()
+    assert _FakeRpcClient.instances[0].kwargs["extra_args"][0:2] == (
+        "--extension",
+        str(Path(worker.__file__).parent / "agent_runtime" / "extension.ts"),
+    )
     client_kwargs = _FakeRpcClient.instances[0].kwargs
     assert client_kwargs["env"]["HOME"] == str(agent_home)
     assert client_kwargs["env"]["GITHUB_TOKEN"] == ""
@@ -386,7 +386,8 @@ async def test_run_rpc_uses_workspace_xdg_dirs_for_slot_without_chown(
         assert base.is_dir()
         assert (base / "omp").is_dir()
     assert Path(env["BUN_INSTALL_CACHE_DIR"]).is_dir()
-    assert chown_calls == []
+    assert len(chown_calls) == 2
+    assert chown_calls[0][1:] == (inputs.slot_uid, inputs.slot_uid)
 
 
 @pytest.mark.asyncio
@@ -607,13 +608,13 @@ def _make_inputs_with_classification(
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=True)
     row = _ClassifiedRow(classification) if classification else None
     inputs.db.get_issue = lambda _key: row  # type: ignore[attr-defined]
-    bindings.db = inputs.db  # tools_called check uses inputs.db.get_issue
+    bindings.db = inputs.db  # operations_called check uses inputs.db.get_issue
     return inputs, bindings
 
 
 @pytest.mark.asyncio
 async def test_run_rpc_sends_reminder_when_pr_class_quits_early(tmp_path: Path, settings: Settings) -> None:
-    """`bug` classified turn that never calls a terminal tool gets a reminder."""
+    """`bug` classified turn that never calls a terminal operation gets a reminder."""
     inputs, bindings = _make_inputs_with_classification(tmp_path, settings, classification="bug")
     loop = asyncio.new_event_loop()
     try:
@@ -630,56 +631,44 @@ async def test_run_rpc_sends_reminder_when_pr_class_quits_early(tmp_path: Path, 
     # kickoff + 2 reminders (default ROBOMP_TASK_COMPLETION_MAX_REMINDERS=2)
     assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
     assert fake.prompts[0] == "kickoff"
-    assert all("terminal action" in p.lower() or "open the pr" in p.lower() for p in fake.prompts[1:])
+    assert all("terminal operation" in p.lower() or "open the pr" in p.lower() for p in fake.prompts[1:])
 
 
-@pytest.mark.asyncio
-async def test_run_rpc_stops_reminding_after_terminal_tool(tmp_path: Path, settings: Settings) -> None:
-    """A reminder turn that fires `gh_open_pr` halts the loop."""
+def test_bridge_dispatcher_counts_successful_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: set[str] = set()
+    operation = worker.operations.Operation("gh_open_pr", lambda _args: None)
+    monkeypatch.setattr(worker.operations, "operations", lambda _b: {"gh_open_pr": operation})
+    dispatch = worker._bridge_dispatcher(SimpleNamespace(issue_key="acme/widgets#1"), called)  # type: ignore[arg-type]
+    assert dispatch("gh_open_pr", {}) is None
+    assert called == {"gh_open_pr"}
+
+
+def test_bridge_dispatcher_does_not_count_failed_operation(monkeypatch: pytest.MonkeyPatch) -> None:
+    called: set[str] = set()
+
+    def fail(_args):
+        raise worker.operations.OperationError("submit_pr_review", "rejected")
+
+    operation = worker.operations.Operation("submit_pr_review", fail)
+    monkeypatch.setattr(worker.operations, "operations", lambda _b: {"submit_pr_review": operation})
+    dispatch = worker._bridge_dispatcher(SimpleNamespace(issue_key="acme/widgets#1"), called)  # type: ignore[arg-type]
+    with pytest.raises(worker.operations.OperationError):
+        dispatch("submit_pr_review", {})
+    assert called == set()
+
+
+def test_completion_reminder_uses_bridge_operations(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, settings: Settings
+) -> None:
     inputs, bindings = _make_inputs_with_classification(tmp_path, settings, classification="bug")
-
-    # First turn returns with no terminal tool; first reminder causes the
-    # agent to "call" gh_open_pr — simulated by mutating the worker's
-    # tools_called set via the on_prompt hook on the next prompt.
-    def _on_prompt(client: _FakeRpcClient, prompt: str) -> None:
-        if len(client.prompts) == 2:  # this is the first reminder
-            # Mimic a tool_end firing during the reminder turn by writing
-            # into the closure set the driver tracks. We can't reach it
-            # directly; instead trip the abort path? No — use the public
-            # contract: tool_end fires through on_tool_execution_end. The
-            # driver registers the callback before prompt_and_wait, so we
-            # replay it here.
-            for cb in client._tool_end_callbacks:
-                cb(SimpleNamespace(tool_name="gh_open_pr", result={}, is_error=None))
-
-    # Capture the registered tool_end callback on the fake.
-    original_on_tool_end = _FakeRpcClient.on_tool_execution_end
-
-    def _record_tool_end(self, cb) -> None:
-        self._tool_end_callbacks = getattr(self, "_tool_end_callbacks", [])
-        self._tool_end_callbacks.append(cb)
-
-    _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
-    try:
-        _FakeRpcClient.on_prompt = staticmethod(_on_prompt)  # type: ignore[attr-defined]
-        loop = asyncio.new_event_loop()
-        try:
-            worker._run_rpc_blocking(
-                inputs,
-                task_kind="triage_issue",
-                prompt="kickoff",
-                loop=loop,
-                bindings=bindings,  # type: ignore[arg-type]
-            )
-        finally:
-            loop.close()
-    finally:
-        _FakeRpcClient.on_tool_execution_end = original_on_tool_end  # type: ignore[assignment]
-        delattr(_FakeRpcClient, "on_prompt")
-
-    fake = _FakeRpcClient.instances[0]
-    # kickoff + 1 reminder; second reminder NOT sent because gh_open_pr fired.
-    assert len(fake.prompts) == 2, fake.prompts
+    called: set[str] = set()
+    operation = worker.operations.Operation("gh_open_pr", lambda _args: {})
+    monkeypatch.setattr(worker.operations, "operations", lambda _b: {"gh_open_pr": operation})
+    dispatch = worker._bridge_dispatcher(bindings, called)  # type: ignore[arg-type]
+    dispatch("gh_open_pr", {})
+    assert not worker._needs_completion_reminder(
+        task_kind="triage_issue", inputs=inputs, bindings=bindings, operations_called=called
+    )  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -720,116 +709,19 @@ async def test_run_rpc_skips_reminder_when_unclassified(tmp_path: Path, settings
     assert len(fake.prompts) == 1
 
 
-@pytest.mark.asyncio
-async def test_run_rpc_review_pr_reminds_until_submit_pr_review(tmp_path: Path, settings: Settings) -> None:
+def test_review_completion_reminder_uses_captured_operations(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    loop = asyncio.new_event_loop()
-    try:
-        worker._run_rpc_blocking(
-            inputs,
-            task_kind="review_pr",
-            prompt="kickoff",
-            loop=loop,
-            bindings=bindings,  # type: ignore[arg-type]
-        )
-    finally:
-        loop.close()
-    fake = _FakeRpcClient.instances[0]
-    assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
-    assert fake.prompts[0] == "kickoff"
-    assert all("submit_pr_review" in p for p in fake.prompts[1:])
-    assert all("gh_open_pr" not in p for p in fake.prompts[1:])
+    called = {"submit_pr_review"}
+    assert not worker._needs_completion_reminder(
+        task_kind="review_pr", inputs=inputs, bindings=bindings, operations_called=called
+    )  # type: ignore[arg-type]
 
 
-@pytest.mark.asyncio
-async def test_run_rpc_review_pr_stops_after_submit_without_dirty_probe(
-    tmp_path: Path, settings: Settings, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_failed_review_operation_still_needs_reminder(tmp_path: Path, settings: Settings) -> None:
     inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-
-    def _probe(_workspace, _slot_uid):  # type: ignore[no-untyped-def]
-        raise AssertionError("review_pr must not run dirty-state probes")
-
-    monkeypatch.setattr(worker, "_probe_workspace_dirty", _probe)
-    original_on_tool_end = _FakeRpcClient.on_tool_execution_end
-
-    def _record_tool_end(self, cb) -> None:
-        self._tool_end_callbacks = getattr(self, "_tool_end_callbacks", [])
-        self._tool_end_callbacks.append(cb)
-
-    def _on_prompt(client: _FakeRpcClient, _prompt: str) -> None:
-        for cb in client._tool_end_callbacks:
-            cb(SimpleNamespace(tool_name="submit_pr_review", result={}, is_error=None))
-
-    _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
-    try:
-        _FakeRpcClient.on_prompt = staticmethod(_on_prompt)  # type: ignore[attr-defined]
-        loop = asyncio.new_event_loop()
-        try:
-            worker._run_rpc_blocking(
-                inputs,
-                task_kind="review_pr",
-                prompt="kickoff",
-                loop=loop,
-                bindings=bindings,  # type: ignore[arg-type]
-            )
-        finally:
-            loop.close()
-    finally:
-        _FakeRpcClient.on_tool_execution_end = original_on_tool_end  # type: ignore[assignment]
-        delattr(_FakeRpcClient, "on_prompt")
-
-    fake = _FakeRpcClient.instances[0]
-    assert fake.prompts == ["kickoff"]
-
-
-@pytest.mark.asyncio
-async def test_run_rpc_review_pr_still_reminds_when_submit_fails(tmp_path: Path, settings: Settings) -> None:
-    """An errored terminal-tool end event does not count as the terminal action.
-
-    omp_rpc normalizes xd:// device dispatches to the host-tool name, so a
-    rejected `submit_pr_review` surfaces as an end event with `is_error=True`
-    under its real name. Counting it would end the review task silently with
-    no review submitted — the completion reminder must still fire.
-    """
-    inputs, bindings = _make_inputs(tmp_path, settings, session_has_jsonl=False)
-    original_on_tool_end = _FakeRpcClient.on_tool_execution_end
-
-    def _record_tool_end(self, cb) -> None:
-        self._tool_end_callbacks = getattr(self, "_tool_end_callbacks", [])
-        self._tool_end_callbacks.append(cb)
-
-    def _on_prompt(client: _FakeRpcClient, _prompt: str) -> None:
-        for cb in client._tool_end_callbacks:
-            cb(
-                SimpleNamespace(
-                    tool_name="submit_pr_review",
-                    result={"content": [{"type": "text", "text": "GitHub rejected PR review: 422"}]},
-                    is_error=True,
-                )
-            )
-
-    _FakeRpcClient.on_tool_execution_end = _record_tool_end  # type: ignore[assignment]
-    try:
-        _FakeRpcClient.on_prompt = staticmethod(_on_prompt)  # type: ignore[attr-defined]
-        loop = asyncio.new_event_loop()
-        try:
-            worker._run_rpc_blocking(
-                inputs,
-                task_kind="review_pr",
-                prompt="kickoff",
-                loop=loop,
-                bindings=bindings,  # type: ignore[arg-type]
-            )
-        finally:
-            loop.close()
-    finally:
-        _FakeRpcClient.on_tool_execution_end = original_on_tool_end  # type: ignore[assignment]
-        delattr(_FakeRpcClient, "on_prompt")
-
-    fake = _FakeRpcClient.instances[0]
-    assert len(fake.prompts) == 1 + settings.task_completion_max_reminders
-    assert all("submit_pr_review" in p for p in fake.prompts[1:])
+    assert worker._needs_completion_reminder(
+        task_kind="review_pr", inputs=inputs, bindings=bindings, operations_called=set()
+    )  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------

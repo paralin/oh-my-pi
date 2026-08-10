@@ -16,11 +16,9 @@ import type {
 	ModelUsageHealth,
 	TextContent,
 	ThinkingContent,
-	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import { calculateRateLimitBackoffMs, parseRateLimitReason } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
-import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { isFireworksFastModelId, toFireworksBaseModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { extractRetryHint, logger, prompt } from "@oh-my-pi/pi-utils";
@@ -121,7 +119,6 @@ export interface TurnRecoveryHost {
 	isStreaming(): boolean;
 	isCompacting(): boolean;
 	abortInProgress(): boolean;
-	streamingEditAbortTriggered(): boolean;
 	promptGeneration(): number;
 	sessionId(): string;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
@@ -363,8 +360,8 @@ export class TurnRecovery {
 	}
 
 	/** Prompts after transient overlap with a prior agent run. */
-	promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
-		return this.#promptAgentWithIdleRetry(messages, options);
+	promptAgentWithIdleRetry(messages: AgentMessage[]): Promise<void> {
+		return this.#promptAgentWithIdleRetry(messages);
 	}
 
 	/** Parses provider retry and rate-limit reset hints into a delay. */
@@ -874,22 +871,15 @@ export class TurnRecovery {
 	 * finalized it as `stopReason: "aborted"` or leaked it as `stopReason:
 	 * "error"` (a stalled/dropped stream reported as an error rather than an
 	 * abort — issue #5375). Only fires while the session is neither aborting nor
-	 * tearing down. A user/lifecycle abort (`#abortInProgress`), a dispose-driven
-	 * abort (`#isDisposed`), or a session-induced streaming-edit guard abort
-	 * (`StreamingEditGuard.abortTriggered` — auto-generated-file guard or failed-patch
-	 * preview) is deliberate and MUST settle the turn instead: routing it through
-	 * retry would orphan `#retryPromise` on a continuation the guard skips
-	 * (hanging the in-flight `prompt()`) or silently undo the guard's intended
-	 * abort. Deliberate user interrupts (`UserInterrupt`) and silent aborts carry
-	 * their own marker, not the generic sentinel, so they never match here.
+	 * tearing down. Deliberate user interrupts (`UserInterrupt`) and silent aborts
+	 * carry their own marker, not the generic sentinel, so they never match here.
 	 */
 	isRetryableReasonlessAbort(message: AssistantMessage): boolean {
 		if (
 			(message.stopReason !== "aborted" && message.stopReason !== "error") ||
 			message.content.length !== 0 ||
 			this.#host.abortInProgress() ||
-			this.#host.isDisposed() ||
-			this.#host.streamingEditAbortTriggered()
+			this.#host.isDisposed()
 		) {
 			return false;
 		}
@@ -941,7 +931,6 @@ export class TurnRecovery {
 			(message.stopReason === "aborted" || message.stopReason === "error") &&
 			!this.#host.abortInProgress() &&
 			!this.#host.isDisposed() &&
-			!this.#host.streamingEditAbortTriggered() &&
 			((message.stopReason === "aborted" && AIError.is(id, AIError.Flag.Abort)) || genericAbort);
 		const streamStall =
 			message.stopReason === "error" &&
@@ -950,23 +939,9 @@ export class TurnRecovery {
 		if (!reasonlessAbort && !streamStall) return undefined;
 		if (reasonlessAbort && genericAbort) message.errorId = AIError.create(AIError.Flag.Abort);
 
-		// The Cursor server-execution marker gate applies only to the stream-stall
-		// path: an unmarked/unresolved Cursor block there means the server has not
-		// finished executing, so resuming would race it. A reasonless abort instead
-		// ends the turn and the agent loop pairs every un-run call (Cursor's unmarked
-		// `todo`/MCP blocks included) with a synthetic `executed: false` result, so
-		// the tool-result reconciliation below is the safety gate and the marker is
-		// irrelevant.
 		const resolvedToolCallIds: string[] = [];
 		for (const block of message.content) {
 			if (block.type !== "toolCall") continue;
-			if (
-				streamStall &&
-				message.provider === "cursor" &&
-				(!(kCursorExecResolved in block) || block[kCursorExecResolved] !== true)
-			) {
-				return undefined;
-			}
 			resolvedToolCallIds.push(block.id);
 		}
 		if (resolvedToolCallIds.length === 0) return undefined;
@@ -1923,11 +1898,11 @@ export class TurnRecovery {
 		this.resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #promptAgentWithIdleRetry(messages: AgentMessage[]): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			try {
-				await this.#host.agent.prompt(messages, options);
+				await this.#host.agent.prompt(messages);
 				return;
 			} catch (err) {
 				if (!(err instanceof AgentBusyError)) {

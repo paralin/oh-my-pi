@@ -5,7 +5,7 @@
 ---
 
 [Skill directory: {{baseDir}}]
-Resolve any relative paths in this skill (e.g. `scripts/foo.js`, `templates/config.yaml`) against that directory using its absolute path: read referenced assets and templates, and run scripts with the terminal tool when the skill's instructions call for it.
+Resolve any relative paths in this skill (e.g. `scripts/foo.js`, `templates/config.yaml`) against that directory using its absolute path: load referenced assets and templates with Python, and run scripts from an IPython `%%bash` cell when the skill's instructions call for it.
 {{#if userArgs}}
 User: {{userArgs}}
 {{/if}}

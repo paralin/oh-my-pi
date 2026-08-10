@@ -180,7 +180,7 @@ Failure behavior:
 - if registered directories exist but none are present on disk: throws `No artifacts directory found`,
 - missing output throws `Not found: <id>` with available `.md` output IDs when directory listing succeeds.
 
-Read tool integration:
+Workspace read service integration:
 
 - `read` supports line-range and raw selectors for non-extraction internal URL reads
 - line selectors are rejected when an `agent://` URL contains path or query extraction syntax; extraction returns directly without pagination

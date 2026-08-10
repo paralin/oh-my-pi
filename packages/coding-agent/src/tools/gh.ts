@@ -2,24 +2,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { type } from "@oh-my-pi/omptype";
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-	ToolApprovalDecision,
-} from "@oh-my-pi/pi-agent-core";
-import { getWorktreeDir, hashPath, isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, hashPath, isEnoent, logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import githubDescription from "../prompts/tools/github.md" with { type: "text" };
+import type { ToolSession } from "../session/tool-session";
 import * as git from "../utils/git";
-import type { ToolSession } from ".";
 import { formatShortSha } from "./gh-format";
 import { type CacheStatus, getOrFetchView, invalidateAllForNumber, resolveGithubCacheAuthKey } from "./github-cache";
-import type { OutputMeta } from "./output-meta";
 import { ToolError, throwIfAborted } from "./tool-errors";
-import { toolResult } from "./tool-result";
 
 const GH_REPO_FIELDS = [
 	"nameWithOwner",
@@ -246,49 +235,46 @@ const RUN_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/
 const RUN_SUCCESS_CONCLUSIONS = new Set(["success", "neutral", "skipped"]);
 const RUN_FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required", "startup_failure"]);
 const JOB_FAILURE_CONCLUSIONS = new Set(["failure", "timed_out", "cancelled", "action_required"]);
-const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
-	"repo_view",
-	"file_read",
-	"search_issues",
-	"search_prs",
-	"search_code",
-	"search_commits",
-	"search_repos",
-	"run_watch",
-]);
+/** One explicit GitHub domain operation accepted by the host service. */
+export interface GithubInput {
+	op:
+		| "repo_view"
+		| "file_read"
+		| "pr_create"
+		| "pr_checkout"
+		| "pr_push"
+		| "search_issues"
+		| "search_prs"
+		| "search_code"
+		| "search_commits"
+		| "search_repos"
+		| "run_watch";
+	repo?: string;
+	branch?: string;
+	path?: string;
+	pr?: string | string[];
+	force?: boolean;
+	forceWithLease?: boolean;
+	title?: string;
+	body?: string;
+	base?: string;
+	head?: string;
+	draft?: boolean;
+	fill?: boolean;
+	reviewer?: string[];
+	assignee?: string[];
+	label?: string[];
+	query?: string;
+	since?: string;
+	until?: string;
+	dateField?: "created" | "updated";
+	limit?: number;
+	run?: string;
+	tail?: number;
+}
 
-const githubSchema = type({
-	op: type(
-		"'repo_view' | 'file_read' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
-	).describe("github operation"),
-	"repo?": type("string").describe("owner/repo"),
-	"branch?": type("string").describe("branch"),
-	"path?": type("string").describe("repository-relative file path"),
-	"pr?": type("string | string[]").describe("pr number, url, or branch"),
-	"force?": type("boolean").describe("reset existing local branch"),
-	"forceWithLease?": type("boolean").describe("force-with-lease push"),
-	"title?": type("string").describe("pr title"),
-	"body?": type("string").describe("pr body markdown"),
-	"base?": type("string").describe("pr base branch"),
-	"head?": type("string").describe("pr head branch"),
-	"draft?": type("boolean").describe("open pr as draft"),
-	"fill?": type("boolean").describe("auto-fill pr title/body from commits"),
-	"reviewer?": type("string[]").describe("reviewers"),
-	"assignee?": type("string[]").describe("assignees"),
-	"label?": type("string[]").describe("labels"),
-	"query?": type("string").describe("search query"),
-	"since?": type("string").describe("lower-bound date filter"),
-	"until?": type("string").describe("upper-bound date filter"),
-	"dateField?": type("'created' | 'updated'").describe("date field"),
-	"limit?": type("number").describe("max results"),
-	"run?": type("string").describe("actions run id or url"),
-	"tail?": type("number").describe("log lines per failed job"),
-});
-
-export type GithubInput = typeof githubSchema.infer;
-
-export interface GhToolDetails {
-	meta?: OutputMeta;
+/** Structured facts produced by a GitHub operation. */
+export interface GithubOperationDetails {
 	artifactId?: string;
 	repo?: string;
 	branch?: string;
@@ -303,6 +289,14 @@ export interface GhToolDetails {
 	failedJobs?: string[];
 	watch?: GhRunWatchViewDetails;
 	checkouts?: GhPrCheckoutSummary[];
+}
+
+/** Text and facts emitted by a GitHub domain operation. */
+export interface GithubOperationResult {
+	content: Array<{ type: "text"; text: string }>;
+	details?: GithubOperationDetails;
+	sourceUrl?: string;
+	useless?: boolean;
 }
 
 export interface GhPrCheckoutSummary {
@@ -1600,7 +1594,7 @@ function formatCommitRunWatchResult(
 	return lines.join("\n").trim();
 }
 
-function buildGhDetails(repo: string, run: GhRunSnapshot): GhToolDetails {
+function buildGhDetails(repo: string, run: GhRunSnapshot): GithubOperationDetails {
 	return {
 		repo,
 		branch: run.branch,
@@ -1622,7 +1616,7 @@ function buildRunWatchDetails(
 		note?: string;
 		failedJobLogs?: GhFailedJobLog[];
 	},
-): GhToolDetails {
+): GithubOperationDetails {
 	const observedAtMs = Date.now();
 	return {
 		...buildGhDetails(repo, run),
@@ -1645,7 +1639,7 @@ function buildGhRunCollectionDetails(
 	headSha: string,
 	branch: string | undefined,
 	runs: GhRunSnapshot[],
-): GhToolDetails {
+): GithubOperationDetails {
 	const outcome = getRunCollectionOutcome(runs);
 	return {
 		repo,
@@ -1671,7 +1665,7 @@ function buildCommitRunWatchDetails(
 		note?: string;
 		failedJobLogs?: GhFailedJobLog[];
 	},
-): GhToolDetails {
+): GithubOperationDetails {
 	const observedAtMs = Date.now();
 	return {
 		...buildGhRunCollectionDetails(repo, headSha, branch, runs),
@@ -2434,60 +2428,29 @@ function appendArtifactReference(text: string, artifactId: string | undefined, l
 function buildTextResult(
 	text: string,
 	sourceUrl?: string,
-	details?: GhToolDetails,
+	details?: GithubOperationDetails,
 	options?: { artifactId?: string; artifactLabel?: string; useless?: boolean },
-): AgentToolResult<GhToolDetails> {
-	const builder = toolResult<GhToolDetails>(details).text(
-		appendArtifactReference(text, options?.artifactId, options?.artifactLabel ?? "Saved artifact"),
-	);
-	if (sourceUrl) {
-		builder.sourceUrl(sourceUrl);
-	}
-	if (options?.useless) {
-		builder.useless();
-	}
-	return builder.done();
-}
-
-export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails> {
-	readonly name = "github";
-	readonly approval = (args: unknown): ToolApprovalDecision => {
-		const rawOp = (args as Partial<GithubInput>).op;
-		const op = typeof rawOp === "string" ? rawOp : "";
-		return GITHUB_READONLY_OPS.has(op) ? "read" : "exec";
+): GithubOperationResult {
+	return {
+		content: [
+			{
+				type: "text",
+				text: appendArtifactReference(text, options?.artifactId, options?.artifactLabel ?? "Saved artifact"),
+			},
+		],
+		...(sourceUrl ? { sourceUrl } : {}),
+		...(details ? { details } : {}),
+		...(options?.useless ? { useless: true } : {}),
 	};
-	readonly summary = "Interact with GitHub repositories, files, pull requests, and Actions";
-	readonly loadMode = "discoverable";
-	readonly label = "GitHub";
-	readonly description = prompt.render(githubDescription);
-	readonly parameters = githubSchema;
-	readonly strict = true;
-
-	constructor(private readonly session: ToolSession) {}
-
-	static createIf(session: ToolSession): GithubTool | null {
-		if (!git.github.available()) return null;
-		return new GithubTool(session);
-	}
-
-	async execute(
-		_toolCallId: string,
-		params: GithubInput,
-		signal?: AbortSignal,
-		onUpdate?: AgentToolUpdateCallback<GhToolDetails>,
-		_context?: AgentToolContext,
-	): Promise<AgentToolResult<GhToolDetails>> {
-		return executeGithubOperation(this.session, params, signal, onUpdate);
-	}
 }
 
-/** Executes one validated GitHub domain operation without an AgentTool dispatch. */
+/** Executes one validated GitHub domain operation. */
 export async function executeGithubOperation(
 	session: ToolSession,
 	params: GithubInput,
 	signal?: AbortSignal,
-	onUpdate?: AgentToolUpdateCallback<GhToolDetails>,
-): Promise<AgentToolResult<GhToolDetails>> {
+	onUpdate?: (result: GithubOperationResult) => void,
+): Promise<GithubOperationResult> {
 	return untilAborted(signal, async () => {
 		switch (params.op) {
 			case "repo_view":
@@ -2520,7 +2483,7 @@ async function executeRepoView(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const repo = normalizeOptionalString(params.repo);
 	const branch = normalizeOptionalString(params.branch);
 	const args = ["repo", "view"];
@@ -2542,7 +2505,7 @@ async function executeFileRead(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const repo = await resolveGitHubRepo(session.cwd, normalizeOptionalString(params.repo), undefined, signal);
 	const filePath = requireNonEmpty(normalizeOptionalString(params.path), "path");
 	if (filePath.startsWith("/")) {
@@ -3197,7 +3160,7 @@ async function executePrCheckout(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const repo = normalizeOptionalString(params.repo);
 	const force = params.force ?? false;
 	const prList = normalizePrIdentifierList(params.pr);
@@ -3406,7 +3369,7 @@ async function executePrPush(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const repoRoot = await requireGitRepoRoot(session.cwd, signal);
 	const localBranch = normalizeOptionalString(params.branch) ?? (await requireCurrentGitBranch(repoRoot, signal));
 	const refExists = await git.ref.exists(repoRoot, toLocalBranchRef(localBranch), signal);
@@ -3455,7 +3418,7 @@ async function executePrCreate(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const repo = normalizeOptionalString(params.repo);
 	const title = normalizeOptionalString(params.title);
 	const body = params.body;
@@ -3591,7 +3554,7 @@ async function executeSearchIssues(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const limit = resolveSearchLimit(params.limit);
 	const dateField = resolveSearchDateField("issues", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
@@ -3611,7 +3574,7 @@ async function executeSearchPrs(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const limit = resolveSearchLimit(params.limit);
 	const dateField = resolveSearchDateField("prs", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
@@ -3631,7 +3594,7 @@ async function executeSearchCode(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const query = requireNonEmpty(params.query, "query");
 	const since = normalizeOptionalString(params.since);
 	const until = normalizeOptionalString(params.until);
@@ -3654,7 +3617,7 @@ async function executeSearchCommits(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const limit = resolveSearchLimit(params.limit);
 	const dateField = resolveSearchDateField("commits", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
@@ -3674,7 +3637,7 @@ async function executeSearchRepos(
 	session: ToolSession,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+): Promise<GithubOperationResult> {
 	const limit = resolveSearchLimit(params.limit);
 	const dateField = resolveSearchDateField("repos", params.dateField);
 	const dateQualifier = buildSearchDateQualifier(dateField, params.since, params.until);
@@ -3693,8 +3656,8 @@ async function executeRunWatch(
 	toolName: string,
 	params: GithubInput,
 	signal: AbortSignal | undefined,
-	onUpdate: AgentToolUpdateCallback<GhToolDetails> | undefined,
-): Promise<AgentToolResult<GhToolDetails>> {
+	onUpdate: ((result: GithubOperationResult) => void) | undefined,
+): Promise<GithubOperationResult> {
 	const branchInput = normalizeOptionalString(params.branch);
 	const explicitRepo = normalizeOptionalString(params.repo);
 	const runReference = parseRunReference(params.run);

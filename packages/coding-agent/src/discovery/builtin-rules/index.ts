@@ -9,18 +9,10 @@
  * user/project/tool rule with the same name overrides the bundled copy.
  */
 import goAddCleanup from "./go-add-cleanup.md" with { type: "text" };
-import goBenchLoop from "./go-bench-loop.md" with { type: "text" };
 import goExpPromoted from "./go-exp-promoted.md" with { type: "text" };
 import goIoutil from "./go-ioutil.md" with { type: "text" };
 import goJoinHostport from "./go-join-hostport.md" with { type: "text" };
-import goMessageClone from "./go-message-clone.md" with { type: "text" };
-import goMessageEqual from "./go-message-equal.md" with { type: "text" };
-import goNewExpr from "./go-new-expr.md" with { type: "text" };
-import goNoTinyFunctions from "./go-no-tiny-functions.md" with { type: "text" };
 import goRandV2 from "./go-rand-v2.md" with { type: "text" };
-import goRangeInt from "./go-range-int.md" with { type: "text" };
-import goSlicesClone from "./go-slices-clone.md" with { type: "text" };
-import goSortCompact from "./go-sort-compact.md" with { type: "text" };
 import rsBoxLeak from "./rs-box-leak.md" with { type: "text" };
 import rsFuturePrelude from "./rs-future-prelude.md" with { type: "text" };
 import rsLazylock from "./rs-lazylock.md" with { type: "text" };
@@ -32,13 +24,10 @@ import tsImportType from "./ts-import-type.md" with { type: "text" };
 import tsNoAny from "./ts-no-any.md" with { type: "text" };
 import tsNoDeprecatedLeftovers from "./ts-no-deprecated-leftovers.md" with { type: "text" };
 import tsNoDynamicImport from "./ts-no-dynamic-import.md" with { type: "text" };
-import tsNoInlineCastAccess from "./ts-no-inline-cast-access.md" with { type: "text" };
 import tsNoLocalIsRecord from "./ts-no-local-is-record.md" with { type: "text" };
 import tsNoReturnType from "./ts-no-return-type.md" with { type: "text" };
 import tsNoTestTimers from "./ts-no-test-timers.md" with { type: "text" };
-import tsNoTinyFunctions from "./ts-no-tiny-functions.md" with { type: "text" };
 import tsPromiseWithResolvers from "./ts-promise-with-resolvers.md" with { type: "text" };
-import tsRedundantClearGuard from "./ts-redundant-clear-guard.md" with { type: "text" };
 import tsSetMap from "./ts-set-map.md" with { type: "text" };
 
 /** A bundled rule's stable name and raw markdown (frontmatter + body). */
@@ -50,18 +39,10 @@ export interface BuiltinRuleSource {
 /** All bundled default rules, ordered by name. */
 export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "go-add-cleanup", content: goAddCleanup },
-	{ name: "go-bench-loop", content: goBenchLoop },
 	{ name: "go-exp-promoted", content: goExpPromoted },
 	{ name: "go-ioutil", content: goIoutil },
 	{ name: "go-join-hostport", content: goJoinHostport },
-	{ name: "go-message-clone", content: goMessageClone },
-	{ name: "go-message-equal", content: goMessageEqual },
-	{ name: "go-new-expr", content: goNewExpr },
-	{ name: "go-no-tiny-functions", content: goNoTinyFunctions },
 	{ name: "go-rand-v2", content: goRandV2 },
-	{ name: "go-range-int", content: goRangeInt },
-	{ name: "go-slices-clone", content: goSlicesClone },
-	{ name: "go-sort-compact", content: goSortCompact },
 	{ name: "rs-box-leak", content: rsBoxLeak },
 	{ name: "rs-future-prelude", content: rsFuturePrelude },
 	{ name: "rs-lazylock", content: rsLazylock },
@@ -73,12 +54,9 @@ export const BUILTIN_RULE_SOURCES: readonly BuiltinRuleSource[] = [
 	{ name: "ts-no-any", content: tsNoAny },
 	{ name: "ts-no-deprecated-leftovers", content: tsNoDeprecatedLeftovers },
 	{ name: "ts-no-dynamic-import", content: tsNoDynamicImport },
-	{ name: "ts-no-inline-cast-access", content: tsNoInlineCastAccess },
 	{ name: "ts-no-local-is-record", content: tsNoLocalIsRecord },
 	{ name: "ts-no-return-type", content: tsNoReturnType },
 	{ name: "ts-no-test-timers", content: tsNoTestTimers },
-	{ name: "ts-no-tiny-functions", content: tsNoTinyFunctions },
 	{ name: "ts-promise-with-resolvers", content: tsPromiseWithResolvers },
-	{ name: "ts-redundant-clear-guard", content: tsRedundantClearGuard },
 	{ name: "ts-set-map", content: tsSetMap },
 ];

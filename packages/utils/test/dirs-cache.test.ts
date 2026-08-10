@@ -9,7 +9,6 @@ import {
 	getDocumentConversionCacheDir,
 	getMarketplacesRegistryPath,
 	getProfileRootDir,
-	getSecretPlaceholderKeyPath,
 	setAgentDir,
 } from "@oh-my-pi/pi-utils/dirs";
 import { Snowflake } from "@oh-my-pi/pi-utils/snowflake";
@@ -158,24 +157,19 @@ describe("legacy file adoption on XDG paths", () => {
 		await fs.mkdir(path.join(xdgData, "omp"), { recursive: true });
 		// Legacy layout: key under ~/.omp/agent, registry under ~/.omp.
 		await fs.mkdir(path.join(tempRoot, ".omp", "agent"), { recursive: true });
-		await fs.writeFile(path.join(tempRoot, ".omp", "agent", "secret-placeholder.key"), "legacy-key");
 		await fs.writeFile(path.join(tempRoot, ".omp", "marketplaces.json"), '{"legacy":true}');
 		// The XDG registry is already populated: adoption must not overwrite it.
 		await fs.writeFile(path.join(xdgData, "omp", "marketplaces.json"), '{"xdg":true}');
 		activateTempHome({ XDG_STATE_HOME: xdgState, XDG_DATA_HOME: xdgData });
 
-		const key = getSecretPlaceholderKeyPath();
 		const registry = getMarketplacesRegistryPath();
-		expect(key).toBe(path.join(xdgState, "omp", "secret-placeholder.key"));
 		expect(registry).toBe(path.join(xdgData, "omp", "marketplaces.json"));
-		expect(await fs.readFile(key, "utf8")).toBe("legacy-key");
 		expect(await fs.readFile(registry, "utf8")).toBe('{"xdg":true}');
 	});
 
 	it("keeps the legacy paths canonical when XDG is inactive", async () => {
 		if (process.platform === "win32") return;
 		activateTempHome({});
-		expect(getSecretPlaceholderKeyPath()).toBe(path.join(tempRoot, ".omp", "agent", "secret-placeholder.key"));
 		expect(getMarketplacesRegistryPath()).toBe(path.join(tempRoot, ".omp", "marketplaces.json"));
 	});
 });

@@ -1,5 +1,5 @@
-import { Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
-import { DEFAULT_MAX_BYTES, truncateHeadBytes } from "../session/streaming-output";
+import { Snowflake } from "@oh-my-pi/pi-utils";
+import { DEFAULT_MAX_BYTES } from "../session/streaming-output";
 import type {
 	IpythonErrorEvent,
 	IpythonExecutionEvent,
@@ -8,9 +8,8 @@ import type {
 	IpythonHostArtifact,
 	IpythonHostArtifactRequest,
 } from "./controller";
+import { createIpythonCellText, validateIpythonCellTextBudget } from "./projection";
 import type { IpythonStartupProgress, IpythonStartupProgressHandler } from "./provisioner";
-
-const TRUNCATION_MARKER = "\n[IPython output truncated]";
 
 export type IpythonCellOrigin = "model" | "direct";
 
@@ -72,6 +71,8 @@ export interface IpythonCellRequest {
 	readonly origin: IpythonCellOrigin;
 	readonly signal?: AbortSignal;
 	readonly onUpdate?: (update: IpythonCellUpdate) => void | Promise<void>;
+	/** The provider tool persists this completed cell after its paired tool result. */
+	readonly deferJournal?: boolean;
 }
 
 export interface IpythonCellServiceOptions {
@@ -120,67 +121,6 @@ function errorName(error: unknown): string {
 	return error instanceof Error && error.name ? error.name : "Error";
 }
 
-function safeResultText(data: Readonly<Record<string, unknown>>): string {
-	const plain = data["text/plain"];
-	if (typeof plain === "string") return sanitizeText(plain);
-	const mimeTypes = Object.keys(data).sort();
-	return mimeTypes.length > 0 ? `[result MIME types: ${mimeTypes.join(", ")}]` : "[result data]";
-}
-
-function appendRecord(current: string, record: string): string {
-	if (!record) return current;
-	const separator = current && !current.endsWith("\n") ? "\n" : "";
-	return `${current}${separator}${record}${record.endsWith("\n") ? "" : "\n"}`;
-}
-
-function safeExecutionText(result: IpythonExecutionResult): string {
-	let text = "";
-	let sawError = false;
-	for (const event of result.events) {
-		if (event.kind === "stream") {
-			text += sanitizeText(event.text);
-			continue;
-		}
-		if (event.kind === "result") {
-			text = appendRecord(text, safeResultText(event.data));
-			continue;
-		}
-		if (event.kind === "display") {
-			text = appendRecord(text, sanitizeText(event.text));
-			continue;
-		}
-		if (event.kind === "host_progress") {
-			text = appendRecord(text, sanitizeText(`[${event.operation}] ${event.message}`));
-			continue;
-		}
-		sawError = true;
-		const traceback = event.traceback.length > 0 ? event.traceback.join("\n") : `${event.ename}: ${event.evalue}`;
-		text = appendRecord(text, sanitizeText(traceback));
-	}
-	if (!sawError) {
-		for (const error of result.errors) {
-			const traceback = error.traceback.length > 0 ? error.traceback.join("\n") : `${error.ename}: ${error.evalue}`;
-			text = appendRecord(text, sanitizeText(traceback));
-		}
-	}
-	if (!text && result.status === "aborted") return "IPython cell aborted.\n";
-	return text;
-}
-
-function boundedCellText(text: string, maxBytes: number): IpythonCellText {
-	const totalBytes = Buffer.byteLength(text, "utf-8");
-	if (totalBytes <= maxBytes) return { text, truncated: false, totalBytes, outputBytes: totalBytes };
-	const markerBytes = Buffer.byteLength(TRUNCATION_MARKER, "utf-8");
-	const head = truncateHeadBytes(text, maxBytes - markerBytes);
-	const output = `${head.text}${TRUNCATION_MARKER}`;
-	return {
-		text: output,
-		truncated: true,
-		totalBytes,
-		outputBytes: Buffer.byteLength(output, "utf-8"),
-	};
-}
-
 function syntheticExecution(error: unknown, aborted: boolean): IpythonExecutionResult {
 	const name = aborted ? "AbortError" : errorName(error);
 	const message = aborted ? "IPython cell aborted" : errorMessage(error);
@@ -213,9 +153,7 @@ export class IpythonCellService {
 		this.#provisioner = provisioner;
 		this.#maxModelBytes = options.maxModelBytes ?? DEFAULT_MAX_BYTES;
 		this.#hostContext = options;
-		if (!Number.isSafeInteger(this.#maxModelBytes) || this.#maxModelBytes <= Buffer.byteLength(TRUNCATION_MARKER)) {
-			throw new RangeError("IPython model-text budget is too small");
-		}
+		validateIpythonCellTextBudget(this.#maxModelBytes);
 	}
 
 	get isRunning(): boolean {
@@ -377,7 +315,7 @@ export class IpythonCellService {
 			errors: execution.errors,
 			updates: [...item.updates],
 			artifacts: execution.hostArtifacts,
-			modelText: boundedCellText(safeExecutionText(execution), this.#maxModelBytes),
+			modelText: createIpythonCellText(execution.events, execution.errors, execution.status, this.#maxModelBytes),
 		};
 	}
 

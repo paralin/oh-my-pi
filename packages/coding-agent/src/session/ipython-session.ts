@@ -10,12 +10,14 @@ import {
 } from "../ipython/artifacts";
 import { type IpythonCellRequest, type IpythonCellResult, IpythonCellService } from "../ipython/cell";
 import type {
+	IpythonExtensionHostHandlerResolver,
 	IpythonHostHandlers,
 	IpythonProcessIds,
 	IpythonRestoreResult,
 	IpythonSnapshotResult,
 } from "../ipython/controller";
 import { IpythonKernelProvisioner, ipythonSnapshotPath } from "../ipython/provisioner";
+import type { PythonSkillPackage } from "../ipython/python-packages";
 import { snapshotManifestPath } from "../ipython/state-snapshot";
 import { sessionSidecarDir } from "./session-paths";
 
@@ -39,8 +41,9 @@ export interface IpythonSessionGenerationOptions {
 	readonly snapshotPath: string;
 	readonly restorePath: string | null | undefined;
 	readonly ephemeralSidecar: boolean;
-	readonly pythonPaths: readonly string[];
+	readonly pythonPackages: readonly PythonSkillPackage[];
 	readonly hostHandlers: IpythonHostHandlers;
+	readonly extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver;
 	readonly onRestore: (result: IpythonRestoreResult) => void;
 	readonly onReady: (processIds: IpythonProcessIds, status: { readonly restart: boolean }) => void;
 }
@@ -51,6 +54,7 @@ export interface IpythonSessionGeneration {
 	prewarm(): void;
 	ready(): Promise<void>;
 	flushSnapshot(pathOverride?: string): Promise<IpythonSnapshotResult | undefined>;
+	reloadPythonPackages?(packages: readonly PythonSkillPackage[]): Promise<void>;
 	dispose(): Promise<void>;
 }
 
@@ -58,8 +62,9 @@ export type IpythonSessionGenerationFactory = (options: IpythonSessionGeneration
 
 export interface IpythonSessionRuntimeOptions {
 	readonly snapshotDrainTimeoutMs?: number;
-	readonly pythonPaths?: () => readonly string[];
+	readonly pythonPackages?: () => readonly PythonSkillPackage[];
 	readonly hostHandlers?: () => IpythonHostHandlers;
+	readonly extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver;
 }
 
 export interface IpythonSessionRuntimeHost {
@@ -93,8 +98,9 @@ class DefaultIpythonSessionGeneration implements IpythonSessionGeneration {
 			sidecarDir: options.sidecarDir,
 			snapshotPath: options.snapshotPath,
 			restorePath: options.restorePath,
-			pythonPaths: options.pythonPaths,
+			pythonPackages: options.pythonPackages,
 			hostHandlers: options.hostHandlers,
+			extensionHostHandlerResolver: options.extensionHostHandlerResolver,
 			onRestore: options.onRestore,
 			onReady: options.onReady,
 		});
@@ -120,6 +126,10 @@ class DefaultIpythonSessionGeneration implements IpythonSessionGeneration {
 
 	flushSnapshot(pathOverride?: string): Promise<IpythonSnapshotResult | undefined> {
 		return this.#provisioner.flushSnapshot(pathOverride);
+	}
+
+	reloadPythonPackages(packages: readonly PythonSkillPackage[]): Promise<void> {
+		return this.#provisioner.reloadPythonPackages(packages);
 	}
 
 	dispose(): Promise<void> {
@@ -211,8 +221,9 @@ export class IpythonSessionRuntime {
 	readonly #host: IpythonSessionRuntimeHost;
 	readonly #createGeneration: IpythonSessionGenerationFactory;
 	readonly #snapshotDrainTimeoutMs: number;
-	readonly #pythonPaths: () => readonly string[];
+	#pythonPackages: readonly PythonSkillPackage[];
 	readonly #hostHandlers: () => IpythonHostHandlers;
+	readonly #extensionHostHandlerResolver: IpythonExtensionHostHandlerResolver;
 	readonly #checkpointTasks = new Map<string, Promise<IpythonSnapshotResult | undefined>>();
 	readonly #availableCheckpoints = new Set<string>();
 	#active: ActiveGeneration | undefined;
@@ -230,8 +241,9 @@ export class IpythonSessionRuntime {
 		this.#createGeneration =
 			createGeneration ?? (generationOptions => new DefaultIpythonSessionGeneration(generationOptions));
 		this.#snapshotDrainTimeoutMs = options.snapshotDrainTimeoutMs ?? 5_000;
-		this.#pythonPaths = options.pythonPaths ?? (() => []);
+		this.#pythonPackages = [...(options.pythonPackages?.() ?? [])];
 		this.#hostHandlers = options.hostHandlers ?? (() => ({}));
+		this.#extensionHostHandlerResolver = options.extensionHostHandlerResolver ?? (() => undefined);
 		if (!Number.isSafeInteger(this.#snapshotDrainTimeoutMs) || this.#snapshotDrainTimeoutMs < 0) {
 			throw new RangeError("IPython snapshot drain timeout must be a non-negative integer");
 		}
@@ -273,6 +285,20 @@ export class IpythonSessionRuntime {
 			this.#host.onArtifactFailure(error instanceof Error ? error.message : String(error));
 			return result;
 		}
+	}
+
+	async reloadPythonPackages(packages: readonly PythonSkillPackage[]): Promise<void> {
+		if (this.#disposed) throw new Error("Session IPython runtime is disposed");
+		const nextPackages = [...packages];
+		const active = this.#active;
+		if (!active) {
+			this.#pythonPackages = nextPackages;
+			return;
+		}
+		if (!active.generation.reloadPythonPackages)
+			throw new Error("IPython generation does not support Python package reload");
+		await active.generation.reloadPythonPackages(nextPackages);
+		this.#pythonPackages = nextPackages;
 	}
 
 	async waitForIdle(): Promise<void> {
@@ -443,8 +469,9 @@ export class IpythonSessionRuntime {
 			snapshotPath: ipythonSnapshotPath(sidecarDir),
 			restorePath,
 			ephemeralSidecar: ephemeral,
-			pythonPaths: this.#pythonPaths(),
+			pythonPackages: this.#pythonPackages,
 			hostHandlers: this.#hostHandlers(),
+			extensionHostHandlerResolver: this.#extensionHostHandlerResolver,
 			onRestore: result => this.#host.onRestore(result, classifyIpythonRestore(result)),
 			onReady: (processIds, status) => this.#host.onReady(processIds, status),
 		};

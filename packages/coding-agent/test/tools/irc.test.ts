@@ -10,8 +10,8 @@ import type { AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { ClaudeCodePeer } from "@oh-my-pi/pi-coding-agent/task/claude-code-peer";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool, isIrcEnabled } from "@oh-my-pi/pi-coding-agent/tools/hub";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { type CoordinationDetails, executeHubOperation, isIrcEnabled } from "../../src/tools/hub/index.js";
 
 interface FakeSession {
 	session: AgentSession;
@@ -626,7 +626,7 @@ describe("IRC", () => {
 		});
 	});
 
-	describe("HubTool", () => {
+	describe("Hub operation", () => {
 		it("isIrcEnabled returns false for a top-level session that cannot spawn tasks", () => {
 			const settings = Settings.isolated();
 			// Depth 0 with spawning gated off: no peers exist or can be created.
@@ -656,30 +656,11 @@ describe("IRC", () => {
 				getSessionSpawns: () => "*",
 				settings: Settings.isolated(),
 			};
-			const tool = new HubTool(session);
-			const result = await tool.execute("call", { op: "list" });
+			const hubSession = session;
+			const result = await executeHubOperation(hubSession, { op: "list" });
 			expect(result.isError).toBe(true);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("Peer messaging is unavailable");
-		});
-
-		it("only marks passive wait operations interruptible", () => {
-			const session: ToolSession = {
-				cwd: "/tmp",
-				hasUI: false,
-				getSessionFile: () => null,
-				getSessionSpawns: () => "*",
-				settings: Settings.isolated(),
-				agentRegistry: registry,
-				getAgentId: () => "0-Main",
-			};
-			const tool = new HubTool(session);
-			if (typeof tool.interruptible !== "function") throw new Error("Hub interruptibility must resolve per call");
-			expect(tool.interruptible({ op: "wait" })).toBe(true);
-			expect(tool.interruptible({ op: "logs", follow: true })).toBe(true);
-			expect(tool.interruptible({ op: "logs" })).toBe(false);
-			expect(tool.interruptible({ op: "start" })).toBe(false);
-			expect(tool.interruptible({ op: "send", await: true })).toBe(false);
 		});
 
 		it("op=list includes parked peers, unread counts, and parent ids", async () => {
@@ -697,8 +678,8 @@ describe("IRC", () => {
 			sub.setError(new Error("temporarily unavailable"));
 			await bus.send({ from: "0-Main", to: "0-AuthLoader", body: "unread one" });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "list" });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "list" });
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.op).toBe("list");
 			expect(details?.peers).toMatchObject([
@@ -720,8 +701,8 @@ describe("IRC", () => {
 				status: "parked",
 			});
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "list" });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "list" });
 			const details = result.details as CoordinationDetails | undefined;
 			const peerIds = details?.peers?.map(peer => peer.id) ?? [];
 			expect(peerIds).toContain("0-Worker");
@@ -732,8 +713,8 @@ describe("IRC", () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "send", to: "0-Sub", message: "ping" });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "send", to: "0-Sub", message: "ping" });
 			const details = result.details as CoordinationDetails | undefined;
 			expect(result.isError).toBeFalsy();
 			expect(details?.receipts).toEqual([{ to: "0-Sub", outcome: "injected" }]);
@@ -749,8 +730,8 @@ describe("IRC", () => {
 			registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
 			registry.register({ id: "0-Parked", displayName: "task", kind: "sub", session: null, status: "parked" });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "send", to: "all", message: "anyone there?" });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "send", to: "all", message: "anyone there?" });
 			const details = result.details as CoordinationDetails | undefined;
 			// Broadcast skips parked agents; one failure does not block the other delivery.
 			expect(details?.receipts).toEqual([
@@ -767,8 +748,8 @@ describe("IRC", () => {
 			registry.register({ id: "0-B", displayName: "task", kind: "sub", session: b.session });
 			registry.register({ id: "0-A", displayName: "task", kind: "sub", session: makeFakeSession().session });
 
-			const tool = new HubTool(makeToolSession(registry, "0-A"));
-			await tool.execute("call-1", { op: "send", to: "all", message: "anyone there?" });
+			const hubSession = makeToolSession(registry, "0-A");
+			await executeHubOperation(hubSession, { op: "send", to: "all", message: "anyone there?" });
 
 			// Main receives the broadcast directly (its own incoming card) ...
 			expect(main.delivered.map(msg => msg.body)).toEqual(["anyone there?"]);
@@ -793,8 +774,13 @@ describe("IRC", () => {
 				void bus.send({ from: "0-Sub", to: msg.from, body: "pong", replyTo: msg.id });
 			});
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "send", to: "0-Sub", message: "ping", await: true });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, {
+				op: "send",
+				to: "0-Sub",
+				message: "ping",
+				await: true,
+			});
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.waited?.body).toBe("pong");
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -812,8 +798,13 @@ describe("IRC", () => {
 				void bus.send({ from: "0-Sub", to: msg.from, body: "fresh reply", replyTo: msg.id });
 			});
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "send", to: "0-Sub", message: "ping", await: true });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, {
+				op: "send",
+				to: "0-Sub",
+				message: "ping",
+				await: true,
+			});
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.waited?.body).toBe("fresh reply");
 			expect(bus.inbox("0-Main").map(msg => msg.body)).toEqual(["old buffered reply"]);
@@ -823,8 +814,8 @@ describe("IRC", () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", {
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, {
 				op: "send",
 				to: "0-Sub",
 				message: "ping",
@@ -848,14 +839,14 @@ describe("IRC", () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
+			const hubSession = makeToolSession(registry, "0-Main");
 			const controller = new AbortController();
 			// Abort once delivery reaches the peer, mimicking a steering / IRC interrupt
 			// landing between the send resolving and the reply arriving.
 			sub.onDeliver(() => controller.abort(new Error("mock interrupt")));
 
-			const result = await tool.execute(
-				"call-1",
+			const result = await executeHubOperation(
+				hubSession,
 				{ op: "send", to: "0-Sub", message: "ping", await: true, timeoutMs: 30_000 },
 				controller.signal,
 			);
@@ -870,18 +861,18 @@ describe("IRC", () => {
 		});
 
 		it("op=send rejects await with to=all and self-sends", async () => {
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const broadcast = await tool.execute("call-1", { op: "send", to: "all", message: "x", await: true });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const broadcast = await executeHubOperation(hubSession, { op: "send", to: "all", message: "x", await: true });
 			expect(broadcast.isError).toBe(true);
-			const self = await tool.execute("call-2", { op: "send", to: "0-Main", message: "x" });
+			const self = await executeHubOperation(hubSession, { op: "send", to: "0-Main", message: "x" });
 			expect(self.isError).toBe(true);
 			const selfText = self.content[0]?.type === "text" ? self.content[0].text : "";
 			expect(selfText).toContain("Cannot send a message to yourself.");
 		});
 
 		it("op=send returns a failed receipt for unknown targets", async () => {
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "send", to: "0-Ghost", message: "ping" });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "send", to: "0-Ghost", message: "ping" });
 			expect(result.isError).toBe(true);
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.receipts?.[0]?.outcome).toBe("failed");
@@ -890,8 +881,8 @@ describe("IRC", () => {
 		it("op=wait returns a clean non-error timeout result", async () => {
 			const fake = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "sub", kind: "sub", session: fake.session, status: "running" });
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 5 });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "wait", timeoutMs: 5 });
 			expect(result.isError).toBeFalsy();
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.waited).toBeNull();
@@ -900,8 +891,8 @@ describe("IRC", () => {
 		});
 
 		it("op=wait returns a clean result if no active agents exist", async () => {
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 5 });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "wait", timeoutMs: 5 });
 			expect(result.isError).toBeFalsy();
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("No running background jobs to wait for.");
@@ -909,8 +900,8 @@ describe("IRC", () => {
 
 		it("op=wait returns an error if the requested specific 'from' agent is not active", async () => {
 			registry.register({ id: "0-Sub", displayName: "sub", kind: "sub", session: null, status: "parked" });
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "wait", from: "0-Sub", timeoutMs: 5 });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const result = await executeHubOperation(hubSession, { op: "wait", from: "0-Sub", timeoutMs: 5 });
 			expect(result.isError).toBe(true);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain('agent "0-Sub" is not running');
@@ -931,10 +922,10 @@ describe("IRC", () => {
 			});
 			expect(delivery).toBe("injected");
 
-			const tool = new HubTool(makeToolSession(registry, "0-Running"));
+			const hubSession = makeToolSession(registry, "0-Running");
 			const controller = new AbortController();
 			controller.abort(new Error("queued IRC interrupt"));
-			const result = await tool.execute("call-1", { op: "wait", timeoutMs: 30_000 }, controller.signal);
+			const result = await executeHubOperation(hubSession, { op: "wait", timeoutMs: 30_000 }, controller.signal);
 
 			expect(result.isError).toBeFalsy();
 			const details = result.details as CoordinationDetails | undefined;
@@ -947,7 +938,7 @@ describe("IRC", () => {
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			expect(text).toContain("queued interrupt note");
 
-			const empty = await tool.execute("call-2", { op: "inbox" });
+			const empty = await executeHubOperation(hubSession, { op: "inbox" });
 			const emptyDetails = empty.details as CoordinationDetails | undefined;
 			expect(emptyDetails?.inbox).toEqual([]);
 		});
@@ -967,8 +958,8 @@ describe("IRC", () => {
 			});
 			expect(delivery).toBe("injected");
 
-			const tool = new HubTool(makeToolSession(registry, "0-Running"));
-			const result = await tool.execute("call-1", { op: "inbox" });
+			const hubSession = makeToolSession(registry, "0-Running");
+			const result = await executeHubOperation(hubSession, { op: "inbox" });
 			const details = result.details as CoordinationDetails | undefined;
 			expect(details?.inbox?.map((msg: IrcMessage) => msg.body)).toEqual(["parallel note"]);
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
@@ -989,15 +980,15 @@ describe("IRC", () => {
 				ts: Date.now(),
 			});
 
-			const tool = new HubTool(makeToolSession(registry, "0-Running"));
-			const peeked = await tool.execute("call-1", { op: "inbox", peek: true });
+			const hubSession = makeToolSession(registry, "0-Running");
+			const peeked = await executeHubOperation(hubSession, { op: "inbox", peek: true });
 			const peekedDetails = peeked.details as CoordinationDetails | undefined;
 			expect(peekedDetails?.inbox?.map((msg: IrcMessage) => msg.body)).toEqual(["peeked note"]);
 
 			// The peek surfaced the body via the tool result, so the aside-channel
 			// copy must NOT also be auto-injected at the next step: a second drain
 			// returns nothing (the pending aside was consumed out of the
-			const second = await tool.execute("call-2", { op: "inbox" });
+			const second = await executeHubOperation(hubSession, { op: "inbox" });
 			const secondDetails = second.details as CoordinationDetails | undefined;
 			expect(secondDetails?.inbox).toEqual([]);
 		});
@@ -1010,14 +1001,14 @@ describe("IRC", () => {
 			main.setError(new Error("temporarily unavailable"));
 			await bus.send({ from: "0-Sub", to: "0-Main", body: "fyi" });
 
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const peeked = await tool.execute("call-1", { op: "inbox", peek: true });
+			const hubSession = makeToolSession(registry, "0-Main");
+			const peeked = await executeHubOperation(hubSession, { op: "inbox", peek: true });
 			const peekedDetails = peeked.details as CoordinationDetails | undefined;
 			expect(peekedDetails?.inbox?.map((msg: IrcMessage) => msg.body)).toEqual(["fyi"]);
-			const drained = await tool.execute("call-2", { op: "inbox" });
+			const drained = await executeHubOperation(hubSession, { op: "inbox" });
 			const drainedDetails = drained.details as CoordinationDetails | undefined;
 			expect(drainedDetails?.inbox?.map((msg: IrcMessage) => msg.body)).toEqual(["fyi"]);
-			const empty = await tool.execute("call-3", { op: "inbox" });
+			const empty = await executeHubOperation(hubSession, { op: "inbox" });
 			const emptyDetails = empty.details as CoordinationDetails | undefined;
 			expect(emptyDetails?.inbox).toEqual([]);
 		});

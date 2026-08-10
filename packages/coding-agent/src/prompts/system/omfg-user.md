@@ -7,9 +7,9 @@ TTSR mechanics:
 - `condition` is one or more JavaScript regex patterns tested against assistant streamed output.
 - `scope` is a comma-separated allowlist. If present, only listed streams are checked.
 - `text` = assistant prose only. `thinking` = hidden reasoning summaries. `tool` = every tool's arguments.
-- `tool:<name>(<glob>)` = one tool, only when path-like args match the glob. Examples: `tool:write(*.rb)`, `tool:edit(*.ts)`.
-- SHOULD use file-specific tool scopes for code complaints. Ruby code generated through `write` → `tool:write(*.rb)`, not bare `tool` or `text`.
-- Tool arguments may be serialized while streaming. Conditions for code containing quotes SHOULD tolerate JSON escaping.
+- `tool:<name>` = one tool's arguments. New provider turns expose only `tool:ipython`; path-qualified tool scopes are unsupported.
+- Use `tool:ipython` for code complaints, not bare `tool` or `text`.
+- IPython tool deltas contain the cell code directly. Match the code as written.
 - When `condition` matches within `scope`, the stream is interrupted and the markdown body is injected as correction guidance.
 
 Output contract:
@@ -31,7 +31,7 @@ Example shape:
   "name": "ts-no-any",
   "description": "Never use `any` in TypeScript — use `unknown`, a generic, or the real type",
   "condition": ": any|as any",
-  "scope": ["tool:edit(*.ts)", "tool:edit(*.tsx)", "tool:write(*.ts)", "tool:write(*.tsx)"],
+  "scope": ["tool:ipython"],
   "body": "Never use `: any` or `as any`. Use `unknown`, a domain type, a generic, or a type guard."
 }
 

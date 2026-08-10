@@ -186,7 +186,7 @@ export interface RemoteDirEntry {
  * Plain `ls` (no `| head`) so a permission/race failure surfaces as a non-zero
  * exit instead of being masked as an empty listing. Entries are returned in
  * full, sorted directories-first then by name to mirror the local
- * directory-resource contract, so the read tool can paginate the listing.
+ * directory-resource contract, so the workspace read service can paginate the listing.
  */
 export async function listRemoteDir(
 	target: SSHConnectionTarget,

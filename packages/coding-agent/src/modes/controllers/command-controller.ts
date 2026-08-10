@@ -32,7 +32,6 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memor
 import { BashExecutionComponent } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
-import { EvalExecutionComponent } from "../../modes/components/eval-execution";
 import { MoveOverlay, type MoveOverlayResult } from "../../modes/components/move-overlay";
 import { TranscriptBlock } from "../../modes/components/transcript-container";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
@@ -226,7 +225,6 @@ export class CommandController {
 				serverUrl: this.ctx.settings.get("share.serverUrl"),
 				store: this.ctx.settings.get("share.store"),
 				state: this.ctx.session.state,
-				obfuscator: this.ctx.settings.get("share.redactSecrets") ? this.ctx.session.obfuscator : undefined,
 			});
 			if (loader.signal.aborted) return;
 			restoreEditor();
@@ -587,10 +585,7 @@ export class CommandController {
 	}
 
 	handleToolsCommand(): void {
-		const tools = buildToolsMarkdown({
-			tools: this.ctx.session.agent.state.tools,
-			xdevTools: this.ctx.session.getXdevToolEntries(),
-		});
+		const tools = buildToolsMarkdown({ tools: this.ctx.session.agent.state.tools });
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
@@ -1221,52 +1216,10 @@ export class CommandController {
 		await this.#moveInteractiveCwd(resolvedPath);
 	}
 
-	async handlePythonCommand(code: string, excludeFromContext = false): Promise<void> {
-		const isDeferred = this.ctx.session.isStreaming;
-		this.ctx.pythonComponent = new EvalExecutionComponent(code, this.ctx.ui, excludeFromContext);
-
-		if (isDeferred) {
-			this.ctx.pendingMessagesContainer.addChild(this.ctx.pythonComponent);
-			this.ctx.pendingPythonComponents.push(this.ctx.pythonComponent);
-		} else {
-			this.ctx.present(this.ctx.pythonComponent);
-		}
-		this.ctx.ui.requestRender();
-
-		try {
-			const result = await this.ctx.session.executePython(
-				code,
-				chunk => {
-					if (this.ctx.pythonComponent) {
-						this.ctx.pythonComponent.appendOutput(chunk);
-					}
-				},
-				{ excludeFromContext },
-			);
-
-			if (this.ctx.pythonComponent) {
-				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
-				this.ctx.pythonComponent.setComplete(result.exitCode, result.cancelled, {
-					output: result.output,
-					truncation: meta?.truncation,
-				});
-			}
-		} catch (error) {
-			if (this.ctx.pythonComponent) {
-				this.ctx.pythonComponent.setComplete(undefined, false);
-			}
-			this.ctx.showError(`Python execution failed: ${error instanceof Error ? error.message : "Unknown error"}`);
-		}
-
-		this.ctx.pythonComponent = undefined;
-		this.ctx.ui.requestRender();
-	}
-
 	async handleCompactCommand(
 		customInstructions?: string,
 		mode?: CompactMode,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
-		internalGuidance?: string,
 	): Promise<CompactionOutcome> {
 		const entries = this.ctx.sessionManager.getEntries();
 		const messageCount = entries.filter(e => e.type === "message").length;
@@ -1276,15 +1229,6 @@ export class CommandController {
 			return "ok";
 		}
 
-		// `internalGuidance` is a private summarizer directive (plan-mode
-		// "Approve and compact context") that MUST stay off the public
-		// `customInstructions` channel of the `session_before_compact` extension
-		// hook — extensions treat that field as user focus and would otherwise
-		// bias the summary toward the plan boilerplate (issue #4359). Ride it
-		// through as a CompactOptions field instead.
-		if (internalGuidance) {
-			return this.executeCompaction({ internalGuidance, ...(mode ? { mode } : {}) }, false, beforeFlush, mode);
-		}
 		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
 	}
 

@@ -335,12 +335,9 @@ Records the provider and a pseudonymous SHA-256 account/scope hash used to re-pi
   "timestamp": "2026-02-16T10:29:00.000Z",
   "systemPrompt": "...",
   "task": "...",
-  "tools": ["read", "edit"],
   "outputSchema": { "type": "object" },
   "outputSchemaMode": "strict",
-  "restrictToolNames": true,
-  "spawns": "*",
-  "readSummarize": false
+  "spawns": "*"
 }
 ```
 

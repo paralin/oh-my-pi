@@ -18,7 +18,6 @@ from omp_rpc import (
     RpcCommandError,
     RpcConcurrencyError,
     RpcError,
-    host_tool,
 )
 from omp_rpc.client import _RpcFrameDecoder
 
@@ -76,7 +75,6 @@ FAKE_SERVER = textwrap.dedent(
             "timestamp": 1,
         }
 
-    registered_host_tools = []
     host_event_tool_call_id = "toolu_host_1"
     host_event_tool_name = "echo_host"
 
@@ -98,7 +96,7 @@ FAKE_SERVER = textwrap.dedent(
             "messageCount": len(messages),
             "queuedMessageCount": 0,
             "todoPhases": todo_phases,
-            "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}] + registered_host_tools,
+            "dumpTools": [{"name": "read", "description": "Read files", "parameters": {"type": "object"}}],
         }
 
     def emit_prompt_turn(
@@ -275,21 +273,11 @@ FAKE_SERVER = textwrap.dedent(
 
         if command_type == "get_state":
             respond(request_id, "get_state", current_state())
-        elif command_type == "set_host_tools":
-            registered_host_tools = command.get("tools", [])
-            respond(
-                request_id,
-                "set_host_tools",
-                {"toolNames": [tool.get("name", "") for tool in registered_host_tools]},
-            )
         elif command_type == "set_todos":
             todo_phases = command.get("phases", [])
             respond(request_id, "set_todos", {"todoPhases": todo_phases})
         elif command_type == "get_messages":
             respond(request_id, "get_messages", {"messages": messages})
-        elif command_type == "set_host_tools":
-            tool_names = [tool.get("name", "") for tool in command.get("tools", [])]
-            respond(request_id, "set_host_tools", {"toolNames": tool_names})
         elif command_type == "set_model":
             model_provider = command["provider"]
             model_id = command["modelId"]
@@ -352,23 +340,6 @@ FAKE_SERVER = textwrap.dedent(
             respond(request_id, "set_auto_retry", {})
         elif command_type == "abort_retry":
             respond(request_id, "abort_retry", {})
-        elif command_type == "bash":
-            respond(
-                request_id,
-                "bash",
-                {
-                    "output": "hello\\n",
-                    "exitCode": 0,
-                    "cancelled": False,
-                    "truncated": False,
-                    "totalLines": 1,
-                    "totalBytes": 6,
-                    "outputLines": 1,
-                    "outputBytes": 6,
-                },
-            )
-        elif command_type == "abort_bash":
-            respond(request_id, "abort_bash", {})
         elif command_type == "get_session_stats":
             respond(
                 request_id,
@@ -416,51 +387,6 @@ FAKE_SERVER = textwrap.dedent(
             if message == "needs cancel":
                 print(json.dumps({"type": "extension_ui_request", "id": "ui-3", "method": "editor", "title": "Edit", "placeholder": "value"}), flush=True)
                 continue
-            if message == "needs host tool":
-                print(json.dumps({"type": "agent_start"}), flush=True)
-                host_event_tool_call_id = "toolu_host_1"
-                host_event_tool_name = "echo_host"
-                print(
-                    json.dumps(
-                        {
-                            "type": "host_tool_call",
-                            "id": "host-call-1",
-                            "toolCallId": "toolu_host_1",
-                            "toolName": "echo_host",
-                            "arguments": {"message": "hello"},
-                        }
-                    ),
-                    flush=True,
-                )
-                continue
-            if message == "needs xd host tool":
-                print(json.dumps({"type": "agent_start"}), flush=True)
-                host_event_tool_call_id = "toolu_write_1"
-                host_event_tool_name = "write"
-                print(
-                    json.dumps(
-                        {
-                            "type": "tool_execution_start",
-                            "toolCallId": "toolu_write_1",
-                            "toolName": "write",
-                            "args": {"path": "xd://echo_host", "content": '{"message": "hello"}'},
-                        }
-                    ),
-                    flush=True,
-                )
-                print(
-                    json.dumps(
-                        {
-                            "type": "host_tool_call",
-                            "id": "host-call-2",
-                            "toolCallId": "toolu_write_1",
-                            "toolName": "echo_host",
-                            "arguments": {"message": "hello"},
-                        }
-                    ),
-                    flush=True,
-                )
-                continue
             if message == "notifications":
                 print(json.dumps({"type": "extension_error", "extensionPath": "/tmp/ext.py", "event": "run", "error": "boom"}), flush=True)
                 print(json.dumps({"type": "unknown_future_event", "value": 1}), flush=True)
@@ -470,33 +396,6 @@ FAKE_SERVER = textwrap.dedent(
                 include_extra_events=message == "all events",
                 compact_terminal=message == "compacted turn",
             )
-        elif command_type == "host_tool_update":
-            print(
-                json.dumps(
-                    {
-                        "type": "tool_execution_update",
-                        "toolCallId": host_event_tool_call_id,
-                        "toolName": host_event_tool_name,
-                        "args": {"message": "hello"},
-                        "partialResult": command["partialResult"],
-                    }
-                ),
-                flush=True,
-            )
-        elif command_type == "host_tool_result":
-            print(
-                json.dumps(
-                    {
-                        "type": "tool_execution_end",
-                        "toolCallId": host_event_tool_call_id,
-                        "toolName": host_event_tool_name,
-                        "result": command["result"],
-                        "isError": command.get("isError", False),
-                    }
-                ),
-                flush=True,
-            )
-            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
         else:
             respond(request_id, command_type, success=False, error=f"unsupported: {command_type}")
     """
@@ -666,20 +565,6 @@ IDLESS_ERROR_SERVER = textwrap.dedent(
             continue
 
         command = json.loads(raw_line)
-        if command["type"] == "set_host_tools":
-            print(
-                json.dumps(
-                    {
-                        "id": command.get("id"),
-                        "type": "response",
-                        "command": "set_host_tools",
-                        "success": True,
-                        "data": {"toolNames": []},
-                    }
-                ),
-                flush=True,
-            )
-            continue
         print(
             json.dumps(
                 {
@@ -708,20 +593,6 @@ LATE_PROMPT_FAILURE_SERVER = textwrap.dedent(
 
         command = json.loads(raw_line)
         request_id = command.get("id")
-        if command["type"] == "set_host_tools":
-            print(
-                json.dumps(
-                    {
-                        "id": request_id,
-                        "type": "response",
-                        "command": "set_host_tools",
-                        "success": True,
-                        "data": {"toolNames": []},
-                    }
-                ),
-                flush=True,
-            )
-            continue
         if command["type"] == "prompt":
             print(
                 json.dumps(
@@ -777,32 +648,45 @@ STDERR_SERVER = textwrap.dedent(
         if not raw_line:
             continue
         command = json.loads(raw_line)
-        if command["type"] == "set_host_tools":
+        if command.get("message") == "malformed terminal":
             print(
                 json.dumps(
                     {
-                        "id": command.get("id"),
-                        "type": "response",
-                        "command": "set_host_tools",
-                        "success": True,
-                        "data": {"toolNames": []},
+                        "type": "agent_end",
+                        "messages": [{"role": "future_role"}],
+                        "isTerminal": True,
                     }
                 ),
                 flush=True,
             )
+            time.sleep(2)
+            continue
+        print(
+            json.dumps(
+                {
+                    "type": "auto_compaction_start",
+                    "reason": "future_reason",
+                    "action": "future_action",
+                }
+            ),
+            flush=True,
+        )
+        print(
+            json.dumps(
+                {"type": "agent_end", "messages": [], "isTerminal": False}
+            ),
+            flush=True,
+        )
+        time.sleep(0.15)
+        print(
+            json.dumps(
+                {"type": "agent_end", "messages": [], "isTerminal": True}
+            ),
+            flush=True,
+        )
     """
 )
 
-INVALID_JSON_SERVER = textwrap.dedent(
-    """
-    import sys
-
-    sys.stdout.write('{"type":"ready"}\\n')
-    sys.stdout.flush()
-    sys.stdout.write('{"type":"broken"\\n')
-    sys.stdout.flush()
-    """
-)
 
 BROKEN_STARTUP_SERVER = textwrap.dedent(
     """
@@ -924,7 +808,6 @@ class RpcClientTests(unittest.TestCase):
             thinking="high",
             append_system_prompt="extra instructions",
             provider_session_id="provider-session-1",
-            tools=("read", "edit", "write"),
             no_session=True,
             no_skills=True,
             no_rules=True,
@@ -945,8 +828,6 @@ class RpcClientTests(unittest.TestCase):
                 "extra instructions",
                 "--provider-session-id",
                 "provider-session-1",
-                "--tools",
-                "read,edit,write",
                 "--no-session",
                 "--no-skills",
                 "--no-rules",
@@ -956,7 +837,7 @@ class RpcClientTests(unittest.TestCase):
             ),
         )
 
-    def test_get_state_and_bash(self) -> None:
+    def test_get_state(self) -> None:
         with self.make_client() as client:
             state = client.get_state()
             self.assertEqual(state.session_id, "fake-session")
@@ -966,10 +847,6 @@ class RpcClientTests(unittest.TestCase):
             self.assertFalse(state.fast_mode_enabled)
             self.assertTrue(state.fast_mode_active)
             self.assertEqual(state.tokens_per_second, 7.25)
-
-            result = client.bash("echo hello")
-            self.assertEqual(result.output, "hello\n")
-            self.assertEqual(result.exit_code, 0)
 
     def test_set_fast_mode_preserves_provider_tier_state(self) -> None:
         with self.make_client() as client:
@@ -993,104 +870,6 @@ class RpcClientTests(unittest.TestCase):
             ["pong", "terminal"],
         )
         self.assertEqual(turn.require_assistant_text(), "terminal")
-
-    def test_custom_tools_are_registered_and_executed_via_rpc(self) -> None:
-        def echo_host(args: dict[str, str], context) -> str:
-            context.send_update(f"working:{args['message']}")
-            return f"host:{args['message']}"
-
-        with self.make_client(
-            custom_tools=(
-                host_tool(
-                    name="echo_host",
-                    description="Echo from the Python host process",
-                    parameters={
-                        "type": "object",
-                        "properties": {"message": {"type": "string"}},
-                        "required": ["message"],
-                        "additionalProperties": False,
-                    },
-                    execute=echo_host,
-                ),
-            )
-        ) as client:
-            state = client.get_state()
-            self.assertEqual(state.dump_tools[-1].name, "echo_host")
-
-            turn = client.prompt_and_wait("needs host tool", timeout=2.0)
-            update_events = [
-                event
-                for event in turn.events
-                if getattr(event, "type", None) == "tool_execution_update"
-            ]
-            end_events = [
-                event
-                for event in turn.events
-                if getattr(event, "type", None) == "tool_execution_end"
-            ]
-
-            self.assertEqual(len(update_events), 1)
-            self.assertEqual(
-                update_events[0].partial_result["content"][0]["text"], "working:hello"
-            )
-            self.assertEqual(len(end_events), 1)
-            self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
-
-    def test_xd_dispatched_custom_tool_events_carry_host_tool_name(self) -> None:
-        """Events for an xd:// device dispatch are renamed to the executed host tool.
-
-        With `tools.xdev` on, omp invokes a custom tool through `write
-        xd://<name>` and the wire events carry the transport tool (`write`).
-        Consumers must observe the host-tool name on update/end events
-        regardless of transport — roboomp's terminal-action detection
-        triple-posted PR reviews when end events only said `write`
-        (oh-my-pi#6696). `tool_execution_start` precedes the `host_tool_call`
-        frame on the wire and keeps the transport name.
-        """
-
-        def echo_host(args: dict[str, str], context) -> str:
-            context.send_update(f"working:{args['message']}")
-            return f"host:{args['message']}"
-
-        with self.make_client(
-            custom_tools=(
-                host_tool(
-                    name="echo_host",
-                    description="Echo from the Python host process",
-                    parameters={
-                        "type": "object",
-                        "properties": {"message": {"type": "string"}},
-                        "required": ["message"],
-                        "additionalProperties": False,
-                    },
-                    execute=echo_host,
-                ),
-            )
-        ) as client:
-            turn = client.prompt_and_wait("needs xd host tool", timeout=2.0)
-            start_names = [
-                event.tool_name
-                for event in turn.events
-                if getattr(event, "type", None) == "tool_execution_start"
-            ]
-            update_events = [
-                event
-                for event in turn.events
-                if getattr(event, "type", None) == "tool_execution_update"
-            ]
-            end_events = [
-                event
-                for event in turn.events
-                if getattr(event, "type", None) == "tool_execution_end"
-            ]
-
-            self.assertEqual(start_names, ["write"])
-            self.assertEqual(
-                [event.tool_name for event in update_events], ["echo_host"]
-            )
-            self.assertEqual([event.tool_name for event in end_events], ["echo_host"])
-            self.assertEqual(end_events[0].tool_call_id, "toolu_write_1")
-            self.assertEqual(end_events[0].result["content"][0]["text"], "host:hello")
 
     def test_extension_ui_round_trip(self) -> None:
         with self.make_client() as client:
@@ -1222,7 +1001,6 @@ class RpcClientTests(unittest.TestCase):
             client.follow_up("later")
             client.abort()
             client.abort_retry()
-            client.abort_bash()
 
             client.abort_and_prompt("say hello")
             client.wait_for_idle(timeout=2.0)

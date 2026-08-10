@@ -73,7 +73,7 @@ function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<
 			get: vi.fn((_key: string): unknown => undefined),
 		},
 		session: {
-			refreshMCPTools: vi.fn(),
+			refreshMCPInstructions: vi.fn(),
 			setMCPPromptCommands: vi.fn(),
 			modelRegistry: { authStorage },
 		},

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, TextContent, ToolCall } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -17,9 +17,8 @@ import { TempDir, withTimeout } from "@oh-my-pi/pi-utils";
  * `agent_end`, which incremented the counter and fired the next reminder — no
  * user input required. Within a single user pause that loop runs 1/3 → 2/3 → 3/3.
  *
- * The contract these tests defend: a reminder MUST NOT escalate inside a
- * self-continuation chain unless the agent has produced a tool-level result
- * (e.g. called `todo` or `edit`) between the prior reminder and the next stop.
+ * The contract these tests defend: a reminder does not escalate inside a
+ * self-continuation chain. A later user prompt starts a new reminder cycle.
  */
 describe("AgentSession todo reminder self-continuation suppression", () => {
 	let tempDir: TempDir;
@@ -55,42 +54,6 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		const msg = textOnlyAssistantMessage(text);
 		session.agent.emitExternalEvent({ type: "message_end", message: msg });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
-	}
-
-	function emitToolResult(toolName: string, details: Record<string, unknown> = {}): void {
-		const toolCallId = `call_${toolName}_${Date.now()}_${Math.random()}`;
-		const toolCall: ToolCall = { type: "toolCall", id: toolCallId, name: toolName, arguments: {} };
-		const assistantMsg: AssistantMessage = {
-			role: "assistant",
-			content: [toolCall],
-			api: "anthropic-messages",
-			provider: "anthropic",
-			model: "claude-sonnet-4-5",
-			stopReason: "toolUse",
-			usage: {
-				input: 50,
-				output: 10,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 60,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now(),
-		};
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		const content: TextContent[] = [{ type: "text", text: "ok" }];
-		session.agent.emitExternalEvent({
-			type: "message_end",
-			message: {
-				role: "toolResult",
-				toolCallId,
-				toolName,
-				content,
-				isError: false,
-				details,
-				timestamp: Date.now(),
-			},
-		});
 	}
 
 	function todoReminderTranscriptEntry() {
@@ -239,28 +202,5 @@ describe("AgentSession todo reminder self-continuation suppression", () => {
 		// With the fix: the second `agent_end` is suppressed because no tool action ran
 		// between the first reminder and the agent's text-only ack.
 		expect(reminderAttempts).toEqual([1]);
-	});
-
-	it("re-escalates after the agent makes tool-level progress between stops", async () => {
-		let continueCount = 0;
-		vi.spyOn(session.agent, "continue").mockImplementation(async () => {
-			continueCount += 1;
-			if (continueCount === 1) {
-				// In response to reminder 1/3 the agent actually did work (called `todo`),
-				// then stopped again with todos still incomplete.
-				emitToolResult("todo", { phases: session.getTodoPhases() });
-				emitTextOnlyStop();
-				return;
-			}
-			// Subsequent continuations are bare acks — they must not escalate further.
-			emitTextOnlyStop();
-		});
-
-		emitTextOnlyStop();
-		await withTimeout(firstReminderPromise, 1000, "todo_reminder never fired");
-		await session.waitForIdle();
-
-		// 1/3 fires, agent does work, 2/3 fires, agent acks → suppressed, no 3/3.
-		expect(reminderAttempts).toEqual([1, 2]);
 	});
 });

@@ -13,9 +13,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter, LocalProtocolHandler, parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 // 1x1 transparent PNG — small enough to pass through image loading untouched.
 const TINY_PNG = Buffer.from(
@@ -32,9 +32,6 @@ function makeSession(testDir: string): ToolSession {
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => artifactsDir,
 		getSessionSpawns: () => null,
-		// A restricted slate without inspect_image (and no xdev mount) must keep
-		// inlining images — metadata-only guidance would point at an absent tool.
-		isToolActive: () => false,
 		settings: Settings.isolated({ "images.autoResize": false }),
 	} as unknown as ToolSession;
 }
@@ -71,9 +68,9 @@ describe("read local:// images", () => {
 
 	it("decodes a local:// PNG into an inline image block", async () => {
 		await Bun.write(path.join(localRoot, "clifford.png"), TINY_PNG);
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://clifford.png" });
+		const result = await tool.read("local://clifford.png");
 
 		const image = result.content.find(c => c.type === "image");
 		expect(image).toBeDefined();
@@ -85,9 +82,9 @@ describe("read local:// images", () => {
 
 	it("still reads a local:// text file as text (fast path falls through)", async () => {
 		await Bun.write(path.join(localRoot, "notes.txt"), "hello world");
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://notes.txt" });
+		const result = await tool.read("local://notes.txt");
 
 		expect(result.content.some(c => c.type === "image")).toBe(false);
 		expect(joinText(result.content)).toContain("hello world");
@@ -95,9 +92,9 @@ describe("read local:// images", () => {
 
 	it("rejects a local:// non-image binary without emitting decoded bytes", async () => {
 		await Bun.write(path.join(localRoot, "clip.mp4"), new Uint8Array([0, 1, 2, 3, 4, 5]));
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://clip.mp4" });
+		const result = await tool.read("local://clip.mp4");
 		const text = joinText(result.content);
 
 		expect(text).toContain("Cannot read binary file");
@@ -114,9 +111,9 @@ describe("read local:// images", () => {
 		// emitted as text (the reviewer's video/archive case).
 		const blob = new Uint8Array(256 * 1024);
 		await Bun.write(path.join(localRoot, "video.mp4"), blob);
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
-		const result = await tool.execute("call", { path: "local://video.mp4" });
+		const result = await tool.read("local://video.mp4");
 		const text = joinText(result.content);
 
 		expect(text).toContain("Cannot read binary file");
@@ -140,12 +137,10 @@ describe("read local:// images", () => {
 		await fs.mkdir(outsideDir, { recursive: true });
 		await Bun.write(path.join(outsideDir, "secret.png"), TINY_PNG);
 		await fs.symlink(outsideDir, path.join(localRoot, "linked"));
-		const tool = new ReadTool(makeSession(testDir));
+		const tool = new ReadService(makeSession(testDir));
 
 		// The realpath/containment guard the router applies must still reject the
 		// escape; the image fast path must not silently read it.
-		await expect(tool.execute("call", { path: "local://linked/secret.png" })).rejects.toThrow(
-			"local:// URL escapes local root",
-		);
+		await expect(tool.read("local://linked/secret.png")).rejects.toThrow("local:// URL escapes local root");
 	});
 });

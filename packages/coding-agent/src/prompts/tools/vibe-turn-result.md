@@ -14,6 +14,6 @@
 <error>{{error}}</error>
 {{/if}}
 {{#if alive}}
-Session `{{id}}` is idle and retains this conversation — continue it with vibe_send. Transcript: history://{{id}}
+Session `{{id}}` is idle and retains this conversation — continue it with omp.vibe.send. Transcript: history://{{id}}
 {{/if}}
 </vibe-turn>

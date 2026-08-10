@@ -1,9 +1,9 @@
 import * as fs from "node:fs/promises";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import type { ToolSession } from "../tools";
+import type { ToolSession } from "../session/tool-session";
 import {
 	executeGithubOperation,
 	type GithubInput,
+	type GithubOperationResult,
 	getOrFetchIssue,
 	getOrFetchPr,
 	getOrFetchPrDiff,
@@ -15,8 +15,6 @@ const MAX_JSON_CHARS = 500_000;
 const MAX_STRING_CHARS = 64_000;
 const MAX_BODY_CHARS = 1024 * 1024;
 const MAX_LIST_ITEMS = 100;
-
-type GithubOperationResult = AgentToolResult<Record<string, unknown>>;
 
 export interface IpythonGithubOwner {
 	execute(params: GithubInput, signal: AbortSignal): Promise<GithubOperationResult>;

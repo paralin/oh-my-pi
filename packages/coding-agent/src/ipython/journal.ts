@@ -3,6 +3,7 @@ import type { IpythonArtifactReference, IpythonCellResult, IpythonCellUpdate } f
 export type { IpythonArtifactReference } from "./cell";
 
 import type { IpythonErrorEvent, IpythonExecutionEvent, IpythonProcessIds } from "./controller";
+import { type IpythonCompletedCellPresentation, projectIpythonCellPresentation } from "./projection";
 
 export const IPYTHON_JOURNAL_MESSAGE_TYPE = "ipython-cell";
 export const IPYTHON_JOURNAL_VERSION = 1;
@@ -46,9 +47,10 @@ export interface IpythonLifecycleJournalDetail {
 export type IpythonJournalDetail = IpythonCellJournalDetail | IpythonLifecycleJournalDetail;
 
 export function createIpythonCellJournalDetail(
-	result: IpythonCellResult,
+	result: IpythonCellResult | IpythonCompletedCellPresentation,
 	artifacts: readonly IpythonArtifactReference[] = result.artifacts,
 ): IpythonCellJournalDetail {
+	const safeText = "modelText" in result ? result.modelText : result.safeText;
 	return {
 		version: IPYTHON_JOURNAL_VERSION,
 		kind: "cell",
@@ -69,9 +71,9 @@ export function createIpythonCellJournalDetail(
 		events: [...result.events],
 		errors: [...result.errors],
 		updates: [...result.updates],
-		safeText: result.modelText.text,
-		safeTextTruncated: result.modelText.truncated,
-		totalOutputBytes: result.modelText.totalBytes,
+		safeText: safeText.text,
+		safeTextTruncated: safeText.truncated,
+		totalOutputBytes: safeText.totalBytes,
 		artifacts: [...artifacts],
 	};
 }
@@ -97,6 +99,41 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every(item => typeof item === "string");
+}
+
+function isErrorEvent(value: unknown): value is IpythonErrorEvent {
+	return (
+		isRecord(value) &&
+		value.kind === "error" &&
+		typeof value.ename === "string" &&
+		typeof value.evalue === "string" &&
+		isStringArray(value.traceback)
+	);
+}
+
+function isExecutionEvent(value: unknown): value is IpythonExecutionEvent {
+	if (!isRecord(value)) return false;
+	if (value.kind === "stream") {
+		return (value.name === "stdout" || value.name === "stderr") && typeof value.text === "string";
+	}
+	if (value.kind === "result") return isRecord(value.data);
+	if (value.kind === "display") {
+		return (
+			isRecord(value.data) &&
+			isRecord(value.metadata) &&
+			isRecord(value.transient) &&
+			typeof value.update === "boolean" &&
+			typeof value.text === "string"
+		);
+	}
+	if (value.kind === "host_progress") {
+		return typeof value.operation === "string" && typeof value.message === "string" && isRecord(value.data);
+	}
+	return isErrorEvent(value);
+}
+
 function isStoredUpdate(value: unknown): boolean {
 	if (
 		!isRecord(value) ||
@@ -108,11 +145,11 @@ function isStoredUpdate(value: unknown): boolean {
 	if (value.kind === "startup") {
 		return (
 			isRecord(value.progress) &&
-			typeof value.progress.stage === "string" &&
+			["gate", "runtime", "controller", "restore", "bootstrap", "ready"].includes(String(value.progress.stage)) &&
 			typeof value.progress.message === "string"
 		);
 	}
-	return value.kind === "execution" && isRecord(value.event) && typeof value.event.kind === "string";
+	return value.kind === "execution" && isExecutionEvent(value.event);
 }
 
 function isArtifactReference(value: unknown): boolean {
@@ -145,16 +182,26 @@ export function isIpythonJournalDetail(value: unknown): value is IpythonJournalD
 	return (
 		value.kind === "cell" &&
 		typeof value.cellId === "string" &&
+		(value.executionId === undefined || typeof value.executionId === "string") &&
 		typeof value.sequence === "number" &&
 		(value.origin === "model" || value.origin === "direct") &&
 		value.authority === "trusted-cell" &&
 		typeof value.code === "string" &&
 		(value.status === "ok" || value.status === "error" || value.status === "aborted") &&
+		typeof value.requestedAt === "number" &&
+		(value.startedAt === undefined || typeof value.startedAt === "number") &&
+		typeof value.finishedAt === "number" &&
 		typeof value.durationMs === "number" &&
+		typeof value.stdout === "string" &&
+		typeof value.stderr === "string" &&
+		(value.result === undefined || typeof value.result === "string") &&
 		typeof value.safeText === "string" &&
 		typeof value.safeTextTruncated === "boolean" &&
+		typeof value.totalOutputBytes === "number" &&
 		Array.isArray(value.events) &&
+		value.events.every(isExecutionEvent) &&
 		Array.isArray(value.errors) &&
+		value.errors.every(isErrorEvent) &&
 		Array.isArray(value.updates) &&
 		value.updates.every(isStoredUpdate) &&
 		Array.isArray(value.artifacts) &&
@@ -164,16 +211,19 @@ export function isIpythonJournalDetail(value: unknown): value is IpythonJournalD
 
 export function renderIpythonJournalText(detail: IpythonJournalDetail): string {
 	if (detail.kind === "lifecycle") return `IPython ${detail.event}: ${detail.message}`;
+	const presentation = projectIpythonCellPresentation(detail);
 	const lines = [
-		`IPython cell ${detail.sequence} (${detail.origin}, ${detail.status}, ${detail.durationMs}ms)`,
+		`IPython cell ${presentation.sequence} (${presentation.origin}, ${presentation.status}, ${presentation.durationMs}ms)`,
 		"```python",
-		detail.code,
+		presentation.code,
 		"```",
 	];
-	if (detail.safeText) lines.push("```text", detail.safeText, "```");
-	for (const artifact of detail.artifacts) {
+	if (presentation.safeText.text) lines.push("```text", presentation.safeText.text, "```");
+	for (const artifact of presentation.artifacts) {
 		lines.push(`Artifact: ${artifact.label ?? artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`);
 	}
-	if (detail.safeTextTruncated) lines.push(`Output truncated from ${detail.totalOutputBytes} bytes.`);
+	if (presentation.safeText.truncated) {
+		lines.push(`Output truncated from ${presentation.safeText.totalBytes} bytes.`);
+	}
 	return lines.join("\n");
 }

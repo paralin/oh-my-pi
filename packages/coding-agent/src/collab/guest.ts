@@ -562,7 +562,7 @@ export class CollabGuestLink {
 		// in-flight assistant message predates the snapshot. message_update
 		// carries the full accumulating message, so synthesize the missing start
 		// before the first orphaned update; every other handler is tolerant of
-		// unknown anchors (guarded by streamingComponent/pendingTools lookups).
+		// unknown anchors (guarded by streaming-component lookups).
 		if (event.type === "message_start" && event.message.role === "assistant") {
 			this.#assistantStreamSynced = true;
 		} else if (
@@ -719,7 +719,6 @@ export class CollabGuestLink {
 		this.#ctx.compactionQueuedMessages = [];
 		this.#ctx.streamingComponent = undefined;
 		this.#ctx.streamingMessage = undefined;
-		this.#ctx.pendingTools.clear();
 		if (this.#ctx.loadingAnimation) {
 			this.#ctx.loadingAnimation.stop();
 			this.#ctx.loadingAnimation = undefined;

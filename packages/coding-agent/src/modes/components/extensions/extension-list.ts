@@ -249,8 +249,6 @@ export class ExtensionList implements Component {
 				return theme.icon.extensionTool;
 			case "skill":
 				return theme.icon.extensionSkill;
-			case "tool":
-				return theme.icon.extensionTool;
 			case "slash-command":
 				return theme.icon.extensionSlashCommand;
 			case "mcp":
@@ -335,7 +333,6 @@ export class ExtensionList implements Component {
 		const kindOrder: ExtensionKind[] = [
 			"extension-module",
 			"skill",
-			"tool",
 			"slash-command",
 			"rule",
 			"mcp",
@@ -369,8 +366,6 @@ export class ExtensionList implements Component {
 				return "Extension Modules";
 			case "skill":
 				return "Skills";
-			case "tool":
-				return "Tools";
 			case "slash-command":
 				return "Commands";
 			case "rule":

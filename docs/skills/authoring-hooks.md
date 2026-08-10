@@ -5,7 +5,7 @@ description: Use when creating a new omp hook. Covers HookAPI, event catalog, bl
 
 # Authoring Hooks
 
-Hooks are event-driven interceptors that run alongside the agent loop. They are best used for cross-cutting concerns: safety policy, secret redaction, context pruning, audit logging. A hook module registers handlers via `pi.on(event, handler)` and can block tool execution, override tool output, or rewrite the message context before each LLM call.
+Hooks are event-driven interceptors that run alongside the agent loop. They are best used for cross-cutting concerns: safety policy, secret redaction, context pruning, audit logging. A hook module registers handlers via `pi.on(event, handler)` and can block the IPython cell, override its output, or rewrite the message context before each LLM call.
 
 > **Relationship to extensions:** The hook subsystem (`HookAPI`) is the legacy API. The extension runner now handles everything hooks can do plus more. `ExtensionAPI` supports the hook event model plus extension-only events. Use `ExtensionAPI` for new work; use `HookAPI` only if you are maintaining an existing hook module.
 
@@ -16,7 +16,7 @@ import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function myHook(omp: HookAPI): void {
   omp.on("tool_call", async (event, ctx) => {
-    // intercept every tool call
+    // inspect the fixed IPython cell
   });
 }
 ```
@@ -39,8 +39,8 @@ export default function myExtension(pi: ExtensionAPI): void {
 
 | Event | Fires | Can return |
 |---|---|---|
-| `tool_call` | Before every tool execution | `{ block?: boolean; reason?: string; input?: Record<string, unknown> }` |
-| `tool_result` | After every tool execution | `{ content?; details?; isError?: boolean }` |
+| `tool_call` | Before the fixed IPython cell executes | `{ block?: boolean; reason?: string; input?: { code: string } }` |
+| `tool_result` | After the fixed IPython cell executes | `{ content?; details?; isError?: boolean }` |
 
 ### Session lifecycle
 
@@ -75,19 +75,16 @@ export default function myExtension(pi: ExtensionAPI): void {
 | `ttsr_triggered` | TTSR (too-short response) triggered | — |
 | `todo_reminder` | Todo reminder fires | — |
 
-Extension-only events such as `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `input`, `user_bash`, and `user_python` require `ExtensionAPI`.
+Extension-only events such as `tool_execution_start`, `tool_execution_update`, `tool_execution_end`, `input`, and `user_bash` require `ExtensionAPI`.
 
 ## Pre-tool blocking contract
 
 Return `{ block: true, reason: "..." }` from a `tool_call` handler to prevent execution:
 
 ```ts
-omp.on("tool_call", async (event, ctx) => {
-  if (event.toolName === "bash") {
-    const cmd = String(event.input.command ?? "");
-    if (/\brm\s+-rf\s+\//.test(cmd)) {
-      return { block: true, reason: "Refusing to delete root filesystem" };
-    }
+omp.on("tool_call", async event => {
+  if (/\brm\s+-rf\s+\//.test(event.input.code)) {
+    return { block: true, reason: "Refusing to delete root filesystem" };
   }
 });
 ```
@@ -98,24 +95,23 @@ Contract:
 - `reason` becomes the tool error text the LLM sees.
 - If a handler **throws**, the tool is also blocked (fail-closed).
 - Last non-blocking return wins; first `block: true` short-circuits.
-- A non-blocking handler can return `input` to replace the raw arguments passed to the tool. Handlers do not see earlier input revisions, and input replacement is ignored for `computer` calls.
+- A non-blocking handler can return `input: { code }` to replace the IPython cell. Handlers do not see earlier code revisions.
 
 ## Post-tool override contract
 
 Return `{ content, details, isError }` from a `tool_result` handler to patch what the LLM sees:
 
 ```ts
-omp.on("tool_result", async (event, ctx) => {
-  if (event.toolName === "read" && !event.isError) {
-    const redacted = event.content.map(chunk => {
-      if (chunk.type !== "text") return chunk;
-      return {
-        ...chunk,
-        text: chunk.text.replace(/(?:sk|pk)-[a-zA-Z0-9]{20,}/g, "[REDACTED_API_KEY]"),
-      };
-    });
-    return { content: redacted };
-  }
+omp.on("tool_result", event => {
+  if (event.isError) return;
+  const redacted = event.content.map(chunk => {
+    if (chunk.type !== "text") return chunk;
+    return {
+      ...chunk,
+      text: chunk.text.replace(/(?:sk|pk)-[a-zA-Z0-9]{20,}/g, "[REDACTED_API_KEY]"),
+    };
+  });
+  return { content: redacted };
 });
 ```
 
@@ -124,8 +120,7 @@ Contract:
 - Handlers run in registration order. For `HookAPI`, each handler receives the original tool result event, and the last returned override wins.
 - `content` replaces the full content array for the LLM.
 - `details` replaces the structured details object.
-- `isError` exists on the shared result type, but `HookToolWrapper` does not propagate it into a successful tool result; on a tool failure, the original error is rethrown after handlers complete.
-- On a tool failure, `tool_result` is still emitted with `isError: true`.
+- `isError` replaces the completed IPython cell's error status.
 
 ## Context modification contract
 
@@ -156,16 +151,14 @@ import type { HookAPI } from "@oh-my-pi/pi-coding-agent/extensibility/hooks";
 
 export default function rmRfBlocker(omp: HookAPI): void {
   omp.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") return;
-
-    const cmd = String(event.input.command ?? "");
-    if (!/\brm\s+-rf\s+\//.test(cmd)) return;
+    const code = event.input.code;
+    if (!/\brm\s+-rf\s+\//.test(code)) return;
 
     // Allow if user explicitly confirms (interactive mode only)
     if (ctx.hasUI) {
       const allow = await ctx.ui.confirm(
-        "Dangerous command",
-        `This command deletes from root:\n${cmd}\n\nProceed?`
+        "Dangerous cell",
+        `This cell deletes from root:\n${code}\n\nProceed?`
       );
       if (allow) return;
     }

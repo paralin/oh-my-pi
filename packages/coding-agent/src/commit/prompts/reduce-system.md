@@ -16,6 +16,7 @@ Determine:
 - Valid: specific component names (api, parser, config, etc.)
 </scope-rules>
 <output-format>
+Return ONLY one valid JSON object with no Markdown fence or prose.
 Each detail point:
 - Start with past-tense verb (added, fixed, moved, extracted)
 - Under 120 chars, ends with period

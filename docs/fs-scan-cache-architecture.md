@@ -16,7 +16,7 @@ Current native consumers:
 
 `crates/pi-natives/src/grep.rs` uses `WalkRequest` for candidate discovery but explicitly sets `.cache(false)`; the current public `GrepOptions` has no cache field.
 
-The public invalidation binding remains `invalidateFsScanCache(path?)` in `packages/natives/native/index.d.ts` / `index.js`. Coding-agent mutation helpers live in `packages/coding-agent/src/tools/fs-cache-invalidation.ts`.
+The public invalidation binding remains `invalidateFsScanCache(path?)` in `packages/natives/native/index.d.ts` / `index.js`.
 
 ## Cache key partitioning
 
@@ -83,7 +83,7 @@ Current effects:
 - `astGrep` / `astEdit` directory discovery: `hidden=true`, `gitignore=true`, cache always enabled; skips `.git`; excludes `node_modules` unless the supplied glob mentions it; never follows symlinks; uses minimal detail and path order.
 - `grep`: candidate walks skip `.git`, never follow symlinks, use minimal detail, and are uncached.
 
-The TUI `@`-mention autocomplete opts into cached `fuzzyFind`. Coding-agent's grep tool does not populate this cache.
+The TUI `@`-mention autocomplete opts into cached `fuzzyFind`.
 
 ## Invalidation
 
@@ -94,13 +94,7 @@ The TUI `@`-mention autocomplete opts into cached `fuzzyFind`. Coding-agent's gr
 
 Relative paths resolve against cwd. Invalidation canonicalizes the target; when it no longer exists, it attempts to canonicalize the parent and reattach the filename. This supports create, delete, and rename invalidation.
 
-Coding-agent helpers:
-
-- `invalidateFsScanAfterWrite(path)`
-- `invalidateFsScanAfterDelete(path)`
-- `invalidateFsScanAfterRename(oldPath, newPath)` — invalidates both sides when different
-
-Current write, hashline, patch, and replace mutation paths call these helpers after successful changes. Any new filesystem mutation path must do the same.
+Call the native binding after a successful filesystem mutation that can affect a cached discovery result. A rename invalidates both its source and destination.
 
 ## Adding a cache consumer
 
@@ -108,7 +102,7 @@ Current write, hashline, patch, and replace mutation paths call these helpers af
 2. Put stable candidate filtering in `WalkFilter` when empty-result revalidation should observe it. Post-collection scoring cannot trigger the request's recheck.
 3. Use `.cache(false)` for a genuinely fresh request; it bypasses rather than clearing shared state.
 4. Select `EmptyRecheck` deliberately. Do not add per-call TTL controls; TTL and default recheck age are global.
-5. Invalidate after every successful write, delete, or move; invalidate both sides of a rename.
+5. Invalidate after a successful mutation that can affect the cached result; invalidate both sides of a rename.
 
 ## Boundaries
 

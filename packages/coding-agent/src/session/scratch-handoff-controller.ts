@@ -1,9 +1,7 @@
 /** Scratch handoff continuity for an active coding-agent session. */
 
 import * as fs from "node:fs";
-import * as path from "node:path";
 
-import { Patch } from "@oh-my-pi/hashline";
 import {
 	type Agent,
 	type AgentContext,
@@ -24,12 +22,10 @@ import {
 	type ShakeRegion,
 	shouldCompact,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, Context, Message, Model, ToolCall } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, stringProperty } from "@oh-my-pi/pi-utils";
+import type { AssistantMessage, Context, Message, Model } from "@oh-my-pi/pi-ai";
+import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import type { Settings } from "../config/settings";
-import { expandApplyPatchToEntries } from "../edit/modes/apply-patch";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { AutoCompactionReason } from "../extensibility/shared-events";
 import type { NonMessageTokenSource } from "../modes/utils/context-usage";
@@ -64,96 +60,6 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
  */
 const SCRATCH_HANDOFF_CLOSEOUT_MIN_HEADROOM_TOKENS = 4_096;
 
-function isScratchSafeReadToolCall(toolCall: ToolCall): boolean {
-	return isScratchSafeReadTool(toolCall.name, toolCall.arguments);
-}
-
-export function isScratchSafeReadTool(toolName: string, args: Record<string, unknown> | undefined): boolean {
-	switch (toolName) {
-		case "read":
-		case "grep":
-		case "glob":
-		case "ast_grep":
-		case "web_search":
-			return true;
-		case "lsp": {
-			const action = args?.action;
-			return (
-				action === "capabilities" ||
-				action === "definition" ||
-				action === "diagnostics" ||
-				action === "hover" ||
-				action === "implementation" ||
-				action === "references" ||
-				action === "status" ||
-				action === "symbols" ||
-				action === "type_definition"
-			);
-		}
-		default:
-			return false;
-	}
-}
-
-export function assistantMessageToolCallsAreScratchSafeReads(assistantMessage: AssistantMessage): boolean {
-	const toolCalls = assistantMessage.content.filter((content): content is ToolCall => content.type === "toolCall");
-	return toolCalls.length > 0 && toolCalls.every(isScratchSafeReadToolCall);
-}
-
-export function assistantToolUseCanScratchHandoff(
-	assistantMessage: AssistantMessage,
-	messages: readonly AgentMessage[],
-	hasRecentMutation: boolean,
-): boolean {
-	if (!assistantMessage.content.some(content => content.type === "toolCall")) return true;
-	if (!assistantMessageToolCallsAreScratchSafeReads(assistantMessage)) return false;
-	if (hasRecentMutation) return false;
-
-	const assistantIndex = messages.lastIndexOf(assistantMessage);
-	if (assistantIndex === -1) return false;
-	for (let index = assistantIndex - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message?.role === "assistant") break;
-		if (message?.role === "toolResult" && !isScratchSafeReadTool(message.toolName, undefined)) return false;
-	}
-	return true;
-}
-
-function toolWriteTargetPaths(toolName: string, args: unknown): string[] {
-	if (!isRecord(args)) return [];
-	const record = args;
-	if (toolName === "write") {
-		const pathArg = stringProperty(record, "path");
-		return pathArg ? [pathArg] : [];
-	}
-	if (toolName !== "edit") return [];
-
-	const paths: string[] = [];
-	const directPath = stringProperty(record, "path");
-	if (directPath) paths.push(directPath);
-	const input = stringProperty(record, "input");
-	if (!input) return paths;
-	try {
-		const patch = Patch.parse(input);
-		for (const section of patch.sections) {
-			paths.push(section.path);
-			if (section.fileOp?.kind === "move") paths.push(section.fileOp.dest);
-		}
-		return paths;
-	} catch {
-		// Not a hashline patch — fall through to apply_patch parsing.
-	}
-	try {
-		for (const entry of expandApplyPatchToEntries({ input })) {
-			paths.push(entry.path);
-			if (entry.rename) paths.push(entry.rename);
-		}
-	} catch {
-		// If the edit input is not an apply_patch envelope, there are no parseable target paths.
-	}
-	return paths;
-}
-
 /** Prepared scratch continuity payload for one maintenance pass. */
 export interface PreparedScratchHandoffContext {
 	content: CustomMessage["content"];
@@ -182,7 +88,6 @@ export interface ScratchHandoffHost {
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
 	buildDisplaySessionContext(): SessionContext;
-	resetPlanReference(): void;
 	resetAdvisorRuntimes(): void;
 	closeCodexProviderSessionsForHistoryRewrite(): void;
 	markPrefixReset(): void;
@@ -197,7 +102,6 @@ export interface ScratchHandoffHost {
 		deliverAs: "steer" | "followUp",
 		queueChipText?: string,
 	): Promise<void>;
-	forceScratchToolChoiceNow(toolName: "edit" | "write", label: string): void;
 	runAutoCompaction(
 		reason: AutoCompactionReason,
 		willRetry: boolean,
@@ -207,7 +111,6 @@ export interface ScratchHandoffHost {
 	): Promise<CompactionCheckResult>;
 	/** Settles the pending `message_end` persistence tail before a branch rewrite. */
 	messageEndPersistenceTail(): Promise<void>;
-	withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T;
 	shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string;
 	applyShakeRegions(
 		mode: Exclude<ShakeMode, "images">,
@@ -218,7 +121,7 @@ export interface ScratchHandoffHost {
 
 /** Construction-time scratch identity for this session. */
 export interface ScratchHandoffControllerOptions {
-	/** Path the agent uses in tool calls; absent when scratch handoff is off. */
+	/** Path the agent uses in IPython cells; absent when scratch handoff is off. */
 	displayPath: string | undefined;
 	/** Base directory for relative scratch paths inherited by child sessions. */
 	rootCwd: string | undefined;
@@ -249,11 +152,11 @@ export class ScratchHandoffController {
 	#displayPath: string | undefined;
 	readonly #rootCwd: string | undefined;
 	#parentDisplayPath: string | undefined;
-	#toolArgsById = new Map<string, unknown>();
 	#preProviderStop: PreProviderScratchHandoffStop | undefined;
 	#closeout:
 		| {
 				scratchPath: string;
+				baselineScratchText: string | undefined;
 				baselineWriteCount: number;
 				writeCompleted: boolean;
 				/** One-shot: later tool continuations in the closeout MUST keep their results. */
@@ -340,40 +243,22 @@ export class ScratchHandoffController {
 		return count;
 	}
 
-	/** Remember tool arguments so `tool_execution_end` can match a scratch write. */
-	recordToolExecutionStart(toolCallId: string, args: unknown): void {
-		if (this.#displayPath === undefined) return;
-		this.#toolArgsById.set(toolCallId, args);
-	}
-
-	/** Record a completed tool call, marking a scratch write when it hit the scratch path. */
-	recordToolExecutionEnd(toolCallId: string, toolName: string, isError: boolean): void {
-		const args = this.#toolArgsById.get(toolCallId);
-		this.#toolArgsById.delete(toolCallId);
-		this.#recordWrite(toolName, args, isError);
-	}
-
-	#recordWrite(toolName: string, args: unknown, isError: boolean): void {
-		const scratchPath = this.#displayPath;
-		if (isError || scratchPath === undefined) return;
-		const cwd = this.#host.sessionManager.getCwd();
-		let scratchAbsolutePath: string;
+	#scratchText(scratchPath: string): string | undefined {
 		try {
-			scratchAbsolutePath = path.resolve(resolveToCwd(scratchPath, cwd));
+			return fs.readFileSync(resolveToCwd(scratchPath, this.#host.sessionManager.getCwd()), "utf8");
 		} catch {
-			return;
+			return undefined;
 		}
-		for (const targetPath of toolWriteTargetPaths(toolName, args)) {
-			let targetAbsolutePath: string;
-			try {
-				targetAbsolutePath = path.resolve(resolveToCwd(targetPath, cwd));
-			} catch {
-				continue;
-			}
-			if (targetAbsolutePath !== scratchAbsolutePath) continue;
-			this.#host.sessionManager.appendCustomEntry(SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE, { path: scratchPath });
-			return;
-		}
+	}
+
+	/** Record a successful IPython closeout cell when it changed the scratch document. */
+	recordToolExecutionEnd(toolName: string, isError: boolean): void {
+		const closeout = this.#closeout;
+		if (isError || toolName !== "ipython" || !closeout || closeout.writeCompleted) return;
+		const scratchText = this.#scratchText(closeout.scratchPath);
+		if (scratchText === undefined || scratchText === closeout.baselineScratchText) return;
+		this.#host.sessionManager.appendCustomEntry(SCRATCH_HANDOFF_WRITE_CUSTOM_TYPE, { path: closeout.scratchPath });
+		closeout.writeCompleted = true;
 	}
 
 	/**
@@ -405,6 +290,7 @@ export class ScratchHandoffController {
 		}
 		this.#closeout = {
 			scratchPath,
+			baselineScratchText: this.#scratchText(scratchPath),
 			baselineWriteCount: this.#writeCount(scratchPath),
 			writeCompleted: false,
 			toolResultElisionPending: true,
@@ -427,7 +313,6 @@ export class ScratchHandoffController {
 			return true;
 		}
 		const create = !this.#scratchExists(scratchPath);
-		const toolName = create ? "write" : "edit";
 		const message = {
 			customType: SCRATCH_HANDOFF_CLOSEOUT_CUSTOM_TYPE,
 			content: renderScratchHandoffCloseoutMessage(scratchPath, create),
@@ -436,7 +321,6 @@ export class ScratchHandoffController {
 			details: { path: scratchPath, triggerContextTokens },
 		};
 		if (runImmediately) {
-			this.#host.forceScratchToolChoiceNow(toolName, "scratch-handoff-closeout");
 			await this.#host.promptCustomMessage(message);
 		} else {
 			await this.#host.queueCustomMessage(message, "steer", `scratch handoff: update ${scratchPath}`);
@@ -710,7 +594,6 @@ export class ScratchHandoffController {
 	rebuildLiveContext(): void {
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetPlanReference();
 		this.#host.resetAdvisorRuntimes();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		this.#host.markPrefixReset();
@@ -767,14 +650,11 @@ export class ScratchHandoffController {
 
 		await this.#host.messageEndPersistenceTail();
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const regions = collectShakeRegions(
-			branchEntries,
-			this.#host.withPlanProtection({
-				...AGGRESSIVE_SHAKE_CONFIG,
-				fenceMinTokens: Number.MAX_SAFE_INTEGER,
-				keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
-			}),
-		).filter((region): region is Extract<ShakeRegion, { kind: "toolResult" }> => region.kind === "toolResult");
+		const regions = collectShakeRegions(branchEntries, {
+			...AGGRESSIVE_SHAKE_CONFIG,
+			fenceMinTokens: Number.MAX_SAFE_INTEGER,
+			keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
+		}).filter((region): region is Extract<ShakeRegion, { kind: "toolResult" }> => region.kind === "toolResult");
 		if (regions.length === 0) return undefined;
 
 		// Rewrite from the tail backward so the changed boundary lands as late as

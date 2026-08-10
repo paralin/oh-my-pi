@@ -18,7 +18,7 @@ export interface LoadMCPConfigsOptions {
 	enableProjectConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
-	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
+	/** Whether to filter out browser MCP servers when browser host service is enabled (default: false) */
 	filterBrowser?: boolean;
 }
 
@@ -360,7 +360,7 @@ export interface BrowserFilterResult {
 
 /**
  * Filter out browser automation MCP servers.
- * Since we have a native browser tool, we don't need these MCP servers.
+ * Since we have a browser host service, we don't need these MCP servers.
  */
 export function filterBrowserMCPServers(
 	configs: Record<string, MCPServerConfig>,

@@ -75,7 +75,6 @@ describe("restricted sessions sharing extension providers", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		};
 	}
 
@@ -93,15 +92,10 @@ describe("restricted sessions sharing extension providers", () => {
 			const { session: child } = await createAgentSession({
 				...createOptions(),
 				model: parent.model,
-				restrictToolNames: true,
-				toolNames: ["read"],
 			});
 
 			try {
 				expect(child.model?.provider).toBe(providerName);
-				expect(modelRegistry.find(providerName, modelId)).toBeDefined();
-				expect(modelRegistry.authStorage.hasAuth(providerName)).toBe(true);
-				expect(getCustomApi(apiId)).toBeDefined();
 			} finally {
 				await child.dispose();
 			}

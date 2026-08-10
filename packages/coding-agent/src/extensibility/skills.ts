@@ -449,8 +449,8 @@ const MID_PROMPT_SKILL_RE = /(^|\s)\/skill:([^\s/]+)(\s|$)/;
  *
  * Mid-prompt detection is disabled when the draft itself starts with a
  * different slash command (e.g. `/compact /skill:foo`) or a local-execution
- * sigil — `!cmd` / `!!cmd` for the bash tool and `$ cmd` / `$$ cmd` for the
- * python tool. Those handlers run after the skill-command dispatcher and
+ * sigil — `!cmd` / `!!cmd` for the local shell handler and `$ cmd` / `$$ cmd` for the
+ * local Python handler. Those handlers run after the skill-command dispatcher and
  * their bodies routinely contain `/skill:<name>` references that are not
  * meant as skill invocations.
  */

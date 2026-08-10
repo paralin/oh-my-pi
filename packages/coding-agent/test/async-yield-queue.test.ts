@@ -8,8 +8,8 @@ import {
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { type CoordinationDetails, HubTool } from "../src/tools/hub";
+import type { ToolSession } from "../src/session/tool-session.js";
+import { type CoordinationDetails, executeHubOperation } from "../src/tools/hub";
 
 type AsyncEntry = {
 	jobId: string;
@@ -136,8 +136,8 @@ describe("async result yield queue delivery", () => {
 		await harness.manager.waitForAll();
 		await waitUntil(() => harness.queue.has("async-result"), "Timed out waiting for staged async result");
 
-		const tool = new HubTool(createToolSession(harness.manager));
-		const result = await tool.execute("tool-call", { op: "wait", ids: [jobId] });
+		const hubSession = createToolSession(harness.manager);
+		const result = await executeHubOperation(hubSession, { op: "wait", ids: [jobId] });
 		expect((result.details as CoordinationDetails)?.jobs?.find(job => job.id === jobId)?.status).toBe("completed");
 
 		await harness.queue.flush("streaming");

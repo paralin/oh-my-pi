@@ -1,17 +1,17 @@
 import { type } from "@oh-my-pi/omptype";
-import { type Tool, toolWireSchema } from "@oh-my-pi/pi-ai";
+import { arkToWireSchema } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { readWorldAddress, renderWorldRead, worldAddressFromInput } from "../internal-urls/spacewave-protocol";
 import claudeCodeHubPrompt from "../prompts/tools/claude-code-hub.md" with { type: "text" };
 import claudeCodeYieldPrompt from "../prompts/tools/claude-code-yield.md" with { type: "text" };
 import type { AgentRegistry } from "../registry/agent-registry";
-import type { ToolSession } from "../tools";
-import { HubTool } from "../tools/hub";
-import { WORLD_TOOL_NAME, WorldTool } from "../tools/world";
-import { YieldTool } from "../tools/yield";
+import type { ToolSession } from "../session/tool-session";
+import { executeHubOperation, HUB_TOOL_NAME, HUB_TOOL_SCHEMA } from "../tools/hub";
+import { executeWorldOperation, WORLD_TOOL_DESCRIPTION, WORLD_TOOL_NAME, WORLD_TOOL_SCHEMA } from "../tools/world";
+import { YIELD_TOOL_DESCRIPTION, YIELD_TOOL_NAME, YieldService } from "../tools/yield";
 import { MAX_WORLD_READ_PAGE, WorldClient } from "../world/index.js";
-import { TaskTool } from ".";
+import { TaskService } from ".";
 import type { ClaudeCodeMcpTool, ClaudeCodeToolResult } from "./claude-code-sdk";
 import { isClaudeCodeMcpObjectSchema } from "./claude-code-sdk";
 import type { ExecutorOptions } from "./executor";
@@ -20,7 +20,7 @@ import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import type { YieldItem } from "./types";
 
 /** MCP tools required in every Claude Code task runtime. */
-export const CLAUDE_CODE_MCP_TOOL_NAMES = ["task", "hub", "yield"] as const;
+export const CLAUDE_CODE_MCP_TOOL_NAMES = ["task", "hub", YIELD_TOOL_NAME] as const;
 
 /**
  * Read-only World tool, advertised only when a World socket is configured.
@@ -128,14 +128,12 @@ export function createClaudeCodeToolSession(options: ExecutorOptions, registry: 
 		promptTemplates: options.promptTemplates,
 		rules: options.rules,
 		extensionPaths: options.preloadedExtensionPaths,
-		customToolPaths: options.preloadedCustomToolPaths,
 		enableLsp: options.enableLsp,
 		enableIrc: options.enableIrc,
 		enableMCP: options.enableMCP,
 		eventBus: options.eventBus,
 		restrictToolNames: options.restrictToolNames,
 		taskDepth,
-		getEvalSessionId: () => options.parentEvalSessionId ?? null,
 		// Only live, non-isolated owners can retain addressable children.
 		keepAliveSubagents: options.keepAlive !== false && options.worktree === undefined,
 		getSessionFile: () => null,
@@ -158,32 +156,31 @@ export function createClaudeCodeToolSession(options: ExecutorOptions, registry: 
 	};
 }
 
-function objectToolSchema(tool: Tool): ClaudeCodeMcpTool["inputSchema"] {
-	const schema = toolWireSchema(tool);
+function objectSchema(schema: unknown, name: string): ClaudeCodeMcpTool["inputSchema"] {
 	if (!isClaudeCodeMcpObjectSchema(schema)) {
-		throw new TypeError(`OMP ${tool.name} parameters must be an object JSON Schema.`);
+		throw new TypeError(`OMP ${name} parameters must be an object JSON Schema.`);
 	}
 	return schema;
 }
 
 function buildYieldMcpTool(
-	yieldTool: YieldTool,
+	yieldService: YieldService,
 	yieldItems: YieldItem[],
 	onTerminalYield: () => void,
 ): ClaudeCodeMcpTool {
 	const handler = subprocessToolRegistry.getHandler("yield");
 	return {
-		name: yieldTool.name,
+		name: YIELD_TOOL_NAME,
 		description: prompt.render(claudeCodeYieldPrompt, {
-			description: yieldTool.description,
+			description: YIELD_TOOL_DESCRIPTION,
 		}),
-		inputSchema: objectToolSchema(yieldTool),
+		inputSchema: objectSchema(yieldService.schema, YIELD_TOOL_NAME),
 		handler: async args => {
 			const toolCallId = `yield-${yieldItems.length}`;
 			try {
-				const result = await yieldTool.execute(toolCallId, args);
+				const result = await yieldService.submit(args);
 				const event = {
-					toolName: yieldTool.name,
+					toolName: YIELD_TOOL_NAME,
 					toolCallId,
 					args,
 					result: {
@@ -202,15 +199,22 @@ function buildYieldMcpTool(
 	};
 }
 
-function buildTaskMcpTool(taskTool: TaskTool, signal: AbortSignal): ClaudeCodeMcpTool {
+const CLAUDE_CODE_TASK_DESCRIPTION = [
+	"Delegate a self-contained assignment to an OMP subagent.",
+	"The returned child id can be inspected, waited on, cancelled, or messaged through hub.",
+	"Use one task unless the advertised schema enables a shared-context batch.",
+].join("\n");
+
+/** Bridge the neutral Task service into Claude Code's explicit MCP boundary. */
+function buildTaskMcpTool(taskService: TaskService, signal: AbortSignal): ClaudeCodeMcpTool {
 	let calls = 0;
 	return {
-		name: taskTool.name,
-		description: taskTool.description,
-		inputSchema: objectToolSchema(taskTool),
+		name: "task",
+		description: CLAUDE_CODE_TASK_DESCRIPTION,
+		inputSchema: objectSchema(arkToWireSchema(taskService.schema), "task"),
 		handler: async args => {
 			try {
-				const result = await taskTool.execute(`claude-task-${++calls}`, args, signal);
+				const result = await taskService.spawn(`claude-task-${++calls}`, args, signal);
 				return { content: toolResultContent(result.content) };
 			} catch (error) {
 				return toolFailure(error);
@@ -219,8 +223,11 @@ function buildTaskMcpTool(taskTool: TaskTool, signal: AbortSignal): ClaudeCodeMc
 	};
 }
 
-function projectHubSchema(hubTool: HubTool): ClaudeCodeMcpTool["inputSchema"] {
-	const schema = structuredClone(objectToolSchema(hubTool));
+function projectHubSchema(): ClaudeCodeMcpTool["inputSchema"] {
+	const schema = structuredClone(arkToWireSchema(HUB_TOOL_SCHEMA));
+	if (!isClaudeCodeMcpObjectSchema(schema)) {
+		throw new TypeError("OMP Hub parameters must be an object JSON Schema.");
+	}
 	const properties = schema.properties;
 	if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
 		throw new TypeError("OMP Hub parameters must declare object properties.");
@@ -246,21 +253,19 @@ function assertAdmittedHubCall(args: Record<string, unknown>): void {
 	}
 }
 
-function buildHubMcpTool(hubTool: HubTool, signal: AbortSignal): ClaudeCodeMcpTool {
-	let calls = 0;
+function buildHubMcpTool(session: ToolSession, signal: AbortSignal): ClaudeCodeMcpTool {
 	return {
-		name: hubTool.name,
+		name: HUB_TOOL_NAME,
 		description: prompt.render(claudeCodeHubPrompt),
-		inputSchema: projectHubSchema(hubTool),
+		inputSchema: projectHubSchema(),
 		handler: async args => {
 			try {
 				assertAdmittedHubCall(args);
-				const toolCallId = `claude-hub-${++calls}`;
-				const params = hubTool.parameters(args);
+				const params = HUB_TOOL_SCHEMA(args);
 				if (params instanceof type.errors) {
 					throw new Error(`Invalid OMP Hub arguments: ${params.summary}`);
 				}
-				const result = await hubTool.execute(toolCallId, params, signal);
+				const result = await executeHubOperation(session, params, signal);
 				return { content: toolResultContent(result.content) };
 			} catch (error) {
 				return toolFailure(error);
@@ -345,36 +350,26 @@ function buildWorldReadMcpTool(client: WorldClient, signal: AbortSignal): Claude
 	};
 }
 
-/**
- * Build the authority-checked World tool for one Claude task peer.
- *
- * It is the native {@link WorldTool}: the same schema, the same argument
- * validation, the same client methods, and the same renderer. Advertising a
- * hand-written copy of the schema here is exactly the drift the shared tool
- * exists to prevent, so the wire schema is derived from the tool itself.
- *
- * A structured refusal comes back as rendered text with `isError`, which is the
- * bridge's only result shape. The typed error is what produced that text, so
- * both runtimes report the same fields.
- */
+/** Build the deliberate authority-checked World MCP bridge for one Claude peer. */
 function buildWorldMcpTool(client: WorldClient, signal: AbortSignal): ClaudeCodeMcpTool {
-	const worldTool = new WorldTool(client);
-	let calls = 0;
+	const inputSchema = arkToWireSchema(WORLD_TOOL_SCHEMA);
+	if (!isClaudeCodeMcpObjectSchema(inputSchema)) {
+		throw new TypeError("OMP World parameters must be an object JSON Schema.");
+	}
 	return {
-		name: worldTool.name,
-		description: worldTool.description,
-		inputSchema: objectToolSchema(worldTool),
+		name: WORLD_TOOL_NAME,
+		description: WORLD_TOOL_DESCRIPTION,
+		inputSchema,
 		handler: async args => {
 			try {
-				const params = worldTool.parameters(args);
+				const params = WORLD_TOOL_SCHEMA(args);
 				if (params instanceof type.errors) {
 					throw new Error(`Invalid OMP world arguments: ${params.summary}`);
 				}
-				const toolCallId = `claude-world-${++calls}`;
-				const result = await withPeerSignal(signal, operation => worldTool.execute(toolCallId, params, operation));
+				const result = await withPeerSignal(signal, operation => executeWorldOperation(client, params, operation));
 				return {
-					content: toolResultContent(result.content),
-					isError: result.isError === true,
+					content: [{ type: "text" as const, text: result.text }],
+					isError: result.isError,
 				};
 			} catch (error) {
 				return toolFailure(error);
@@ -386,17 +381,12 @@ function buildWorldMcpTool(client: WorldClient, signal: AbortSignal): ClaudeCode
 /** Build the OMP coordination tools admitted to one Claude task peer. */
 export async function createClaudeCodeMcpTools(options: ClaudeCodeToolBridgeOptions): Promise<ClaudeCodeMcpTool[]> {
 	const session = createClaudeCodeToolSession(options.executor, options.registry);
-	const taskTool = await TaskTool.create(session);
-	const hubTool = new HubTool(session);
-	const yieldTool = new YieldTool({
-		...session,
-		outputSchema: options.executor.outputSchema,
-		outputSchemaMode: options.executor.outputSchemaMode,
-	});
+	const taskService = TaskService.create(session);
+	const yieldService = new YieldService({ outputSchema: options.executor.outputSchema });
 	const tools = [
-		buildTaskMcpTool(taskTool, options.signal),
-		buildHubMcpTool(hubTool, options.signal),
-		buildYieldMcpTool(yieldTool, options.yieldItems, options.onTerminalYield),
+		buildTaskMcpTool(taskService, options.signal),
+		buildHubMcpTool(session, options.signal),
+		buildYieldMcpTool(yieldService, options.yieldItems, options.onTerminalYield),
 	];
 	// One client for this peer's whole run, selected once from the
 	// configuration the task started under. `create` dials nothing and returns

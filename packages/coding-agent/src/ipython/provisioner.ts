@@ -5,11 +5,13 @@ import {
 	type IpythonControllerOptions,
 	type IpythonExecuteOptions,
 	type IpythonExecutionResult,
+	type IpythonExtensionHostHandlerResolver,
 	type IpythonHostHandler,
 	type IpythonProcessIds,
 	type IpythonRestoreResult,
 	type IpythonSnapshotResult,
 } from "./controller";
+import type { PythonSkillPackage } from "./python-packages";
 import { type EnsureIpythonRuntimeOptions, ensureIpythonRuntime, type IpythonRuntime } from "./runtime-bootstrap";
 
 const SESSION_BOOTSTRAP_CODE = `
@@ -34,6 +36,10 @@ edit = _omp_runtime_importlib.import_module("edit")
 goal = _omp_runtime_importlib.import_module("goal")
 refine = _omp_runtime_importlib.import_module("refine")
 rlm_heartbeat = _omp_runtime_importlib.import_module("rlm_heartbeat")
+websearch = _omp_runtime_importlib.import_module("websearch")
+linear = _omp_runtime_importlib.import_module("linear")
+notion = _omp_runtime_importlib.import_module("notion")
+_omp_runtime_baseline_modules = frozenset(_omp_runtime_sys.modules)
 get_ipython().colors = "NoColor"
 `.trim();
 
@@ -49,7 +55,7 @@ export type IpythonStartupProgressHandler = (progress: IpythonStartupProgress) =
 export interface IpythonKernelController {
 	readonly processIds: IpythonProcessIds | undefined;
 	start(): Promise<void>;
-	execute(code: string, options?: IpythonExecuteOptions): Promise<IpythonExecutionResult>;
+	execute(code: string, options?: IpythonExecuteOptions, signal?: AbortSignal): Promise<IpythonExecutionResult>;
 	snapshot(path: string, maxBytes?: number): Promise<IpythonSnapshotResult>;
 	restore(path: string): Promise<IpythonRestoreResult>;
 	interrupt(): Promise<void>;
@@ -63,11 +69,12 @@ export interface IpythonKernelProvisionerOptions {
 	readonly snapshotPath?: string;
 	readonly restorePath?: string | null;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
-	readonly pythonPaths?: readonly string[];
 	readonly hostHandlers?: Readonly<Record<string, IpythonHostHandler>>;
+	readonly extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver;
 	readonly bootstrapCode?: string;
 	readonly readyGate?: Promise<unknown>;
 	readonly runtime?: Omit<EnsureIpythonRuntimeOptions, "environment" | "signal" | "onProgress">;
+	readonly pythonPackages?: readonly PythonSkillPackage[];
 	readonly onRestore?: (result: IpythonRestoreResult) => void;
 	readonly onReady?: (processIds: IpythonProcessIds, status: { readonly restart: boolean }) => void;
 }
@@ -110,6 +117,9 @@ export class IpythonKernelProvisioner {
 	#lastProgress: IpythonStartupProgress | undefined;
 	#startup: Promise<IpythonKernelController> | undefined;
 	#controller: IpythonKernelController | undefined;
+	#runtime: IpythonRuntime | undefined;
+	#pythonPackages: readonly PythonSkillPackage[];
+	#controllerTail: Promise<void> = Promise.resolve();
 	#lastRestore: IpythonRestoreResult | undefined;
 	#disposed = false;
 	#disposePromise: Promise<void> | undefined;
@@ -120,6 +130,7 @@ export class IpythonKernelProvisioner {
 		this.#createController =
 			dependencies.createController ?? (controllerOptions => new IpythonController(controllerOptions));
 		this.#withBootPermit = dependencies.withBootPermit ?? withIpythonBootPermit;
+		this.#pythonPackages = [...(options.pythonPackages ?? options.runtime?.pythonPackages ?? [])];
 	}
 
 	get hasRunningKernel(): boolean {
@@ -174,25 +185,106 @@ export class IpythonKernelProvisioner {
 	async execute(code: string, options?: IpythonExecuteOptions, signal?: AbortSignal): Promise<IpythonExecutionResult> {
 		const controller = await this.ensure(undefined, signal);
 		if (signal?.aborted) throw abortError(signal);
-		const interrupt = () => void controller.interrupt();
-		signal?.addEventListener("abort", interrupt, { once: true });
-		const execution = controller.execute(code, options);
-		if (signal?.aborted) interrupt();
-		try {
-			return await execution;
-		} finally {
-			signal?.removeEventListener("abort", interrupt);
+		return await this.#withControllerLock(() => controller.execute(code, options, signal), signal);
+	}
+
+	async reloadPythonPackages(packages: readonly PythonSkillPackage[]): Promise<void> {
+		if (this.#disposed) throw new Error("IPython provisioner is disposed");
+		const nextPackages = [...packages];
+		if (!this.#startup) {
+			this.#pythonPackages = nextPackages;
+			return;
 		}
+		const controller = await this.ensure();
+		const nextRuntime = await this.#prepareRuntime(nextPackages);
+		await this.#withControllerLock(async () => {
+			if (this.#disposed) throw new Error("IPython provisioner is disposed");
+			const currentRuntime = this.#runtime;
+			if (!currentRuntime) throw new Error("IPython runtime is not prepared");
+			if (!currentRuntime.sitePackagesDir || !nextRuntime.sitePackagesDir) {
+				throw new Error("Managed runtime site-packages path is unavailable");
+			}
+			const oldOwnedPaths = [currentRuntime.sitePackagesDir, ...(currentRuntime.pythonPackagePaths ?? [])];
+			const newOwnedPaths = [...(nextRuntime.pythonPackagePaths ?? []), nextRuntime.sitePackagesDir];
+			const oldImports = this.#pythonPackages.map(pkg => pkg.importName);
+			const newImports = nextPackages.map(pkg => pkg.importName);
+			const administrativeProgram = [
+				"import importlib, os, sys",
+				`old_owned_paths = ${JSON.stringify(oldOwnedPaths)}`,
+				`new_owned_paths = ${JSON.stringify(newOwnedPaths)}`,
+				`owned_imports = ${JSON.stringify([...new Set([...oldImports, ...newImports])])}`,
+				`fixed_runtime_path = ${JSON.stringify(currentRuntime.pythonPackageDir)}`,
+				"saved_paths = list(sys.path)",
+				"def module_uses_owned_path(module):",
+				"    locations = [getattr(module, '__file__', None), *(getattr(module, '__path__', ()) or ())]",
+				"    return any(isinstance(location, str) and any(os.path.commonpath((os.path.abspath(location), os.path.abspath(owned_path))) == os.path.abspath(owned_path) for owned_path in old_owned_paths) for location in locations)",
+				"reload_names = {loaded_name for loaded_name, module in sys.modules.items() if loaded_name not in baseline_modules and module_uses_owned_path(module)}",
+				"reload_names.update(loaded_name for loaded_name in sys.modules if any(loaded_name == name or loaded_name.startswith(name + '.') for name in owned_imports))",
+				"saved_modules = {loaded_name: sys.modules[loaded_name] for loaded_name in reload_names}",
+				"try:",
+				"    for owned_path in old_owned_paths:",
+				"        while owned_path in sys.path: sys.path.remove(owned_path)",
+				"    for loaded_name in reload_names: sys.modules.pop(loaded_name, None)",
+				"    if fixed_runtime_path not in sys.path: sys.path.insert(0, fixed_runtime_path)",
+				"    fixed_runtime_index = sys.path.index(fixed_runtime_path)",
+				"    for owned_path in reversed(new_owned_paths): sys.path.insert(fixed_runtime_index + 1, owned_path)",
+				"    importlib.invalidate_caches()",
+				"except BaseException:",
+				"    sys.path[:] = saved_paths",
+				"    for loaded_name in reload_names: sys.modules.pop(loaded_name, None)",
+				"    sys.modules.update(saved_modules)",
+				"    raise",
+			].join("\n");
+			const administrativeCell = `exec(${JSON.stringify(administrativeProgram)}, {"__builtins__": __builtins__, "baseline_modules": _omp_runtime_baseline_modules})`;
+			const result = await controller.execute(administrativeCell);
+			if (result.status !== "ok") throw new Error(`Failed to reload Python packages: ${errorText(result)}`);
+			this.#runtime = nextRuntime;
+			this.#pythonPackages = nextPackages;
+		}, undefined);
 	}
 
 	async flushSnapshot(pathOverride?: string, maxBytes?: number): Promise<IpythonSnapshotResult | undefined> {
 		const snapshotPath = pathOverride ?? this.snapshotPath;
 		if (!snapshotPath || !this.#controller) return undefined;
-		return await this.#controller.snapshot(snapshotPath, maxBytes);
+		const controller = this.#controller;
+		return await this.#withControllerLock(() => controller.snapshot(snapshotPath, maxBytes));
 	}
 
 	interrupt(): Promise<void> {
 		return this.#controller?.interrupt() ?? Promise.resolve();
+	}
+
+	async #prepareRuntime(packages: readonly PythonSkillPackage[]): Promise<IpythonRuntime> {
+		const sourceEnvironment = {
+			...process.env,
+			...this.#options.environment,
+			PATH: this.#options.environment?.PATH ?? process.env.PATH,
+			NO_COLOR: "1",
+			OMP_SESSION_CWD: this.#options.cwd,
+			OMP_SESSION_ID: this.#options.sessionId,
+			...(this.#options.sidecarDir ? { OMP_SESSION_ARTIFACT_DIR: this.#options.sidecarDir } : {}),
+		};
+		return await this.#ensureRuntime({
+			...this.#options.runtime,
+			pythonPackages: packages,
+			environment: sourceEnvironment,
+			signal: this.#lifecycleAbort.signal,
+			onProgress: message => this.#emitProgress("runtime", message),
+		});
+	}
+
+	async #withControllerLock<T>(work: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+		const previous = this.#controllerTail;
+		const task = previous.then(async () => {
+			if (this.#disposed) throw new Error("IPython provisioner is disposed");
+			if (signal?.aborted) throw abortError(signal);
+			return await work();
+		});
+		this.#controllerTail = task.then(
+			() => undefined,
+			() => undefined,
+		);
+		return await waitWithSignal(task, signal);
 	}
 
 	dispose(): Promise<void> {
@@ -231,7 +323,9 @@ export class IpythonKernelProvisioner {
 
 			this.#emitProgress("runtime", "Preparing the IPython runtime...");
 			const sourceEnvironment = {
+				...process.env,
 				...this.#options.environment,
+				PATH: this.#options.environment?.PATH ?? process.env.PATH,
 				NO_COLOR: "1",
 				OMP_SESSION_CWD: this.#options.cwd,
 				OMP_SESSION_ID: this.#options.sessionId,
@@ -239,18 +333,20 @@ export class IpythonKernelProvisioner {
 			};
 			const runtime = await this.#ensureRuntime({
 				...this.#options.runtime,
+				pythonPackages: this.#pythonPackages,
 				environment: sourceEnvironment,
 				signal,
 				onProgress: message => this.#emitProgress("runtime", message),
 			});
 			if (signal.aborted) throw abortError(signal);
 
+			this.#runtime = runtime;
 			const runtimePaths = [
 				...(runtime.environment.OMP_IPYTHON_RUNTIME_PATH?.split(path.delimiter).filter(Boolean) ?? [
 					runtime.pythonPackageDir,
 				]),
-				...(this.#options.pythonPaths ?? []),
-			];
+				...(runtime.pythonPackagePaths ?? []),
+			].filter((entry, index, all) => all.indexOf(entry) === index);
 			const startingController = this.#createController({
 				pythonExecutable: runtime.pythonExecutable,
 				cwd: this.#options.cwd,
@@ -259,6 +355,7 @@ export class IpythonKernelProvisioner {
 					OMP_IPYTHON_RUNTIME_PATH: runtimePaths.join(path.delimiter),
 				},
 				hostHandlers: this.#options.hostHandlers,
+				extensionHostHandlerResolver: this.#options.extensionHostHandlerResolver,
 				onReady: this.#options.onReady,
 			});
 			controller = startingController;

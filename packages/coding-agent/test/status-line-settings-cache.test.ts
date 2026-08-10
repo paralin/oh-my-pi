@@ -170,22 +170,6 @@ describe("StatusLineComponent effective settings cache", () => {
 		expect(content).not.toContain("running");
 	});
 
-	it("keeps plan and hook state dynamic without settings invalidation", () => {
-		const component = makeComponent({ preset: "custom", leftSegments: ["mode"], rightSegments: [] });
-		const effective = component.getEffectiveSettingsForTest();
-		expect(component.getTopBorder(80).content).toBe("");
-
-		component.setPlanModeStatus({ enabled: true, paused: false });
-		expect(stripVTControlCharacters(component.getTopBorder(80).content)).toContain("Plan");
-		expect(component.getEffectiveSettingsForTest()).toBe(effective);
-
-		component.setHookStatus("hook", "hook running");
-		expect(component.render(80)).toEqual(["hook running"]);
-		component.setHookStatus("hook", "hook done");
-		expect(component.render(80)).toEqual(["hook done"]);
-		expect(component.getEffectiveSettingsForTest()).toBe(effective);
-	});
-
 	it("does not mutate shared preset segment options during narrow renders", () => {
 		const before = { ...STATUS_LINE_PRESETS.default.segmentOptions?.path };
 		const component = makeComponent({ preset: "default", sessionAccent: false });

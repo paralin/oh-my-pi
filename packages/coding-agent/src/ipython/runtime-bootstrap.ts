@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { $which, getIpythonRuntimeDir, ptree, withFileLock } from "@oh-my-pi/pi-utils";
 import { ipythonBootstrapEnvironment, ipythonEnvironment } from "./environment";
 import { IPYTHON_PYTHON_ASSETS, ipythonPythonAssetHash } from "./python-assets";
+import type { PythonSkillPackage } from "./python-packages";
 import runtimeProject from "./runtime/pyproject.toml" with { type: "text" };
 import runtimeLock from "./runtime/uv.lock" with { type: "text" };
 
@@ -16,19 +17,21 @@ export const IPYTHON_RUNTIME_PACKAGES = Object.freeze({
 	dill: "0.4.1",
 	ipykernel: "7.3.0",
 	"jupyter-client": "8.9.1",
+	pillow: "11.3.0",
 	pyzmq: "26.4.0",
 });
 
 const READY_SCRIPT = [
-	"import importlib.metadata as m, sys",
+	"import importlib, importlib.metadata as m, importlib.util, json, pathlib, sys",
 	"assert sys.version_info[:3] == (3, 11, 15)",
 	`expected = ${JSON.stringify(IPYTHON_RUNTIME_PACKAGES)}`,
 	"assert all(m.version(name) == version for name, version in expected.items())",
-	"import pathlib",
 	"package_dir = pathlib.Path(sys.argv[1])",
 	"assert (package_dir / '.omp-assets').read_text().strip() == sys.argv[2]",
+	"for package_root in reversed(json.loads(sys.argv[3])): sys.path.insert(0, package_root)",
 	"sys.path.insert(0, str(package_dir))",
-	"import dill, ipykernel, jupyter_client, zmq, rlm, omp",
+	"assert all(importlib.util.find_spec(name) is not None for name in ('dill', 'ipykernel', 'jupyter_client', 'zmq', 'rlm', 'omp'))",
+	"assert all(importlib.util.find_spec(package_name) is not None for package_name in json.loads(sys.argv[4]))",
 ].join("\n");
 
 export interface EnsureIpythonRuntimeOptions {
@@ -36,6 +39,7 @@ export interface EnsureIpythonRuntimeOptions {
 	readonly uvExecutable?: string;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
 	readonly cacheKeyParts?: readonly string[];
+	readonly pythonPackages?: readonly PythonSkillPackage[];
 	readonly signal?: AbortSignal;
 	readonly timeoutMs?: number;
 	readonly onProgress?: (message: string) => void;
@@ -46,11 +50,15 @@ export interface IpythonRuntime {
 	readonly runtimeDir: string;
 	readonly environment: Readonly<Record<string, string>>;
 	readonly pythonPackageDir: string;
+	readonly sitePackagesDir?: string;
+	readonly pythonPackagePaths?: readonly string[];
 }
 
 interface IpythonRuntimeBase {
 	readonly pythonExecutable: string;
 	readonly runtimeDir: string;
+	readonly sitePackagesDir: string;
+	readonly pythonPackagePaths: readonly string[];
 }
 
 interface InFlightRuntime {
@@ -64,13 +72,52 @@ interface InFlightRuntime {
 
 const inFlight = new Map<string, InFlightRuntime>();
 
-function runtimeHash(cacheKeyParts: readonly string[]): string {
+export function normalizePythonProjectName(name: string): string {
+	return name
+		.trim()
+		.normalize("NFKC")
+		.toLowerCase()
+		.replace(/[-_.]+/gu, "-");
+}
+
+export function runtimePythonPackageIdentity(packages: readonly PythonSkillPackage[]): string {
+	return JSON.stringify(
+		packages.map(pkg => ({
+			importName: pkg.importName,
+			projectName: normalizePythonProjectName(pkg.projectName),
+			contentHash: pkg.contentHash,
+		})),
+	);
+}
+
+export function runtimePythonPackageMarkerText(packages: readonly PythonSkillPackage[]): string {
+	return `${runtimePythonPackageIdentity(packages)}\n`;
+}
+
+function runtimePythonPackageMarkerPath(runtimeDir: string): string {
+	return path.join(runtimeDir, ".omp-python-packages");
+}
+
+function runtimePythonSitePackagesDir(runtimeDir: string): string {
+	return process.platform === "win32"
+		? path.join(runtimeDir, ".venv", "Lib", "site-packages")
+		: path.join(
+				runtimeDir,
+				".venv",
+				"lib",
+				`python${MANAGED_PYTHON_VERSION.split(".").slice(0, 2).join(".")}`,
+				"site-packages",
+			);
+}
+
+function runtimeHash(cacheKeyParts: readonly string[], pythonPackages: readonly PythonSkillPackage[]): string {
 	const hasher = new Bun.CryptoHasher("sha256");
 	hasher.update(`schema:${RUNTIME_SCHEMA}\0python:${MANAGED_PYTHON_VERSION}\0`);
 	hasher.update(runtimeProject);
 	hasher.update("\0");
 	hasher.update(runtimeLock);
 	hasher.update(`\0python-assets:${PYTHON_ASSET_HASH}`);
+	hasher.update(`\0python-packages:${runtimePythonPackageIdentity(pythonPackages)}`);
 	for (const part of cacheKeyParts) {
 		hasher.update(`\0${part.length}:`);
 		hasher.update(part);
@@ -152,6 +199,73 @@ function pythonPackageDir(runtimeDir: string): string {
 	return path.join(runtimeDir, "python");
 }
 
+function stagedPythonPackageRoot(runtimeDir: string, index: number): string {
+	return path.join(runtimeDir, "python-sources", String(index).padStart(4, "0"));
+}
+
+function stagedPythonPackagePaths(runtimeDir: string, packages: readonly PythonSkillPackage[]): string[] {
+	return packages.map((pkg, index) => {
+		const relativeSourceRoot = path.relative(path.resolve(pkg.packageRoot), path.resolve(pkg.sourceRoot));
+		if (!relativeSourceRoot || relativeSourceRoot === ".." || relativeSourceRoot.startsWith(`..${path.sep}`)) {
+			throw new Error(`Python source root escapes its package root: ${pkg.sourceRoot}`);
+		}
+		return path.join(stagedPythonPackageRoot(runtimeDir, index), relativeSourceRoot);
+	});
+}
+
+export async function stagePythonPackageInventory(
+	runtimeDir: string,
+	packages: readonly PythonSkillPackage[],
+): Promise<string[]> {
+	const paths: string[] = [];
+	for (const [index, pkg] of packages.entries()) {
+		const packageRoot = path.resolve(pkg.packageRoot);
+		const stageRoot = stagedPythonPackageRoot(runtimeDir, index);
+		const temporaryRoot = `${stageRoot}.staging`;
+		const hasher = new Bun.CryptoHasher("sha256");
+		const rootStat = await fs.lstat(packageRoot);
+		if (rootStat.isSymbolicLink() || !rootStat.isDirectory())
+			throw new Error(`Python package root is not a directory: ${packageRoot}`);
+		await fs.rm(temporaryRoot, { recursive: true, force: true });
+		await fs.mkdir(temporaryRoot, { recursive: true });
+		try {
+			for (const file of pkg.files) {
+				if (path.isAbsolute(file.path) || file.path === ".." || file.path.startsWith(`..${path.sep}`)) {
+					throw new Error(`Python package inventory escapes its root: ${file.path}`);
+				}
+				const source = path.resolve(packageRoot, file.path);
+				if (source !== packageRoot && !source.startsWith(`${packageRoot}${path.sep}`)) {
+					throw new Error(`Python package inventory escapes its root: ${file.path}`);
+				}
+				const target = path.join(temporaryRoot, file.path);
+				const before = await fs.lstat(source);
+				if (before.isSymbolicLink() || !before.isFile() || before.size !== file.bytes) {
+					throw new Error(`Python package inventory changed during staging: ${file.path}`);
+				}
+				const bytes = await fs.readFile(source);
+				const after = await fs.lstat(source);
+				if (after.isSymbolicLink() || !after.isFile() || after.size !== file.bytes) {
+					throw new Error(`Python package inventory changed during staging: ${file.path}`);
+				}
+				hasher.update(`${file.path.length}:${file.path}\0${file.bytes}:`);
+				hasher.update(bytes);
+				await fs.mkdir(path.dirname(target), { recursive: true });
+				await fs.writeFile(target, bytes, { flag: "wx" });
+			}
+			if (hasher.digest("hex") !== pkg.contentHash) {
+				throw new Error(`Python package content changed during staging: ${pkg.importName}`);
+			}
+			await fs.rm(stageRoot, { recursive: true, force: true });
+			await fs.rename(temporaryRoot, stageRoot);
+		} catch (error) {
+			await fs.rm(temporaryRoot, { recursive: true, force: true });
+			throw error;
+		}
+		paths.push(path.join(stageRoot, path.relative(packageRoot, path.resolve(pkg.sourceRoot))));
+	}
+	return paths;
+}
+
 async function writePythonAssets(runtimeDir: string): Promise<void> {
 	const packageDir = pythonPackageDir(runtimeDir);
 	await fs.mkdir(packageDir, { recursive: true });
@@ -170,11 +284,25 @@ async function runtimeReady(
 	pythonExecutable: string,
 	runtimeDir: string,
 	environment: Readonly<Record<string, string>>,
+	packageMarkerPath: string,
+	packageMarkerText: string,
+	packagePaths: readonly string[],
+	packageImports: readonly string[],
 	signal?: AbortSignal,
 ): Promise<boolean> {
 	try {
+		if ((await fs.readFile(packageMarkerPath, "utf8")) !== packageMarkerText) return false;
 		const result = await ptree.exec(
-			[pythonExecutable, "-I", "-c", READY_SCRIPT, pythonPackageDir(runtimeDir), PYTHON_ASSET_HASH],
+			[
+				pythonExecutable,
+				"-I",
+				"-c",
+				READY_SCRIPT,
+				pythonPackageDir(runtimeDir),
+				PYTHON_ASSET_HASH,
+				JSON.stringify(packagePaths),
+				JSON.stringify(packageImports),
+			],
 			{
 				allowAbort: true,
 				allowNonZero: true,
@@ -201,15 +329,166 @@ function resolveUv(options: EnsureIpythonRuntimeOptions, environment: Readonly<R
 	);
 }
 
+async function executeUv(
+	uv: string,
+	args: readonly string[],
+	cwd: string,
+	environment: Readonly<Record<string, string>>,
+	signal: AbortSignal | undefined,
+	timeout: number,
+	label: string,
+): Promise<{ stdout: string; stderr: string }> {
+	const result = await ptree
+		.exec([uv, ...args], {
+			allowAbort: true,
+			allowNonZero: true,
+			cwd,
+			env: environment,
+			signal,
+			stderr: "full",
+			timeout,
+		})
+		.catch(error => {
+			if (signal?.aborted) throw error;
+			throw new Error(`Failed to launch uv for ${label}: ${errorMessage(error)}`);
+		});
+	if (result.exitError?.aborted && signal?.aborted) throw result.exitError;
+	if (!result.ok) {
+		const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode ?? "unknown"}`;
+		throw new Error(`Failed ${label}: ${detail}`);
+	}
+	return { stdout: result.stdout, stderr: result.stderr };
+}
+
+function isLocalRequirement(line: string): boolean {
+	const value = line.trim().toLowerCase();
+	return (
+		value === "-e" ||
+		value.startsWith("-e ") ||
+		value === "--editable" ||
+		value.startsWith("--editable ") ||
+		value.startsWith("--editable=") ||
+		value.startsWith("file:") ||
+		value.startsWith("./") ||
+		value.startsWith("../") ||
+		value.startsWith("/") ||
+		/\s@\s*(?:file:|\.?\.?\/|[a-z]:[\\/])/u.test(value)
+	);
+}
+
+function isVcsOrDirectUrlRequirement(line: string): boolean {
+	const value = line.trim().toLowerCase();
+	const url = "(?:https?|ssh|git|hg|svn|bzr|file)://";
+	return (
+		new RegExp(`^(?:git|hg|svn|bzr)\\+${url}`, "u").test(value) ||
+		new RegExp(`^${url}`, "u").test(value) ||
+		new RegExp(`\\s@\\s*(?:${url}|(?:git|hg|svn|bzr)\\+)`, "u").test(value)
+	);
+}
+
+export function validatePythonPackageExport(content: string, packageName: string): void {
+	for (const line of content.split(/\r?\n/u)) {
+		const trimmed = line.trim();
+		if (!trimmed || trimmed.startsWith("#")) continue;
+		if (isLocalRequirement(trimmed))
+			throw new Error(`uv export for ${packageName} contains a local/editable/file requirement`);
+		if (isVcsOrDirectUrlRequirement(trimmed))
+			throw new Error(`uv export for ${packageName} contains a VCS/direct-URL requirement`);
+		if (trimmed.startsWith("--") && !trimmed.startsWith("--hash="))
+			throw new Error(`uv export for ${packageName} contains an unsupported global option`);
+	}
+}
+
+async function installPythonPackageDependencies(
+	uv: string,
+	runtimeDir: string,
+	pythonExecutable: string,
+	packages: readonly PythonSkillPackage[],
+	environment: Readonly<Record<string, string>>,
+	signal: AbortSignal | undefined,
+	timeout: number,
+): Promise<void> {
+	if (packages.length === 0) return;
+	const requirementsDir = path.join(runtimeDir, "python-packages");
+	await fs.mkdir(requirementsDir, { recursive: true });
+	const exports: string[] = [];
+	for (const [index, pkg] of packages.entries()) {
+		const packageRoot = await fs.realpath(pkg.packageRoot);
+		const outputPath = path.join(requirementsDir, `${String(index).padStart(4, "0")}-${pkg.importName}.txt`);
+		await executeUv(
+			uv,
+			["export", "--locked", "--no-emit-project", "--no-config", "--output-file", outputPath],
+			packageRoot,
+			environment,
+			signal,
+			timeout,
+			`dependency export for ${pkg.importName}`,
+		);
+		const exported = await fs.readFile(outputPath, "utf8");
+		validatePythonPackageExport(exported, pkg.importName);
+		exports.push(exported);
+	}
+	const combinedPath = path.join(requirementsDir, "all.txt");
+	await fs.writeFile(combinedPath, exports.join("\n"), "utf8");
+	const hasRequirements = exports.some(content =>
+		content.split(/\r?\n/u).some(line => {
+			const trimmed = line.trim();
+			return trimmed.length > 0 && !trimmed.startsWith("#") && !trimmed.startsWith("--");
+		}),
+	);
+	if (!hasRequirements) return;
+	await executeUv(
+		uv,
+		[
+			"pip",
+			"install",
+			"--python",
+			pythonExecutable,
+			"--require-hashes",
+			"--no-deps",
+			"--no-config",
+			"--no-progress",
+			"-r",
+			combinedPath,
+		],
+		runtimeDir,
+		environment,
+		signal,
+		timeout,
+		"locked Python package installation",
+	);
+}
+
 async function provisionRuntime(
 	runtimeRoot: string,
 	runtimeDir: string,
 	pythonExecutable: string,
 	options: EnsureIpythonRuntimeOptions,
 ): Promise<IpythonRuntimeBase> {
+	const packages = options.pythonPackages ?? [];
+	const packageMarkerText = runtimePythonPackageMarkerText(packages);
+	const packageMarkerPath = runtimePythonPackageMarkerPath(runtimeDir);
+	const packagePaths = stagedPythonPackagePaths(runtimeDir, packages);
+	const packageImports = packages.map(pkg => pkg.importName);
 	const bootstrapEnvironment = ipythonBootstrapEnvironment(runtimeRoot, options.environment ?? process.env);
-	if (await runtimeReady(pythonExecutable, runtimeDir, bootstrapEnvironment, options.signal)) {
-		return { pythonExecutable, runtimeDir };
+	if (
+		await runtimeReady(
+			pythonExecutable,
+			runtimeDir,
+			bootstrapEnvironment,
+			packageMarkerPath,
+			packageMarkerText,
+			packagePaths,
+			packageImports,
+			options.signal,
+		)
+	) {
+		return {
+			pythonExecutable,
+			runtimeDir,
+			sitePackagesDir: runtimePythonSitePackagesDir(runtimeDir),
+			pythonPackagePaths: packagePaths,
+		};
 	}
 
 	await fs.mkdir(runtimeRoot, { recursive: true });
@@ -218,8 +497,24 @@ async function provisionRuntime(
 		lockPath,
 		async () => {
 			await writePythonAssets(runtimeDir);
-			if (await runtimeReady(pythonExecutable, runtimeDir, bootstrapEnvironment, options.signal)) {
-				return { pythonExecutable, runtimeDir };
+			if (
+				await runtimeReady(
+					pythonExecutable,
+					runtimeDir,
+					bootstrapEnvironment,
+					packageMarkerPath,
+					packageMarkerText,
+					packagePaths,
+					packageImports,
+					options.signal,
+				)
+			) {
+				return {
+					pythonExecutable,
+					runtimeDir,
+					sitePackagesDir: runtimePythonSitePackagesDir(runtimeDir),
+					pythonPackagePaths: packagePaths,
+				};
 			}
 
 			const uv = resolveUv(options, bootstrapEnvironment);
@@ -229,53 +524,75 @@ async function provisionRuntime(
 				Bun.write(path.join(runtimeDir, "pyproject.toml"), runtimeProject),
 				Bun.write(path.join(runtimeDir, "uv.lock"), runtimeLock),
 			]);
-
-			const result = await ptree
-				.exec(
-					[
-						uv,
-						"sync",
-						"--project",
-						runtimeDir,
-						"--locked",
-						"--no-install-project",
-						"--managed-python",
-						"--python",
-						MANAGED_PYTHON_VERSION,
-						"--no-build",
-						"--no-config",
-						"--default-index",
-						"https://pypi.org/simple",
-						"--keyring-provider",
-						"disabled",
-						"--color",
-						"never",
-						"--no-progress",
-					],
-					{
-						allowAbort: true,
-						allowNonZero: true,
-						cwd: runtimeDir,
-						env: bootstrapEnvironment,
-						signal: options.signal,
-						stderr: "full",
-						timeout: options.timeoutMs ?? BOOTSTRAP_TIMEOUT_MS,
-					},
-				)
-				.catch(error => {
-					if (options.signal?.aborted) throw error;
-					throw new Error(`Failed to launch uv for the IPython runtime: ${errorMessage(error)}`);
-				});
-			if (result.exitError?.aborted && options.signal?.aborted) throw result.exitError;
-			if (!result.ok) {
-				const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode ?? "unknown"}`;
-				throw new Error(`Failed to set up the IPython runtime: ${detail}`);
+			await executeUv(
+				uv,
+				[
+					"sync",
+					"--project",
+					runtimeDir,
+					"--locked",
+					"--no-install-project",
+					"--managed-python",
+					"--python",
+					MANAGED_PYTHON_VERSION,
+					"--no-build",
+					"--no-config",
+					"--default-index",
+					"https://pypi.org/simple",
+					"--keyring-provider",
+					"disabled",
+					"--color",
+					"never",
+					"--no-progress",
+				],
+				runtimeDir,
+				bootstrapEnvironment,
+				options.signal,
+				options.timeoutMs ?? BOOTSTRAP_TIMEOUT_MS,
+				"set up the IPython runtime",
+			);
+			await installPythonPackageDependencies(
+				uv,
+				runtimeDir,
+				pythonExecutable,
+				packages,
+				bootstrapEnvironment,
+				options.signal,
+				options.timeoutMs ?? BOOTSTRAP_TIMEOUT_MS,
+			);
+			const stagedPaths = await stagePythonPackageInventory(runtimeDir, packages);
+			if (JSON.stringify(stagedPaths) !== JSON.stringify(packagePaths)) {
+				throw new Error("Staged Python package paths do not match the runtime inventory");
 			}
-			if (!(await runtimeReady(pythonExecutable, runtimeDir, bootstrapEnvironment, options.signal))) {
-				throw new Error("IPython runtime setup completed without the locked Python packages");
+			const pendingMarkerPath = `${packageMarkerPath}.pending`;
+			await fs.writeFile(pendingMarkerPath, packageMarkerText, "utf8");
+			try {
+				if (
+					!(await runtimeReady(
+						pythonExecutable,
+						runtimeDir,
+						bootstrapEnvironment,
+						pendingMarkerPath,
+						packageMarkerText,
+						packagePaths,
+						packageImports,
+						options.signal,
+					))
+				) {
+					throw new Error("IPython runtime setup completed without the locked Python packages");
+				}
+				await fs.rm(packageMarkerPath, { force: true });
+				await fs.rename(pendingMarkerPath, packageMarkerPath);
+			} finally {
+				await fs.rm(pendingMarkerPath, { force: true });
 			}
 			options.onProgress?.("IPython runtime ready");
-			return { pythonExecutable, runtimeDir };
+			return {
+				pythonExecutable,
+				runtimeDir,
+				sitePackagesDir: runtimePythonSitePackagesDir(runtimeDir),
+				pythonPackagePaths: packagePaths,
+			};
 		},
 		{ retries: LOCK_RETRIES, retryDelayMs: LOCK_RETRY_DELAY_MS, signal: options.signal },
 	);
@@ -319,7 +636,7 @@ function startRuntimeProvision(
 export function ensureIpythonRuntime(options: EnsureIpythonRuntimeOptions = {}): Promise<IpythonRuntime> {
 	if (options.signal?.aborted) return Promise.reject(abortError(options.signal));
 	const runtimeRoot = path.resolve(options.runtimeRoot ?? getIpythonRuntimeDir());
-	const identity = runtimeHash(options.cacheKeyParts ?? []);
+	const identity = runtimeHash(options.cacheKeyParts ?? [], options.pythonPackages ?? []);
 	const runtimeDir = path.join(runtimeRoot, `v${RUNTIME_SCHEMA}-${identity}`);
 	let shared = inFlight.get(runtimeDir);
 	if (!shared) {
@@ -332,6 +649,8 @@ export function ensureIpythonRuntime(options: EnsureIpythonRuntimeOptions = {}):
 		return {
 			...runtime,
 			pythonPackageDir: packageDir,
+			sitePackagesDir: runtime.sitePackagesDir,
+			pythonPackagePaths: runtime.pythonPackagePaths,
 			environment: {
 				...environment,
 				OMP_IPYTHON_RUNTIME_PATH: packageDir,

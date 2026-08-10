@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { renderToolExamples } from "../src/dialect/examples";
 import type { InbandTool } from "../src/dialect/types";
 
@@ -99,9 +98,8 @@ describe("renderToolExamples", () => {
 			examples: [{ caption: "Count lines", call: { command: "wc -l src/*.ts | sort -n" } }],
 		};
 
-		const rendered = renderToolExamples(tool, INTENT_FIELD);
-		// Payload stays bare; the required intent field rides on the envelope.
-		expect(rendered).toContain(`<example ${INTENT_FIELD}="…">\nwc -l src/*.ts | sort -n\n</example>`);
+		const rendered = renderToolExamples(tool);
+		expect(rendered).toContain(`<example>\nwc -l src/*.ts | sort -n\n</example>`);
 		expect(rendered).not.toContain("bash(");
 	});
 
@@ -156,46 +154,5 @@ describe("renderToolExamples", () => {
 		expect(rendered).toContain("RIGHT:");
 		expect(rendered).toContain('find(paths=["**/*.ts"])');
 		expect(rendered).toContain('find(paths=["src/**/*.ts"])');
-	});
-
-	it("injects the intent-field placeholder when intentField is provided", () => {
-		const tool: InbandTool = {
-			name: "find",
-			description: "Find files.",
-			parameters: {
-				type: "object",
-				properties: {
-					[INTENT_FIELD]: { type: "string" },
-					paths: { type: "array", items: { type: "string" } },
-				},
-				required: [INTENT_FIELD, "paths"],
-			},
-			examples: [
-				{
-					caption: "Find files",
-					call: { paths: ["src/**/*.ts"] },
-				},
-			],
-		};
-
-		const rendered = renderToolExamples(tool, INTENT_FIELD);
-		expect(rendered).toContain(`${INTENT_FIELD}="…"`);
-		// Placeholder leads the args, matching schema-injection order.
-		expect(rendered.indexOf(`${INTENT_FIELD}=`)).toBeLessThan(rendered.indexOf("paths="));
-	});
-
-	it("omits the intent-field placeholder when intentField is undefined", () => {
-		const tool: InbandTool = {
-			name: "find",
-			description: "Find files.",
-			parameters: {
-				type: "object",
-				properties: { paths: { type: "array", items: { type: "string" } } },
-				required: ["paths"],
-			},
-			examples: [{ caption: "Find files", call: { paths: ["src/**/*.ts"] } }],
-		};
-
-		expect(renderToolExamples(tool)).not.toContain(`${INTENT_FIELD}=`);
 	});
 });

@@ -1,23 +1,17 @@
-import { afterEach, describe, expect, test } from "bun:test";
-import { toolWireSchema } from "@oh-my-pi/pi-ai";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { executeWorldOperation, WORLD_TOOL_NAME, WorldTool } from "@oh-my-pi/pi-coding-agent/tools/world/index";
+import { describe, expect, test } from "bun:test";
 import {
-	WORLD_SESSION_ENV,
-	WORLD_SOCKET_ENV,
 	WorldAuthorityError,
 	type WorldClient,
 	type WorldDispatchSnapshot,
 	WorldOperationError,
 } from "@oh-my-pi/pi-coding-agent/world/index";
+import { executeWorldOperation } from "../../src/tools/world/index.js";
 import {
 	WorldAuthorityDenialCode,
 	WorldOperationFailureCode,
 	WorldRuntimeOperation,
 } from "../../src/world/generated/llmsession.pb.js";
 
-const SOCKET = "/run/glados/console.sock";
 const CALLER = "glados/llm-session/caller";
 
 interface FakeCalls {
@@ -36,8 +30,6 @@ interface FakeClientOptions {
 	watch?: () => WorldDispatchSnapshot[];
 	/** Thrown by whichever method is called, before it records anything. */
 	throws?: Error;
-	/** Interactive roots have mutation authority without a static session key. */
-	interactive?: boolean;
 }
 
 /**
@@ -53,8 +45,6 @@ function fakeClient(options: FakeClientOptions = {}): { client: WorldClient; cal
 		if (options.throws) throw options.throws;
 	};
 	const client = {
-		canMutate: options.interactive ?? true,
-		sessionKey: options.interactive ? undefined : CALLER,
 		deriveIntentKey: (source: unknown) => ({ intentKey: "di:derived", source }),
 		submitDispatch: async (request: unknown) => {
 			raise();
@@ -92,107 +82,7 @@ function fakeClient(options: FakeClientOptions = {}): { client: WorldClient; cal
 	return { client, calls };
 }
 
-function session(overrides: Partial<ToolSession> = {}): ToolSession {
-	return {
-		cwd: "/tmp/test",
-		hasUI: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-		settings: Settings.isolated(),
-		...overrides,
-	};
-}
-
-function setWorldEnv(socket: string | undefined, caller: string | undefined): void {
-	if (socket === undefined) delete process.env[WORLD_SOCKET_ENV];
-	else process.env[WORLD_SOCKET_ENV] = socket;
-	if (caller === undefined) delete process.env[WORLD_SESSION_ENV];
-	else process.env[WORLD_SESSION_ENV] = caller;
-}
-
-afterEach(() => {
-	setWorldEnv(undefined, undefined);
-});
-
-describe("world tool admission", () => {
-	test("an unconfigured root gets no tool", () => {
-		setWorldEnv(undefined, undefined);
-		expect(WorldTool.createIf(session())).toBeNull();
-	});
-
-	// A socket alone is a complete configuration for reads. A tool whose every
-	// call would be denied for want of a caller is worse than no tool.
-	test("a socket-only root gets no tool", () => {
-		setWorldEnv(SOCKET, undefined);
-		expect(WorldTool.createIf(session())).toBeNull();
-	});
-	test("an interactive root activates the tool before its binding is attached", () => {
-		setWorldEnv(SOCKET, undefined);
-		const { client } = fakeClient({ interactive: true });
-
-		expect(client.sessionKey).toBeUndefined();
-		expect(client.canMutate).toBe(true);
-		expect(WorldTool.createIf(session({ worldClient: () => client }))).not.toBeNull();
-	});
-
-	test("a socket-plus-session root gets the tool", () => {
-		setWorldEnv(SOCKET, CALLER);
-		const { client } = fakeClient();
-		const tool = WorldTool.createIf(session({ worldClient: () => client }));
-		expect(tool).not.toBeNull();
-		expect(tool?.name).toBe(WORLD_TOOL_NAME);
-	});
-
-	test("an owner-supplied client is used instead of the process-shared one", async () => {
-		setWorldEnv(SOCKET, CALLER);
-		const { client, calls } = fakeClient();
-		const tool = WorldTool.createIf(session({ worldClient: () => client }));
-		await tool?.execute("call-1", {
-			op: "session_input",
-			request_id: "r1",
-			session: "glados/llm-session/b",
-			text: "go",
-		});
-		expect(calls.inputs).toHaveLength(1);
-	});
-});
-
-describe("world tool schema", () => {
-	test("advertises one object schema with every operation", () => {
-		const { client } = fakeClient();
-		const schema = toolWireSchema(new WorldTool(client)) as {
-			type: string;
-			properties: Record<string, { enum?: string[] }>;
-			required?: string[];
-		};
-		expect(schema.type).toBe("object");
-		expect(schema.properties.op?.enum).toEqual([
-			"dispatch_submit",
-			"dispatch_watch",
-			"question_answer",
-			"session_input",
-			"session_interrupt",
-		]);
-		expect(schema.required).toContain("op");
-		expect(schema.properties).not.toHaveProperty("resume_session");
-	});
-
-	test("names each operation's permission in its description", () => {
-		const { client } = fakeClient();
-		const description = new WorldTool(client).description;
-		for (const permission of [
-			"world.dispatch.submit",
-			"world.dispatch.watch",
-			"world.question.answer",
-			"world.session.input",
-			"world.session.interrupt",
-		]) {
-			expect(description).toContain(permission);
-		}
-	});
-});
-
-describe("world tool operations", () => {
+describe("world operation owner", () => {
 	test("dispatch_submit builds the identity tuple from flat arguments", async () => {
 		const { client, calls } = fakeClient({
 			submit: () => ({
@@ -392,7 +282,7 @@ describe("world tool operations", () => {
 	});
 });
 
-describe("world tool refusals", () => {
+describe("world operation refusals", () => {
 	test("a permission denial renders the daemon's code, caller, and permission", async () => {
 		const { client } = fakeClient({
 			throws: new WorldAuthorityError("question_answer", {
@@ -450,26 +340,5 @@ describe("world tool refusals", () => {
 		await expect(
 			executeWorldOperation(client, { op: "session_input", request_id: "r", session: "s", text: "t" }),
 		).rejects.toThrow(/socket closed/);
-	});
-
-	test("the native tool returns the rendered refusal as a tool error", async () => {
-		const { client } = fakeClient({
-			throws: new WorldAuthorityError("session_input", {
-				operation: WorldRuntimeOperation.SESSION_INPUT,
-				callerSessionObjectKey: CALLER,
-				code: WorldAuthorityDenialCode.CALLER_MANIFEST_UNAVAILABLE,
-				requiredPermission: "world.session.input",
-				detail: "the caller has settled",
-			}),
-		});
-		const result = await new WorldTool(client).execute("call-1", {
-			op: "session_input",
-			request_id: "r1",
-			session: "glados/llm-session/b",
-			text: "go",
-		});
-		expect(result.isError).toBe(true);
-		expect(result.content[0]).toMatchObject({ type: "text" });
-		expect((result.content[0] as { text: string }).text).toContain("CALLER_MANIFEST_UNAVAILABLE");
 	});
 });

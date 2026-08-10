@@ -820,19 +820,6 @@ class SessionState:
 
 
 @dataclass(slots=True, frozen=True)
-class BashResult:
-    output: str
-    exit_code: int | None
-    cancelled: bool
-    truncated: bool
-    total_lines: int
-    total_bytes: int
-    output_lines: int
-    output_bytes: int
-    artifact_id: str | None = None
-
-
-@dataclass(slots=True, frozen=True)
 class FastModeResult:
     enabled: bool
     active: bool
@@ -1404,20 +1391,6 @@ def parse_session_state(payload: JsonObject) -> SessionState:
                 payload.get("contextUsage"), field="sessionState.contextUsage"
             )
         ),
-    )
-
-
-def parse_bash_result(payload: JsonObject) -> BashResult:
-    return BashResult(
-        output=str(payload.get("output", "")),
-        exit_code=_optional_int(payload, "exitCode"),
-        cancelled=bool(payload.get("cancelled", False)),
-        truncated=bool(payload.get("truncated", False)),
-        total_lines=int(payload.get("totalLines", 0)),
-        total_bytes=int(payload.get("totalBytes", 0)),
-        output_lines=int(payload.get("outputLines", 0)),
-        output_bytes=int(payload.get("outputBytes", 0)),
-        artifact_id=_optional_str(payload, "artifactId"),
     )
 
 

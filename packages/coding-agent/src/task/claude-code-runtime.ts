@@ -194,7 +194,6 @@ async function writeClaudeCodeSessionMetadata(
 			task: options.task,
 			tools: options.agent.tools ?? [],
 			spawns: persistedSpawns(options),
-			readSummarize: options.agent.readSummarize,
 			outputSchema: options.outputSchema,
 			outputSchemaMode: options.outputSchemaMode,
 			restrictToolNames: options.restrictToolNames || undefined,

@@ -3,8 +3,8 @@
  *
  * When a user configures an extension via `extensions:` (in settings) or
  * `--extension`/`-e` (on the CLI), the docs promise that the package's
- * sibling directories — `skills/`, `hooks/pre|post/`, `tools/`, `commands/`,
- * `rules/`, `prompts/`, and `.mcp.json` — are picked up by omp's standard
+ * sibling directories — `skills/`, `hooks/pre|post/`, `commands/`, `rules/`,
+ * `prompts/`, and `.mcp.json` — are picked up by omp's standard
  * discovery surfaces. The native `omp` provider in `builtin.ts` only walks
  * `.omp/` and `~/.omp/agent/`, so without this provider those sub-trees are
  * silently ignored.
@@ -17,16 +17,15 @@
  * @see ../../docs/extension-loading.md
  */
 import * as path from "node:path";
-import { logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { logger, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
-import { readDirEntries, readFile } from "../capability/fs";
+import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Prompt, promptCapability } from "../capability/prompt";
 import { type Rule, ruleCapability } from "../capability/rule";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import {
 	buildRuleFromMarkdown,
@@ -40,8 +39,7 @@ import { resolvePluginStdioPaths } from "./substitute-plugin-root";
 
 const PROVIDER_ID = "omp-plugins";
 const DISPLAY_NAME = "OMP Extension Packages";
-const DESCRIPTION =
-	"Sub-discovery (skills, hooks, tools, commands, rules, prompts, .mcp.json) inside extension packages";
+const DESCRIPTION = "Sub-discovery (skills, hooks, commands, rules, prompts, .mcp.json) inside extension packages";
 const PRIORITY = 90;
 
 // =============================================================================
@@ -177,84 +175,6 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 }
 
 // =============================================================================
-// Custom Tools
-// =============================================================================
-
-const TOOL_EXTENSIONS = ["json", "md", "ts", "js", "sh", "bash", "py"];
-
-async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const roots = await listOmpExtensionRoots(ctx);
-	const perRoot = await Promise.all(
-		roots.map(async root => {
-			const toolsDir = path.join(root.path, "tools");
-			const [filesResult, entries] = await Promise.all([
-				loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, root.level, {
-					extensions: TOOL_EXTENSIONS,
-					transform: (name, content, filePath, source) => {
-						if (name.endsWith(".json")) {
-							const data = tryParseJson<{ name?: string; description?: string }>(content);
-							const toolName = data?.name || name.replace(/\.json$/, "");
-							const description =
-								typeof data?.description === "string" && data.description.trim()
-									? data.description
-									: `${toolName} custom tool`;
-							return { name: toolName, path: filePath, description, level: root.level, _source: source };
-						}
-						if (name.endsWith(".md")) {
-							const { frontmatter } = parseFrontmatter(content, { source: filePath });
-							const toolName = (frontmatter.name as string) || name.replace(/\.md$/, "");
-							const description =
-								typeof frontmatter.description === "string" && frontmatter.description.trim()
-									? String(frontmatter.description)
-									: `${toolName} custom tool`;
-							return { name: toolName, path: filePath, description, level: root.level, _source: source };
-						}
-						const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
-						return {
-							name: toolName,
-							path: filePath,
-							description: `${toolName} custom tool`,
-							level: root.level,
-							_source: source,
-						};
-					},
-				}),
-				readDirEntries(toolsDir),
-			]);
-
-			// `<tools>/<name>/index.ts` sub-directory tools, mirroring `builtin.ts:loadTools`.
-			const indexCandidates = entries
-				.filter(e => !e.name.startsWith(".") && e.isDirectory())
-				.map(e => path.join(toolsDir, e.name, "index.ts"));
-			const indexContents = await Promise.all(indexCandidates.map(p => readFile(p)));
-			const indexItems: CustomTool[] = [];
-			for (let i = 0; i < indexCandidates.length; i++) {
-				if (indexContents[i] === null) continue;
-				const indexPath = indexCandidates[i];
-				const toolName = path.basename(path.dirname(indexPath));
-				indexItems.push({
-					name: toolName,
-					path: indexPath,
-					description: `${toolName} custom tool`,
-					level: root.level,
-					_source: createSourceMeta(PROVIDER_ID, indexPath, root.level),
-				});
-			}
-
-			return { filesResult, indexItems };
-		}),
-	);
-
-	const items: CustomTool[] = [];
-	const warnings: string[] = [];
-	for (const { filesResult, indexItems } of perRoot) {
-		items.push(...filesResult.items, ...indexItems);
-		if (filesResult.warnings) warnings.push(...filesResult.warnings);
-	}
-	return { items, warnings };
-}
-
-// =============================================================================
 // MCP Servers
 // =============================================================================
 
@@ -377,14 +297,6 @@ registerProvider<Hook>(hookCapability.id, {
 	description: DESCRIPTION,
 	priority: PRIORITY,
 	load: loadHooks,
-});
-
-registerProvider<CustomTool>(toolCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: DESCRIPTION,
-	priority: PRIORITY,
-	load: loadTools,
 });
 
 registerProvider<MCPServer>(mcpCapability.id, {

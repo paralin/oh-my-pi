@@ -1,24 +1,13 @@
 /**
  * Structured metadata for tool outputs.
  *
- * Tools populate details.meta using the fluent OutputMetaBuilder.
- * The tool wrapper automatically formats and appends notices at message boundary.
+ * Host operations populate details.meta using the fluent OutputMetaBuilder.
  */
-import type {
-	AgentTool,
-	AgentToolContext,
-	AgentToolExecFn,
-	AgentToolResult,
-	AgentToolUpdateCallback,
-} from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
-import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
+import type { OutputSummary, TruncationResult } from "../session/streaming-output";
 import { formatBytes, wrapBrackets } from "./render-utils";
-import { renderError } from "./tool-errors";
 
 /**
  * Truncation metadata for the output notice.
@@ -577,35 +566,6 @@ export function stripOutputNotice(text: string, meta: OutputMeta | undefined): s
 }
 
 // =============================================================================
-// Tool wrapper
-// =============================================================================
-
-/**
- * Append output notice to tool result content if meta is present.
- */
-function appendOutputNotice(
-	content: (TextContent | ImageContent)[],
-	meta: OutputMeta | undefined,
-): (TextContent | ImageContent)[] {
-	const notice = formatOutputNotice(meta);
-	if (!notice) return content;
-
-	const result = [...content];
-	for (let i = result.length - 1; i >= 0; i--) {
-		const item = result[i];
-		if (item.type === "text") {
-			result[i] = { ...item, text: item.text + notice };
-			return result;
-		}
-	}
-
-	result.push({ type: "text", text: notice.trim() });
-	return result;
-}
-
-const kUnwrappedExecute = Symbol("OutputMeta.UnwrappedExecute");
-
-// =============================================================================
 // Centralized artifact spill for large tool results
 // =============================================================================
 
@@ -647,7 +607,7 @@ export function resolveOutputSinkHeadBytes(s: Settings | undefined): number {
 const INLINE_CAP_SLACK_BYTES = 2 * 1024;
 
 /**
- * Resolve the `enforceInlineByteCap` budget for streaming tools (bash/ssh)
+ * Resolve the `enforceInlineByteCap` budget for streaming host operations
  * from session settings: the user's spill threshold plus notice slack.
  */
 export function resolveInlineByteCapBudget(s: Settings | undefined): number {
@@ -656,205 +616,8 @@ export function resolveInlineByteCapBudget(s: Settings | undefined): number {
 
 /**
  * Resolve the per-line column cap from session settings. Shared by streaming
- * executors (bash/python/ssh/eval via OutputSink) and the `read` tool's
- * line-buffer post-processing, so one setting controls both surfaces.
+ * host executors and the workspace-read service's line-buffer post-processing, so one setting controls both surfaces.
  */
 export function resolveOutputMaxColumns(s: Settings | undefined): number {
 	return s?.get("tools.outputMaxColumns") ?? getDefault("tools.outputMaxColumns");
-}
-
-/**
- * If the tool result text exceeds the spill threshold, save the full output
- * as a session artifact and replace the content with a head+tail (middle
- * elision) view plus an artifact reference. When `tools.artifactHeadBytes`
- * is 0, falls back to tail-only truncation. Skips when the tool already
- * saved its own artifact (e.g. bash/python via OutputSink).
- */
-async function spillLargeResultToArtifact(
-	result: AgentToolResult,
-	toolName: string,
-	context: AgentToolContext | undefined,
-): Promise<AgentToolResult> {
-	const sessionManager = context?.sessionManager;
-	if (!sessionManager) return result;
-	const { threshold, tailBytes, tailLines, headBytes } = getSpillConfig(context?.settings);
-
-	// Skip if tool already saved an artifact
-	const existingMeta: OutputMeta | undefined = result.details?.meta;
-	if (existingMeta?.truncation?.artifactId) return result;
-
-	// Reading an artifact already addresses recoverable full output. Spilling that
-	// read would only create a redundant artifact containing another artifact's
-	// page (and can repeat indefinitely on subsequent reads).
-	if (
-		toolName === "read" &&
-		existingMeta?.source?.type === "internal" &&
-		existingMeta.source.value.startsWith("artifact://")
-	) {
-		return result;
-	}
-
-	// Measure total text content
-	const textParts: string[] = [];
-	for (const block of result.content) {
-		if (block.type === "text" && block.text) {
-			textParts.push(block.text);
-		}
-	}
-	if (textParts.length === 0) return result;
-
-	const fullText = textParts.length === 1 ? textParts[0] : textParts.join("\n");
-	const totalBytes = Buffer.byteLength(fullText, "utf-8");
-	if (totalBytes <= threshold) return result;
-
-	// Save the full output as an artifact so the elided bytes stay recoverable.
-	// In a persistent session this hits `Bun.write`, which can throw (disk full,
-	// permissions). The spill wraps arbitrary tools (built-in, MCP, extension,
-	// RPC-host); a save failure must never convert a successful call into an
-	// error, nor re-expose the full (possibly context-blowing) output. Mirror
-	// `enforceInlineByteCap`: always truncate past the threshold, and only
-	// attach the `artifact://` recovery link when the save actually succeeded.
-	let artifactId: string | undefined;
-	try {
-		artifactId = await sessionManager.saveArtifact(fullText, toolName);
-	} catch (error) {
-		logger.warn("Failed to spill large tool result to artifact", {
-			tool: toolName,
-			error: error instanceof Error ? error.message : String(error),
-		});
-	}
-
-	// Truncate: middle elision when a head budget is configured, otherwise tail-only.
-	const useMiddle = headBytes > 0;
-	const truncated = useMiddle
-		? truncateMiddle(fullText, {
-				maxBytes: headBytes + tailBytes,
-				maxLines: tailLines * 2,
-				maxHeadBytes: headBytes,
-				maxHeadLines: tailLines,
-			})
-		: truncateTail(fullText, {
-				maxBytes: tailBytes,
-				maxLines: tailLines,
-			});
-
-	// Replace text blocks with single truncated block, keep images
-	const newContent: (TextContent | ImageContent)[] = [];
-	for (const block of result.content) {
-		if (block.type !== "text") {
-			newContent.push(block);
-		}
-	}
-	newContent.push({ type: "text", text: truncated.content });
-
-	// Build truncation meta
-	const outputLines = truncated.outputLines ?? truncated.totalLines;
-	const outputBytes = truncated.outputBytes ?? truncated.totalBytes;
-	let truncationMeta: TruncationMeta;
-	if (truncated.truncatedBy === "middle") {
-		const elidedLines = truncated.elidedLines ?? Math.max(0, truncated.totalLines - outputLines);
-		const elidedBytes = truncated.elidedBytes ?? Math.max(0, truncated.totalBytes - outputBytes);
-		const keptLines = Math.max(0, outputLines - 1); // -1 for marker line
-		const headLines = Math.ceil(keptLines / 2);
-		const tailLineCount = keptLines - headLines;
-		truncationMeta = {
-			direction: "middle",
-			truncatedBy: "middle",
-			totalLines: truncated.totalLines,
-			totalBytes: truncated.totalBytes,
-			outputLines,
-			outputBytes,
-			maxBytes: headBytes + tailBytes,
-			headRange: headLines > 0 ? { start: 1, end: headLines } : undefined,
-			tailRange:
-				tailLineCount > 0
-					? { start: truncated.totalLines - tailLineCount + 1, end: truncated.totalLines }
-					: undefined,
-			elidedLines,
-			elidedBytes,
-			artifactId,
-			nextOffset: existingMeta?.truncation?.nextOffset,
-		};
-	} else {
-		const shownStart = truncated.totalLines - outputLines + 1;
-		truncationMeta = {
-			direction: "tail",
-			truncatedBy: truncated.truncatedBy ?? "bytes",
-			totalLines: truncated.totalLines,
-			totalBytes: truncated.totalBytes,
-			outputLines,
-			outputBytes,
-			maxBytes: tailBytes,
-			shownRange: { start: shownStart, end: truncated.totalLines },
-			artifactId,
-			nextOffset: existingMeta?.truncation?.nextOffset,
-		};
-	}
-
-	const newMeta: OutputMeta = { ...(existingMeta ?? {}), truncation: truncationMeta };
-	const newDetails = { ...(result.details ?? {}), meta: newMeta };
-
-	return { ...result, content: newContent, details: newDetails };
-}
-
-// =============================================================================
-// Tool wrapper
-// =============================================================================
-
-async function wrappedExecute(
-	this: AgentTool & { [kUnwrappedExecute]: AgentToolExecFn },
-	toolCallId: string,
-	params: any,
-	signal?: AbortSignal,
-	onUpdate?: AgentToolUpdateCallback,
-	context?: AgentToolContext,
-): Promise<AgentToolResult> {
-	const originalExecute = this[kUnwrappedExecute];
-
-	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
-
-		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
-
-		// Append notices from meta
-		const meta: OutputMeta | undefined = result.details?.meta;
-		if (meta) {
-			return {
-				...result,
-				content: appendOutputNotice(result.content, meta),
-			};
-		}
-		return result;
-	} catch (e) {
-		// Re-throw with formatted message so agent-loop sets isError flag
-		throw new Error(renderError(e));
-	}
-}
-
-/**
- * Wrap a tool to:
- * 1. Automatically append output notices based on details.meta
- * 2. Handle ToolError rendering
- */
-export function wrapToolWithMetaNotice<T extends AgentTool<any, any, any>>(tool: T): T {
-	if (kUnwrappedExecute in tool) {
-		return tool;
-	}
-
-	const originalExecute = tool.execute;
-
-	return Object.defineProperties(tool, {
-		[kUnwrappedExecute]: {
-			value: originalExecute,
-			enumerable: false,
-			configurable: true,
-		},
-		execute: {
-			value: wrappedExecute,
-			enumerable: false,
-			configurable: true,
-			writable: true,
-		},
-	});
 }

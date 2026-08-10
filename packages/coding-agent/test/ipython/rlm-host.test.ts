@@ -107,6 +107,9 @@ describe("RLM IPython host handlers", () => {
 		await expect(
 			handlers["rlm.run"]?.(hostRequest({ type: "rlm.run", prompt: "work", kwargs: { apply: true } })),
 		).rejects.toThrow("require isolated=True");
+		await expect(
+			handlers["rlm.run"]?.(hostRequest({ type: "rlm.run", prompt: "work", kwargs: { service_tier: "turbo" } })),
+		).rejects.toThrow("service_tier must be one of");
 	});
 
 	test("projects model lookup and direct-child list/delete without a second roster", async () => {
@@ -115,7 +118,26 @@ describe("RLM IPython host handlers", () => {
 		expect(
 			await handlers["rlm.find_models"]?.(hostRequest({ type: "rlm.find_models", query: "fast", limit: 4 })),
 		).toEqual({
-			models: [{ provider: "provider", id: "model", name: "Model fast", selector: "provider/model" }],
+			models: [
+				{
+					provider: "provider",
+					id: "model",
+					name: "Model fast",
+					selector: "provider/model",
+					// Host emits the camelCase concreteSelector + availability per Prime.
+					concreteSelector: "provider/model",
+					available: true,
+				},
+			],
+		});
+		expect(await handlers["rlm.find_models"]?.(hostRequest({ type: "rlm.find_models" }))).toEqual({
+			models: [
+				expect.objectContaining({
+					selector: "provider/model",
+					concreteSelector: "provider/model",
+					available: true,
+				}),
+			],
 		});
 		expect(await handlers["rlm.list_subagents"]?.(hostRequest({ type: "rlm.list_subagents" }))).toEqual({
 			subagents: [

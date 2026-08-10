@@ -15,10 +15,15 @@ const arkSessionNotification = type({
 
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type {
+	IpythonCompletedCellPresentation,
+	IpythonLiveCellPresentation,
+} from "@oh-my-pi/pi-coding-agent/ipython/projection";
 import { AcpAgent } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-agent";
 import {
 	buildToolCallStartUpdate,
 	mapAgentSessionEventToAcpSessionUpdates,
+	mapHistoricalAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "@oh-my-pi/pi-coding-agent/modes/acp/acp-event-mapper";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -92,17 +97,13 @@ class ReplayTestSession {
 		return [];
 	}
 
-	getPlanModeState(): undefined {
-		return undefined;
-	}
-
 	setClientBridge(_bridge: unknown): void {}
 
 	subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
 		return () => {};
 	}
 
-	async refreshMCPTools(_tools: unknown): Promise<void> {}
+	async refreshMCPInstructions(_tools: unknown): Promise<void> {}
 }
 
 describe("ACP event mapper", () => {
@@ -111,7 +112,7 @@ describe("ACP event mapper", () => {
 		const getMessageId = (message: unknown): string | undefined =>
 			message === assistantMessage ? "a80f1ff7-4f0a-4e6b-9f09-c94857b62a4a" : undefined;
 
-		const textUpdates = mapAgentSessionEventToAcpSessionUpdates(
+		const textUpdates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "message_update",
 				message: assistantMessage,
@@ -120,7 +121,7 @@ describe("ACP event mapper", () => {
 			"session-1",
 			{ getMessageId },
 		);
-		const thoughtUpdates = mapAgentSessionEventToAcpSessionUpdates(
+		const thoughtUpdates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "message_update",
 				message: assistantMessage,
@@ -145,7 +146,7 @@ describe("ACP event mapper", () => {
 		const assistantMessage = makeAssistantMessage("final response");
 		const progress = { textEmitted: false, thoughtEmitted: false };
 
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "message_end",
 				message: assistantMessage,
@@ -175,7 +176,7 @@ describe("ACP event mapper", () => {
 			getMessageProgress: (message: unknown) => (message === assistantMessage ? progress : undefined),
 		};
 
-		const deltaUpdates = mapAgentSessionEventToAcpSessionUpdates(
+		const deltaUpdates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "message_update",
 				message: assistantMessage,
@@ -184,7 +185,7 @@ describe("ACP event mapper", () => {
 			"session-1",
 			options,
 		);
-		const doneUpdates = mapAgentSessionEventToAcpSessionUpdates(
+		const doneUpdates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "message_end",
 				message: assistantMessage,
@@ -198,8 +199,35 @@ describe("ACP event mapper", () => {
 		expect(doneUpdates).toEqual([]);
 	});
 
+	it("does not map legacy named-tool events on the live ACP stream", () => {
+		const events: AgentSessionEvent[] = [
+			{
+				type: "tool_execution_start",
+				toolCallId: "legacy-start",
+				toolName: "read",
+				args: { path: "README.md" },
+			},
+			{
+				type: "tool_execution_update",
+				toolCallId: "legacy-update",
+				toolName: "bash",
+				args: { command: "echo hidden" },
+				partialResult: { content: [{ type: "text", text: "hidden" }] },
+			},
+			{
+				type: "tool_execution_end",
+				toolCallId: "legacy-end",
+				toolName: "edit",
+				isError: false,
+				result: { content: [{ type: "text", text: "hidden" }] },
+			},
+		];
+
+		expect(events.flatMap(event => mapAgentSessionEventToAcpSessionUpdates(event, "session-1"))).toEqual([]);
+	});
+
 	it("preserves command text when a new command tool is started", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-command-start",
@@ -244,7 +272,7 @@ describe("ACP event mapper", () => {
 		] satisfies AgentSessionEvent[];
 
 		const updates = events.flatMap(event =>
-			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+			mapHistoricalAgentSessionEventToAcpSessionUpdates(event, "session-1", {
 				getToolArgs: () => ({ op: "send", to: "Scout", message: "Private coordination" }),
 			}),
 		);
@@ -252,38 +280,8 @@ describe("ACP event mapper", () => {
 		expect(updates).toEqual([]);
 	});
 
-	it("keeps xd-routed Hub traffic off the ACP session stream", () => {
-		const args = {
-			path: "xd://hub",
-			content: JSON.stringify({ op: "inbox", from: "Scout" }),
-		};
-		const events = [
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-xd-hub-inbox",
-				toolName: "write",
-				args,
-			},
-			{
-				type: "tool_execution_end",
-				toolCallId: "tc-xd-hub-inbox",
-				toolName: "write",
-				isError: false,
-				result: { content: [{ type: "text", text: "Private reply" }] },
-			},
-		] satisfies AgentSessionEvent[];
-
-		const updates = events.flatMap(event =>
-			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
-				getToolArgs: () => args,
-			}),
-		);
-
-		expect(updates).toEqual([]);
-	});
-
 	it("keeps Hub process control visible over ACP", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-hub-process-send",
@@ -320,7 +318,7 @@ describe("ACP event mapper", () => {
 		] satisfies AgentSessionEvent[];
 
 		const updates = events.flatMap(event =>
-			mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+			mapHistoricalAgentSessionEventToAcpSessionUpdates(event, "session-1", {
 				getToolArgs: () => ({ op: "wait", ids: ["bash_a1b2c3"] }),
 			}),
 		);
@@ -329,7 +327,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("keeps a bare Hub wait visible so job deliveries reach ACP", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-hub-bare-wait",
@@ -344,7 +342,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("hides a peer-scoped Hub wait from ACP", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-hub-peer-wait",
@@ -358,7 +356,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("uses command text for a new command tool even when intent is generic", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-command-start-generic-intent",
@@ -379,87 +377,8 @@ describe("ACP event mapper", () => {
 		expect(update.content).toContainEqual({ type: "content", content: { type: "text", text: "$ echo hi" } });
 	});
 
-	it("preserves eval source when a new eval tool is started", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-eval-start",
-				toolName: "eval",
-				args: { language: "js", title: "sum", code: "return 1 + 1;" },
-				intent: "sum",
-			} as AgentSessionEvent,
-			"session-1",
-		);
-
-		expect(updates).toHaveLength(1);
-		expectAcpNotifications(updates);
-		const update = updates[0]!.update as {
-			sessionUpdate: string;
-			title: string;
-			kind?: string;
-			status?: string;
-			rawInput?: unknown;
-			content?: Array<{ type: string; content?: { type: string; text?: string } }>;
-		};
-		expect(update.sessionUpdate).toBe("tool_call");
-		expect(update.title).toBe("[js] sum\nreturn 1 + 1;");
-		expect(update.kind).toBe("execute");
-		expect(update.status).toBe("pending");
-		expect(update.rawInput).toEqual({ language: "js", title: "sum", code: "return 1 + 1;" });
-		expect(update.content).toContainEqual({
-			type: "content",
-			content: { type: "text", text: "[js] sum\nreturn 1 + 1;" },
-		});
-	});
-
-	it("builds eval source content from valid cells only", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-eval-mixed-cells",
-				toolName: "eval",
-				args: {
-					cells: [null, {}, { code: "" }, { code: "x" }, { language: "py", code: "y" }],
-				},
-				intent: "evaluating",
-			} as AgentSessionEvent,
-			"session-1",
-		);
-
-		expect(updates).toHaveLength(1);
-		expectAcpNotifications(updates);
-		const update = updates[0]!.update as {
-			title: string;
-			content?: Array<{ type: string; content?: { type: string; text?: string } }>;
-		};
-		expect(update.title).toBe("[?]\nx\n[py]\ny");
-		expect(update.content).toEqual([{ type: "content", content: { type: "text", text: "[?]\nx\n[py]\ny" } }]);
-	});
-
-	it("limits eval source before emitting visible tool-call text", () => {
-		const source = "x".repeat(4_100);
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
-			{
-				type: "tool_execution_start",
-				toolCallId: "tc-eval-long-source",
-				toolName: "eval",
-				args: { language: "js", code: source },
-			} as AgentSessionEvent,
-			"session-1",
-		);
-
-		expect(updates).toHaveLength(1);
-		expectAcpNotifications(updates);
-		const update = updates[0]!.update as {
-			title: string;
-			content?: Array<{ type: string; content?: { type: string; text?: string } }>;
-		};
-		expect(update.title).toHaveLength(4_000);
-		expect(update.title.endsWith("…")).toBe(true);
-		expect(update.content).toEqual([{ type: "content", content: { type: "text", text: update.title } }]);
-	});
 	it("emits a diff ToolCallContent for each per-file edit result", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-1",
@@ -497,7 +416,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("emits a diff ToolCallContent for single-file edit details", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-single",
@@ -557,7 +476,7 @@ describe("ACP event mapper", () => {
 		];
 
 		for (const event of events) {
-			const updates = mapAgentSessionEventToAcpSessionUpdates(event, "session-1", {
+			const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(event, "session-1", {
 				resolveImageData: data => (data === blobRef ? resolvedImageData : data),
 			});
 			const update = updates[0]!.update as {
@@ -578,7 +497,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("emits locations on tool_execution_update from args", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_update",
 				toolCallId: "tc-2",
@@ -597,7 +516,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("preserves command text when a command tool update replaces content", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_update",
 				toolCallId: "tc-3",
@@ -624,7 +543,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("preserves command text when tool update details accompany empty content", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_update",
 				toolCallId: "tc-terminal-empty-content",
@@ -651,7 +570,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("keeps terminal content alongside readable text", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_update",
 				toolCallId: "tc-terminal-update-text",
@@ -677,7 +596,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("keeps terminal content alongside readable end text", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-terminal-end",
@@ -703,7 +622,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("preserves command text when a command tool final update replaces content", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-terminal-final-command",
@@ -734,7 +653,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("keeps terminal content alongside readable error and message fields", () => {
-		const errorUpdates = mapAgentSessionEventToAcpSessionUpdates(
+		const errorUpdates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-terminal-error",
@@ -744,7 +663,7 @@ describe("ACP event mapper", () => {
 			} as AgentSessionEvent,
 			"session-1",
 		);
-		const messageUpdates = mapAgentSessionEventToAcpSessionUpdates(
+		const messageUpdates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-terminal-message",
@@ -778,7 +697,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("keeps plain command output visible without terminal details", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-plain-output",
@@ -799,7 +718,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("embeds only terminal content from direct terminalId", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-direct-terminal",
@@ -819,7 +738,7 @@ describe("ACP event mapper", () => {
 	});
 
 	it("does not duplicate existing terminal content", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_end",
 				toolCallId: "tc-terminal-dedup",
@@ -841,7 +760,7 @@ describe("ACP event mapper", () => {
 		expect(update.content?.filter(item => item.type === "terminal" && item.terminalId === "term-1")).toHaveLength(1);
 	});
 	it("shows bash commands in visible tool call content", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "toolu_bash_1",
@@ -873,7 +792,7 @@ describe("ACP event mapper", () => {
 
 	it("maps shell and exec tool starts as execute", () => {
 		for (const toolName of ["shell", "exec"] as const) {
-			const updates = mapAgentSessionEventToAcpSessionUpdates(
+			const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 				{
 					type: "tool_execution_start",
 					toolCallId: `toolu_${toolName}_1`,
@@ -1065,7 +984,7 @@ describe("ACP event mapper", () => {
 		});
 	});
 	it("does not add command text content to non-command tool starts", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "toolu_read_1",
@@ -1093,7 +1012,7 @@ describe("ACP event mapper", () => {
 		expect("content" in update).toBe(false);
 	});
 	it("resolves tool_execution_start locations against mapper cwd", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "toolu_read_cwd",
@@ -1112,7 +1031,7 @@ describe("ACP event mapper", () => {
 		expect("content" in update).toBe(false);
 	});
 	it("emits distinct locations for move-style path arguments", () => {
-		const updates = mapAgentSessionEventToAcpSessionUpdates(
+		const updates = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-move",
@@ -1129,47 +1048,223 @@ describe("ACP event mapper", () => {
 		expect(update.locations).toEqual([{ path: "src/current.ts" }, { path: "src/old.ts" }, { path: "src/new.ts" }]);
 	});
 
-	it("maps xd:// device writes to an execute call with no fabricated file location", () => {
-		const update = buildToolCallStartUpdate({
-			toolCallId: "toolu_xd_write",
-			toolName: "write",
-			args: { path: "xd://github", content: '{"op":"repo_view"}' },
-			cwd: path.resolve("/repo"),
-		});
+	it("maps shared IPython cell projections to one execute call with safe rich updates", () => {
+		const updates = [
+			{
+				kind: "startup" as const,
+				cellId: "cell-1",
+				origin: "model" as const,
+				progress: { stage: "runtime" as const, message: "Preparing runtime..." },
+			},
+			{
+				kind: "execution" as const,
+				cellId: "cell-1",
+				origin: "model" as const,
+				event: { kind: "stream" as const, name: "stdout" as const, text: "safe output\n" },
+			},
+		];
+		const events: Array<IpythonCompletedCellPresentation["events"][number]> = [
+			{ kind: "stream", name: "stdout", text: "safe output\n" },
+			{
+				kind: "display",
+				data: {
+					"text/html": "<script>unsafe()</script>",
+					"image/jpeg": "a".repeat(300_000),
+					"application/vnd.omp.diff+json": {
+						path: "src/file.ts",
+						diff: `@@ -1 +1 @@\n-${"o".repeat(10_000)}\n+${"n".repeat(10_000)}`,
+					},
+					"application/vnd.omp.attachment+json": {
+						path: "plot.png",
+						mime_type: "image/png",
+						data: "cG5n",
+					},
+				},
+				metadata: {},
+				transient: {},
+				update: false,
+				text: "[displayed MIME types]",
+			},
+			{ kind: "host_progress", operation: "omp.code.edit", message: "Applied edit", data: {} },
+		];
+		for (let index = 0; index < 100; index++) {
+			events.push({
+				kind: "host_progress",
+				operation: `omp.generated.${index}`,
+				message: `Generated progress ${index}`,
+				data: {},
+			});
+			events.push({
+				kind: "display",
+				data: {
+					"application/vnd.omp.diff+json": {
+						path: `src/generated-${index}.ts`,
+						diff: "@@ -1 +1 @@\n-old\n+new",
+					},
+				},
+				metadata: {},
+				transient: {},
+				update: false,
+				text: "[displayed MIME types]",
+			});
+		}
+		const live: IpythonLiveCellPresentation = {
+			kind: "cell",
+			phase: "live",
+			cellId: "cell-1",
+			origin: "model",
+			code: "x".repeat(10_000),
+			status: "running",
+			events,
+			errors: [],
+			updates,
+			startupProgress: [{ stage: "runtime", message: "Preparing runtime..." }],
+			safeText: {
+				text: "safe output\n[displayed MIME types]\n[omp.code.edit] Applied edit\n",
+				truncated: false,
+				totalBytes: 72,
+				outputBytes: 72,
+			},
+			artifacts: [],
+		};
+		const complete: IpythonCompletedCellPresentation = {
+			...live,
+			phase: "complete",
+			cellId: "cell-1",
+			executionId: "execute-1",
+			sequence: 1,
+			authority: "trusted-cell",
+			status: "ok",
+			requestedAt: 10,
+			startedAt: 11,
+			finishedAt: 20,
+			durationMs: 9,
+			stdout: "safe output\n",
+			stderr: "",
+			result: undefined,
+			artifacts: Array.from({ length: 100 }, (_, index) => ({
+				path: index === 0 ? "/tmp/ipython/plot.png" : `/tmp/ipython/artifact-${index}.txt`,
+				mimeType: index === 0 ? "image/png" : "text/plain",
+				bytes: 3,
+				label: index === 0 ? "plot" : `artifact ${index}`,
+			})),
+		};
+		const options = { cwd: "/work", resolveImageData: (data: string) => `resolved:${data}` };
+		const [start] = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "ipython_cell_start", presentation: live },
+			"session-1",
+			options,
+		);
+		const [progress] = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "ipython_cell_update", presentation: live },
+			"session-1",
+			options,
+		);
+		const [end] = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "ipython_cell_end", presentation: complete },
+			"session-1",
+			options,
+		);
 
-		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
-		expect(update).toMatchObject({
+		expect(start?.update).toMatchObject({
 			sessionUpdate: "tool_call",
-			title: "xd://github",
+			toolCallId: "cell-1",
+			kind: "execute",
+			status: "pending",
+		});
+		const startUpdate = start?.update as { rawInput?: { code?: string } };
+		expect(startUpdate.rawInput?.code?.length).toBe(4_000);
+		expect(progress?.update).toMatchObject({
+			sessionUpdate: "tool_call_update",
+			toolCallId: "cell-1",
+			status: "in_progress",
+		});
+		expect(end?.update).toMatchObject({
+			sessionUpdate: "tool_call_update",
+			toolCallId: "cell-1",
+			status: "completed",
+		});
+		const endUpdate = end?.update as {
+			content?: Array<Record<string, unknown>>;
+			locations?: unknown[];
+		};
+		const content = endUpdate.content ?? [];
+		expect(content).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ type: "diff", path: "/work/src/file.ts" }),
+				expect.objectContaining({
+					type: "content",
+					content: expect.objectContaining({ type: "image", data: "resolved:cG5n", mimeType: "image/png" }),
+				}),
+				expect.objectContaining({
+					type: "content",
+					content: expect.objectContaining({ type: "resource_link", mimeType: "image/png", size: 3 }),
+				}),
+			]),
+		);
+		expect(progress?.update).not.toHaveProperty("rawOutput");
+		expect(end?.update).not.toHaveProperty("rawOutput");
+		expect(content.length).toBeLessThanOrEqual(64);
+		const boundedDiff = content.find(item => item.type === "diff" && item.path === "/work/src/file.ts");
+		if (!boundedDiff || typeof boundedDiff.oldText !== "string" || typeof boundedDiff.newText !== "string") {
+			throw new Error("missing bounded IPython diff");
+		}
+		expect(boundedDiff.oldText.length).toBeLessThanOrEqual(4_000);
+		expect(boundedDiff.newText.length).toBeLessThanOrEqual(4_000);
+		if (!Array.isArray(endUpdate.locations)) throw new Error("missing bounded IPython locations");
+		expect(endUpdate.locations.length).toBeLessThanOrEqual(64);
+		expect(endUpdate.locations.some(location => (location as { path?: unknown }).path === "/work/src/file.ts")).toBe(
+			true,
+		);
+		expect(endUpdate.locations.some(location => (location as { path?: unknown }).path === "/work/plot.png")).toBe(
+			true,
+		);
+		const serializedNotifications = JSON.stringify([start, progress, end]);
+		expect(serializedNotifications).not.toContain("<script>");
+		expect(serializedNotifications).not.toContain("a".repeat(300_000));
+		expect(serializedNotifications.length).toBeLessThan(800_000);
+		expect(JSON.stringify(content)).toContain("Preparing runtime");
+		expect(JSON.stringify(content)).toContain("Additional IPython cell content omitted");
+		expect(JSON.stringify(content)).toContain("omp.code.edit");
+		expect(buildToolCallStartUpdate({ toolCallId: "ip-1", toolName: "ipython", args: {} })).toMatchObject({
 			kind: "execute",
 		});
-		expect("locations" in update).toBe(false);
 	});
 
-	it("keeps xd:// discovery reads as read kind and plain file writes as edit", () => {
-		const discovery = buildToolCallStartUpdate({
-			toolCallId: "toolu_xd_read",
-			toolName: "read",
-			args: { path: "xd://lsp" },
-		});
-		expect(discovery).toMatchObject({ title: "xd://lsp", kind: "read" });
-		expect("locations" in discovery).toBe(false);
-
-		const fileWrite = buildToolCallStartUpdate({
-			toolCallId: "toolu_file_write",
-			toolName: "write",
-			args: { path: "src/foo.ts", content: "x" },
-			cwd: path.resolve("/repo"),
-		});
-		expect(fileWrite).toMatchObject({
-			title: "write: src/foo.ts",
-			kind: "edit",
-			locations: [{ path: path.resolve("/repo", "src/foo.ts") }],
-		});
+	it("maps aborted IPython terminal projections to failed ACP status", () => {
+		const presentation = {
+			kind: "cell",
+			phase: "complete",
+			cellId: "cell-abort",
+			executionId: undefined,
+			sequence: 2,
+			origin: "model",
+			authority: "trusted-cell",
+			code: "while True: pass",
+			status: "aborted",
+			requestedAt: 1,
+			startedAt: 2,
+			finishedAt: 3,
+			durationMs: 1,
+			stdout: "",
+			stderr: "",
+			result: undefined,
+			events: [],
+			errors: [],
+			updates: [],
+			startupProgress: [],
+			safeText: { text: "IPython cell aborted.\n", truncated: false, totalBytes: 23, outputBytes: 23 },
+			artifacts: [],
+		} satisfies IpythonCompletedCellPresentation;
+		const [notification] = mapAgentSessionEventToAcpSessionUpdates(
+			{ type: "ipython_cell_end", presentation },
+			"session-1",
+		);
+		expect(notification?.update).toMatchObject({ status: "failed", toolCallId: "cell-abort" });
 	});
 
 	it("rejects mutated ACP notification discriminators", () => {
-		const [notification] = mapAgentSessionEventToAcpSessionUpdates(
+		const [notification] = mapHistoricalAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
 				toolCallId: "tc-schema",
@@ -1185,5 +1280,69 @@ describe("ACP event mapper", () => {
 			update: { ...notification!.update, sessionUpdate: "tool_call_updates" },
 		});
 		expectAcpStructureRejects(arkSessionNotification, { ...notification, sessionId: 42 });
+	});
+	it("projects bounded Act progress without a private transcript or done value", () => {
+		const common = { type: "act_event" as const, actId: "act-acp", outerToolCallId: "cell-root" };
+		const start = mapHistoricalAgentSessionEventToAcpSessionUpdates(
+			{
+				...common,
+				sequence: 1,
+				event: "start",
+				prompt: `<script>${"p".repeat(8_000)}</script>`,
+				promptTruncated: false,
+				model: { provider: "test", id: "actor" },
+				cancellationCapability: "posix-managed",
+			},
+			"session-1",
+		);
+		const cell = mapHistoricalAgentSessionEventToAcpSessionUpdates(
+			{
+				...common,
+				sequence: 2,
+				event: "cell_terminal",
+				cellId: "act-cell",
+				status: "ok",
+				stdout: "x".repeat(10_000),
+				stdoutTruncated: false,
+				stderr: "",
+				stderrTruncated: false,
+				result: "safe result",
+				resultTruncated: false,
+				errorTruncated: false,
+			},
+			"session-1",
+		);
+		const terminal = mapHistoricalAgentSessionEventToAcpSessionUpdates(
+			{
+				...common,
+				sequence: 3,
+				event: "terminal",
+				status: "done",
+				prompt: "private prompt",
+				promptTruncated: false,
+				model: { provider: "test", id: "actor" },
+				cancellationCapability: "posix-managed",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				errorTruncated: false,
+			},
+			"session-1",
+		);
+		expect(start[0]?.update).toMatchObject({
+			sessionUpdate: "tool_call",
+			toolCallId: "omp-act-act-acp",
+			kind: "execute",
+		});
+		expect(Buffer.byteLength(JSON.stringify(start))).toBeLessThan(8_000);
+		expect(Buffer.byteLength(JSON.stringify(cell))).toBeLessThan(8_000);
+		expect(JSON.stringify(cell)).toContain("safe result");
+		expect(JSON.stringify(terminal)).not.toContain("private prompt");
+		expect(JSON.stringify(terminal)).not.toContain("rlm.done");
 	});
 });

@@ -41,13 +41,7 @@ describe("issue #983: multi-file legacy Pi extensions", () => {
 				'import { foo } from "./helper.ts";',
 				"",
 				"export default function(pi) {",
-				"\tconst { Type } = pi.typebox;",
-				"\tpi.registerTool({",
-				"\t\tname: foo,",
-				'\t\tdescription: "Issue #983 regression test",',
-				"\t\tparameters: Type.Object({}),",
-				'\t\texecute: async () => ({ content: [{ type: "text", text: foo }] }),',
-				"\t});",
+				"\tpi.registerCommand(foo, { handler: async () => {} });",
 				"}",
 			].join("\n"),
 		);
@@ -57,6 +51,6 @@ describe("issue #983: multi-file legacy Pi extensions", () => {
 
 		expect(result.errors).toHaveLength(0);
 		expect(extension).toBeDefined();
-		expect(extension?.tools.has(TOOL_NAME)).toBe(true);
+		expect(extension?.commands.has(TOOL_NAME)).toBe(true);
 	});
 });

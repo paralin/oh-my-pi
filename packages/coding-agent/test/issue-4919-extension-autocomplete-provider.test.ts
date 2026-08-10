@@ -132,7 +132,6 @@ describe("extension autocomplete provider API (#4919)", () => {
 			sessionManager: manager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: registry,
-			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			promptTemplates: [],
 		});
 		const createdMode = new InteractiveMode(created, "test");

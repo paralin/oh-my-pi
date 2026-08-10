@@ -278,13 +278,6 @@ async def loaded_sources(*, timeout: int = 30) -> dict[str, Any]:
     return await host_request("debug.loaded_sources", {"timeout": timeout})
 
 
-async def custom_request(command: str, *, arguments: dict[str, Any] | None = None, timeout: int = 30) -> dict[str, Any]:
-    """Send one bounded adapter-specific DAP request."""
-    return await host_request(
-        "debug.custom_request", {"command": command, "arguments": arguments or {}, "timeout": timeout}
-    )
-
-
 async def terminate(*, timeout: int = 30) -> dict[str, Any]:
     """Terminate and dispose the active debug-session tree."""
     return await host_request("debug.terminate", {"timeout": timeout})

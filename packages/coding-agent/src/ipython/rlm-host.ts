@@ -7,8 +7,10 @@ import type {
 import type { IpythonHostHandlers, IpythonHostRequest } from "./controller";
 
 const RLM_NAME_MAX = 64;
+const RLM_MODEL_LIMIT_DEFAULT = 8;
 const RLM_MODEL_LIMIT_MAX = 20;
-const RLM_RUN_KEYS = new Set(["name", "model", "isolated", "apply", "merge"]);
+const RLM_RUN_KEYS = new Set(["name", "model", "service_tier", "isolated", "apply", "merge"]);
+const RLM_SERVICE_TIERS = new Set(["auto", "default", "flex", "scale", "priority"]);
 
 function record(value: unknown, label: string): Readonly<Record<string, unknown>> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new TypeError(`${label} must be an object`);
@@ -73,11 +75,21 @@ function validateRun(request: IpythonHostRequest): TaskAdmissionRequest {
 		throw new TypeError(`name must be at most ${RLM_NAME_MAX} characters`);
 	}
 	const model = optionalString(kwargs, "model");
+	let serviceTier: "auto" | "default" | "flex" | "scale" | "priority" | null | undefined;
+	if (kwargs.service_tier !== undefined) {
+		const value = kwargs.service_tier;
+		if (value === null || (typeof value === "string" && RLM_SERVICE_TIERS.has(value))) {
+			serviceTier = value as "auto" | "default" | "flex" | "scale" | "priority" | null;
+		} else {
+			throw new TypeError("service_tier must be one of auto, default, flex, scale, priority, or null");
+		}
+	}
 	const isolationControls = isolation(kwargs);
 	return {
 		assignment: prompt,
 		...(name ? { name } : {}),
 		...(model ? { model } : {}),
+		...(serviceTier !== undefined ? { serviceTier } : {}),
 		...(isolationControls ? { isolation: isolationControls } : {}),
 		sourceId: `ipython:${request.sessionId}:${request.cellId}:${request.sequence}`,
 		signal: request.signal,
@@ -112,7 +124,7 @@ export function createRlmIpythonHostHandlers(task: TaskAdmissionService | undefi
 		"rlm.find_models": request => {
 			const queryValue = request.data.query;
 			if (queryValue !== undefined && typeof queryValue !== "string") throw new TypeError("query must be a string");
-			const limitValue = request.data.limit;
+			const limitValue = request.data.limit ?? RLM_MODEL_LIMIT_DEFAULT;
 			if (
 				typeof limitValue !== "number" ||
 				!Number.isInteger(limitValue) ||
@@ -121,7 +133,15 @@ export function createRlmIpythonHostHandlers(task: TaskAdmissionService | undefi
 			) {
 				throw new TypeError(`limit must be an integer from 1 through ${RLM_MODEL_LIMIT_MAX}`);
 			}
-			return { models: service(task).findModels((queryValue ?? "").trim(), limitValue) };
+			return {
+				models: service(task)
+					.findModels((queryValue ?? "").trim(), limitValue)
+					.map(model => ({
+						...model,
+						concreteSelector: model.concreteSelector ?? model.selector,
+						available: model.available ?? true,
+					})),
+			};
 		},
 		"rlm.list_subagents": async request => ({
 			subagents: (await service(task).listDirectChildren(request.signal)).map(subagent),

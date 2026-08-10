@@ -164,7 +164,7 @@ selected node
    │
    ├─ current leaf (not ask result)? ──> close selector (no-op)
    │
-   ├─ ask tool result? ──> re-answer as a sibling branch when questions are recoverable
+   ├─ question-service result? ──> re-answer as a sibling branch when questions are recoverable
    │
    ├─ user or ordinary custom message? ──> leaf := parentId (or root)
    │                                         + prefill only into an empty editor

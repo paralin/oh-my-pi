@@ -66,7 +66,6 @@ function createFixture(opts: {
 		streamingComponent,
 		streamingMessage: opts.streamingMessage,
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		noteDisplayableThinkingContent: vi.fn(() => false),
 	};
 	const sessionMock = {

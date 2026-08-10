@@ -114,7 +114,6 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 			sessionManager: manager,
 			settings: Settings.isolated({ "compaction.enabled": false }),
 			modelRegistry: registry,
-			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 			promptTemplates: templates,
 		});
 		const createdMode = new InteractiveMode(created, "test");

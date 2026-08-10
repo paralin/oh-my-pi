@@ -10,7 +10,7 @@ Scratch continuity:
 - Update existing root TODO in place; no duplicate status blocks. Link large evidence rather than copying it.
 - Child TODO blocks parent completion unless explicitly deferred with owner, blocker, next action, return condition, source refs.
 - Verification = current proof + residual risk, not command transcript.
-- Scratch owns task tracking; do not duplicate it in todo tool.
+- Scratch owns task tracking; do not duplicate it in `omp.harness.todo`.
 - Keep `#+TITLE`, `#+SESSION`, `#+PATH`, optional `#+PARENT_SCRATCH` as root keywords; no wrapper heading.
 {{#if parentDisplayPath}}- Parent scratch: `{{parentDisplayPath}}`. Link when needed; NEVER write child state into parent.{{/if}}
 - No update needed? Leave unchanged. NEVER mention scratch state/path in final response unless asked.

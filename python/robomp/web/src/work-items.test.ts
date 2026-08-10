@@ -561,7 +561,7 @@ describe("buildWorkItems", () => {
     expect(stageOrdinal("new")).toBe(0);
     expect(stageOrdinal("reproducing")).toBe(1);
     // needs_info is set by mark_unable_to_reproduce during reproduction and
-    // cleared back to reproducing by repro_record in host_tools; it stays in
+    // cleared back to reproducing by repro_record in operations; it stays in
     // the reproduction phase (ordinal 1), not advanced past fixing.
     expect(stageOrdinal("needs_info")).toBe(1);
     expect(stageOrdinal("fixing")).toBe(2);

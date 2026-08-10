@@ -126,7 +126,7 @@ export function buildFileMentionBlock(files: FileMentionMessage["files"], indent
 
 /**
  * Whether an assistant turn has visible text, thinking, or image content — i.e.
- * content that closes the current read-tool run.
+ * content that closes the current read request.
  */
 export function assistantHasVisibleContent(message: AssistantAgentMessage): boolean {
 	return message.content.some(
@@ -140,7 +140,7 @@ export function assistantHasVisibleContent(message: AssistantAgentMessage): bool
 /**
  * Split mixed assistant turns into visible text before tool execution and
  * visible text segments that must render immediately after the preceding tool.
- * Cursor can return intro text, tool calls, progress text, and the final answer
+ * A provider can return intro text, tool calls, progress text, and the final answer
  * in one assistant message; keeping every text block in the leading assistant
  * block buries post-tool text above tool results in the transcript.
  */

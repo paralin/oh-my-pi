@@ -22,9 +22,9 @@ import {
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "history-protocol-"));
@@ -200,9 +200,9 @@ describe("history:// protocol", () => {
 			session: fakeLiveSession([{ role: "user", content: "hello from live", timestamp: 1 }]),
 			status: "idle",
 		});
-		const tool = new ReadTool(makeToolSession(os.tmpdir()));
+		const tool = new ReadService(makeToolSession(os.tmpdir()));
 
-		const result = await tool.execute("history-range", { path: "history://HubAgent:1-1" });
+		const result = await tool.read("history://HubAgent:1-1");
 		const output = result.content.find(content => content.type === "text");
 
 		expect(output?.type).toBe("text");

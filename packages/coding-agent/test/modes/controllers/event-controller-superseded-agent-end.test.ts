@@ -21,7 +21,6 @@ function createContext() {
 		updateEditorTopBorder: vi.fn(),
 		flushPendingCommandOutput: vi.fn(),
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map<string, unknown>(),
 		hideThinkingBlock: false,
 		setWorkingMessage: vi.fn(),
 		clearPinnedError: vi.fn(),

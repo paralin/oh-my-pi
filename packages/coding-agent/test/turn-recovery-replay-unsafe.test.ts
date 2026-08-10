@@ -63,7 +63,6 @@ function createHost(
 		isStreaming: () => false,
 		isCompacting: () => false,
 		abortInProgress: () => false,
-		streamingEditAbortTriggered: () => false,
 		promptGeneration: () => 0,
 		sessionId: () => "test-session",
 		emitSessionEvent: async () => {},

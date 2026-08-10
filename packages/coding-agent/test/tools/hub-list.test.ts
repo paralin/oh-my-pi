@@ -3,11 +3,11 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { CoordinationBackend } from "@oh-my-pi/pi-coding-agent/coordination/backend";
 import { type AgentPeer, AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { HubTool } from "@oh-my-pi/pi-coding-agent/tools/hub";
-import { executeList } from "@oh-my-pi/pi-coding-agent/tools/hub/messaging";
 import { WorldAuthorityError, WorldOperationError } from "@oh-my-pi/pi-coding-agent/world/client";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { executeHubOperation } from "../../src/tools/hub/index.js";
+import { executeList } from "../../src/tools/hub/messaging.js";
 import {
 	WorldAuthorityDenialCode,
 	WorldOperationFailureCode,
@@ -175,7 +175,7 @@ describe("hub list", () => {
 			coordinationBackend: backend,
 		};
 
-		const result = await new HubTool(session).execute("list", { op: "list" });
+		const result = await executeHubOperation(session, { op: "list" });
 		expect(listed).toBe(1);
 		if (!result.details || !("peers" in result.details)) throw new Error("Expected coordination details");
 		expect(result.details.peers).toEqual([expect.objectContaining({ id: "foreign", source: "world" })]);
@@ -256,7 +256,7 @@ describe("hub list", () => {
 			coordinationBackend: backend,
 		};
 
-		const result = await new HubTool(session).execute("send", {
+		const result = await executeHubOperation(session, {
 			op: "send",
 			to: "foreign",
 			message: "status?",
@@ -356,11 +356,11 @@ describe("hub list", () => {
 			agentRegistry: registry,
 			coordinationBackend: backend,
 		};
-		const tool = new HubTool(session);
+		const hubSession = session;
 
-		const inboxResult = await tool.execute("inbox", { op: "inbox" });
+		const inboxResult = await executeHubOperation(hubSession, { op: "inbox" });
 		expect(inboxResult.details).toEqual(expect.objectContaining({ inbox }));
-		const waitResult = await tool.execute("wait", { op: "wait", from: "foreign", timeoutMs: 1_000 });
+		const waitResult = await executeHubOperation(hubSession, { op: "wait", from: "foreign", timeoutMs: 1_000 });
 		expect(waitResult.details).toEqual(
 			expect.objectContaining({ waited: expect.objectContaining({ id: "wait-1", body: "later" }) }),
 		);
@@ -417,7 +417,7 @@ describe("hub list", () => {
 			coordinationBackend: backend,
 		};
 
-		const result = await new HubTool(session).execute("send", { op: "send", to: "worker", message: "hello" });
+		const result = await executeHubOperation(session, { op: "send", to: "worker", message: "hello" });
 		expect(result.isError).toBe(true);
 		expect(sends).toBe(0);
 		if (!result.details || !("rosterErrors" in result.details)) throw new Error("Expected coordination details");
@@ -468,7 +468,7 @@ describe("hub list", () => {
 			coordinationBackend: backend,
 		};
 
-		const result = await new HubTool(session).execute("send", {
+		const result = await executeHubOperation(session, {
 			op: "send",
 			to: "main",
 			message: "reply",
@@ -521,7 +521,7 @@ describe("hub list", () => {
 			coordinationBackend: backend,
 		};
 
-		const result = await new HubTool(session).execute("send", { op: "send", to: "main", message: "hello" });
+		const result = await executeHubOperation(session, { op: "send", to: "main", message: "hello" });
 
 		expect(result.isError).toBe(true);
 		if (!result.details || !("worldError" in result.details)) throw new Error("Expected coordination details");

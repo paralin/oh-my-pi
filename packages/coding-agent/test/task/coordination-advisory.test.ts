@@ -26,7 +26,7 @@ describe("buildCoordinationAdvisory", () => {
 	});
 });
 
-// Contract: TaskTool.execute composes the specialization nudge with the
+// Contract: TaskService.execute composes the specialization nudge with the
 // coordination suggestion, gating the latter to the async path (sync siblings
 // have already finished). composeSpawnAdvisory is the seam that decision flows
 // through, so the gating is pinned here rather than only inside the builders.

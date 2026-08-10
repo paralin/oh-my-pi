@@ -1,6 +1,6 @@
 /** Session memory backend lifecycle and transcript resets. */
 
-import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -22,7 +22,6 @@ export interface SessionMemoryHost {
 	takeMnemopiSessionState(): MnemopiSessionState | undefined;
 	setBaseSystemPrompt(prompt: string[]): void;
 	refreshBaseSystemPrompt(): Promise<void>;
-	replaceMemoryTools(tools: AgentTool[]): Promise<void>;
 }
 
 /** Owns memory backend transitions and transcript-scoped memory state. */
@@ -30,7 +29,6 @@ export class SessionMemory {
 	readonly #host: SessionMemoryHost;
 	readonly #memoryAgentDir: string | undefined;
 	readonly #memoryTaskDepth: number;
-	readonly #createMemoryTools: (() => Promise<AgentTool[]>) | undefined;
 	#memoryBackendTransition: Promise<void> = Promise.resolve();
 	#localMemoryStartupAbort: AbortController | undefined;
 	#baseSystemPromptBeforeMemoryPromotion: string[] | undefined;
@@ -40,13 +38,11 @@ export class SessionMemory {
 		options: {
 			memoryAgentDir?: string;
 			memoryTaskDepth?: number;
-			createMemoryTools?: () => Promise<AgentTool[]>;
 		},
 	) {
 		this.#host = host;
 		this.#memoryAgentDir = options.memoryAgentDir;
 		this.#memoryTaskDepth = options.memoryTaskDepth ?? 0;
-		this.#createMemoryTools = options.createMemoryTools;
 	}
 
 	/** Current serialized backend transition, used by prompt and disposal drains. */
@@ -195,28 +191,10 @@ export class SessionMemory {
 				});
 			}
 			if (this.#host.isDisposed()) return;
-			await this.#refreshMemoryTools();
-			if (this.#host.isDisposed()) return;
 			await this.#host.refreshBaseSystemPrompt();
 		} catch (error) {
 			await this.#disposeMemoryBackendState(false);
-			if (!this.#host.isDisposed()) {
-				await this.#replaceMemoryTools([]).catch(refreshError => {
-					logger.warn("Failed to remove memory tools after backend apply error", {
-						error: String(refreshError),
-					});
-				});
-			}
 			throw error;
 		}
-	}
-
-	async #refreshMemoryTools(): Promise<void> {
-		const tools = (await this.#createMemoryTools?.()) ?? [];
-		await this.#replaceMemoryTools(tools);
-	}
-
-	#replaceMemoryTools(tools: AgentTool[]): Promise<void> {
-		return this.#host.replaceMemoryTools(tools);
 	}
 }

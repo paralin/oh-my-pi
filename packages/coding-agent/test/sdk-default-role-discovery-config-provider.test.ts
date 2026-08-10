@@ -106,7 +106,6 @@ describe("issue #6162 fresh launch default role from models.yml discovery provid
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			skipPythonPreflight: true,
 		});
 
 		try {

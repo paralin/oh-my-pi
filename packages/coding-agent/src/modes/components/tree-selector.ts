@@ -752,7 +752,7 @@ class TreeList implements Component {
 				return `[ls: ${path}]`;
 			}
 			default: {
-				// Custom tool - show name and truncated JSON args
+				// Other tool - show name and truncated JSON args
 				const argsStr = JSON.stringify(args).slice(0, 40);
 				return `[${name}: ${argsStr}${JSON.stringify(args).length > 40 ? "..." : ""}]`;
 			}

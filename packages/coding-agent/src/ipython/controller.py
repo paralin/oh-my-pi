@@ -580,9 +580,13 @@ async def _interrupt_active(
     active_id: str | None,
     interrupted: set[str],
     writer: EventWriter,
+    requested_id: str | None = None,
 ) -> None:
+    if requested_id is not None and requested_id != active_id:
+        await writer.write(InterruptedEvent(requested_id, False))
+        return
     if active_task is None or active_task.done() or active_id is None:
-        await writer.write(InterruptedEvent(None, False))
+        await writer.write(InterruptedEvent(requested_id, False))
         return
     interrupted.add(active_id)
     await manager.interrupt_kernel()
@@ -672,7 +676,7 @@ async def _run() -> None:
                 await writer.write(ProtocolErrorEvent(command.error))
             elif isinstance(command, CommReplyCommand):
                 if client is not None and runtime is not None:
-                    parent = runtime.comm_parents.pop(command.comm_id, None)
+                    parent = runtime.comm_parents.get(command.comm_id)
                     if parent is not None:
                         await _send_comm_reply(client, command, parent)
             elif isinstance(command, ExecuteCommand):
@@ -686,7 +690,9 @@ async def _run() -> None:
                     _execute(manager, client, writer, command, interrupted, stop_event, runtime)
                 )
             elif isinstance(command, InterruptCommand):
-                await _interrupt_active(manager, active_task, active_id, interrupted, writer)
+                await _interrupt_active(
+                    manager, active_task, active_id, interrupted, writer, command.request_id
+                )
             else:
                 break
     finally:

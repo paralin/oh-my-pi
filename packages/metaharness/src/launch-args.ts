@@ -30,8 +30,6 @@ export interface LaunchRequest {
 	webSearch?: boolean;
 	/** Harbor container backend. Defaults to apple-container whenever the Apple `container` CLI is installed; docker is an explicit opt-in. */
 	environment?: "docker" | "apple-container";
-	/** Prewalk to a fast/cheap model at the first edit/write once the todo list exists; `into` overrides the default "smol" target. */
-	prewalk?: { into?: string };
 	/** Role of this run inside its experiment (baseline vs treatment). */
 	role?: RunRole;
 	/** One-line description of what this arm tests. */
@@ -65,14 +63,6 @@ export function harborRunnerArgs(
 	if (request.timeoutMultiplier !== undefined) argv.push("--timeout-multiplier", String(request.timeoutMultiplier));
 	if (request.webSearch) argv.push("--web-search");
 	for (const task of request.include ?? []) argv.push("--include", task);
-	if (request.prewalk) {
-		argv.push("--agent-arg", "--prewalk");
-		if (request.prewalk.into) {
-			argv.push("--agent-arg", "--prewalk-into", "--agent-arg", request.prewalk.into);
-			const provider = request.prewalk.into.split("/", 1)[0];
-			if (provider && request.prewalk.into.includes("/")) argv.push("--providers", provider);
-		}
-	}
 	if (request.prebuiltBinaries) {
 		for (const name of ["omp-linux-arm64", "omp-linux-x64"]) {
 			const binary = path.join(REPO_ROOT, "packages", "coding-agent", "dist", name);

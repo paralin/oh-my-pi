@@ -1,5 +1,5 @@
 /**
- * Pure helpers shared by tool renderers. Host-agnostic; no DOM beyond
+ * Pure helpers shared by transcript rendering. Host-agnostic; no DOM beyond
  * `globalThis` feature probes, no host package imports.
  */
 import type { ToolResultImage, ToolResultLike } from "./types";

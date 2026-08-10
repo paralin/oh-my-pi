@@ -4,7 +4,7 @@ import {
 	describeScreenshot,
 	type InflightOp,
 	preparePageForScreenshot,
-} from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
+} from "../../src/tools/browser/tab-worker.js";
 
 type ScreenshotPage = Parameters<typeof preparePageForScreenshot>[0];
 

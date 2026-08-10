@@ -3,10 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
+import { ReadService } from "../../src/tools/read.js";
 
 const ATOM = `<?xml version="1.0"?>\n<feed xmlns="http://www.w3.org/2005/Atom"><title>Sample</title><entry><title>One</title><id>1</id><updated>2024-01-01T00:00:00Z</updated><content>body</content></entry></feed>`;
 const JSON_BODY = `{"alpha":1,"beta":[2,3]}`;
@@ -52,10 +52,10 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 
 	it("returns the raw atom feed body when :raw is set", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		stubLoadPage(ATOM, "application/atom+xml");
 
-		const result = await tool.execute("call", { path: "https://example.com/feed.xml:raw" });
+		const result = await tool.read("https://example.com/feed.xml:raw");
 		const textBlock = result.content.find(c => c.type === "text");
 
 		expect(result.details?.method).toBe("raw");
@@ -67,19 +67,19 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 
 	it("returns the rendered atom feed when :raw is absent (existing behavior)", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		stubLoadPage(ATOM, "application/atom+xml");
 
-		const result = await tool.execute("call", { path: "https://example.com/feed.xml" });
+		const result = await tool.read("https://example.com/feed.xml");
 		expect(result.details?.method).toBe("feed");
 	});
 
 	it("returns the raw JSON body when :raw is set", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		stubLoadPage(JSON_BODY, "application/json");
 
-		const result = await tool.execute("call", { path: "https://example.com/api.json:raw" });
+		const result = await tool.read("https://example.com/api.json:raw");
 		const textBlock = result.content.find(c => c.type === "text");
 
 		expect(result.details?.method).toBe("raw");
@@ -89,10 +89,10 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 
 	it("still pretty-prints JSON when :raw is absent (existing behavior)", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		stubLoadPage(JSON_BODY, "application/json");
 
-		const result = await tool.execute("call", { path: "https://example.com/api.json" });
+		const result = await tool.read("https://example.com/api.json");
 		const textBlock = result.content.find(c => c.type === "text");
 
 		expect(result.details?.method).toBe("json");
@@ -101,7 +101,7 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 
 	it("refetches the same URL on subsequent reads", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		let body = "v1";
 		const loadPage = vi.spyOn(scrapers, "loadPage").mockImplementation(async (requestedUrl: string) => ({
 			ok: true,
@@ -111,9 +111,9 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 			content: body,
 		}));
 
-		const first = await tool.execute("first", { path: "https://example.com/live.txt:raw" });
+		const first = await tool.read("https://example.com/live.txt:raw");
 		body = "v2";
-		const second = await tool.execute("second", { path: "https://example.com/live.txt:raw" });
+		const second = await tool.read("https://example.com/live.txt:raw");
 		const firstText = first.content.find(entry => entry.type === "text");
 		const secondText = second.content.find(entry => entry.type === "text");
 
@@ -125,14 +125,14 @@ describe("read URL with :raw selector (regression: JSON/feed parsers ignored raw
 
 	it("returns slices of raw content when :raw is combined with a range", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		const body = Array.from({ length: 20 }, (_, i) => `raw line ${i + 1}`).join("\n");
 		stubLoadPage(body, "application/json");
 
 		// `:raw:N-M` must skip JSON pretty-print (raw mode) AND slice. URL output is
 		// prefixed with a 6-line header (URL/Content-Type/Method/blank/---/blank), so
 		// body line N appears at output line N+6.
-		const result = await tool.execute("call", { path: "https://example.com/api.json:raw:9-11" });
+		const result = await tool.read("https://example.com/api.json:raw:9-11");
 		const text =
 			result.content
 				.filter(c => c.type === "text")
@@ -159,11 +159,11 @@ describe("read URL with multi-range selector (regression: was stuck on URL → 4
 
 	it("routes :A-B,C-D to the multi-range builder against the cached body", async () => {
 		const session = makeSession(testDir);
-		const tool = new ReadTool(session);
+		const tool = new ReadService(session);
 		const body = Array.from({ length: 40 }, (_, i) => `content ${i + 1}`).join("\n");
 		const loadSpy = stubLoadPage(body, "text/plain");
 
-		const result = await tool.execute("call", { path: "https://example.com/file.txt:11-13,26-28" });
+		const result = await tool.read("https://example.com/file.txt:11-13,26-28");
 		const text = result.content
 			.filter(c => c.type === "text")
 			.map(c => c.text)

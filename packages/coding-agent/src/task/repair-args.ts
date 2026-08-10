@@ -1,7 +1,7 @@
 /**
- * Repair double-encoded JSON string arguments for the task tool.
+ * Repair double-encoded JSON string arguments at the Task MCP boundary.
  *
- * Models occasionally JSON-escape a string value twice when emitting a
+ * Claude Code occasionally JSON-escapes a string value twice when emitting a
  * `task` tool call, so a `task` field that should read
  *
  *     # Role
@@ -23,7 +23,7 @@
  * fires there because a double-encoded string is still a structurally valid
  * string.
  *
- * This is deliberately scoped to the task tool's natural-language fields
+ * This is deliberately scoped to the Task MCP operation's natural-language fields
  * (`task`, shared `context`); identifier fields (`name`, `agent`)
  * are never repaired. It is NOT applied to code-bearing
  * tools (write/edit/bash/search), where a backslash or quote is load-bearing
@@ -88,7 +88,7 @@ function repairTaskItem(item: TaskItem): TaskItem {
 }
 
 /**
- * Repair double-encoded prose in task-tool params (flat `task`, shared
+ * Repair double-encoded prose in Task MCP params (flat `task`, shared
  * `context`, and each batch task item's `task`). Returns the same reference
  * when nothing changed so callers can cheaply skip work. Defensive against
  * partially-streamed args (missing/undefined fields, partial task arrays) so

@@ -80,7 +80,6 @@ async function createMinimalSession(
 		},
 		enableMCP: false,
 		enableLsp: false,
-		...(options.toolNames !== undefined ? { toolNames: options.toolNames } : {}),
 	});
 	return { session: result.session, authStorage };
 }
@@ -164,10 +163,6 @@ describe("provider prompt-cache key session affinity", () => {
 			{
 				name: "system",
 				options: { customSystemPrompt: "Use a different provider prompt." },
-			},
-			{
-				name: "tools",
-				options: { toolNames: ["read"] },
 			},
 		];
 

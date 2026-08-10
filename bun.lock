@@ -88,7 +88,6 @@
         "@aptre/protobuf-es-lite": "catalog:",
         "@babel/parser": "catalog:",
         "@mozilla/readability": "catalog:",
-        "@oh-my-pi/hashline": "catalog:",
         "@oh-my-pi/omp-stats": "catalog:",
         "@oh-my-pi/omptype": "catalog:",
         "@oh-my-pi/pi-agent-core": "catalog:",
@@ -178,7 +177,6 @@
         "@oh-my-pi/pi-coding-agent": "catalog:",
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
-        "@oh-my-pi/typescript-edit-benchmark": "workspace:*",
         "clsx": "^2.1.1",
         "d3-scale": "^4.0.2",
         "d3-shape": "^3.2.0",
@@ -298,31 +296,6 @@
       "devDependencies": {
         "chalk": "catalog:",
         "ghostty-web": "catalog:",
-      },
-    },
-    "packages/typescript-edit-benchmark": {
-      "name": "@oh-my-pi/typescript-edit-benchmark",
-      "version": "0.0.1",
-      "dependencies": {
-        "@babel/generator": "catalog:",
-        "@babel/parser": "catalog:",
-        "@babel/traverse": "catalog:",
-        "@babel/types": "catalog:",
-        "@oh-my-pi/hashline": "catalog:",
-        "@oh-my-pi/pi-agent-core": "catalog:",
-        "@oh-my-pi/pi-ai": "catalog:",
-        "@oh-my-pi/pi-coding-agent": "catalog:",
-        "@oh-my-pi/pi-natives": "catalog:",
-        "@oh-my-pi/pi-tui": "catalog:",
-        "@oh-my-pi/pi-utils": "catalog:",
-        "diff": "catalog:",
-        "prettier": "catalog:",
-        "regexp-tree": "catalog:",
-      },
-      "devDependencies": {
-        "@types/babel__generator": "catalog:",
-        "@types/babel__traverse": "catalog:",
-        "@types/bun": "catalog:",
       },
     },
     "packages/utils": {
@@ -877,8 +850,6 @@
     "@oh-my-pi/pi-wire": ["@oh-my-pi/pi-wire@workspace:packages/wire"],
 
     "@oh-my-pi/snapcompact": ["@oh-my-pi/snapcompact@workspace:packages/snapcompact"],
-
-    "@oh-my-pi/typescript-edit-benchmark": ["@oh-my-pi/typescript-edit-benchmark@workspace:packages/typescript-edit-benchmark"],
 
     "@opentelemetry/api": ["@opentelemetry/api@1.9.1", "", {}, "sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q=="],
 
@@ -1709,8 +1680,6 @@
     "react-refresh": ["react-refresh@0.18.0", "", {}, "sha512-QgT5//D3jfjJb6Gsjxv0Slpj23ip+HtOpnNgnb2S5zU3CB26G/IDPGoy4RJB42wzFE46DRsstbW6tKHoKbhAxw=="],
 
     "readable-stream": ["readable-stream@3.6.2", "", { "dependencies": { "inherits": "^2.0.3", "string_decoder": "^1.1.1", "util-deprecate": "^1.0.1" } }, "sha512-9u/sniCrY3D5WdsERHzHE4G2YCXqoG5FTHUiCC4SIbr6XcLZBY05ya9EKjYek9O5xOAwjGq+1JdGBAS7Q9ScoA=="],
-
-    "regexp-tree": ["regexp-tree@0.1.27", "", { "bin": { "regexp-tree": "bin/regexp-tree" } }, "sha512-iETxpjK6YoRWJG5o6hXLwvjYAoW+FEZn9os0PD/b6AP6xQwsa/Y7lCVgIixBbUPMfhu+i2LtdeAqVTgGlQarfA=="],
 
     "require-directory": ["require-directory@2.1.1", "", {}, "sha512-fGxEI7+wsG9xrvdjsrlmL22OMTTiHRwAMroiEeMgq8gzoLC/PQr7RsRDSTLUg/bZAZtF+TVIkHc6/4RIKrui+Q=="],
 

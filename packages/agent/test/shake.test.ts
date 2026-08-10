@@ -85,12 +85,6 @@ describe("collectShakeRegions — tool results", () => {
 		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
 	});
 
-	test("never collects protected tools", () => {
-		const entry = messageEntry(toolResultMessage("skill", "y".repeat(800)));
-		const regions = collectShakeRegions([entry], cfg({ protectedTools: ["skill"] }));
-		expect(regions).toHaveLength(0);
-	});
-
 	test("never collects already-pruned tool results", () => {
 		const entry = messageEntry(toolResultMessage("bash", "z".repeat(800), { prunedAt: Date.now() }));
 		const regions = collectShakeRegions([entry], cfg());
@@ -204,15 +198,15 @@ describe("applyShakeRegions — multi-region ordering", () => {
 });
 
 describe("shake config presets", () => {
-	test("aggressive preset protects skill and drops everything else", () => {
+	test("aggressive preset drops every eligible region", () => {
 		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBe(0);
 		expect(AGGRESSIVE_SHAKE_CONFIG.minSavings).toBe(0);
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("skill");
+		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toEqual([]);
 	});
 
 	test("default preset keeps a protect window", () => {
 		expect(DEFAULT_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
-		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
+		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toHaveLength(1);
 	});
 
 	test("empty branch yields no regions", () => {

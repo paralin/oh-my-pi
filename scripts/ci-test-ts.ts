@@ -99,12 +99,7 @@ const fastWorkspacePackages = [
 // These suites cover the native package, TUI/browser-ish behavior, local servers,
 // or coding-agent-adjacent benchmark paths. Keep them low-concurrency and in jobs
 // that have downloaded the Linux x64 native addon artifacts.
-const nativeAndIntegrationPackages = [
-	"packages/natives",
-	"packages/tui",
-	"packages/collab-web",
-	"packages/typescript-edit-benchmark",
-];
+const nativeAndIntegrationPackages = ["packages/natives", "packages/tui", "packages/collab-web"];
 
 // Packages the CI buckets deliberately skip but a local full run should still
 // cover. mnemopi's embedding suites need a ~270MB fastembed model absent from CI
@@ -131,7 +126,7 @@ const codingAgentSingletonPathPatterns = [
 
 const codingAgentUiPathPatterns = [
 	/^test\/modes\//,
-	/^test\/(interactive-mode|main-interactive|input-controller|streaming|status-line|keybindings|editor|hook|theme|setup-wizard|job-renderer|tool-args-reveal|tool-execution)[^/]*\.test\.ts$/,
+	/^test\/(interactive-mode|main-interactive|input-controller|streaming|status-line|keybindings|editor|hook|theme|setup-wizard|job-renderer)[^/]*\.test\.ts$/,
 ];
 
 const codingAgentRuntimePathPatterns = [
@@ -187,7 +182,6 @@ const codingAgentUiContentMarkers = [
 	"InteractiveMode",
 	"InputController",
 	"StatusLine",
-	"ToolExecutionComponent",
 	"render(",
 	"renderToString",
 ];

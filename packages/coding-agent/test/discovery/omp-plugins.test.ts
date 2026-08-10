@@ -3,7 +3,7 @@
  *
  * The native `omp` discovery provider only walks `.omp/` and `~/.omp/agent/`.
  * Extension packages registered via `extensions:` in settings or
- * `--extension` on the CLI ship their own `skills/`, `hooks/`, `tools/`,
+ * `--extension` on the CLI ship their own `skills/`, `hooks/`,
  * `commands/`, `rules/`, `prompts/`, and `.mcp.json`. The `omp-plugins`
  * provider (`src/discovery/omp-plugins.ts`) is what wires those sub-trees
  * into the standard capability surfaces.
@@ -24,7 +24,6 @@ import { promptCapability } from "@oh-my-pi/pi-coding-agent/capability/prompt";
 import { ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { slashCommandCapability } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
-import { toolCapability } from "@oh-my-pi/pi-coding-agent/capability/tool";
 import type { LoadContext, Provider } from "@oh-my-pi/pi-coding-agent/capability/types";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
@@ -81,8 +80,6 @@ function buildExtensionPackage(packageDir: string, skillName = "my-skill"): void
 	writeFile(path.join(packageDir, "hooks", "pre", "bash.sh"), "#!/bin/sh\necho pre\n");
 	writeFile(path.join(packageDir, "hooks", "post", "edit.sh"), "#!/bin/sh\necho post\n");
 	writeFile(path.join(packageDir, "hooks", "pre", "extension.ts"), "export default function (_pi) {}\n");
-	writeFile(path.join(packageDir, "tools", "wcount.sh"), "#!/bin/sh\nwc -w\n");
-	writeFile(path.join(packageDir, "tools", "deep-tool", "index.ts"), "export default { name: 'deep-tool' };\n");
 	writeFile(
 		path.join(packageDir, ".mcp.json"),
 		JSON.stringify({ mcpServers: { lsp: { command: "lsp-server", args: ["--stdio"] } } }),
@@ -122,13 +119,12 @@ function ctx(): LoadContext {
 test("project settings.json#extensions surfaces every sub-directory", async () => {
 	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
 
-	const [skills, commands, rules, prompts, hooks, tools, mcps] = await Promise.all([
+	const [skills, commands, rules, prompts, hooks, mcps] = await Promise.all([
 		loadFromPlugin<{ name: string }>(skillCapability.id, ctx()),
 		loadFromPlugin<{ name: string }>(slashCommandCapability.id, ctx()),
 		loadFromPlugin<{ name: string }>(ruleCapability.id, ctx()),
 		loadFromPlugin<{ name: string }>(promptCapability.id, ctx()),
 		loadFromPlugin<{ name: string; type: "pre" | "post" }>(hookCapability.id, ctx()),
-		loadFromPlugin<{ name: string }>(toolCapability.id, ctx()),
 		loadFromPlugin<{ name: string; command?: string }>(mcpCapability.id, ctx()),
 	]);
 
@@ -138,7 +134,6 @@ test("project settings.json#extensions surfaces every sub-directory", async () =
 	expect(prompts.map(p => p.name)).toContain("review");
 	expect(hooks.some(h => h.name === "bash.sh" && h.type === "pre")).toBe(true);
 	expect(hooks.some(h => h.name === "edit.sh" && h.type === "post")).toBe(true);
-	expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["wcount", "deep-tool"]));
 	expect(mcps.find(m => m.name === "lsp")?.command).toBe("lsp-server");
 });
 
@@ -154,9 +149,7 @@ test("`--extension` CLI injection is wired through the same provider", async () 
 	injectOmpExtensionCliRoots([ext], home, project);
 
 	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
-	const tools = await loadFromPlugin<{ name: string }>(toolCapability.id, ctx());
 	expect(skills.map(s => s.name)).toContain("my-skill");
-	expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["wcount", "deep-tool"]));
 });
 
 test("relative CLI roots rebind when resume switches projects", async () => {
@@ -412,7 +405,5 @@ test("linked plugins (only in lockfile, not in package.json#dependencies) are su
 	);
 
 	const skills = await loadFromPlugin<{ name: string; path: string }>(skillCapability.id, ctx());
-	const tools = await loadFromPlugin<{ name: string; path: string }>(toolCapability.id, ctx());
 	expect(skills.find(s => s.name === "my-skill" && s.path.includes("my-linked-ext"))).toBeDefined();
-	expect(tools.find(t => t.name === "wcount" && t.path.includes("my-linked-ext"))).toBeDefined();
 });

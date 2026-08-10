@@ -1,12 +1,10 @@
 /**
  * ACP-side `ClientBridge` implementation. Wraps `AgentSideConnection` so the
- * `read`/`write`/`bash`/`edit` tools (and the permission gate in
- * `AgentSession`) can route through the client when it advertises the
- * relevant capabilities at `initialize` time.
+ * read service and the permission gate in `AgentSession` can use the
+ * capabilities that remain relevant to current ACP sessions.
  */
 import type {
 	PermissionOption as AcpPermissionOption,
-	TerminalHandle as AcpTerminalHandle,
 	AgentSideConnection,
 	ClientCapabilities,
 	RequestPermissionRequest,
@@ -15,11 +13,9 @@ import type {
 import type {
 	ClientBridge,
 	ClientBridgeCapabilities,
-	ClientBridgeCreateTerminalParams,
 	ClientBridgePermissionOption,
 	ClientBridgePermissionOutcome,
 	ClientBridgePermissionToolCall,
-	ClientBridgeTerminalHandle,
 } from "../../session/client-bridge";
 
 export function createAcpClientBridge(
@@ -29,8 +25,6 @@ export function createAcpClientBridge(
 ): ClientBridge {
 	const capabilities: ClientBridgeCapabilities = {
 		readTextFile: clientCapabilities?.fs?.readTextFile === true,
-		writeTextFile: clientCapabilities?.fs?.writeTextFile === true,
-		terminal: clientCapabilities?.terminal === true,
 		// Permission requests are always usable on the connection; gating is
 		// the agent's policy choice rather than a client capability.
 		requestPermission: true,
@@ -50,65 +44,10 @@ export function createAcpClientBridge(
 		};
 	}
 
-	if (capabilities.writeTextFile) {
-		bridge.writeTextFile = async params => {
-			await connection.writeTextFile({
-				sessionId,
-				path: params.path,
-				content: params.content,
-			});
-		};
-	}
-
-	if (capabilities.terminal) {
-		bridge.createTerminal = (params: ClientBridgeCreateTerminalParams) =>
-			createTerminalHandle(connection, sessionId, params);
-	}
-
 	bridge.requestPermission = (toolCall, options, signal) =>
 		requestPermission(connection, sessionId, toolCall, options, signal);
 
 	return bridge;
-}
-
-async function createTerminalHandle(
-	connection: AgentSideConnection,
-	sessionId: string,
-	params: ClientBridgeCreateTerminalParams,
-): Promise<ClientBridgeTerminalHandle> {
-	const handle = await connection.createTerminal({
-		sessionId,
-		command: params.command,
-		...(params.args ? { args: params.args } : {}),
-		...(params.env ? { env: params.env } : {}),
-		...(params.cwd ? { cwd: params.cwd } : {}),
-		...(typeof params.outputByteLimit === "number" ? { outputByteLimit: params.outputByteLimit } : {}),
-	});
-	return wrapTerminalHandle(handle);
-}
-
-function wrapTerminalHandle(handle: AcpTerminalHandle): ClientBridgeTerminalHandle {
-	return {
-		terminalId: handle.id,
-		async currentOutput() {
-			const out = await handle.currentOutput();
-			return {
-				output: out.output,
-				truncated: out.truncated,
-				exitStatus: out.exitStatus ?? null,
-			};
-		},
-		async waitForExit() {
-			const status = await handle.waitForExit();
-			return { exitCode: status.exitCode ?? null, signal: status.signal ?? null };
-		},
-		async kill() {
-			await handle.kill();
-		},
-		async release() {
-			await handle.release();
-		},
-	};
 }
 
 async function requestPermission(

@@ -1,7 +1,7 @@
 ---
 description: Prefer math/rand/v2 over the legacy math/rand package
 condition: '"math/rand"'
-scope: "tool:edit(*.go), tool:write(*.go)"
+scope: "tool:ipython"
 interruptMode: never
 ---
 

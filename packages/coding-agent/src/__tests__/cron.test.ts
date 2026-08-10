@@ -4,17 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type CronJob, CronManager, type CronTimer, nextCronFire, parseCronExpression } from "../cron";
-import { getThemeByName } from "../modes/theme/theme";
 import { sessionSidecarDir } from "../session/session-paths";
 import { FileSessionStorage, MemorySessionStorage } from "../session/session-storage";
-import {
-	CronCreateTool,
-	CronDeleteTool,
-	CronListTool,
-	cronCreateToolRenderer,
-	cronDeleteToolRenderer,
-	cronListToolRenderer,
-} from "../tools/cron";
 
 function fakeClock(start: number) {
 	let current = start;
@@ -53,38 +44,86 @@ async function waitFor(condition: () => boolean | Promise<boolean>, message: str
 	throw new Error(message);
 }
 
-describe("cron tool policy", () => {
-	it("requires write approval for schedule mutations", () => {
-		expect(new CronCreateTool({} as never).approval).toBe("write");
-		expect(new CronDeleteTool({} as never).approval).toBe("write");
-	});
-
-	it("includes a sanitized prompt summary when listing jobs", async () => {
-		const tool = new CronListTool({
-			cronManager: {
-				load: async () => {},
-				list: () => [
-					{
-						id: "job-1",
-						expression: "5 * * * *",
-						prompt: "Rotate logs\nnow",
-						recurring: true,
-						durable: false,
-						createdAt: 1,
-						nextFireAt: 2,
-					},
-				],
-			},
-		} as never);
-
-		const result = await tool.execute();
-
-		expect(result.content[0]).toMatchObject({ type: "text" });
-		expect(result.content[0]?.type === "text" ? result.content[0].text : "").toContain("prompt Rotate logs now");
-	});
-});
-
 describe("cron scheduling", () => {
+	it("updates session-only jobs while preserving identity and next fire until expression changes", async () => {
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const manager = new CronManager({
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => {},
+		});
+		try {
+			const original = await manager.create({ expression: "5 11 * * *", prompt: "first", recurring: true });
+			clock.setNow(clock.now() + 30 * 60_000);
+			const promptUpdated = await manager.update(original.id, { prompt: "second" });
+			expect(promptUpdated).toMatchObject({
+				id: original.id,
+				durable: false,
+				createdAt: original.createdAt,
+				nextFireAt: original.nextFireAt,
+				prompt: "second",
+			});
+			const expressionUpdated = await manager.update(original.id, { expression: "10 12 * * *", recurring: false });
+			expect(expressionUpdated).toMatchObject({
+				id: original.id,
+				durable: false,
+				createdAt: original.createdAt,
+				expression: "10 12 * * *",
+				recurring: false,
+				expiresAt: undefined,
+			});
+			expect(expressionUpdated?.nextFireAt).toBe(nextCronFire("10 12 * * *", new Date(clock.now())).getTime());
+		} finally {
+			await manager.dispose();
+		}
+	});
+
+	it("updates durable jobs through the claim and restores them when publication fails", async () => {
+		const directory = await fs.mkdtemp(path.join(os.tmpdir(), "omp-cron-update-rollback-"));
+		const clock = fakeClock(new Date(2026, 0, 1, 10, 0).getTime());
+		const manager = new CronManager({
+			sessionFile: path.join(directory, "session.jsonl"),
+			now: clock.now,
+			setTimer: clock.setTimer,
+			clearTimer: clock.clearTimer,
+			enqueuePrompt: async () => {},
+		});
+		try {
+			await manager.load();
+			const original = await manager.create({
+				expression: "5 11 * * *",
+				prompt: "first",
+				recurring: true,
+				durable: true,
+			});
+			const failedWrite = vi
+				.spyOn(FileSessionStorage.prototype, "writeTextAtomic")
+				.mockRejectedValueOnce(new Error("disk"));
+			try {
+				await expect(manager.update(original.id, { prompt: "second" })).rejects.toThrow("disk");
+				expect(manager.list()).toEqual([original]);
+				expect(await Bun.file(manager.storePath()).json()).toEqual([original]);
+			} finally {
+				failedWrite.mockRestore();
+			}
+			const updated = await manager.update(original.id, { prompt: "second", recurring: false });
+			expect(updated).toMatchObject({
+				id: original.id,
+				durable: true,
+				createdAt: original.createdAt,
+				prompt: "second",
+				recurring: false,
+				expiresAt: undefined,
+				nextFireAt: original.nextFireAt,
+			});
+			expect(await Bun.file(manager.storePath()).json()).toEqual([updated]);
+		} finally {
+			await manager.dispose();
+			await fs.rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("parses standard fields and finds the next local-time match", () => {
 		const schedule = parseCronExpression("*/15 9-17 * * 1-5");
 		expect(schedule.minutes.has(30)).toBe(true);
@@ -2081,153 +2120,5 @@ describe("cron scheduling", () => {
 			managerA.dispose();
 			managerB.dispose();
 		}
-	});
-
-	it("sanitizes and bounds pending delete identifiers", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const rendered = Bun.stripANSI(
-			cronDeleteToolRenderer
-				.renderCall(
-					{ id: `cron\tbad\u0007\n\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007${"x".repeat(120)}` },
-					{ expanded: false, isPartial: true },
-					theme,
-				)
-				.render(200)
-				.join("\n"),
-		);
-		expect(rendered).not.toContain("\t");
-		expect(rendered).not.toContain("\u0007");
-		expect(rendered).not.toContain("\u001b");
-		expect(rendered).not.toContain("x".repeat(80));
-	});
-
-	it("sanitizes completed delete identifiers", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const rendered = Bun.stripANSI(
-			cronDeleteToolRenderer
-				.renderResult({ content: [], details: { deleted: false } }, { expanded: false, isPartial: false }, theme, {
-					id: "cron\tbad\u0007\n\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007",
-				})
-				.render(200)
-				.join("\n"),
-		);
-		expect(rendered).not.toContain("\t");
-		expect(rendered).not.toContain("\u0007");
-		expect(rendered).not.toContain("\u001b");
-	});
-
-	it("sanitizes and bounds completed create expressions", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const expression = `0\t11\t*\t*\t${"1".repeat(120)}`;
-		const rendered = Bun.stripANSI(
-			cronCreateToolRenderer
-				.renderResult(
-					{
-						content: [],
-						details: {
-							id: "cron-1",
-							expression,
-							prompt: `inspect ${os.homedir()}/private/file\nsecond\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007`,
-							recurring: false,
-							durable: false,
-							createdAt: 0,
-							nextFireAt: Date.now(),
-						},
-					},
-					{ expanded: false, isPartial: false },
-					theme,
-				)
-				.render(200)
-				.join("\n"),
-		);
-		expect(rendered).not.toContain("\t");
-		expect(rendered).not.toContain("1".repeat(80));
-		expect(rendered).toContain("inspect ~/private/file second");
-		expect(rendered).not.toContain("\u001b");
-		expect(rendered).not.toContain(os.homedir());
-	});
-
-	it("renders a sanitized bounded prompt summary in cron list rows", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const rendered = Bun.stripANSI(
-			cronListToolRenderer
-				.renderResult(
-					{
-						content: [],
-						details: {
-							jobs: [
-								{
-									id: "cron-1",
-									expression: "0 11 * * *",
-									prompt: `status\n\u001b[31m${os.homedir()}/private/file\tsecond\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007${"x".repeat(240)}`,
-									recurring: false,
-									durable: false,
-									createdAt: 0,
-									nextFireAt: Date.now(),
-								},
-							],
-						},
-					},
-					{ expanded: true, isPartial: false },
-					theme,
-				)
-				.render(240)
-				.join("\n"),
-		);
-		expect(rendered).toContain("status ~/private/file");
-		expect(rendered).toContain("secondlinked");
-		expect(rendered).not.toContain("\u001b");
-		expect(rendered).not.toContain(os.homedir());
-		expect(rendered).not.toContain("x".repeat(160));
-	});
-
-	it("sanitizes cron error output into one display line", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const rendered = Bun.stripANSI(
-			cronCreateToolRenderer
-				.renderResult(
-					{
-						content: [
-							{
-								type: "text",
-								text: `failed opening ${os.homedir()}/private/store\nerror\u001b]8;;https://example.com\u0007linked\u001b]8;;\u0007`,
-							},
-						],
-						isError: true,
-					},
-					{ expanded: false, isPartial: false },
-					theme,
-				)
-				.render(200)
-				.join("\n"),
-		);
-		expect(rendered).toContain("failed opening ~/private/store errorlinked");
-		expect(rendered).not.toContain("\u001b");
-		expect(rendered).not.toContain(os.homedir());
-	});
-
-	it("bounds a long cron error line", async () => {
-		const theme = await getThemeByName("dark");
-		if (!theme) throw new Error("Expected dark theme");
-		const rendered = Bun.stripANSI(
-			cronCreateToolRenderer
-				.renderResult(
-					{
-						content: [{ type: "text", text: `storage rejected the job: ${"y".repeat(400)}` }],
-						isError: true,
-					},
-					{ expanded: false, isPartial: false },
-					theme,
-				)
-				.render(240)
-				.join("\n"),
-		);
-		expect(rendered).toContain("storage rejected the job:");
-		expect(rendered).not.toContain("y".repeat(160));
 	});
 });

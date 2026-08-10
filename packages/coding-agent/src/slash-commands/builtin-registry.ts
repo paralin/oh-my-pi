@@ -7,12 +7,6 @@ import { APP_NAME, getMCPConfigPath, getProjectDir, logger, setProjectDir } from
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
-import {
-	expandRoleAlias,
-	formatModelString,
-	getModelMatchPreferences,
-	resolveCliModel,
-} from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
@@ -44,8 +38,6 @@ import type { SessionOAuthAccountList } from "../session/agent-session-types";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
-import type { ComputerTool } from "../tools/computer";
-import { computerExposureMode } from "../tools/computer/exposure";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -55,7 +47,6 @@ import {
 	renderChangelogEntries,
 } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
-import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
@@ -99,90 +90,6 @@ function refreshStatusLine(ctx: InteractiveModeContext): void {
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
 	return session.isFastModeEnabled() ? "on" : "off";
-}
-
-/** Detailed, session-effective `/computer status` diagnostics. */
-async function formatComputerUseStatus(session: AgentSession): Promise<string> {
-	const enabled = session.settings.get("computer.enabled");
-	const active = session.getEnabledToolNames().includes("computer");
-	const model = session.model;
-	const modelName = model ? formatModelString(model) : "none";
-	const exposure = !enabled
-		? "not exposed (disabled)"
-		: !active
-			? "not exposed (tool inactive)"
-			: computerExposureMode(model);
-	const configured = {
-		display: session.settings.get("computer.display"),
-		maxWidth: session.settings.get("computer.maxWidth"),
-		maxHeight: session.settings.get("computer.maxHeight"),
-	};
-	const computerTool = active
-		? (session.getToolByName("computer") as Pick<ComputerTool, "capabilities"> | undefined)
-		: undefined;
-	const capabilities = await computerTool?.capabilities();
-	const capabilityStatus = capabilities
-		? [
-				`backend=${capabilities.backend}${capabilities.displayServer ? `/${capabilities.displayServer}` : ""}`,
-				`capture=${capabilities.capture} (${capabilities.capturePermission})`,
-				`input=${capabilities.input} (${capabilities.inputPermission})`,
-				`ax=${capabilities.ax} (${capabilities.axPermission})`,
-				`backgroundWindowInput=${capabilities.backgroundWindowInput}`,
-				`deliveryModes=${capabilities.deliveryModes.join(",") || "none"}`,
-			].join(", ")
-		: "session not started";
-	return [
-		`Computer use: ${enabled ? "enabled" : "disabled"}`,
-		`tool: ${active ? "active" : "inactive"}`,
-		`exposure: ${exposure}`,
-		`model: ${modelName}`,
-		`configured: display=${configured.display}, maxWidth=${configured.maxWidth}, maxHeight=${configured.maxHeight}`,
-		`capabilities: ${capabilityStatus}`,
-	].join(" · ");
-}
-
-/**
- * Apply a session-scoped computer-use toggle: flip the active tool slate first
- * (so a failed enable never leaves a stale settings override), then record the
- * runtime override — never `settings.set`, which would persist to settings.json.
- * Returns the operator feedback line.
- */
-async function applyComputerUseToggle(session: AgentSession, enable: boolean): Promise<string> {
-	const applied = await session.setComputerToolEnabled(enable);
-	if (enable && !applied) {
-		return "Computer use is unavailable in this session.";
-	}
-	session.settings.override("computer.enabled", enable);
-	return enable
-		? `Computer use enabled for this session. ${await formatComputerUseStatus(session)}`
-		: "Computer use disabled for this session.";
-}
-
-/** Session-effective `/vision status` line. */
-function formatVisionStatus(session: AgentSession): string {
-	const { mode, active, model } = session.inspectImageState();
-	const override = session.getInspectImageModeOverride();
-	const modelObj = session.model;
-	const capability = modelObj
-		? modelObj.input.includes("image")
-			? "native image input"
-			: "no native image input"
-		: "no active model";
-	return [
-		`inspect_image: ${active ? "active" : "inactive"}`,
-		`mode: ${mode}${override ? " (session override)" : ""}`,
-		...(override ? [`configured: ${session.settings.get("inspect_image.mode")}`] : []),
-		`model: ${model ?? "none"} (${capability})`,
-	].join(" · ");
-}
-
-/** Applies a `/vision` mode for this session and returns the operator feedback line. */
-async function applyVisionMode(session: AgentSession, mode: InspectImageMode): Promise<string> {
-	const applied = await session.setInspectImageMode(mode);
-	if (!applied) {
-		return "inspect_image is unavailable in this session.";
-	}
-	return `Vision mode: ${mode}. ${formatVisionStatus(session)}`;
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -407,59 +314,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "setup",
-		aliases: ["providers"],
-		description: "Open provider setup",
-		allowArgs: true,
-		subcommands: [{ name: "providers", description: "Configure sign-in and web search providers" }],
-		handleTui: async (command, runtime) => {
-			const args = command.args.trim().toLowerCase();
-			const opensProviders = args === "" || args === "providers";
-			if (opensProviders) {
-				await runtime.ctx.showProviderSetup();
-			} else {
-				runtime.ctx.showWarning(`Usage: /${command.name} [providers]`);
-			}
-			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "plan",
-		description: "Toggle plan mode (agent plans before executing)",
-		inlineHint: "[prompt]",
-		allowArgs: true,
-		getTuiAutocompleteDescription: runtime => {
-			if (!runtime.ctx.settings.get("plan.enabled" as SettingPath)) return "Plan: disabled in settings";
-			if (runtime.ctx.planModeEnabled) {
-				const planFile = runtime.ctx.planModePlanFilePath;
-				return `Plan: on${planFile ? ` (${path.basename(planFile)})` : ""}`;
-			}
-			if (runtime.ctx.goalModeEnabled) return "Plan: blocked by goal mode";
-			return "Plan: off";
-		},
-		handleTui: async (command, runtime) => {
-			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
-			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "plan-review",
-		description: "Re-open the plan review for the latest plan (plan mode only)",
-		getTuiAutocompleteDescription: runtime =>
-			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
-		handleTui: async (_command, runtime) => {
-			await runtime.ctx.openPlanReview();
-			runtime.ctx.editor.setText("");
-		},
-	},
-	{
 		name: "vibe",
 		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			if (runtime.ctx.vibeModeEnabled) return "Vibe: on";
-			if (runtime.ctx.planModeEnabled) return "Vibe: blocked by plan mode";
 			if (runtime.ctx.goalModeEnabled) return "Vibe: blocked by goal mode";
 			return "Vibe: off";
 		},
@@ -483,7 +343,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			if (!runtime.ctx.settings.get("goal.enabled" as SettingPath)) return "Goal: disabled in settings";
-			if (runtime.ctx.planModeEnabled) return "Goal: blocked by plan mode";
 			const state = runtime.ctx.session.getGoalModeState();
 			return state ? `Goal: ${state.goal.status} (${shortDetail(state.goal.objective)})` : "Goal: off";
 		},
@@ -658,115 +517,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
 			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "computer",
-		description: "Toggle the native computer-use tool for this session",
-		acpDescription: "Toggle computer use",
-		acpInputHint: "[on|off|status]",
-		subcommands: [
-			{ name: "on", description: "Enable computer use for this session" },
-			{ name: "off", description: "Disable computer use for this session" },
-			{ name: "status", description: "Show computer use status" },
-		],
-		allowArgs: true,
-		getTuiAutocompleteDescription: runtime =>
-			`Computer: ${runtime.ctx.session.settings.get("computer.enabled") ? "on" : "off"}`,
-		handle: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg === "status") {
-				await runtime.output(await formatComputerUseStatus(runtime.session));
-				return commandConsumed();
-			}
-			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
-				const enable = arg === "off" ? false : arg === "on" || !runtime.session.settings.get("computer.enabled");
-				await runtime.output(await applyComputerUseToggle(runtime.session, enable));
-				return commandConsumed();
-			}
-			return usage("Usage: /computer [on|off|status]", runtime);
-		},
-		handleTui: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg === "status") {
-				runtime.ctx.showStatus(await formatComputerUseStatus(runtime.ctx.session));
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (!arg || arg === "toggle" || arg === "on" || arg === "off") {
-				const enable =
-					arg === "off" ? false : arg === "on" || !runtime.ctx.session.settings.get("computer.enabled");
-				runtime.ctx.showStatus(await applyComputerUseToggle(runtime.ctx.session, enable));
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /computer [on|off|status]");
-			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "vision",
-		description: "Control the inspect_image vision-delegation tool for this session",
-		acpDescription: "Toggle vision delegation",
-		acpInputHint: "[on|off|auto|status]",
-		subcommands: [
-			{ name: "on", description: "Always expose inspect_image this session" },
-			{ name: "off", description: "Never expose inspect_image this session" },
-			{ name: "auto", description: "Follow inspect_image.mode (auto hides it for vision-capable models)" },
-			{ name: "status", description: "Show inspect_image status" },
-		],
-		allowArgs: true,
-		getTuiAutocompleteDescription: runtime => `Vision: ${runtime.ctx.session.inspectImageState().mode}`,
-		handle: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg === "status") {
-				await runtime.output(formatVisionStatus(runtime.session));
-				return commandConsumed();
-			}
-			if (arg === "on" || arg === "off" || arg === "auto") {
-				await runtime.output(await applyVisionMode(runtime.session, arg));
-				return commandConsumed();
-			}
-			return usage("Usage: /vision [on|off|auto|status]", runtime);
-		},
-		handleTui: async (command, runtime) => {
-			const arg = command.args.trim().toLowerCase();
-			if (arg === "status") {
-				runtime.ctx.showStatus(formatVisionStatus(runtime.ctx.session));
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			if (arg === "on" || arg === "off" || arg === "auto") {
-				runtime.ctx.showStatus(await applyVisionMode(runtime.ctx.session, arg));
-				runtime.ctx.editor.setText("");
-				return;
-			}
-			runtime.ctx.showStatus("Usage: /vision [on|off|auto|status]");
-			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "prewalk",
-		description: "Switch to a fast/cheap model at the next action (works even without --prewalk)",
-		acpDescription: "Prewalk at the next action",
-		handle: async (_command, runtime) => {
-			const rolePattern = expandRoleAlias("@smol", runtime.settings);
-			const resolved = resolveCliModel({
-				cliModel: rolePattern,
-				modelRegistry: runtime.session.modelRegistry,
-				preferences: getModelMatchPreferences(runtime.settings),
-			});
-			if (resolved.error || !resolved.model) {
-				return usage(resolved.error ?? `Model "${rolePattern}" not found`, runtime);
-			}
-			if (!runtime.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
-				return usage(`No API key for ${resolved.model.provider}/${resolved.model.id}`, runtime);
-			}
-			runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
-			await runtime.output(
-				`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
-			);
-			return commandConsumed();
 		},
 	},
 	{
@@ -949,7 +699,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					serverUrl: runtime.settings.get("share.serverUrl"),
 					store: runtime.settings.get("share.store"),
 					state: runtime.session.state,
-					obfuscator: runtime.settings.get("share.redactSecrets") ? runtime.session.obfuscator : undefined,
 				});
 				const lines = [`Share URL: ${result.url}`];
 				if (result.gistUrl) lines.push(`Gist: ${result.gistUrl}`);
@@ -1118,7 +867,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handle: async (command, runtime) => {
 			const arg = command.args.toLowerCase();
 			const enabled = runtime.settings.get("browser.enabled" as SettingPath) as boolean;
-			if (!enabled) return usage("Browser tool is disabled (enable in settings).", runtime);
+			if (!enabled) return usage("Browser service is disabled (enable in settings).", runtime);
 			const current = runtime.settings.get("browser.headless" as SettingPath) as boolean;
 			let next = current;
 			if (!arg) next = !current;
@@ -1126,19 +875,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			else if (arg === "visible" || arg === "show" || arg === "headful") next = false;
 			else return usage("Usage: /browser [headless|visible]", runtime);
 			runtime.settings.set("browser.headless" as SettingPath, next as SettingValue<SettingPath>);
-			const tool = runtime.session.getToolByName("browser");
-			if (tool && "restartForModeChange" in tool) {
-				try {
-					await (tool as { restartForModeChange: () => Promise<void> }).restartForModeChange();
-				} catch (err) {
-					// Setting was already mutated; surface the restart failure so the
-					// user knows the browser is in an inconsistent state.
-					await runtime.output(
-						`Browser mode set to ${next ? "headless" : "visible"}, but restart failed: ${errorMessage(err)}`,
-					);
-					return commandConsumed();
-				}
-			}
 			await runtime.output(`Browser mode: ${next ? "headless" : "visible"}`);
 			return commandConsumed();
 		},
@@ -1147,7 +883,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const current = settings.get("browser.headless" as SettingPath) as boolean;
 			let next = current;
 			if (!(settings.get("browser.enabled" as SettingPath) as boolean)) {
-				runtime.ctx.showWarning("Browser tool is disabled (enable in settings)");
+				runtime.ctx.showWarning("Browser service is disabled (enable in settings)");
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -1163,16 +899,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			settings.set("browser.headless" as SettingPath, next as SettingValue<SettingPath>);
-			const tool = runtime.ctx.session.getToolByName("browser");
-			if (tool && "restartForModeChange" in tool) {
-				try {
-					await (tool as { restartForModeChange: () => Promise<void> }).restartForModeChange();
-				} catch (error) {
-					runtime.ctx.showWarning(`Failed to restart browser: ${errorMessage(error)}`);
-					runtime.ctx.editor.setText("");
-					return;
-				}
-			}
 			runtime.ctx.showStatus(`Browser mode: ${next ? "headless" : "visible"}`);
 			runtime.ctx.editor.setText("");
 		},
@@ -1190,25 +916,35 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			if (arg === "code") {
 				const block = extractLastCodeBlock(runtime.ctx.session.messages);
-				if (!block) {
-					runtime.ctx.showStatus("No code block to copy.");
+				const cell = block ? undefined : runtime.ctx.session.getIpythonCellJournalDetails(1)[0];
+				const code = block?.code ?? cell?.code;
+				if (!code) {
+					runtime.ctx.showStatus("No code block or IPython cell to copy.");
 					runtime.ctx.editor.setText("");
 					return;
 				}
-				await copyToClipboard(block.code);
-				runtime.ctx.showStatus("Copied code block to clipboard");
+				await copyToClipboard(code);
+				runtime.ctx.showStatus(block ? "Copied code block to clipboard" : "Copied IPython cell code to clipboard");
 				runtime.ctx.editor.setText("");
 				return;
 			}
 			if (arg === "cmd" || arg === "command") {
-				const lastCommand = extractLastCommand(runtime.ctx.session.messages);
-				if (!lastCommand) {
+				const currentCell = runtime.ctx.session.getIpythonCellJournalDetails(1)[0];
+				const lastCommand = currentCell?.code ? undefined : extractLastCommand(runtime.ctx.session.messages);
+				if (!lastCommand && !currentCell?.code) {
 					runtime.ctx.showStatus("No command to copy.");
 					runtime.ctx.editor.setText("");
 					return;
 				}
-				await copyToClipboard(lastCommand.code);
-				runtime.ctx.showStatus(`Copied ${lastCommand.kind === "bash" ? "bash command" : "eval code"} to clipboard`);
+				if (lastCommand) {
+					await copyToClipboard(lastCommand.code);
+					runtime.ctx.showStatus(
+						`Copied ${lastCommand.kind === "bash" ? "bash command" : "eval code"} to clipboard`,
+					);
+				} else {
+					await copyToClipboard(currentCell!.code);
+					runtime.ctx.showStatus("Copied IPython cell code to clipboard");
+				}
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -1467,23 +1203,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "tools",
 		description: "Show tools currently visible to the agent",
 		acpDescription: "Show available tools",
-		getTuiAutocompleteDescription: runtime => {
-			const active = runtime.ctx.session.getActiveToolNames().length;
-			const all = runtime.ctx.session.getAllToolNames().length;
-			return all === 0 ? "Tools: none available" : `Tools: ${active} active / ${all} available`;
-		},
+		getTuiAutocompleteDescription: () => "Tools: ipython",
 		handle: async (_command, runtime) => {
-			const active = runtime.session.getActiveToolNames();
-			const all = runtime.session.getAllToolNames();
-			if (all.length === 0) {
-				await runtime.output("No tools are available.");
-				return commandConsumed();
-			}
-			const lines = all.map(name => `${active.includes(name) ? "*" : "-"} ${name}`);
-			for (const mounted of runtime.session.getXdevToolEntries()) {
-				lines.push(`~ xd://${mounted.name}`);
-			}
-			await runtime.output(lines.join("\n"));
+			await runtime.output("* ipython");
 			return commandConsumed();
 		},
 		handleTui: (_command, runtime) => {
@@ -2646,55 +2368,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "force",
-		description: "Force next turn to use a specific tool",
-		aliases: ["force:"],
-		inlineHint: "<tool-name> [prompt]",
-		allowArgs: true,
-		getTuiAutocompleteDescription: runtime => {
-			const count = runtime.ctx.session.getActiveToolNames().length;
-			return count === 0 ? "Force: no active tools" : `Force: ${count} active tools`;
-		},
-		handle: async (command, runtime) => {
-			const spaceIdx = command.args.indexOf(" ");
-			const toolName = spaceIdx === -1 ? command.args : command.args.slice(0, spaceIdx);
-			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
-			if (!toolName) return usage("Usage: /force:<tool-name> [prompt]", runtime);
-			try {
-				runtime.session.setForcedToolChoice(toolName);
-			} catch (err) {
-				return usage(errorMessage(err), runtime);
-			}
-			await runtime.output(`Next turn forced to use ${toolName}.`);
-			return prompt ? { prompt } : commandConsumed();
-		},
-		handleTui: (command, runtime) => {
-			const spaceIdx = command.args.indexOf(" ");
-			const toolName = spaceIdx === -1 ? command.args : command.args.slice(0, spaceIdx);
-			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
-
-			if (!toolName) {
-				runtime.ctx.showError("Usage: /force:<tool-name> [prompt]");
-				runtime.ctx.editor.setText("");
-				return;
-			}
-
-			try {
-				runtime.ctx.session.setForcedToolChoice(toolName);
-				runtime.ctx.showStatus(`Next turn forced to use ${toolName}.`);
-			} catch (error) {
-				runtime.ctx.showError(errorMessage(error));
-				runtime.ctx.editor.setText("");
-				return;
-			}
-
-			runtime.ctx.editor.setText("");
-
-			// If a prompt was provided, pass it through as input
-			if (prompt) return { prompt };
-		},
-	},
-	{
 		name: "live",
 		description: "Start Codex-backed realtime voice mode",
 		handleTui: async (_command, runtime) => {
@@ -3068,7 +2741,7 @@ export const BUILTIN_SLASH_COMMANDS_INTERNAL: ReadonlyArray<SlashCommandSpec> = 
 /**
  * Reload the interactive session's plugin runtime: invalidate fs/plugin-root
  * caches, rediscover skills and file slash commands, reset the capability
- * cache, and reconnect MCP servers (rebinding the session's MCP tools). Shared
+ * cache, and reconnect MCP servers and refresh their IPython instructions. Shared
  * by `/reload-plugins`'s TUI handler and the `handle`-adapter's `reloadPlugins`
  * hook so both honor the command's documented MCP reload scope (#7189).
  */

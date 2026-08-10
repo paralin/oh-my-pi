@@ -16,7 +16,7 @@ export interface Goal {
 export interface GoalModeState {
 	enabled: boolean;
 	mode: "active" | "exiting";
-	reason?: "completed";
+	reason?: string;
 	goal: Goal;
 }
 

@@ -19,7 +19,7 @@ export const benchHelp = {
 } satisfies CommandMetadata;
 
 export const browserRelayHelp = {
-	description: "Run the local CDP relay that lets the browser tool drive your own Chrome tabs",
+	description: "Run the local CDP relay used by the typed browser host capability",
 } satisfies CommandMetadata;
 
 export const cleanseHelp = {
@@ -40,13 +40,9 @@ export const dryBalanceHelp = {
 	description: "Dry-run OAuth account balancing across random session ids",
 } satisfies CommandMetadata;
 
-export const galleryHelp = {
-	description: "Preview tool renderers across streaming, in-progress, success, and failure states",
-} satisfies CommandMetadata;
-
 export const gcHelp = { description: "Run storage garbage collection" } satisfies CommandMetadata;
 
-export const grepHelp = { description: "Test grep tool" } satisfies CommandMetadata;
+export const grepHelp = { description: "Search files with the grep CLI" } satisfies CommandMetadata;
 
 export const grievancesHelp = {
 	description: "View, clean, or push reported tool issues (auto-QA grievances)",
@@ -63,7 +59,7 @@ export const modelsHelp = { description: "List, search, and refresh available mo
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
 
 export const readHelp = {
-	description: "Show what the read tool will return for a path, URL, or internal URI",
+	description: "Read a path, URL, or internal URI through the host service",
 } satisfies CommandMetadata;
 
 export const sayHelp = {

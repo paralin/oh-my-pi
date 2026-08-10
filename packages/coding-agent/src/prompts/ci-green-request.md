@@ -4,8 +4,8 @@ NEVER stop after a single fix attempt.
 </critical>
 
 <instruction>
-- You SHOULD use the `github` tool with `op: run_watch` and no other arguments if available.
-- Otherwise use `gh` cli.
+- In IPython, prefer `await omp.github.run()` to watch the current commit when the host service is available.
+- Otherwise run the `gh` CLI from a `%%bash` cell.
 - Use workflow runs for current HEAD as source of truth after each push.
 </instruction>
 

@@ -1,4 +1,0 @@
-The rlm shim and focused Python skills in this directory adapt observable
-behavior from Prime Agent at commit 0e0d23391bcd879f1aea70dbda4d07dda7970b34.
-They are distributed under the MIT terms in ../NOTICE. OMP replaces Prime's
-host services and credential access with session-scoped typed host handlers.

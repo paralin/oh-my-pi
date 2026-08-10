@@ -40,7 +40,6 @@ import type { OutputMeta } from "../tools/output-meta";
 import { formatOutputNotice } from "../tools/output-meta";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
-export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 
 /**
@@ -436,7 +435,7 @@ export interface SkillPromptDetails {
 }
 
 /** Sentinel value for `AssistantMessage.errorMessage` indicating that the abort
- *  was an *expected internal transition* (plan-mode → execution compaction)
+ *  was an expected internal transition
  *  and must NOT surface as a red "Operation aborted" line. Distinct from
  *  `undefined` (default) so user-cancel aborts with no errorMessage still
  *  render normally. Persists through SessionManager so history replay
@@ -862,10 +861,7 @@ export interface BashExecutionMessage {
 	excludeFromContext?: boolean;
 }
 
-/**
- * Message type for user-initiated Python executions via the $ command.
- * Shares the same kernel session as eval's Python backend.
- */
+/** Persisted history from the removed user Python shortcut. */
 export interface PythonExecutionMessage {
 	role: "pythonExecution";
 	code: string;
@@ -875,7 +871,7 @@ export interface PythonExecutionMessage {
 	truncated: boolean;
 	meta?: OutputMeta;
 	timestamp: number;
-	/** If true, this message is excluded from LLM context ($$ prefix) */
+	/** Whether the historical execution was excluded from model context. */
 	excludeFromContext?: boolean;
 }
 
@@ -1055,7 +1051,7 @@ function convertImageBearingCustomMessage(message: CustomMessage | HookMessage):
  * while that marker follows).
  *
  * WeakMap (not a symbol tag) is deliberate: `wrapSteeringForModel` and
- * `deobfuscateAgentMessages` spread messages into fresh variants with different
+ * message transformation spread messages into fresh variants with different
  * content; a symbol-keyed fragment would ride that spread and mis-convert the
  * copy. Identity keying keeps the cache off spread copies.
  */

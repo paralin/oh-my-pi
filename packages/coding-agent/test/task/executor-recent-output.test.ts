@@ -134,22 +134,6 @@ function toolPair(idx: number): AgentSessionEvent[] {
 	] as AgentSessionEvent[];
 }
 
-function yieldEvents(): AgentSessionEvent[] {
-	return [
-		{ type: "tool_execution_start", toolCallId: "final-yield", toolName: "yield", args: {} },
-		{
-			type: "tool_execution_end",
-			toolCallId: "final-yield",
-			toolName: "yield",
-			result: {
-				content: [{ type: "text", text: "Result submitted." }],
-				details: { status: "success", data: { ok: true } },
-			},
-			isError: false,
-		},
-	] as AgentSessionEvent[];
-}
-
 interface MockSessionControls {
 	session: AgentSession;
 	/** Resolves once prompt() has emitted every scripted event. */
@@ -171,9 +155,6 @@ function createScriptedSession(
 		model: undefined,
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
-		getActiveToolNames: () => ["read", "yield"],
-		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async (_toolNames: string[]) => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -186,7 +167,7 @@ function createScriptedSession(
 			emittedGate.resolve();
 		},
 		waitForIdle: async () => {},
-		getLastAssistantMessage: () => undefined,
+		getLastAssistantMessage: () => assistantMessage([{ type: "text", text: "Completed." }]),
 		abort: async () => {
 			aborted = true;
 		},
@@ -237,9 +218,7 @@ async function runScenario(ops: Op[], options?: { abortAfterOps?: boolean }): Pr
 		}
 		if (options?.abortAfterOps) {
 			abortController.abort();
-			return;
 		}
-		for (const event of yieldEvents()) emit(event);
 	});
 
 	vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({ session } as CreateAgentSessionResult);

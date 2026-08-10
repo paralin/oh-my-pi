@@ -13,18 +13,14 @@
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
-import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { StrippedToolCallsPlaceholder } from "@oh-my-pi/pi-coding-agent/modes/components/stripped-tool-calls-placeholder";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext, StrippedToolCallsMarker } from "@oh-my-pi/pi-coding-agent/session/session-context";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { type Component, Container, Image, ImageProtocol, setTerminalImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { Container } from "@oh-my-pi/pi-tui";
 
 beforeAll(() => {
 	initTheme();
@@ -37,11 +33,8 @@ beforeEach(async () => {
 	await Settings.init({ inMemory: true });
 });
 
-const originalImageProtocol = TERMINAL.imageProtocol;
-
 afterEach(() => {
 	resetSettingsForTest();
-	setTerminalImageProtocol(originalImageProtocol);
 	vi.restoreAllMocks();
 });
 
@@ -71,7 +64,6 @@ function makeCtx(): {
 		chatContainer: { clear: vi.fn(), addChild: vi.fn() },
 		pendingMessagesContainer: { clear: vi.fn(), disposeChildren: vi.fn() },
 		pendingBashComponents: [],
-		pendingPythonComponents: [],
 		session: { buildTranscriptSessionContext: transcriptSpy },
 		viewSession: {
 			buildTranscriptSessionContext: transcriptSpy,
@@ -104,12 +96,6 @@ const emptyUsage: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const pngImage: ImageContent = {
-	type: "image",
-	data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==",
-	mimeType: "image/png",
-};
-
 function assistantToolCall(id: string, name: string, args: Record<string, unknown>): AssistantMessage {
 	return {
 		role: "assistant",
@@ -127,16 +113,6 @@ function transcriptWith(messages: AgentMessage[]): SessionContext {
 	return { ...makeEmptyContext(), messages };
 }
 
-function countImageComponents(component: Component): number {
-	const own = component instanceof Image ? 1 : 0;
-	if (!("children" in component) || !Array.isArray(component.children)) return own;
-	return own + component.children.reduce((count, child) => count + countImageComponents(child), 0);
-}
-
-function hasImageComponent(component: Component): boolean {
-	return countImageComponents(component) > 0;
-}
-
 function makeRenderCtx(
 	transcript: SessionContext,
 	showImages = true,
@@ -148,9 +124,7 @@ function makeRenderCtx(
 		chatContainer,
 		pendingMessagesContainer: new Container(),
 		pendingBashComponents: [],
-		pendingPythonComponents: [],
 		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
 		statusLine: { invalidate: vi.fn() },
 		updateEditorBorderColor: vi.fn(),
 		updateEditorTopBorder: vi.fn(),
@@ -172,7 +146,9 @@ function makeRenderCtx(
 		editor: { addToHistory: vi.fn() },
 		viewSession: {
 			buildTranscriptSessionContext: () => transcript,
-			getToolByName: () => undefined,
+			getToolByName: () => {
+				throw new Error("historical replay must not resolve tools");
+			},
 			extensionRunner: undefined,
 			sessionManager: {
 				getEntries: vi.fn(() => []),
@@ -235,152 +211,6 @@ describe("UiHelpers.renderInitialMessages — clearTerminalHistory", () => {
 			([force, opts]) => force === true && (opts as { clearScrollback?: boolean } | undefined)?.clearScrollback,
 		);
 		expect(clearedCall).toBeUndefined();
-	});
-});
-
-describe("UiHelpers.renderInitialMessages — image replay", () => {
-	it("restores read tool image blocks onto the rebuilt assistant transcript", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const transcript = transcriptWith([
-			assistantToolCall("read-image", "read", { path: "sample.png" }),
-			{
-				role: "toolResult",
-				toolCallId: "read-image",
-				toolName: "read",
-				content: [{ type: "text", text: "Read image: sample.png" }, pngImage],
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		new UiHelpers(ctx).renderInitialMessages();
-
-		expect(hasImageComponent(chatContainer)).toBe(true);
-		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("Read sample.png");
-	});
-
-	it("restores eval display image blocks onto rebuilt tool output", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const transcript = transcriptWith([
-			assistantToolCall("eval-image", "eval", { language: "py", code: "display(image)" }),
-			{
-				role: "toolResult",
-				toolCallId: "eval-image",
-				toolName: "eval",
-				content: [{ type: "text", text: "(displayed 1 image; no text output)" }, pngImage],
-				details: {
-					language: "python",
-					cells: [{ index: 0, code: "display(image)", output: "display image 1: 1x1", status: "complete" }],
-				},
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		new UiHelpers(ctx).renderInitialMessages();
-
-		expect(hasImageComponent(chatContainer)).toBe(true);
-		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("display image 1: 1x1");
-	});
-
-	it("preserves hidden read images so enabling them later can replay the image", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": false } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const transcript = transcriptWith([
-			assistantToolCall("read-hidden", "read", { path: "hidden.png" }),
-			{
-				role: "toolResult",
-				toolCallId: "read-hidden",
-				toolName: "read",
-				content: [{ type: "text", text: "Read image: hidden.png" }, pngImage],
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript, false);
-
-		new UiHelpers(ctx).renderInitialMessages();
-
-		expect(hasImageComponent(chatContainer)).toBe(false);
-		const assistant = chatContainer.children.find(
-			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
-		);
-		expect(assistant).toBeDefined();
-		assistant?.setImagesVisible(true);
-		expect(hasImageComponent(chatContainer)).toBe(true);
-	});
-
-	it("preserves tool-result images while tool activity is hidden so revealing it can replay the image", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		const transcript = transcriptWith([
-			assistantToolCall("read-tool-hidden", "read", { path: "tool-hidden.png" }),
-			{
-				role: "toolResult",
-				toolCallId: "read-tool-hidden",
-				toolName: "read",
-				content: [{ type: "text", text: "Read image: tool-hidden.png" }, pngImage],
-				isError: false,
-				timestamp: 2,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript, true, true);
-
-		new UiHelpers(ctx).renderInitialMessages();
-
-		expect(hasImageComponent(chatContainer)).toBe(false);
-		const assistant = chatContainer.children.find(
-			(child): child is AssistantMessageComponent => child instanceof AssistantMessageComponent,
-		);
-		expect(assistant).toBeDefined();
-		assistant?.setToolResultImagesVisible(true);
-		expect(hasImageComponent(chatContainer)).toBe(true);
-	});
-
-	it("replays reopened session image blocks through the cold-start rebuild path", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
-		setTerminalImageProtocol(ImageProtocol.Sixel);
-		using tempDir = TempDir.createSync("@pi-render-initial-image-replay-");
-		const session = SessionManager.create(tempDir.path(), tempDir.path());
-		session.appendMessage(assistantToolCall("read-reopened", "read", { path: "reopened.png" }));
-		session.appendMessage({
-			role: "toolResult",
-			toolCallId: "read-reopened",
-			toolName: "read",
-			content: [{ type: "text", text: "Read image: reopened.png" }, pngImage],
-			isError: false,
-			timestamp: 2,
-		});
-		session.appendMessage(assistantToolCall("eval-reopened", "eval", { language: "py", code: "display(image)" }));
-		session.appendMessage({
-			role: "toolResult",
-			toolCallId: "eval-reopened",
-			toolName: "eval",
-			content: [{ type: "text", text: "(displayed 1 image; no text output)" }, pngImage],
-			details: {
-				language: "python",
-				cells: [{ index: 0, code: "display(image)", output: "display image 1: 1x1", status: "complete" }],
-			},
-			isError: false,
-			timestamp: 4,
-		});
-		await session.flush();
-		const sessionFile = session.getSessionFile();
-		if (!sessionFile) throw new Error("Expected persisted session file");
-		const reloaded = await SessionManager.open(sessionFile);
-		const transcript = reloaded.buildSessionContext({ transcript: true });
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		new UiHelpers(ctx).renderInitialMessages({ clearTerminalHistory: true });
-
-		expect(countImageComponents(chatContainer)).toBe(2);
-		expect(Bun.stripANSI(chatContainer.render(100).join("\n"))).toContain("Read reopened.png");
-		expect(ctx.ui.requestRender).toHaveBeenCalledWith(true, { clearScrollback: true });
 	});
 });
 
@@ -502,46 +332,5 @@ describe("UiHelpers.renderSessionContext — error-stop tool calls", () => {
 		const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
 		expect(rendered).toContain("synthetic assistant stop error");
 		expect(rendered).not.toContain("late tool result must not replace the assistant stop error");
-	});
-});
-
-describe("UiHelpers.renderSessionContext — mid-stream tool call rebuild", () => {
-	it("decodes streamed write content from partialJson, not the provider's stale parsed arguments", async () => {
-		// A transcript rebuild (theme change, settings edit, focus replay) can land
-		// while a write's args still stream. The provider re-parses `arguments`
-		// only every STREAMING_JSON_PARSE_MIN_GROWTH bytes, so the parsed snapshot
-		// lags the raw buffer. The rebuilt preview must decode from the buffer —
-		// exactly like the live reveal path — or the write body freezes at the
-		// last throttled parse until more bytes arrive.
-		await Settings.init({ inMemory: true });
-		const staleContent = "line one of the streamed write";
-		const grownBuffer = `{"path":"/tmp/mid.ts","content":"${staleContent}\\nGROWN_TAIL_SENTINEL`;
-		const transcript = transcriptWith([
-			{
-				role: "assistant",
-				content: [
-					{
-						type: "toolCall",
-						id: "write-mid",
-						name: "write",
-						// Provider-parsed snapshot from BEFORE the buffer grew.
-						arguments: { path: "/tmp/mid.ts", content: staleContent },
-						[kStreamingPartialJson]: grownBuffer,
-					},
-				],
-				api: "anthropic-messages",
-				provider: "anthropic",
-				model: "claude-sonnet",
-				usage: emptyUsage,
-				stopReason: "toolUse",
-				timestamp: 1,
-			},
-		]);
-		const { ctx, chatContainer } = makeRenderCtx(transcript);
-
-		new UiHelpers(ctx).renderInitialMessages();
-
-		const rendered = Bun.stripANSI(chatContainer.render(120).join("\n"));
-		expect(rendered).toContain("GROWN_TAIL_SENTINEL");
 	});
 });

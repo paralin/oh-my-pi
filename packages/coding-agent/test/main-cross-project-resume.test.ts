@@ -144,7 +144,6 @@ describe("runRootCommand — cross-project --resume", () => {
 		parsed.noExtensions = true;
 		parsed.noSkills = true;
 		parsed.noRules = true;
-		parsed.noTools = true;
 		parsed.noLsp = true;
 		let resumedManager: SessionManager | undefined;
 		let preloadedDestinationAtCreation = false;
@@ -198,7 +197,6 @@ describe("runRootCommand — cross-project --resume", () => {
 		parsed.noExtensions = true;
 		parsed.noSkills = true;
 		parsed.noRules = true;
-		parsed.noTools = true;
 		parsed.noLsp = true;
 		let resumedManager: SessionManager | undefined;
 

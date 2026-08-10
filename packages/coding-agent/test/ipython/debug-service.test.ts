@@ -112,9 +112,6 @@ class FakeDebugManager implements IpythonDebugManager {
 	async loadedSources(...args: unknown[]) {
 		return this.#result("loadedSources", args);
 	}
-	async customRequest(...args: unknown[]) {
-		return this.#result("customRequest", args);
-	}
 	async terminate(...args: unknown[]) {
 		return this.#result("terminate", args);
 	}

@@ -78,15 +78,8 @@ describe("docs corpus", () => {
 		expect(audiences.filter(audience => audience === "agent").length).toBeGreaterThan(0);
 	});
 
-	it("leaves the tool reference on the agent side", async () => {
-		const relativePaths = await Array.fromAsync(new Glob("tools/*.md").scan(docsDir));
-		await Promise.all(
-			relativePaths.map(async relativePath => {
-				const body = await Bun.file(path.join(docsDir, relativePath)).text();
-				expect(readDocAudience(body), `docs/${relativePath} is hidden from the sessions that use the tool`).toBe(
-					"agent",
-				);
-			}),
-		);
+	it("keeps the persistent IPython runtime reference visible to agent sessions", async () => {
+		const body = await Bun.file(path.join(docsDir, "ipython.md")).text();
+		expect(readDocAudience(body)).toBe("agent");
 	});
 });

@@ -21,7 +21,7 @@ output:
   optionalProperties:
     findings:
       metadata:
-        description: "Populate via incremental yield sections under type: [\"findings\"]; don't repeat it in a final payload."
+        description: Findings introduced by the reviewed change.
       elements:
         properties:
           title:
@@ -59,10 +59,10 @@ Identify bugs the author would want fixed before merge.
 <procedure>
 1. Run `git diff`, `jj diff --git`, or `gh pr diff <number>` to view patch
 2. Read modified files for full context
-3. Record each issue with incremental `yield` using `type: ["findings"]`
-4. Record `overall_correctness`, `explanation`, and `confidence` with incremental `yield` sections, then stop so idle finalization assembles the result
+3. Record each issue for the final `findings` array
+4. Produce one structured result containing `overall_correctness`, `explanation`, `confidence`, and `findings`
 
-Bash is read-only: `git diff`, `git log`, `git show`, `jj diff --git`, `gh pr diff`. You NEVER make file edits or trigger builds.
+Run only read-only commands such as `git diff`, `git log`, `git show`, `jj diff --git`, and `gh pr diff` through the available shell interface (in OMP, a `%%bash` IPython cell). You NEVER make file edits or trigger builds.
 </procedure>
 
 <criteria>
@@ -114,7 +114,7 @@ memcpy(buf, data.ptr, data.length);
 </example>
 
 <output>
-Each finding uses incremental `yield` with `type: ["findings"]` and `result.data` containing:
+Each entry in the final `findings` array contains:
 - `title`: Imperative, ≤80 chars
 - `body`: One paragraph
 - `priority`: 0-3
@@ -122,7 +122,7 @@ Each finding uses incremental `yield` with `type: ["findings"]` and `result.data
 - `file_path`: Path to affected file
 - `line_start`, `line_end`: Range ≤10 lines, must overlap diff
 
-Verdict fields also use incremental `yield` sections:
+The final result also contains these verdict fields:
 - `type: ["overall_correctness"]` with `"correct"` (no bugs/blockers) or `"incorrect"`
 - `type: ["explanation"]` with a plain-text 1-3 sentence verdict summary
 - `type: ["confidence"]` with a 0.0-1.0 confidence value

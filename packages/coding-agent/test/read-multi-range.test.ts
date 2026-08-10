@@ -2,15 +2,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ClientBridge } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import type { ReadToolDetails } from "@oh-my-pi/pi-coding-agent/tools/read";
-import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../src/session/tool-session.js";
+import type { ReadResult } from "../src/tools/read.js";
+import { ReadService } from "../src/tools/read.js";
 
-function textOutput(result: AgentToolResult<ReadToolDetails>): string {
+function textOutput(result: ReadResult): string {
 	return result.content
 		.filter(c => c.type === "text")
 		.map(c => c.text)
@@ -38,7 +37,7 @@ function makeNumberedContent(lines: number): string {
 	return Array.from({ length: lines }, (_, i) => `line ${i + 1}`).join("\n");
 }
 
-describe("read tool multi-range selector", () => {
+describe("read service multi-range selector", () => {
 	let tmpDir: string;
 
 	beforeEach(async () => {
@@ -49,17 +48,14 @@ describe("read tool multi-range selector", () => {
 		await removeWithRetries(tmpDir);
 	});
 
-	it("uses only the filename in hashline headers for nested files", async () => {
+	it("returns nested-file contents without a header", async () => {
 		const filePath = path.join(tmpDir, "src", "nested", "numbered.txt");
 		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(filePath, "alpha\nbeta\n");
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const text = textOutput(await tool.execute("call-filename-header", { path: filePath }));
-		const firstLine = text.split("\n")[0];
-
-		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
-		expect(firstLine).not.toContain("src");
+		const tool = new ReadService(createSession(tmpDir));
+		const text = textOutput(await tool.read(filePath));
+		expect(text).toBe("alpha\nbeta\n");
 	});
 
 	it("returns both ranges separated by an elision marker", async () => {
@@ -67,12 +63,9 @@ describe("read tool multi-range selector", () => {
 		await fs.mkdir(path.dirname(filePath), { recursive: true });
 		await fs.writeFile(filePath, makeNumberedContent(50));
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("call-multi", { path: `${filePath}:3-5,20-22` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${filePath}:3-5,20-22`);
 		const text = textOutput(result);
-		const firstLine = text.split("\n")[0];
-		expect(firstLine).toMatch(/^\[numbered\.txt#[0-9A-F]{4}\]$/);
-
 		expect(text).toContain("line 3");
 		expect(text).toContain("line 4");
 		expect(text).toContain("line 5");
@@ -102,8 +95,8 @@ describe("read tool multi-range selector", () => {
 			].join("\n"),
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const text = textOutput(await tool.execute("call-bracket-close", { path: `${filePath}:1-1` }));
+		const tool = new ReadService(createSession(tmpDir));
+		const text = textOutput(await tool.read(`${filePath}:1-1`));
 
 		expect(text).toContain("function outer() {");
 		expect(text).toContain("…");
@@ -128,8 +121,8 @@ describe("read tool multi-range selector", () => {
 			].join("\n"),
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const text = textOutput(await tool.execute("call-bracket-open", { path: `${filePath}:7-7` }));
+		const tool = new ReadService(createSession(tmpDir));
+		const text = textOutput(await tool.read(`${filePath}:7-7`));
 
 		expect(text.indexOf("function outer() {")).toBeLessThan(text.indexOf("}"));
 		expect(text).toContain("…");
@@ -155,12 +148,12 @@ describe("read tool multi-range selector", () => {
 			].join("\n"),
 		);
 
-		const tool = new ReadTool(createSession(tmpDir));
+		const tool = new ReadService(createSession(tmpDir));
 		// Read only the `def` header (expands by a few trailing context lines).
 		// Python has no closing delimiter, so a bracket scan would surface
 		// nothing; tree-sitter surfaces the def's last body line (9) as the
 		// block boundary, behind an ellipsis for the skipped middle.
-		const text = textOutput(await tool.execute("call-py-def", { path: `${filePath}:1-1` }));
+		const text = textOutput(await tool.read(`${filePath}:1-1`));
 
 		expect(text).toContain("def greet(name):");
 		expect(text).toContain("…");
@@ -172,9 +165,9 @@ describe("read tool multi-range selector", () => {
 		const filePath = path.join(tmpDir, "numbered.txt");
 		await fs.writeFile(filePath, makeNumberedContent(20));
 
-		const tool = new ReadTool(createSession(tmpDir));
+		const tool = new ReadService(createSession(tmpDir));
 		// 3-7 and 6-9 overlap → merged into 3-9 (collapses to a single-range read).
-		const result = await tool.execute("call-merge", { path: `${filePath}:3-7,6-9` });
+		const result = await tool.read(`${filePath}:3-7,6-9`);
 		const text = textOutput(result);
 
 		// All lines from the merged range present
@@ -189,8 +182,8 @@ describe("read tool multi-range selector", () => {
 		const filePath = path.join(tmpDir, "numbered.txt");
 		await fs.writeFile(filePath, makeNumberedContent(50));
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("call-sort", { path: `${filePath}:30-32,5-7` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${filePath}:30-32,5-7`);
 		const text = textOutput(result);
 
 		const indexEarly = text.indexOf("line 5");
@@ -203,8 +196,8 @@ describe("read tool multi-range selector", () => {
 		const filePath = path.join(tmpDir, "small.txt");
 		await fs.writeFile(filePath, makeNumberedContent(10));
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("call-oob", { path: `${filePath}:3-5,999-1000` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${filePath}:3-5,999-1000`);
 		const text = textOutput(result);
 
 		expect(text).toContain("line 3");
@@ -216,8 +209,8 @@ describe("read tool multi-range selector", () => {
 		const filePath = path.join(tmpDir, "numbered.txt");
 		await fs.writeFile(filePath, makeNumberedContent(30));
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("call-plus", { path: `${filePath}:2+2,20+2` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${filePath}:2+2,20+2`);
 		const text = textOutput(result);
 
 		expect(text).toContain("line 2");
@@ -232,9 +225,9 @@ describe("read tool multi-range selector", () => {
 		const filePath = path.join(tmpDir, "numbered.txt");
 		await fs.writeFile(filePath, makeNumberedContent(30));
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const dotdot = textOutput(await tool.execute("call-dotdot", { path: `${filePath}:3..5` }));
-		const dash = textOutput(await tool.execute("call-dash", { path: `${filePath}:3-5` }));
+		const tool = new ReadService(createSession(tmpDir));
+		const dotdot = textOutput(await tool.read(`${filePath}:3..5`));
+		const dash = textOutput(await tool.read(`${filePath}:3-5`));
 
 		expect(dotdot).toContain("line 3");
 		expect(dotdot).toContain("line 5");
@@ -246,8 +239,8 @@ describe("read tool multi-range selector", () => {
 		const filePath = path.join(tmpDir, "numbered.txt");
 		await fs.writeFile(filePath, makeNumberedContent(50));
 
-		const tool = new ReadTool(createSession(tmpDir));
-		const result = await tool.execute("call-dotdot-multi", { path: `${filePath}:3..5,20..22` });
+		const tool = new ReadService(createSession(tmpDir));
+		const result = await tool.read(`${filePath}:3..5,20..22`);
 		const text = textOutput(result);
 
 		expect(text).toContain("line 3");
@@ -259,8 +252,8 @@ describe("read tool multi-range selector", () => {
 	});
 
 	it("rejects multi-range selectors on directories", async () => {
-		const tool = new ReadTool(createSession(tmpDir));
-		await expect(tool.execute("call-dir", { path: `${tmpDir}:1-2,5-6` })).rejects.toThrow(
+		const tool = new ReadService(createSession(tmpDir));
+		await expect(tool.read(`${tmpDir}:1-2,5-6`)).rejects.toThrow(
 			/Multi-range line selectors are not supported for directory listings/,
 		);
 	});
@@ -274,8 +267,8 @@ describe("read tool multi-range selector", () => {
 			readTextFile: async () => bridgeText,
 		};
 
-		const tool = new ReadTool(createSession(tmpDir, bridge));
-		const result = await tool.execute("call-bridge", { path: `${filePath}:1-2,4-5` });
+		const tool = new ReadService(createSession(tmpDir, bridge));
+		const result = await tool.read(`${filePath}:1-2,4-5`);
 		const text = textOutput(result);
 
 		expect(text).toContain("bridge one");

@@ -6,7 +6,6 @@ import chalk from "chalk";
 import type { ScratchCompactionMethod } from "../config/scratch-compaction-method";
 import type { ServiceTierOpenAISettingValue } from "../config/service-tier";
 import { CLI_THINKING_LEVELS, type ConfiguredThinkingLevel, parseCliThinkingLevel } from "../thinking";
-import { BUILTIN_TOOL_NAMES, HIDDEN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import {
 	OPTIONAL_FLAGS,
 	OPTIONAL_VALUE_FLAGS,
@@ -34,12 +33,6 @@ export interface Args {
 	config?: string[];
 	smol?: string;
 	slow?: string;
-	plan?: string;
-	prewalk?: boolean;
-	noPrewalk?: boolean;
-	prewalkInto?: string;
-	planYolo?: boolean;
-	planYoloInto?: string;
 	maxTime?: number;
 	compactionMethod?: ScratchCompactionMethod;
 	apiKey?: string;
@@ -64,8 +57,6 @@ export interface Args {
 	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
 	join?: string;
 	models?: string[];
-	tools?: string[];
-	noTools?: boolean;
 	noLsp?: boolean;
 	noPty?: boolean;
 	hooks?: string[];
@@ -107,8 +98,6 @@ export interface Args {
 const PARSE_DEPS: ParseDeps = {
 	logger,
 	parseThinking: parseCliThinkingLevel,
-	builtinToolNames: [...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES],
-	normalizeToolNames,
 	thinkingEfforts: CLI_THINKING_LEVELS,
 };
 
@@ -169,7 +158,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 		const flagIndex = i;
 
-		// Support --flag=value syntax (e.g. --tools=ask,read). The value is
+		// Support --flag=value syntax. The value is
 		// spliced in as the next token so value-consuming flags pick it up via
 		// `args[++i]`; a non-consuming flag (e.g. a boolean) leaves it behind and
 		// the post-loop guard drops it so it is not mistaken for a message.
@@ -183,7 +172,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		}
 
 		// Extension-registered flags take precedence over built-ins: a flag an
-		// extension owns (e.g. plan-mode's boolean `--plan`) is parsed with the
+		// extension owns is parsed with the
 		// extension's semantics rather than falling into a built-in branch. For a
 		// value-taking built-in (`--plan`, `--model`, …) that branch would consume
 		// the following token — eating the user's message and setting the wrong
@@ -243,8 +232,6 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.fromCodex = true;
 		} else if (arg === "--no-session") {
 			result.noSession = true;
-		} else if (arg === "--no-tools") {
-			result.noTools = true;
 		} else if (arg === "--no-lsp") {
 			result.noLsp = true;
 		} else if (arg === "--no-pty") {
@@ -253,12 +240,6 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.hideThinking = true;
 		} else if (arg === "--advisor") {
 			result.advisor = true;
-		} else if (arg === "--prewalk") {
-			result.prewalk = true;
-		} else if (arg === "--no-prewalk") {
-			result.noPrewalk = true;
-		} else if (arg === "--plan-yolo") {
-			result.planYolo = true;
 		} else if (arg === "--print" || arg === "-p") {
 			result.print = true;
 		} else if (arg === "--print-thoughts") {

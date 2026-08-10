@@ -330,10 +330,19 @@
             if (msg.role === 'jsExecution' && msg.code) parts.push(msg.code);
             break;
           }
-          case 'custom_message':
+          case 'custom_message': {
             parts.push(entry.customType);
-            parts.push(typeof entry.content === 'string' ? entry.content : extractContent(entry.content));
+            const detail = getIpythonCellDetail(entry);
+            if (detail) {
+              parts.push(detail.code, detail.safeText);
+              for (const artifact of detail.artifacts) {
+                if (artifact && typeof artifact.path === 'string') parts.push(artifact.path);
+              }
+            } else {
+              parts.push(typeof entry.content === 'string' ? entry.content : extractContent(entry.content));
+            }
             break;
+          }
           case 'compaction':
             parts.push('compaction');
             break;
@@ -471,6 +480,65 @@
         return div.innerHTML;
       }
 
+      function getIpythonCellDetail(entry) {
+        if (!entry || entry.type !== 'custom_message' || entry.customType !== 'ipython-cell') return null;
+        const detail = entry.details;
+        if (!detail || typeof detail !== 'object' || detail.version !== 1 || detail.kind !== 'cell') return null;
+        if (typeof detail.code !== 'string' || typeof detail.safeText !== 'string' || !Array.isArray(detail.events) || !Array.isArray(detail.artifacts)) return null;
+        return detail;
+      }
+
+      function ipythonImageHtml(mimeType, data) {
+        if (!['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(mimeType)) return '';
+        if (typeof data !== 'string' || !/^[A-Za-z0-9+/_=-]+$/.test(data)) return '';
+        return `<img class="ipython-image" src="data:${mimeType};base64,${escapeHtml(data)}" alt="IPython ${escapeHtml(mimeType)} output">`;
+      }
+
+      function renderIpythonRichHtml(detail) {
+        const rich = [];
+        for (const event of detail.events) {
+          if (!event || (event.kind !== 'display' && event.kind !== 'result') || !event.data || typeof event.data !== 'object') continue;
+          for (const [mimeType, value] of Object.entries(event.data)) {
+            if (mimeType.startsWith('image/')) {
+              const image = ipythonImageHtml(mimeType, value);
+              if (image) rich.push(image);
+              continue;
+            }
+            if (mimeType === 'application/vnd.omp.attachment+json' && value && typeof value === 'object') {
+              const image = ipythonImageHtml(value.mime_type, value.data);
+              if (image) rich.push(image);
+              continue;
+            }
+            if (mimeType === 'application/vnd.omp.diff+json' && value && typeof value === 'object' && typeof value.diff === 'string') {
+              const path = typeof value.path === 'string' ? `<div class="ipython-diff-path">${escapeHtml(value.path)}</div>` : '';
+              rich.push(`<div class="ipython-diff">${path}<pre>${escapeHtml(value.diff)}</pre></div>`);
+            }
+          }
+        }
+        return rich.join('');
+      }
+
+      function renderIpythonCellHtml(entry, entryId, tsHtml) {
+        const detail = getIpythonCellDetail(entry);
+        if (!detail) return '';
+        const status = typeof detail.status === 'string' ? detail.status : 'unknown';
+        const sequence = Number.isFinite(detail.sequence) ? `In [${detail.sequence}]` : 'IPython';
+        const safeText = detail.safeText
+          ? `<pre class="ipython-output">${escapeHtml(detail.safeText)}</pre>`
+          : '';
+        const artifacts = detail.artifacts
+          .filter(artifact => artifact && typeof artifact.path === 'string')
+          .map(artifact => `<li>${escapeHtml(artifact.label || artifact.path)}${artifact.mimeType ? ` <span class="tree-muted">(${escapeHtml(artifact.mimeType)})</span>` : ''}<div class="tree-muted">${escapeHtml(artifact.path)}</div></li>`)
+          .join('');
+        return `<div class="hook-message ipython-cell" id="${entryId}" data-ipython-status="${escapeHtml(status)}">${tsHtml}
+          <div class="hook-type">[${escapeHtml(sequence)}] ${escapeHtml(status)}</div>
+          <pre class="ipython-code"><code>${escapeHtml(detail.code)}</code></pre>
+          ${safeText}
+          ${renderIpythonRichHtml(detail)}
+          ${artifacts ? `<ul class="ipython-artifacts">${artifacts}</ul>` : ''}
+        </div>`;
+      }
+
       function canonicalizeMessage(text) {
         if (!text) return '';
         const trimmed = text.trim();
@@ -546,6 +614,11 @@
             return labelHtml + `<span class="tree-branch-summary">[branch summary]:</span> ${escapeHtml(summary)}`;
           }
           case 'custom_message': {
+            const detail = getIpythonCellDetail(entry);
+            if (detail) {
+              const first = truncate(normalize(detail.code));
+              return labelHtml + `<span class="tree-custom">[IPython ${escapeHtml(detail.status || 'unknown')}]:</span> ${escapeHtml(first)}`;
+            }
             const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
             return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
           }
@@ -735,32 +808,32 @@
       }
 
       // ============================================================
-      // TOOL CALL RENDERING
+      // HISTORICAL TOOL CALL RENDERING
       // ============================================================
-      //
-      // Tool calls render through the bundled <omp-tool-view> web component
-      // (tool-views.generated.js — the same React renderers collab-web uses).
-      // Payloads are handed over via a global store keyed by data-key, which
-      // survives innerHTML serialization and cloneNode round trips.
 
-      const TOOL_VIEW_DATA = new Map();
-      globalThis.__OMP_TOOL_VIEW_DATA = TOOL_VIEW_DATA;
-      let toolViewSeq = 0;
+      function boundedHistoryText(value) {
+        let text;
+        try {
+          text = typeof value === 'string' ? value : (JSON.stringify(value) || '');
+        } catch {
+          text = String(value);
+        }
+        return text.length <= 4000 ? text : text.slice(0, 4000) + '…';
+      }
 
       function renderToolCall(call, sctx) {
+        // IPython journal entries render the authoritative cell presentation.
+        if (call.name === 'ipython') return '';
         const result = findToolResult(call.id, sctx.entries);
         const statusClass = result ? (result.isError ? 'error' : 'success') : 'pending';
-        const key = 'tv' + (++toolViewSeq);
-        TOOL_VIEW_DATA.set(key, {
-          name: call.name,
-          args: call.arguments || {},
-          result: result || undefined,
-          host: {
-            hasAgent: (id) => !!lookupSubSession(sctx.prefix, id),
-            openAgent: (id) => openSubSession(joinKey(sctx.prefix, id)),
-          },
-        });
-        return '<omp-tool-view class="tool-execution ' + statusClass + '" data-key="' + key + '" open></omp-tool-view>';
+        const args = boundedHistoryText(call.arguments || {});
+        let html = '<div class="tool-execution ' + statusClass + '">';
+        html += '<div class="tool-command">Removed tool: ' + escapeHtml(boundedHistoryText(call.name)) + ' ' + escapeHtml(args) + '</div>';
+        if (result) {
+          const output = boundedHistoryText((result.content || []).filter(block => block.type === 'text').map(block => block.text || '').join('\n'));
+          html += formatExpandableOutput(output, 10);
+        }
+        return html + '</div>';
       }
 
       // ============================================================
@@ -1177,6 +1250,8 @@
         }
 
         if (entry.type === 'custom_message' && entry.display) {
+          const ipython = renderIpythonCellHtml(entry, entryId, tsHtml);
+          if (ipython) return ipython;
           return `<div class="hook-message" id="${entryId}">${tsHtml}
             <div class="hook-type">[${escapeHtml(entry.customType)}]</div>
             <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>

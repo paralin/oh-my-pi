@@ -14,7 +14,6 @@ import type {
 	ServiceTierByFamily,
 	ServiceTierFamily,
 	TextContent,
-	TSchema,
 } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
@@ -32,7 +31,6 @@ import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
-
 import { resolvePath, withHostGuard } from "../utils";
 import type {
 	AssistantThinkingRenderer,
@@ -41,11 +39,12 @@ import type {
 	ExtensionContext,
 	ExtensionFactory,
 	ExtensionRuntime as IExtensionRuntime,
+	IpythonExtensionHostHandler,
+	IpythonMimeRenderer,
 	LoadExtensionsResult,
 	MessageRenderer,
 	ProviderConfig,
 	RegisteredCommand,
-	ToolDefinition,
 } from "./types";
 
 installLegacyPiSpecifierShim();
@@ -85,18 +84,6 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	setLabel(): void {
-		throw new ExtensionRuntimeNotInitializedError();
-	}
-
-	getActiveTools(): string[] {
-		throw new ExtensionRuntimeNotInitializedError();
-	}
-
-	getAllTools(): string[] {
-		throw new ExtensionRuntimeNotInitializedError();
-	}
-
-	setActiveTools(): Promise<void> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -164,13 +151,6 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.handlers.set(event, list);
 	}
 
-	registerTool<TParams extends TSchema = TSchema, TDetails = unknown>(tool: ToolDefinition<TParams, TDetails>): void {
-		this.extension.tools.set(tool.name, {
-			definition: tool,
-			extensionPath: this.extension.path,
-		});
-	}
-
 	registerCommand(
 		name: string,
 		options: {
@@ -206,6 +186,24 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		}
 	}
 
+	registerIpythonHostHandler(namespace: string, operation: string, handler: IpythonExtensionHostHandler): void {
+		let registrations = this.extension.ipythonHostHandlers;
+		if (!registrations) {
+			registrations = [];
+			this.extension.ipythonHostHandlers = registrations;
+		}
+		registrations.push({ namespace, operation, handler });
+	}
+
+	registerIpythonMimeRenderer(mimeType: string, renderer: IpythonMimeRenderer): void {
+		let registrations = this.extension.ipythonMimeRenderers;
+		if (!registrations) {
+			registrations = [];
+			this.extension.ipythonMimeRenderers = registrations;
+		}
+		registrations.push({ mimeType, renderer });
+	}
+
 	registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
 		this.extension.messageRenderers.set(customType, renderer as MessageRenderer);
 	}
@@ -239,18 +237,6 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	exec(command: string, args: string[], options?: ExecOptions) {
 		return execCommand(command, args, options?.cwd ?? this.cwd, options);
-	}
-
-	getActiveTools(): string[] {
-		return this.runtime.getActiveTools();
-	}
-
-	getAllTools(): string[] {
-		return this.runtime.getAllTools();
-	}
-
-	setActiveTools(toolNames: string[]): Promise<void> {
-		return this.runtime.setActiveTools(toolNames);
 	}
 
 	getCommands() {
@@ -301,9 +287,10 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		path: extensionPath,
 		resolvedPath,
 		handlers: new Map(),
-		tools: new Map(),
 		assistantThinkingRenderers: [],
 		messageRenderers: new Map(),
+		ipythonHostHandlers: [],
+		ipythonMimeRenderers: [],
 		commands: new Map(),
 		flags: new Map(),
 		shortcuts: new Map(),
@@ -360,30 +347,35 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+/**
+ * Load file-backed extensions into an existing session runtime. This is the
+ * reload path: callers retain the runtime actions/UI bindings already wired by
+ * ExtensionRunner and decide whether the candidate set may replace the live
+ * one after validating every collected declaration.
+ */
+export async function loadExtensionsIntoRuntime(
+	paths: readonly string[],
+	cwd: string,
+	eventBus: EventBus,
+	runtime: IExtensionRuntime,
+): Promise<{ extensions: Extension[]; errors: Array<{ path: string; error: string }>; runtime: IExtensionRuntime }> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
-	const resolvedEventBus = eventBus ?? new EventBus();
-	const runtime = new ExtensionRuntime();
-
 	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
-
+		const { extension, error } = await loadExtension(extPath, cwd, eventBus, runtime);
 		if (error) {
 			errors.push({ path: extPath, error });
 			continue;
 		}
-
-		if (extension) {
-			extensions.push(extension);
-		}
+		if (extension) extensions.push(extension);
 	}
+	return { extensions, errors, runtime };
+}
 
-	return {
-		extensions,
-		errors,
-		runtime,
-	};
+export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+	const runtime = new ExtensionRuntime();
+	const loaded = await loadExtensionsIntoRuntime(paths, cwd, eventBus ?? new EventBus(), runtime);
+	return { ...loaded, runtime };
 }
 
 interface ExtensionManifest {

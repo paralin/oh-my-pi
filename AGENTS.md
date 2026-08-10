@@ -216,16 +216,11 @@ All text displayed in tool renderers must be sanitized. Raw content (file conten
 - Diff content (added and removed).
 - Streaming previews.
 
-### Streaming tool previews
+### IPython cell presentation
 
-Tool-call previews can have **multiple render paths**. If you add preview-only fields or depend on partially streamed args, update every path — not only the final renderer. Streamed argument buffers decode into display args via `decodeStreamedToolArgs` / `ToolArgsRevealController` (`modes/controllers/tool-args-reveal.ts`); both the live event path and transcript rebuilds must go through them — never spread provider-parsed `arguments` next to a raw `__partialJson` (parsed args lag the stream by a throttled parse window).
-
-For the bash tool specifically:
-
-- The pending preview may need raw `partialJson`, not just parsed `arguments`. Parsed args lag until a JSON object closes, which makes inline env assignments appear only at the end.
-- Preserve preview-only fields (e.g. `__partialJson`) through `event-controller.ts`, transcript rebuilds in `ui-helpers.ts`, and merged call/result rendering in `tool-execution.ts`. Missing one path causes inconsistent previews.
-- `ToolExecutionComponent.#buildRenderContext()` for bash must work even before a result exists — the renderer uses call args plus render context to show the command preview while streaming.
-- Verify both live streaming and rebuilt transcript paths after any bash preview change. A fix in one path does not fix the other.
+Model-origin work arrives as complete IPython cells. Keep live TUI, transcript
+rebuild, print, RPC, and ACP output on the shared journal projection rather than
+adding provider-tool-specific preview paths.
 
 ## Commands
 

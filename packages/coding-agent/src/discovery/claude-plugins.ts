@@ -13,7 +13,6 @@ import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import {
 	type ClaudePluginRoot,
@@ -349,43 +348,6 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 }
 
 // =============================================================================
-// Custom Tools
-// =============================================================================
-
-async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
-	const items: CustomTool[] = [];
-	const warnings: string[] = [];
-
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	warnings.push(...rootWarnings);
-
-	const results = await Promise.all(
-		roots.map(async root => {
-			const toolsDir = path.join(root.path, "tools");
-			return loadFilesFromDir<CustomTool>(ctx, toolsDir, PROVIDER_ID, root.scope, {
-				transform: (name, _content, filePath, source) => {
-					const toolName = name.replace(/\.(ts|js|sh|bash|py)$/, "");
-					return {
-						name: toolName,
-						path: filePath,
-						description: `${toolName} custom tool`,
-						level: root.scope,
-						_source: source,
-					};
-				},
-			});
-		}),
-	);
-
-	for (const result of results) {
-		items.push(...result.items);
-		if (result.warnings) warnings.push(...result.warnings);
-	}
-
-	return { items, warnings };
-}
-
-// =============================================================================
 // MCP Servers
 // =============================================================================
 
@@ -605,14 +567,6 @@ registerProvider<Hook>(hookCapability.id, {
 	description: "Load hooks from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadHooks,
-});
-
-registerProvider<CustomTool>(toolCapability.id, {
-	id: PROVIDER_ID,
-	displayName: DISPLAY_NAME,
-	description: "Load custom tools from Claude Code marketplace plugins",
-	priority: PRIORITY,
-	load: loadTools,
 });
 
 registerProvider<MCPServer>(mcpCapability.id, {

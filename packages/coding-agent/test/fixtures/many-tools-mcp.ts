@@ -1,20 +1,11 @@
 #!/usr/bin/env bun
 /**
- * Test fixture: a minimal stdio MCP server that advertises MANY tools, used by
- * `sdk-mcp-auto-discovery.test.ts` to prove two deferred-discovery contracts:
+ * Minimal stdio MCP server that advertises many tools for connection-status,
+ * server-lifecycle, and tool-ownership tests. The optional `--delay <ms>`
+ * argument stalls initialization so tests can dispose a connecting manager.
  *
- * 1. `tools.discoveryMode: "auto"` is recomputed once the real MCP tool count
- *    is known — a toolset this large must flip discovery ON for a session whose
- *    pre-discovery registry was under the threshold, instead of force-activating
- *    every tool with no `search_tool_bm25` registered.
- * 2. A session disposed while the server is still connecting must disconnect
- *    the manager and never have MCP tools resurrected onto it. The optional
- *    `--delay <ms>` argv stalls the `initialize` response so the test can
- *    deterministically dispose mid-connect.
- *
- * Speaks newline-delimited JSON-RPC 2.0 (the wire format of `StdioTransport`),
- * same shape as `instructions-mcp.ts`. Exported constants are imported by the
- * test; the server only starts when run as the entry module (`import.meta.main`).
+ * Speaks newline-delimited JSON-RPC 2.0. Exported constants are imported by
+ * tests; the server only starts when run as the entry module.
  */
 import * as readline from "node:readline";
 

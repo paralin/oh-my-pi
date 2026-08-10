@@ -326,14 +326,12 @@ function collectAssistantSurfaces(messages: readonly AgentMessage[]): HistorySur
 				continue;
 			}
 			if (block.type === "toolCall") {
-				const filePaths = extractArgPaths(block.arguments);
 				surfaces.push({
 					text: stringifyToolArguments(block.arguments),
-					label: formatToolSurfaceLabel(block.name, filePaths),
+					label: `tool:${block.name} serialized arguments`,
 					context: {
 						source: "tool",
 						toolName: block.name,
-						filePaths,
 						streamKey: block.id ? `toolcall:${block.id}` : `tool:${block.name}:${index}`,
 					},
 				});
@@ -470,16 +468,13 @@ function buildNoMatchFeedback(rule: Rule, surfaces: readonly HistorySurface[]): 
 	lines.push(
 		'If the visible bad code contains quotes, remember tool arguments are checked as serialized JSON, so quotes may appear as escaped sequences such as \\".',
 	);
-	lines.push("If the condition looks right, fix the scope so it reaches the offending tool and file glob.");
+	lines.push("If the condition looks right, fix the scope so it reaches the offending tool.");
 	return lines.join("\n");
 }
 
 function buildScopeFeedback(rule: Rule, matches: readonly HistorySurface[]): string | undefined {
-	const toolMatch = findFileToolMatch(matches);
-	if (!toolMatch) return undefined;
-
-	const recommendedScope = recommendedToolScope(toolMatch);
-	if (!recommendedScope) return undefined;
+	const toolMatch = matches.find(match => match.context.source === "tool" && match.context.toolName);
+	if (!toolMatch?.context.toolName) return undefined;
 
 	const scope = rule.scope ?? [];
 	let hasBroadToolScope = scope.length === 0;
@@ -490,60 +485,17 @@ function buildScopeFeedback(rule: Rule, matches: readonly HistorySurface[]): str
 			hasBroadToolScope = true;
 			continue;
 		}
-		if (token === "text") {
-			hasTextScope = true;
-		}
+		if (token === "text") hasTextScope = true;
 	}
-
-	if (!hasBroadToolScope && !hasTextScope) {
-		return undefined;
-	}
+	if (!hasBroadToolScope && !hasTextScope) return undefined;
 
 	const problems: string[] = [];
-	if (hasBroadToolScope) {
-		problems.push(`scope ${formatRuleList(rule.scope)} is broader than the matching file-specific tool call`);
-	}
-	if (hasTextScope) {
-		problems.push("scope includes `text`, but the offending content was confirmed in tool arguments");
-	}
-
-	return `The condition matched ${toolMatch.label}, but ${problems.join("; ")}. Use a narrow scope such as ${JSON.stringify(
+	if (hasBroadToolScope) problems.push(`scope ${formatRuleList(rule.scope)} is broader than the matching tool call`);
+	if (hasTextScope) problems.push("scope includes `text`, but the offending content was confirmed in tool arguments");
+	const recommendedScope = `tool:${toolMatch.context.toolName}`;
+	return `The condition matched ${toolMatch.label}, but ${problems.join("; ")}. Use the narrow scope ${JSON.stringify(
 		recommendedScope,
 	)} and do not repeat the failed scope ${formatRuleList(rule.scope)}.`;
-}
-
-function findFileToolMatch(matches: readonly HistorySurface[]): HistorySurface | undefined {
-	for (const match of matches) {
-		if (match.context.source !== "tool") continue;
-		if (!match.context.toolName) continue;
-		if (!extensionGlob(match.context.filePaths)) continue;
-		return match;
-	}
-	return undefined;
-}
-
-function recommendedToolScope(surface: HistorySurface): string | undefined {
-	const toolName = surface.context.toolName;
-	const glob = extensionGlob(surface.context.filePaths);
-	if (!toolName || !glob) return undefined;
-	return `tool:${toolName}(${glob})`;
-}
-
-function extensionGlob(filePaths: readonly string[] | undefined): string | undefined {
-	for (const filePath of filePaths ?? []) {
-		const extension = path.extname(filePath.replaceAll("\\", "/")).toLowerCase();
-		if (extension.length > 1) {
-			return `*${extension}`;
-		}
-	}
-	return undefined;
-}
-
-function formatToolSurfaceLabel(toolName: string, filePaths: readonly string[] | undefined): string {
-	if (!filePaths || filePaths.length === 0) {
-		return `tool:${toolName} serialized arguments`;
-	}
-	return `tool:${toolName}(${filePaths.join(", ")}) serialized arguments`;
 }
 
 function formatRuleList(values: readonly string[] | undefined): string {
@@ -613,35 +565,4 @@ function stringifyToolArguments(args: unknown): string {
 	} catch {
 		return "";
 	}
-}
-
-function extractArgPaths(args: unknown): string[] | undefined {
-	if (!args || typeof args !== "object" || Array.isArray(args)) {
-		return undefined;
-	}
-
-	const paths: string[] = [];
-	for (const key in args as Record<string, unknown>) {
-		const value = (args as Record<string, unknown>)[key];
-		const normalizedKey = key.toLowerCase();
-		if (typeof value === "string" && (normalizedKey === "path" || normalizedKey.endsWith("path"))) {
-			paths.push(value);
-			continue;
-		}
-		if (Array.isArray(value) && (normalizedKey === "paths" || normalizedKey.endsWith("paths"))) {
-			for (const candidate of value) {
-				if (typeof candidate === "string") {
-					paths.push(candidate);
-				}
-			}
-		}
-	}
-
-	const uniquePaths: string[] = [];
-	for (const candidate of paths) {
-		if (!uniquePaths.includes(candidate)) {
-			uniquePaths.push(candidate);
-		}
-	}
-	return uniquePaths.length > 0 ? uniquePaths : undefined;
 }

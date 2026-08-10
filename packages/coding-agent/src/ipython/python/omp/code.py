@@ -2,48 +2,9 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable
+from typing import Any
 
 from rlm import host_request
-
-
-async def ast_search(
-    pattern: str,
-    *,
-    path: str = ".",
-    glob: str | None = None,
-    offset: int = 0,
-    limit: int = 50,
-) -> dict[str, Any]:
-    """Return structured native AST matches for one bounded workspace scope."""
-    return await host_request(
-        "code.ast_search",
-        {"pattern": pattern, "path": path, "glob": glob or "", "offset": offset, "limit": limit},
-    )
-
-
-async def ast_edit(
-    operations: Iterable[tuple[str, str]],
-    *,
-    path: str = ".",
-    glob: str | None = None,
-    apply: bool = False,
-    max_files: int = 50,
-    fail_on_parse_error: bool = True,
-) -> dict[str, Any]:
-    """Preview or apply bounded structural rewrites through OMP's native AST owner."""
-    rewrites = [{"pattern": pattern, "replacement": replacement} for pattern, replacement in operations]
-    return await host_request(
-        "code.ast_edit",
-        {
-            "operations": rewrites,
-            "path": path,
-            "glob": glob or "",
-            "apply": apply,
-            "max_files": max_files,
-            "fail_on_parse_error": fail_on_parse_error,
-        },
-    )
 
 
 async def lsp_status() -> dict[str, Any]:

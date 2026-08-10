@@ -2,12 +2,10 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type } from "@oh-my-pi/omptype";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -128,68 +126,6 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 
 			release.resolve("done");
 			await primaryManager!.waitForAll();
-		} finally {
-			await primary.dispose();
-		}
-	}, 60000);
-
-	it("exposes the owning session's jobs through a production extension context", async () => {
-		let observedSnapshot: AsyncJobSnapshot | null | undefined;
-		const snapshotExtension: ExtensionFactory = pi => {
-			pi.registerTool({
-				name: "capture_async_job_snapshot",
-				label: "Capture async job snapshot",
-				description: "Capture the session-owned async job snapshot for this test.",
-				parameters: type({}),
-				approval: "read",
-				async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-					observedSnapshot = ctx.getAsyncJobSnapshot();
-					return { content: [{ type: "text", text: "captured" }] };
-				},
-			});
-		};
-		const session = await spawnTopLevelSession(undefined, [snapshotExtension]);
-		const manager = AsyncJobManager.instance();
-		expect(manager).toBeDefined();
-		const release = Promise.withResolvers<string>();
-		const jobId = manager!.register("bash", "extension snapshot test", async () => release.promise, {
-			ownerId: "Main",
-		});
-
-		try {
-			const snapshotTool = session.getToolByName("capture_async_job_snapshot");
-			expect(snapshotTool).toBeDefined();
-			await snapshotTool!.execute("call-snapshot", {});
-
-			expect(observedSnapshot?.running.some(job => job.id === jobId)).toBe(true);
-		} finally {
-			release.resolve("done");
-			await manager!.waitForAll();
-			await session.dispose();
-		}
-	}, 60000);
-
-	it("refuses async bash from a secondary session instead of routing it to the primary's manager", async () => {
-		const primary = await spawnTopLevelSession({ "async.enabled": true });
-		try {
-			const primaryManager = AsyncJobManager.instance();
-			expect(primaryManager).toBeDefined();
-			const primaryJobCountBefore = primaryManager!.getAllJobs().length;
-
-			const secondary = await spawnTopLevelSession({ "async.enabled": true });
-			try {
-				const bashTool = secondary.getToolByName("bash");
-				expect(bashTool).toBeDefined();
-				await expect(bashTool!.execute("call-1", { command: "echo hi", async: true })).rejects.toThrow(
-					/Async job manager unavailable/,
-				);
-			} finally {
-				await secondary.dispose();
-			}
-
-			// The secondary's failed async attempt must not have leaked a job into
-			// the primary's manager.
-			expect(primaryManager!.getAllJobs().length).toBe(primaryJobCountBefore);
 		} finally {
 			await primary.dispose();
 		}

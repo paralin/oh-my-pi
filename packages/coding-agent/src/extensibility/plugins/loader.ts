@@ -352,10 +352,9 @@ function resolveDirectoryEntries(dir: string): string[] {
  *     `extensions`, then a direct index, then a one-level scan of
  *     sub-extensions — matching the pi `extensions/<name>/index.ts` convention
  *     and OMP's configured-directory (`-e`) extension loader
- *   - otherwise (tools/hooks/commands) only a direct index.{ts,js,mjs,cjs}.
+ *   - otherwise (hooks/commands) only a direct index.{ts,js,mjs,cjs}.
  *     The sub-extension scan and the `omp`/`pi` `extensions` manifest are
- *     extensions-specific and must not hijack a non-extension directory entry
- *     (e.g. a `tools: "."` entry must still resolve `./index.ts`).
+ *     extensions-specific and must not hijack a hook or command directory.
  *
  * Returns an empty array when nothing loadable exists at `joined`, letting
  * callers flag a missing entry instead of silently dropping it.
@@ -378,10 +377,10 @@ function resolveManifestEntryFiles(joined: string, expandDirectory: boolean): st
 }
 
 /**
- * Generic path resolver for plugin manifest entries (tools, hooks, commands, extensions).
+ * Generic path resolver for plugin manifest entries (hooks, commands, extensions).
  * Handles both single-string and string[] base entries, plus feature-specific entries.
  */
-function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
+function resolvePluginPaths(plugin: InstalledPlugin, key: "hooks" | "commands" | "extensions"): string[] {
 	const resolved: string[] = [];
 	for (const entry of resolvePluginManifestEntries(plugin, key)) {
 		if (entry.resolvedPath) {
@@ -400,7 +399,7 @@ function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "c
  */
 export function resolvePluginManifestEntries(
 	plugin: InstalledPlugin,
-	key: "tools" | "hooks" | "commands" | "extensions",
+	key: "hooks" | "commands" | "extensions",
 ): Array<{ entry: string; resolvedPath: string | null }> {
 	const declared: Array<{ entry: string; resolvedPath: string | null }> = [];
 	const manifest = plugin.manifest;
@@ -444,10 +443,6 @@ export function resolvePluginManifestEntries(
 	return declared;
 }
 
-export function resolvePluginToolPaths(plugin: InstalledPlugin): string[] {
-	return resolvePluginPaths(plugin, "tools");
-}
-
 export function resolvePluginHookPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "hooks");
 }
@@ -463,20 +458,6 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 // =============================================================================
 // Aggregated Discovery
 // =============================================================================
-
-/**
- * Get all tool paths from all enabled plugins.
- */
-export async function getAllPluginToolPaths(cwd: string): Promise<string[]> {
-	const plugins = await getEnabledPlugins(cwd);
-	const paths: string[] = [];
-
-	for (const plugin of plugins) {
-		paths.push(...resolvePluginToolPaths(plugin));
-	}
-
-	return paths;
-}
 
 /**
  * Get all hook paths from all enabled plugins.

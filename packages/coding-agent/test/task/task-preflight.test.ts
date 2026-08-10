@@ -3,11 +3,11 @@ import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
-import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
+import { TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { ToolSession } from "../../src/session/tool-session.js";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -102,9 +102,9 @@ describe("task async preflight", () => {
 		async ({ name, params, settings, spawns, expectation }) => {
 			mockDiscovery();
 			const jobs = manager();
-			const tool = await TaskTool.create(createSession({ manager: jobs, settings, spawns }));
+			const tool = await TaskService.create(createSession({ manager: jobs, settings, spawns }));
 
-			const result = await tool.execute("preflight", params as TaskParams);
+			const result = await tool.spawn("preflight", params as TaskParams);
 
 			expect(textOf(result)).toContain(expectation);
 			expect(jobs.getJob(name)).toBeUndefined();
@@ -116,9 +116,9 @@ describe("task async preflight", () => {
 		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
 		const jobs = manager();
 		const register = vi.spyOn(jobs, "register");
-		const tool = await TaskTool.create(createSession({ manager: jobs, settings: { "task.batch": true } }));
+		const tool = await TaskService.create(createSession({ manager: jobs, settings: { "task.batch": true } }));
 
-		const result = await tool.execute("mixed-preflight", {
+		const result = await tool.spawn("mixed-preflight", {
 			context: "Shared context.",
 			tasks: [
 				{ name: "Invalid", agent: "missing", task: "Do invalid work." },
@@ -142,11 +142,11 @@ describe("task async preflight", () => {
 		const runSubprocess = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(resultFor("unexpected"));
 		const jobs = manager();
 		const register = vi.spyOn(jobs, "register");
-		const tool = await TaskTool.create(
+		const tool = await TaskService.create(
 			createSession({ manager: jobs, settings: { "async.enabled": false, "task.batch": true } }),
 		);
 
-		const result = await tool.execute("sync-preflight", {
+		const result = await tool.spawn("sync-preflight", {
 			context: "Shared context.",
 			tasks: [
 				{ name: "Invalid", agent: "missing", task: "Do invalid work." },

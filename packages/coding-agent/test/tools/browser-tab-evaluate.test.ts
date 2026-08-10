@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/sdk";
-import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
-import { getTabsMapForTest } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import * as logger from "@oh-my-pi/pi-utils/logger";
+import { getTabsMapForTest, releaseAllTabs, releaseTab, runInTab } from "../../src/tools/browser/tab-supervisor.js";
+import { openBrowserTab } from "../../src/tools/browser.js";
+import { clampTimeout } from "../../src/tools/operation-timeouts.js";
 import { chromiumAvailable } from "./chromium-probe";
 
 const CHROMIUM_AVAILABLE = await chromiumAvailable();
@@ -18,10 +19,46 @@ function makeSession(): ToolSession {
 	};
 }
 
+function browser(session: ToolSession) {
+	return {
+		execute: async (
+			_callId: string,
+			params: import("../../src/tools/browser.js").BrowserParams,
+			signal?: AbortSignal,
+		) => {
+			const name = params.name ?? "main";
+			const timeoutMs = clampTimeout("browser", params.timeout, session.settings.get("tools.maxTimeout")) * 1_000;
+			switch (params.action) {
+				case "open":
+					await openBrowserTab(session, name, params, timeoutMs, signal);
+					return { content: [] };
+				case "close":
+					if (params.all) await releaseAllTabs({ kill: Boolean(params.kill), timeoutMs });
+					else await releaseTab(name, { kill: Boolean(params.kill), timeoutMs });
+					return { content: [] };
+				case "run": {
+					if (!params.code) throw new Error("code is required");
+					const result = await runInTab(name, { code: params.code, timeoutMs, signal, session });
+					const content = [...result.displays];
+					if (result.returnValue !== undefined)
+						content.push({
+							type: "text",
+							text:
+								typeof result.returnValue === "string"
+									? result.returnValue
+									: (JSON.stringify(result.returnValue, null, 2) ?? String(result.returnValue)),
+						});
+					return { content };
+				}
+			}
+		},
+	};
+}
+
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	// Launches real headless Chromium; CI cold start easily exceeds bun's 5s default.
 	it("runs tab.evaluate in the page's main JavaScript world", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `main-world-${process.pid}`;
 
 		try {
@@ -54,7 +91,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				});
 			},
 		});
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `interception-lifecycle-${process.pid}`;
 
 		try {
@@ -162,7 +199,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				});
 			},
 		});
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `once-interception-${process.pid}`;
 
 		try {
@@ -210,7 +247,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("keeps the tab worker alive after an unhandled waitForResponse timeout descendant", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `response-timeout-descendant-${process.pid}`;
 
 		try {
@@ -248,7 +285,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("fails floated user continuations without killing the tab worker", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `continuation-rejection-${process.pid}`;
 
 		try {
@@ -309,7 +346,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("fails a browser error rethrown through a native promise combinator", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `combinator-rejection-${process.pid}`;
 
 		try {
@@ -351,7 +388,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("restores promise tracking after evaluated code freezes Promise", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `frozen-promise-${process.pid}`;
 
 		try {
@@ -382,7 +419,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("aborts the run facade before draining floated continuations", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `drain-abort-${process.pid}`;
 		const url = "data:text/html,<title>original</title><h1>ready</h1>";
 
@@ -419,7 +456,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("folds a user continuation rejection that settles during cleanup", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `cleanup-continuation-rejection-${process.pid}`;
 
 		try {
@@ -462,7 +499,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 		const warn = vi.spyOn(logger, "warn").mockImplementation(message => {
 			if (message === "Unhandled rejection after browser run ended") warningLogged.resolve();
 		});
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `late-continuation-rejection-${process.pid}`;
 
 		try {
@@ -499,7 +536,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("observes floating raw page promises when the target closes", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = browser(makeSession());
 		const name = `target-close-${process.pid}`;
 		const url = `data:text/html,<h1>ready</h1>#${name}`;
 

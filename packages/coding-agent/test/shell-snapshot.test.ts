@@ -228,7 +228,7 @@ describe("shell-snapshot fn-env helper", () => {
 		expect(out).toContain(`export TRICKY_VAL='it'\\''s '\\''tricky'\\'''`);
 		expect(out).toContain(`export NL_VAL='line1\nline2'`);
 
-		// Eval the emitted lines and verify the round-trip values match.
+		// Execute the emitted lines and verify the round-trip values match.
 		const round = Bun.spawn(
 			["bash", "-c", `eval "$1"; printf '%s\\n' "$TRICKY_VAL"; printf '%s\\n' "$NL_VAL"`, "_", out],
 			{ stdout: "pipe", stderr: "ignore" },

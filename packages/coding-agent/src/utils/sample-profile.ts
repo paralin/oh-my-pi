@@ -12,13 +12,13 @@
  * - a process-wide "top functions by self samples" table
  * - Rust v0 and legacy symbols demangled (best-effort, path extraction)
  *
- * Consumed by the read tool: `*.sample.txt` reads show the summary, `:raw`
+ * Consumed by the workspace read service: `*.sample.txt` reads show the summary, `:raw`
  * returns the original bytes.
  */
 
 import { formatPct, mergeInto, type ProfileNode, type RenderTreeContext, renderProfileNode } from "./profile-tree";
 
-/** Matches paths the read tool should treat as macOS sample reports. */
+/** Matches paths the workspace read service should treat as macOS sample reports. */
 export function isSampleProfilePath(filePath: string): boolean {
 	return /\.sample\.txt$/i.test(filePath);
 }

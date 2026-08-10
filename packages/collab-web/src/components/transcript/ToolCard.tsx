@@ -15,7 +15,7 @@ export interface ToolCardProps {
 	host?: ToolRenderHost;
 }
 
-/** Wire-type adapter over the shared per-tool renderer stack. */
+/** Wire-type adapter for the shared transcript card. */
 export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode {
 	const { name, intent, args, result, running, partialResult, host } = props;
 	const partial =

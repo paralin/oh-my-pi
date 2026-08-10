@@ -1,5 +1,5 @@
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import type { JsDisplayOutput } from "../../eval/js/shared/types";
+import type { JsDisplayOutput } from "../../javascript-runtime/types";
 
 /**
  * Accumulates a browser run's result entries: explicit `display()` payloads,

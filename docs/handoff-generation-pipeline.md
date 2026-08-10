@@ -49,18 +49,19 @@ The same minimum-content guard exists inside `SessionHandoff.handoff()` and thro
 - Creates `#handoffAbortController` and links any caller-provided abort signal to it.
 - Requires a selected model and an API key/resolver for that model.
 - Builds the handoff request through the **same side-request pipeline a live turn uses**, shared with ephemeral turns:
-  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus, after secret obfuscation) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`.
-  2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext`, LLM conversion, and obfuscation).
-  3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — normalized tools and provider-context transforms matching the loop. The base system prompt is pinned, so the fresh session does not inherit a per-turn `before_agent_start` override.
+  1. Renders the handoff prompt (`renderHandoffPrompt(...)` with optional focus) and appends it as an agent-attributed `user` message to a snapshot of `agent.state.messages`; stored transcript text is not transformed.
+  2. Converts the snapshot with `convertMessagesToLlm(...)` (session `transformContext` and LLM conversion).
+  3. Builds provider `Context` with `agent.buildSideRequestContext(llmMessages, baseSystemPrompt)` — the fixed IPython interface and provider-context transforms matching the loop. The base system prompt is pinned, so the fresh session does not inherit a per-turn `before_agent_start` override.
   4. Builds simple-stream options with the live provider cache key, a unique side `sessionId` (`<sid>:side:<snowflake>`), service tier/payload hooks, `preferWebsockets: false`, `initiatorOverride: "agent"`, and the abort signal.
-- Obfuscates the final provider context and calls `generateHandoffFromContext(...)` through the host side-stream transport.
-- Deobfuscates the returned handoff text before persistence or display.
+- Calls `generateHandoffFromContext(...)` through the host side-stream transport.
 
 ### 2) Generate and capture output
 
-`generateHandoffFromContext(...)` lives in `packages/agent/src/compaction/compaction.ts` next to summarization. It issues an OTEL-instrumented `completeSimple`-equivalent oneshot against the caller-built `Context`, overriding the supplied stream options with clamped compaction reasoning and `toolChoice: "none"`.
-
-If a provider rejects explicit `toolChoice: "none"` because it supports only automatic tool choice, the function retries once with `toolChoice: "auto"`. Tools remain present for cache-prefix compatibility, but returned tool-call blocks are ignored; only text blocks are joined.
+`generateHandoffFromContext(...)` lives in
+`packages/agent/src/compaction/compaction.ts` next to summarization. It issues
+an OTEL-instrumented one-shot completion against the caller-built context with
+clamped compaction reasoning. The handoff request is text-only: it does not
+invoke an IPython cell or select a provider capability.
 
 ```ts
 await generateHandoffFromContext(context, model, {
@@ -71,17 +72,21 @@ await generateHandoffFromContext(context, model, {
 });
 ```
 
-`generateHandoff(messages, …)` remains exported for downstream callers. It constructs a basic context from `systemPrompt`, `tools`, and `convertToLlm`, then delegates to `generateHandoffFromContext`; coding-agent uses the context-aware function so host transforms, obfuscation, side-stream routing, and cache keys match live turns.
+`generateHandoff(messages, …)` remains exported for downstream callers. Coding
+agent uses the context-aware form so host transforms, side-stream routing, and
+cache keys match live turns. The generated response keeps text blocks only.
 
 Important generation properties:
 
-- The request shares the live provider cache prefix because the `Context` is built by the identical transform + normalization pipeline the loop uses, and routed with the same `promptCacheKey` the turn used.
-- The handoff instruction is a trailing `user` message, not a developer message, so the cached prefix remains aligned with the prior turn (the trailing message is the only divergence point).
-- `toolChoice: "none"` prevents intentional tool dispatch on normal providers; the compatibility retry uses `"auto"` only after an explicit-tool-choice rejection.
-- Returned assistant content is filtered to text blocks and joined with `\n`; tool-call blocks are ignored.
-- `stopReason === "error"` after the compatibility retry throws a generation error.
+- The request shares the live provider cache prefix because its context follows
+  the same transform and routing path as the prior turn.
+- The handoff instruction is a trailing `user` message, so the cached prefix
+  remains aligned with the prior turn.
+- Returned assistant content is filtered to text blocks and joined with `\n`.
+- A terminal generation error is surfaced to the caller.
 
-Capture is direct from the oneshot response; no agent-loop events or latest-assistant-message scan are involved.
+Capture is direct from the one-shot response; no agent-loop event or
+latest-assistant-message scan is involved.
 
 ### 3) Cancellation checks
 
@@ -239,7 +244,7 @@ High-level state flow:
 2. Streaming and message-count preflight guards.
 3. `#handoffAbortController` created (`isGeneratingHandoff = true`).
 4. `generateHandoffFromContext(...)` sends one cache-aligned side request, with a one-time `"auto"` tool-choice compatibility retry when required.
-5. Assistant text blocks are joined; tool-call blocks are discarded; secret placeholders are restored locally.
+5. Assistant text blocks are joined; non-text provider blocks are discarded.
 6. If missing text or an extension cancels the switch → return `undefined`; if aborted → cancellation error.
 7. If present:
    - flush bash/session persistence and detach advisor recorders

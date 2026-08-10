@@ -1,6 +1,6 @@
 """Structural protocol shared by `GitHubClient` and `GitHubProxyClient`.
 
-Callers (worker, host tools, tasks, server, CLI) reference `GitHubBackend`
+Callers (worker, operations, tasks, server, CLI) reference `GitHubBackend`
 so they accept either the direct PAT-bearing REST client or the HMAC-RPC
 proxy client without changing signatures. Both impls return the same typed
 dataclasses (`IssueInfo`, `RepoInfo`, …) defined in `github_client`.

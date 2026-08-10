@@ -26,13 +26,22 @@ smoke_cli() {
    local omp_bin="$1"
    local runtime_dir
    runtime_dir="$(mktemp -d "$WORK_DIR/compiled-runtime.XXXXXX")"
-   XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --version
-   XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --help >/dev/null
-   XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" stats --summary >/dev/null
-   # Spawns bundled workers and serves the stats dashboard once. Regression
-   # probe for #1011/#1027 worker loading and for npm/compiled distributions
-   # missing the dashboard assets that `stats --summary` never touches.
-   XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --smoke-test
+   mkdir -p "$runtime_dir"/{home,xdg-data,xdg-cache,xdg-config,xdg-state,xdg-runtime}
+   smoke_env=(
+      HOME="$runtime_dir/home"
+      XDG_DATA_HOME="$runtime_dir/xdg-data"
+      XDG_CACHE_HOME="$runtime_dir/xdg-cache"
+      XDG_CONFIG_HOME="$runtime_dir/xdg-config"
+      XDG_STATE_HOME="$runtime_dir/xdg-state"
+      XDG_RUNTIME_DIR="$runtime_dir/xdg-runtime"
+   )
+   env "${smoke_env[@]}" "$omp_bin" --version
+   env "${smoke_env[@]}" "$omp_bin" --help >/dev/null
+   env "${smoke_env[@]}" "$omp_bin" stats --summary >/dev/null
+   # Spawns bundled workers, serves the stats dashboard, then provisions the
+   # bundled IPython runtime and reopens it warm without a bootstrap executable.
+   # This catches distribution-only worker, asset, and first-use runtime paths.
+   env "${smoke_env[@]}" "$omp_bin" --smoke-test
 }
 
 find_tarball() {
@@ -204,7 +213,10 @@ mkdir -p "$TARBALL_APP_DIR"
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
 	"
 
-   bun add "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
+   # Every package under test is a locally built tarball. Disable registry release-age
+   # filtering so Bun does not reject incompatible optional native leaves that are
+   # metadata-resolved from the registry but cannot install on this host.
+   bun add --minimum-release-age=0 "$utils_tgz" "$wire_tgz" "$omptype_tgz" "$natives_tgz" "$hashline_tgz" "$catalog_tgz" "$ai_tgz" "$mnemopi_tgz" "$snapcompact_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz" "$collab_web_tgz"
    # The platform leaf must arrive through the core's optionalDependencies +
    # override, not as a direct dependency — assert it landed before smoking so a
    # resolution regression is distinguishable from a runtime loader bug.
@@ -214,7 +226,7 @@ mkdir -p "$TARBALL_APP_DIR"
       exit 1
    }
    wire_proto="$(bun -e 'import { COLLAB_PROTO } from "@oh-my-pi/pi-wire"; process.stdout.write(String(COLLAB_PROTO));')"
-   [ "$wire_proto" = "3" ] || {
+   [ "$wire_proto" = "4" ] || {
       echo "Unexpected @oh-my-pi/pi-wire COLLAB_PROTO: $wire_proto"
       exit 1
    }

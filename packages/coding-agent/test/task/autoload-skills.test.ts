@@ -36,9 +36,6 @@ function createMockSession(
 		sessionManager: {
 			appendSessionInit: () => {},
 		},
-		getActiveToolNames: () => ["read", "yield"],
-		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {

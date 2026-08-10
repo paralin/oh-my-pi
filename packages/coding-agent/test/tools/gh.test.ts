@@ -2,22 +2,20 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:te
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolCall } from "@oh-my-pi/pi-ai";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import * as piUtils from "@oh-my-pi/pi-utils";
+import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+import type { ToolSession } from "../../src/session/tool-session.js";
 import {
 	buildSearchDateQualifier,
-	GithubTool,
+	executeGithubOperation,
+	type GithubInput,
 	getOrFetchPrDiff,
 	parsePrUnifiedDiff,
 	parseSearchDateBound,
 	resolveDefaultRepoMemoized,
-} from "@oh-my-pi/pi-coding-agent/tools/gh";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as piUtils from "@oh-my-pi/pi-utils";
-import { $which, getAgentDir, hashPath, removeWithRetries, setAgentDir, WhichCachePolicy } from "@oh-my-pi/pi-utils";
+} from "../../src/tools/gh.js";
 
 // Isolate every `git` invocation in this file from the developer's host
 // configuration. The fixture spawns dozens of git subprocesses against tiny
@@ -40,6 +38,14 @@ process.env.GIT_ASKPASS = "true";
 // `$XDG_CONFIG_HOME/git/config` even after we pin `GIT_CONFIG_GLOBAL`. Clear
 // it so the override is absolute.
 delete process.env.XDG_CONFIG_HOME;
+
+function github(session: ToolSession) {
+	return {
+		name: "github",
+		execute: (_callId: string, params: GithubInput, signal?: AbortSignal) =>
+			executeGithubOperation(session, params, signal),
+	};
+}
 
 function createSession(
 	cwd: string = "/tmp/test",
@@ -428,7 +434,7 @@ describe("github tool", () => {
 			visibility: "PUBLIC",
 		});
 
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		const result = await tool.execute("repo-view", { op: "repo_view", repo: "cli/cli" });
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
@@ -441,7 +447,7 @@ describe("github tool", () => {
 
 	it("reads repository files through the GitHub contents API", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue('{"version":"16.3.11"}\n');
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		const result = await tool.execute("file-read", {
 			op: "file_read",
 			repo: "can1357/oh-my-pi",
@@ -492,7 +498,7 @@ describe("github tool", () => {
 			} as never;
 		});
 
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		const result = await tool.execute("pr-create", {
 			op: "pr_create",
 			repo: "owner/repo",
@@ -544,7 +550,7 @@ describe("github tool", () => {
 	it("rejects pr_create when neither title nor fill is supplied", async () => {
 		const textSpy = vi.spyOn(git.github, "text");
 		const jsonSpy = vi.spyOn(git.github, "json");
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 
 		await expect(tool.execute("pr-create", { op: "pr_create", repo: "owner/repo" })).rejects.toThrow(
 			"title is required unless fill is true",
@@ -583,7 +589,7 @@ describe("github tool", () => {
 			],
 		});
 
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		const result = await tool.execute("search-prs", {
 			op: "search_prs",
 			query: "feature",
@@ -606,7 +612,7 @@ describe("github tool", () => {
 	it("calls /search/issues via gh api with the full query verbatim (including leading-dash terms)", async () => {
 		const runGhJsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
 
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		await tool.execute("search-issues", {
 			op: "search_issues",
 			query: "-label:bug",
@@ -663,7 +669,7 @@ describe("github tool", () => {
 
 	it("search_issues: appends a created:>= qualifier built from `since` and tags `is:issue`", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		await tool.execute("search-issues", {
 			op: "search_issues",
 			query: "is:open",
@@ -678,7 +684,7 @@ describe("github tool", () => {
 
 	it("search_prs: builds a qualifier-only query when `query` is omitted and tags `is:pr`", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		await tool.execute("search-prs", {
 			op: "search_prs",
 			repo: "owner/repo",
@@ -694,7 +700,7 @@ describe("github tool", () => {
 
 	it("search_prs: errors when neither `query` nor a date bound is provided", async () => {
 		vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		await expect(tool.execute("search-prs", { op: "search_prs", repo: "owner/repo" })).rejects.toThrow(
 			/query is required/,
 		);
@@ -702,7 +708,7 @@ describe("github tool", () => {
 
 	it("search_commits: forces `committer-date` regardless of `dateField`", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		await tool.execute("search-commits", {
 			op: "search_commits",
 			query: "refactor",
@@ -719,7 +725,7 @@ describe("github tool", () => {
 
 	it("search_repos: maps dateField=updated to the `pushed:` qualifier", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		await tool.execute("search-repos", {
 			op: "search_repos",
 			query: "language:rust",
@@ -735,22 +741,15 @@ describe("github tool", () => {
 
 	it("search_code: treats validated empty date placeholders as omitted", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
-		const request: ToolCall = {
-			type: "toolCall",
-			id: "search-code-empty-dates",
-			name: tool.name,
-			arguments: {
-				op: "search_code",
-				query: "transformer_infer.py",
-				repo: "ModelTC/LightX2V",
-				since: "",
-				until: "",
-				dateField: "created",
-			},
-		};
-
-		const result = await tool.execute(request.id, tool.parameters.assert(validateToolArguments(tool, request)));
+		const tool = github(createSession());
+		const result = await tool.execute("search-code-empty-dates", {
+			op: "search_code",
+			query: "transformer_infer.py",
+			repo: "ModelTC/LightX2V",
+			since: "",
+			until: "",
+			dateField: "created",
+		});
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toContain("No code matches found.");
@@ -760,26 +759,16 @@ describe("github tool", () => {
 
 	it("search_code: rejects validated non-empty since and until values", async () => {
 		const spy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession());
-		const requests: ToolCall[] = [
-			{
-				type: "toolCall",
-				id: "search-code-since",
-				name: tool.name,
-				arguments: { op: "search_code", query: "foo", since: "3d" },
-			},
-			{
-				type: "toolCall",
-				id: "search-code-until",
-				name: tool.name,
-				arguments: { op: "search_code", query: "foo", until: "2026-05-01" },
-			},
+		const tool = github(createSession());
+		const requests: GithubInput[] = [
+			{ op: "search_code", query: "foo", since: "3d" },
+			{ op: "search_code", query: "foo", until: "2026-05-01" },
 		];
 
 		for (const request of requests) {
-			await expect(
-				tool.execute(request.id, tool.parameters.assert(validateToolArguments(tool, request))),
-			).rejects.toThrow(/search_code does not support since\/until/);
+			await expect(tool.execute("search-code", request)).rejects.toThrow(
+				/search_code does not support since\/until/,
+			);
 		}
 		expect(spy).not.toHaveBeenCalled();
 	});
@@ -796,20 +785,13 @@ describe("github tool", () => {
 				},
 			],
 		});
-		const tool = new GithubTool(createSession());
-
-		const request: ToolCall = {
-			type: "toolCall",
-			id: "search-code-results",
-			name: tool.name,
-			arguments: {
-				op: "search_code",
-				query: "findThing",
-				repo: "owner/repo",
-				limit: 1,
-			},
-		};
-		const result = await tool.execute(request.id, tool.parameters.assert(validateToolArguments(tool, request)));
+		const tool = github(createSession());
+		const result = await tool.execute("search-code-results", {
+			op: "search_code",
+			query: "findThing",
+			repo: "owner/repo",
+			limit: 1,
+		});
 		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 		expect(text).toContain("# GitHub code search");
@@ -844,7 +826,7 @@ describe("github tool", () => {
 			],
 		});
 
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		const result = await tool.execute("search-commits", {
 			op: "search_commits",
 			query: "fix flaky",
@@ -879,7 +861,7 @@ describe("github tool", () => {
 			],
 		});
 
-		const tool = new GithubTool(createSession());
+		const tool = github(createSession());
 		const result = await tool.execute("search-repos", {
 			op: "search_repos",
 			query: "language:typescript stars:>100",
@@ -905,7 +887,7 @@ describe("github tool", () => {
 	it("search_prs: defaults `repo:` to the current checkout when `repo` is omitted", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("acme/widgets\n");
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession("/tmp/gh-default-prs"));
+		const tool = github(createSession("/tmp/gh-default-prs"));
 		await tool.execute("search-prs", {
 			op: "search_prs",
 			query: "is:open",
@@ -926,7 +908,7 @@ describe("github tool", () => {
 	it("search_issues: skips the current-repo default when the query already carries a scope qualifier", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("acme/widgets\n");
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession("/tmp/gh-default-skip-qualifier"));
+		const tool = github(createSession("/tmp/gh-default-skip-qualifier"));
 		await tool.execute("search-issues", {
 			op: "search_issues",
 			query: "is:open org:torvalds",
@@ -945,7 +927,7 @@ describe("github tool", () => {
 	it("search_code: falls back to global search when `gh repo view` cannot resolve the current checkout", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockRejectedValue(new Error("not a git repository"));
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession("/tmp/gh-default-no-remote"));
+		const tool = github(createSession("/tmp/gh-default-no-remote"));
 		await tool.execute("search-code", {
 			op: "search_code",
 			query: "findThing",
@@ -962,7 +944,7 @@ describe("github tool", () => {
 	it("search_commits: honors an explicit `repo` override over the current-checkout default", async () => {
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue("acme/widgets\n");
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({ items: [] });
-		const tool = new GithubTool(createSession("/tmp/gh-default-explicit-override"));
+		const tool = github(createSession("/tmp/gh-default-explicit-override"));
 		await tool.execute("search-commits", {
 			op: "search_commits",
 			query: "fix",
@@ -1010,7 +992,7 @@ describe("github tool", () => {
 					url: fixture.forkBare,
 				});
 
-			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const tool = github(createSession(fixture.repoRoot));
 			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: "123" });
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = (await git.repo.primaryRoot(fixture.repoRoot)) ?? fixture.repoRoot;
@@ -1294,7 +1276,7 @@ echo ok
 					maintainerCanModify: true,
 				});
 
-			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const tool = github(createSession(fixture.repoRoot));
 			const result = await tool.execute("pr-checkout", { op: "pr_checkout", pr: ["100", "200"] });
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 			const primaryRoot = (await git.repo.primaryRoot(fixture.repoRoot)) ?? fixture.repoRoot;
@@ -1339,7 +1321,7 @@ echo ok
 		});
 
 		it("rejects PR pushes from branches without checkout metadata", async () => {
-			const tool = new GithubTool(createSession(fixture.repoRoot));
+			const tool = github(createSession(fixture.repoRoot));
 			await expect(tool.execute("pr-push", { op: "pr_push" })).rejects.toThrow(
 				"branch manual-branch has no PR push metadata; check it out via op: pr_checkout first",
 			);
@@ -1348,15 +1330,6 @@ echo ok
 				originMainBefore,
 			);
 		});
-	});
-
-	it("exposes a flat op-based schema without legacy run_watch parameters", () => {
-		const tool = new GithubTool(createSession());
-		const wire = toolWireSchema(tool);
-		const properties = wire.properties as Record<string, unknown>;
-		expect(properties.op).toBeDefined();
-		expect(properties.interval).toBeUndefined();
-		expect(properties.grace).toBeUndefined();
 	});
 
 	it("tails failed job logs inline and saves the full failed-job logs as an artifact", async () => {
@@ -1403,9 +1376,7 @@ echo ok
 		});
 
 		try {
-			const tool = new GithubTool(
-				createSession("/tmp/test", Settings.isolated({ "github.enabled": true }), artifactsDir),
-			);
+			const tool = github(createSession("/tmp/test", Settings.isolated({ "github.enabled": true }), artifactsDir));
 			const result = await tool.execute("run-watch", {
 				op: "run_watch",
 				run: "https://github.com/owner/repo/actions/runs/77",
@@ -1485,7 +1456,7 @@ echo ok
 			.spyOn(git.github, "text")
 			.mockRejectedValue(new Error("gh repo view must not be consulted when `repo` is explicit"));
 
-		const tool = new GithubTool(createSession("/tmp/run-watch-explicit-repo-cwd"));
+		const tool = github(createSession("/tmp/run-watch-explicit-repo-cwd"));
 		const result = await tool.execute("run-watch", {
 			op: "run_watch",
 			repo: targetRepo,
@@ -1535,7 +1506,7 @@ echo ok
 			.spyOn(git.github, "text")
 			.mockRejectedValue(new Error("gh repo view must not be consulted when `repo` is explicit"));
 
-		const tool = new GithubTool(createSession("/tmp/run-watch-run-url-casing"));
+		const tool = github(createSession("/tmp/run-watch-run-url-casing"));
 		const result = await tool.execute("run-watch", {
 			op: "run_watch",
 			repo: targetRepo,
@@ -1566,7 +1537,7 @@ echo ok
 		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(cwdRepo);
 		const jsonSpy = vi.spyOn(git.github, "json");
 
-		const tool = new GithubTool(createSession(cwd));
+		const tool = github(createSession(cwd));
 		await expect(tool.execute("run-watch", { op: "run_watch", repo: targetRepo })).rejects.toThrow(
 			`Cannot infer the watched commit for ${targetRepo}: current checkout is ${cwdRepo}. Pass \`branch\` or \`run\` to scope the watch.`,
 		);
@@ -1590,7 +1561,7 @@ echo ok
 		// was replaced.
 		await expect(resolveDefaultRepoMemoized(cwd)).resolves.toBe(targetRepo);
 
-		const tool = new GithubTool(createSession(cwd));
+		const tool = github(createSession(cwd));
 		await expect(tool.execute("run-watch", { op: "run_watch", repo: targetRepo })).rejects.toThrow(
 			`Cannot infer the watched commit for ${targetRepo}: current checkout is ${replacedCwdRepo}. Pass \`branch\` or \`run\` to scope the watch.`,
 		);
@@ -1604,7 +1575,7 @@ echo ok
 		vi.spyOn(git.github, "text").mockRejectedValue(new Error("not a git repository"));
 		const jsonSpy = vi.spyOn(git.github, "json");
 
-		const tool = new GithubTool(createSession(cwd));
+		const tool = github(createSession(cwd));
 		await expect(tool.execute("run-watch", { op: "run_watch", repo: targetRepo })).rejects.toThrow(
 			`Cannot infer the watched commit for ${targetRepo}: current checkout is not a GitHub repository. Pass \`branch\` or \`run\` to scope the watch.`,
 		);
@@ -1633,7 +1604,7 @@ echo ok
 			return { workflow_runs: [] };
 		}) as unknown as typeof git.github.json);
 
-		const tool = new GithubTool(createSession(cwd));
+		const tool = github(createSession(cwd));
 		// We don't care about the outcome — just that the casing guard let us
 		// reach the polling loop instead of throwing the mismatch ToolError.
 		await tool.execute("run-watch", { op: "run_watch", repo: userRepo }, abort.signal).catch(() => {});

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { RunOutput } from "@oh-my-pi/pi-coding-agent/tools/browser/run-output";
-import { formatSelectorMatchHint, toActionableHandle } from "@oh-my-pi/pi-coding-agent/tools/browser/tab-worker";
 import type { ElementHandle } from "puppeteer-core";
+import { RunOutput } from "../../src/tools/browser/run-output.js";
+import { formatSelectorMatchHint, toActionableHandle } from "../../src/tools/browser/tab-worker.js";
 
 // Regression coverage for the invisible-output failure mode: `display("string")`,
 // `console.log`, and `print` reach the runtime as `onText` chunks, which the browser

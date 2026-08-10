@@ -2,7 +2,7 @@
 
 # Configuration Discovery and Resolution
 
-This document describes how the coding-agent resolves configuration today: which roots are scanned, how precedence works, and how resolved config is consumed by settings, skills, hooks, tools, and extensions.
+This document describes how the coding-agent resolves configuration today: which roots are scanned, how precedence works, and how resolved config is consumed by settings, skills, hooks, slash commands, and extensions.
 
 ## Scope
 
@@ -21,7 +21,6 @@ Key integration points:
 - `packages/coding-agent/src/discovery/index.ts`
 - `packages/coding-agent/src/extensibility/skills.ts`
 - `packages/coding-agent/src/extensibility/hooks/loader.ts`
-- `packages/coding-agent/src/extensibility/custom-tools/loader.ts`
 - `packages/coding-agent/src/extensibility/extensions/loader.ts`
 
 ---
@@ -45,7 +44,7 @@ Key integration points:
                     │
                     ▼
           subsystem-specific consumption
-   (settings, skills, hooks, tools, extensions)
+   (settings, skills, hooks, slash commands, extensions)
 ```
 
 ## 1) Config roots and source order
@@ -81,7 +80,7 @@ For the TTSR settings and CLI, the project boundary is the exact working directo
 
 A named profile (`omp --profile <name>`, `OMP_PROFILE`, or the legacy fallback `PI_PROFILE`) relocates the OMP user base. `OMP_PROFILE` wins when it is defined, including when it is explicitly empty; `default`, empty, or whitespace selects the default profile. When a profile is active, every OMP-native user-level path written here as `~/.omp/agent/...` normally resolves to `~/.omp/profiles/<name>/agent/...`. `--alias <command>` does not select a profile by itself: paired with `--profile`, it creates a shell shortcut for that profile.
 
-The relocation is uniform across the native provider (`builtin.ts`) and the generic `config.ts` helpers, so it covers slash commands, rules, prompts, instructions, hooks, tools, extensions, settings, skills, and MCP, plus the top-level `SYSTEM.md` / `RULES.md` / `AGENTS.md` files and runtime state (sessions, blobs, `agent.db`). A profile sees only its own OMP config, never the default profile's agent config.
+The relocation is uniform across the native provider (`builtin.ts`) and the generic `config.ts` helpers, so it covers slash commands, rules, prompts, instructions, hooks, extensions, settings, skills, and MCP, plus the top-level `SYSTEM.md` / `RULES.md` / `AGENTS.md` files and runtime state (sessions, blobs, `agent.db`). A profile sees only its own OMP config, never the default profile's agent config.
 
 Keybindings are the one exception: a named profile merges the default profile's `~/.omp/agent/keybindings.*` under its own `~/.omp/profiles/<name>/agent/keybindings.*`, with the profile file overriding per binding ([#4867](https://github.com/can1357/oh-my-pi/issues/4867)). Keybindings describe the terminal/keyboard in front of the user, which doesn't change with the active profile, so user-level remaps keep working in every profile unless the profile explicitly overrides them. The inherited file is read-only for the profile process — legacy-format migration of the default profile's file only happens when the default profile itself runs.
 
@@ -111,7 +110,7 @@ Options:
 - `cwd` (default `getProjectDir()`)
 - `existingOnly` (default `false`)
 
-This API is used for directory-based config lookups (commands, hooks, tools, agents, etc.).
+This API is used for directory-based config lookups (commands, hooks, agents, and similar content).
 
 ## `findConfigFile(subpath, options)` / `findConfigFileWithMeta(...)`
 
@@ -232,7 +231,6 @@ Capabilities define a `key(item)`:
 Relevant keys:
 
 - skills: `name`
-- tools: `name`
 - hooks: `${type}:${tool}:${name}`
 - extension modules: `name`
 - extensions: `name`
@@ -249,7 +247,7 @@ Native provider (`id: native`) reads native config from:
 
 ### Directory admission rules
 
-- Slash commands, directory rules, prompts, instructions, hooks, tools, extensions, extension modules, and settings use a project/user root only when the root directory exists and is non-empty.
+- Slash commands, directory rules, prompts, instructions, hooks, extensions, extension modules, and settings use a project/user root only when the root directory exists and is non-empty.
 - Skills scan `<ancestor>/.omp/skills` for each ancestor from the current working directory up to the repo root/home boundary, plus `~/.omp/agent/skills`, without requiring the root `.omp` directory itself to be non-empty.
 - `SYSTEM.md`, `RULES.md`, and `.omp/AGENTS.md` read user-level files directly and use the nearest non-empty ancestor `.omp` directory for project files. `RULES.md` becomes an always-apply sticky rule. See [`docs/system-prompt-customization.md`](./system-prompt-customization.md) for the full `SYSTEM.md` / `APPEND_SYSTEM.md` contract.
 - MCP does not use the non-empty-root admission helper. It reads project `.omp/mcp.json` then `.omp/.mcp.json`, followed by user `mcp.json` then `.mcp.json`, directly.
@@ -262,7 +260,6 @@ Native provider (`id: native`) reads native config from:
 - Prompts: `prompts/*.md`
 - Instructions: `instructions/*.md`
 - Hooks: `hooks/pre/*`, `hooks/post/*`
-- Tools: `tools/*.{json,md,ts,js,sh,bash,py}` and `tools/<name>/index.ts`
 - Extension modules: discovered under `extensions/` (+ legacy `settings.json.extensions` string array)
 - Extensions: `extensions/<name>/gemini-extension.json`
 - Settings capability: `settings.json`, then `config.yml`
@@ -296,23 +293,12 @@ Generate a session name using lowercase `<type>:<primary-objective>`.
 
 ## TTSR rule gates
 
-The TTSR group in `packages/coding-agent/src/config/settings-schema.ts` controls bundled rule providers through `ttsr.builtinRules`, `ttsr.apertureRules`, and `ttsr.disabledRules`:
+The TTSR group in `packages/coding-agent/src/config/settings-schema.ts` controls regex rule loading through `ttsr.builtinRules` and `ttsr.disabledRules`:
 
 - `ttsr.builtinRules` defaults to `true` and controls the `builtin-defaults` provider.
-- `ttsr.apertureRules` defaults to `false` and controls the `aperture-defaults` provider.
 - `ttsr.disabledRules` defaults to `[]` and disables matching rule names from any provider.
 
-Enable the default-off provider only in the project directory that needs it:
-
-```yaml
-# <cwd>/.omp/config.yml
-ttsr:
-  apertureRules: true
-```
-
-Project settings use the exact session working directory. They read `<cwd>/.omp/config.yml` and do not inherit the same file from a parent directory. A session started in a nested repository, worktree, or unrelated directory therefore keeps `apertureRules: false` unless that exact directory enables it.
-
-The gates are independent. A rule name in `disabledRules` is removed even when its provider gate is on. Provider priority and `ruleCapability.key` name deduplication run first, so the first rule with a name wins and its `_source.provider` is the attribution used by runtime and `omp ttsr` output. These settings affect `bucketRules(...)`, `TtsrManager`, and CLI `list`, `test`, and `scan`; they do not alter unrelated capability providers.
+A disabled name is removed before registration. Provider priority and `ruleCapability.key` name deduplication run first, so the first rule with a name wins and supplies the attribution shown by runtime and `omp ttsr` output. These settings affect `bucketRules(...)`, `TtsrManager`, and CLI `list` and `test` only.
 
 ## Skills subsystem
 
@@ -324,11 +310,6 @@ The gates are independent. A rule name in `disabledRules` is removed even when i
 
 - `discoverAndLoadHooks()` resolves hook paths from hook capability + explicit configured paths.
 - Then loads modules via Bun import.
-
-## Tools subsystem
-
-- `discoverAndLoadCustomTools()` resolves tool paths from tool capability + plugin tool paths + explicit configured paths.
-- Declarative `.md/.json` tool files are metadata only; executable loading expects code modules.
 
 ## Extensions subsystem
 
@@ -356,7 +337,7 @@ Settings capability items are not deduplicated; `Settings.#loadProjectSettings()
 
 - `ConfigFile` JSON -> YAML migration for YAML-targeted files.
 - Settings migration from `settings.json` and `agent.db` to `config.yml`.
-- Field migrations cover renamed/removed settings and value-shape changes, including `queueMode`, changelog settings, `ask.timeout`, flat `theme`, `inspect_image.enabled`, task isolation/eager settings, removed edit and compaction modes, `inlineToolDescriptors`, status-line segments, provider/search settings, memories/hindsight settings, and nested-leaf renames. Consult `Settings.#migrateRawSettings()` for the current exhaustive list.
+- Field migrations cover renamed/removed settings and value-shape changes, including `queueMode`, changelog settings, `ask.timeout`, flat `theme`, task isolation/eager settings, removed edit and compaction modes, status-line segments, provider/search settings, memories/hindsight settings, and nested-leaf renames. Consult `Settings.#migrateRawSettings()` for the current exhaustive list.
 - Legacy setting names `skills.enablePiUser` / `skills.enablePiProject` are still active gates for native skill source.
 
 If these compatibility paths are removed in code, update this document immediately; several runtime behaviors still depend on them today.

@@ -133,7 +133,6 @@ function buildTool(spec: TestTool): AgentTool {
 			label: spec.name,
 			description: `test tool ${spec.name}`,
 			parameters: z.object({ value: z.string().optional() }),
-			intent: "omit",
 			execute: async () => {
 				if (spec.behavior === "throw") throw new Error(`${spec.name} boom`);
 				return { content: [{ type: "text", text: spec.result ?? "ok" }], details: {} };
@@ -146,7 +145,6 @@ function buildTool(spec: TestTool): AgentTool {
 		label: spec.name,
 		description: `blocked tool ${spec.name}`,
 		parameters: z.object({ value: z.string().optional() }),
-		intent: "omit",
 		execute: async () => ({ content: [{ type: "text", text: "should not run" }], details: {} }),
 	} satisfies AgentTool;
 }
@@ -546,7 +544,6 @@ describe("skipped tools without spans", () => {
 			label: "fast",
 			description: "fast",
 			parameters: z.object({ value: z.string().optional() }),
-			intent: "omit",
 			execute: async () => {
 				fastDone = true;
 				return { content: [{ type: "text", text: "fast-ok" }], details: {} };
@@ -557,7 +554,6 @@ describe("skipped tools without spans", () => {
 			label: "slow",
 			description: "slow",
 			parameters: z.object({ value: z.string().optional() }),
-			intent: "omit",
 			// concurrency: shared (default) — both run in parallel. Interruptible:
 			// queued steering hard-aborts only interruptible waits; non-interruptible
 			// tools now run to completion and the steer injects at the boundary.
@@ -637,7 +633,6 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			label: "fast",
 			description: "fast",
 			parameters: z.object({ value: z.string().optional() }),
-			intent: "omit",
 			concurrency: "exclusive",
 			execute: async () => {
 				state.firstDone = true;
@@ -763,7 +758,6 @@ describe("regressions: agent loop telemetry/run summary", () => {
 			label: "cyclic",
 			description: "returns cyclic details",
 			parameters: z.object({ value: z.string().optional() }),
-			intent: "omit",
 			execute: async () => ({
 				content: [{ type: "text", text: "ok" }],
 				details: { ring: cyclic },

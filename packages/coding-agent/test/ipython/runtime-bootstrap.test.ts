@@ -2,11 +2,21 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Skill } from "../../src/extensibility/skills.js";
 import { IpythonController } from "../../src/ipython/controller.js";
 import { ipythonBootstrapEnvironment, ipythonEnvironment } from "../../src/ipython/environment.js";
 import { IPYTHON_PYTHON_ASSETS, ipythonPythonAssetHash } from "../../src/ipython/python-assets.js";
-import runtimeLock from "../../src/ipython/runtime/uv.lock" with { type: "text" };
-import { ensureIpythonRuntime, IPYTHON_RUNTIME_PACKAGES } from "../../src/ipython/runtime-bootstrap.js";
+import type { PythonSkillPackage } from "../../src/ipython/python-packages.js";
+import { resolvePythonSkillPackages } from "../../src/ipython/python-packages.js";
+import {
+	ensureIpythonRuntime,
+	IPYTHON_RUNTIME_PACKAGES,
+	normalizePythonProjectName,
+	runtimePythonPackageIdentity,
+	runtimePythonPackageMarkerText,
+	stagePythonPackageInventory,
+	validatePythonPackageExport,
+} from "../../src/ipython/runtime-bootstrap.js";
 
 const integrationEnabled = Bun.env.OMP_IPYTHON_INTEGRATION === "1";
 const describeIntegration = integrationEnabled ? describe : describe.skip;
@@ -31,7 +41,90 @@ async function runPython(
 	return stdout.trim();
 }
 
+function packageIdentity(importName: string, projectName: string, contentHash: string): PythonSkillPackage {
+	return {
+		importName,
+		callableName: "run",
+		projectName,
+		packageRoot: "/tmp/package",
+		sourceRoot: "/tmp/package/src",
+		skillPath: "/tmp/package/SKILL.md",
+		files: [],
+		contentHash,
+		skill: {
+			name: importName,
+			description: "test",
+			filePath: "/tmp/package/SKILL.md",
+			baseDir: "/tmp/package",
+			source: "test",
+		},
+	};
+}
+
 describe("IPython runtime environment", () => {
+	test("builds ordered normalized package identity and exact marker text", () => {
+		const packages = [packageIdentity("z_pkg", "Z.pkg", "hash-z"), packageIdentity("a_pkg", "A_pkg", "hash-a")];
+		expect(normalizePythonProjectName(" Z_pkg ")).toBe("z-pkg");
+		expect(runtimePythonPackageIdentity(packages)).toBe(
+			JSON.stringify([
+				{ importName: "z_pkg", projectName: "z-pkg", contentHash: "hash-z" },
+				{ importName: "a_pkg", projectName: "a-pkg", contentHash: "hash-a" },
+			]),
+		);
+		expect(runtimePythonPackageMarkerText(packages)).toBe(`${runtimePythonPackageIdentity(packages)}\n`);
+	});
+
+	test("rejects unsafe exported local and editable requirements", () => {
+		const safe = "dill==0.4.1 --hash=sha256:abc\n--hash=sha256:def\n";
+		expect(() => validatePythonPackageExport(safe, "safe_pkg")).not.toThrow();
+		for (const requirement of ["-e .", "--editable .", "pkg @ file:///tmp/pkg", "file:///tmp/pkg", "../pkg"]) {
+			expect(() => validatePythonPackageExport(requirement, "unsafe_pkg")).toThrow("local/editable/file");
+		}
+		for (const requirement of [
+			"--index-url https://pypi.org/simple",
+			"--find-links /tmp",
+			"git+https://example.invalid/pkg.git",
+			"pkg @ https://example.invalid/pkg.whl",
+		]) {
+			expect(() => validatePythonPackageExport(requirement, "unsafe_pkg")).toThrow();
+		}
+	});
+
+	test("stages the recorded inventory and rejects mutable source changes", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-python-stage-"));
+		try {
+			const packageRoot = path.join(root, "package");
+			const sourceRoot = path.join(packageRoot, "src", "stage_pkg");
+			await fs.mkdir(sourceRoot, { recursive: true });
+			await fs.writeFile(path.join(packageRoot, "SKILL.md"), "---\nname: stage\ndescription: stage\n---\n");
+			await fs.writeFile(path.join(packageRoot, "pyproject.toml"), '[project]\nname = "stage-pkg"\n');
+			await fs.writeFile(path.join(packageRoot, "uv.lock"), "version = 1\n");
+			await fs.writeFile(path.join(sourceRoot, "__init__.py"), "VALUE = 1\n");
+			const skill = {
+				name: "stage",
+				description: "stage",
+				filePath: path.join(packageRoot, "SKILL.md"),
+				baseDir: packageRoot,
+				source: "test",
+				pythonImport: "stage_pkg",
+				pythonCallable: "run",
+				pythonPath: path.join(packageRoot, "src"),
+			};
+			const resolved = await resolvePythonSkillPackages([skill]);
+			const pkg = resolved.packages[0];
+			if (!pkg) throw new Error("package did not resolve");
+			const staged = await stagePythonPackageInventory(path.join(root, "runtime"), [pkg]);
+			expect(await fs.readFile(path.join(staged[0]!, "stage_pkg", "__init__.py"), "utf8")).toBe("VALUE = 1\n");
+			await fs.writeFile(path.join(sourceRoot, "__init__.py"), "VALUE = 2\n");
+			await expect(stagePythonPackageInventory(path.join(root, "runtime"), [pkg])).rejects.toThrow(
+				"content changed",
+			);
+			expect(await fs.readFile(path.join(staged[0]!, "stage_pkg", "__init__.py"), "utf8")).toBe("VALUE = 1\n");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test("passes ordinary context without ambient credentials or execution injection", () => {
 		const environment = ipythonEnvironment({
 			HOME: "/safe/home",
@@ -120,9 +213,20 @@ describe("IPython runtime environment", () => {
 		expect(new Set(paths).size).toBe(paths.length);
 		for (const required of [
 			"rlm/__init__.py",
+			"rlm/_act.py",
 			"rlm/harness.py",
 			"rlm/mcp_base.py",
 			"omp/__init__.py",
+			"omp/ask.py",
+			"omp/autoresearch.py",
+			"omp/browser.py",
+			"omp/computer.py",
+			"omp/cron.py",
+			"omp/images.py",
+			"omp/qa.py",
+			"omp/security.py",
+			"omp/vibe.py",
+			"omp/world.py",
 			"agent_message/__init__.py",
 			"agent_observe/__init__.py",
 			"attach_image/__init__.py",
@@ -131,6 +235,10 @@ describe("IPython runtime environment", () => {
 			"goal/__init__.py",
 			"refine/__init__.py",
 			"rlm_heartbeat/__init__.py",
+			"websearch/__init__.py",
+			"websearch/websearch.py",
+			"linear/__init__.py",
+			"notion/__init__.py",
 		]) {
 			expect(paths).toContain(required);
 		}
@@ -143,52 +251,20 @@ describe("IPython runtime environment", () => {
 			"goal",
 			"refine",
 			"rlm-heartbeat",
+			"websearch",
+			"linear",
+			"notion",
 		]) {
 			const metadata = IPYTHON_PYTHON_ASSETS.find(asset => asset.path === `skills/${skill}/SKILL.md`);
 			expect(metadata?.content).toContain("type: python");
 			expect(metadata?.content).toContain("python_import:");
+			expect(metadata?.content).toContain("python_callable:");
 			expect(paths).toContain(`skills/${skill}/pyproject.toml`);
 		}
 		expect(ipythonPythonAssetHash()).toMatch(/^[a-f0-9]{64}$/);
-		const runtimeSource = IPYTHON_PYTHON_ASSETS.map(asset => asset.content).join("\n");
-		expect(runtimeSource).not.toContain("auth.json");
-		expect(runtimeSource).not.toContain("prime-agent-runtime");
-	});
-
-	test("locks PyZMQ wheels covering every release target", () => {
-		const wheels = [
-			[
-				"pyzmq-26.4.0-cp311-cp311-macosx_10_15_universal2.whl",
-				"bfcf82644c9b45ddd7cd2a041f3ff8dce4a0904429b74d73a439e8cab1bd9e54",
-			],
-			[
-				"pyzmq-26.4.0-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl",
-				"e9bcae3979b2654d5289d3490742378b2f3ce804b0b5fd42036074e2bf35b030",
-			],
-			[
-				"pyzmq-26.4.0-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl",
-				"4550af385b442dc2d55ab7717837812799d3674cb12f9a3aa897611839c18e9e",
-			],
-			[
-				"pyzmq-26.4.0-cp311-cp311-musllinux_1_1_aarch64.whl",
-				"3709c9ff7ba61589b7372923fd82b99a81932b592a5c7f1a24147c91da9a68d6",
-			],
-			[
-				"pyzmq-26.4.0-cp311-cp311-musllinux_1_1_x86_64.whl",
-				"382a4a48c8080e273427fc692037e3f7d2851959ffe40864f2db32646eeb3cef",
-			],
-			["pyzmq-26.4.0-cp311-cp311-win_amd64.whl", "963977ac8baed7058c1e126014f3fe58b3773f45c78cce7af5c26c09b6823896"],
-		] as const;
-		for (const [filename, hash] of wheels) {
-			expect(runtimeLock).toContain(filename);
-			expect(runtimeLock).toContain(`sha256:${hash}`);
-		}
-		expect(IPYTHON_RUNTIME_PACKAGES).toEqual({
-			dill: "0.4.1",
-			ipykernel: "7.3.0",
-			"jupyter-client": "8.9.1",
-			pyzmq: "26.4.0",
-		});
+		const notice = IPYTHON_PYTHON_ASSETS.find(asset => asset.path === "NOTICE");
+		expect(notice?.content).toContain("Copyright (c) 2025 Mario Zechner");
+		expect(notice?.content).toContain("Permission is hereby granted, free of charge");
 	});
 });
 
@@ -281,7 +357,7 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 			const versions = await runPython(
 				first.pythonExecutable,
 				first.environment,
-				"import importlib.metadata as m, json, os; print(json.dumps({name: m.version(name) for name in ['dill', 'ipykernel', 'jupyter-client', 'pyzmq']})); assert 'ANTHROPIC_API_KEY' not in os.environ; assert 'PYTHONPATH' not in os.environ",
+				"import importlib.metadata as m, json, os; print(json.dumps({name: m.version(name) for name in ['dill', 'ipykernel', 'jupyter-client', 'pillow', 'pyzmq']})); assert 'ANTHROPIC_API_KEY' not in os.environ; assert 'PYTHONPATH' not in os.environ",
 			);
 			expect(JSON.parse(versions)).toEqual(IPYTHON_RUNTIME_PACKAGES);
 
@@ -292,10 +368,10 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 			});
 			await controller.start();
 			const cell = await controller.execute(
-				"import os, sys; sys.path.insert(0, os.environ['OMP_IPYTHON_RUNTIME_PATH']); import dill, ipykernel, jupyter_client, zmq, rlm, omp, edit; (dill.__version__, ipykernel.__version__, jupyter_client.__version__, zmq.__version__, callable(rlm), len(omp.capabilities()), omp.skill_path('edit').is_file(), callable(edit.run))",
+				"import os, sys; sys.path.insert(0, os.environ['OMP_IPYTHON_RUNTIME_PATH']); import dill, ipykernel, jupyter_client, PIL, zmq, rlm, omp, edit; (dill.__version__, ipykernel.__version__, jupyter_client.__version__, PIL.__version__, zmq.__version__, callable(rlm), len(omp.capabilities()), omp.skill_path('edit').is_file(), callable(edit.run))",
 			);
 			expect(cell.status).toBe("ok");
-			expect(cell.result).toBe("('0.4.1', '7.3.0', '8.9.1', '26.4.0', True, 22, True, True)");
+			expect(cell.result).toBe("('0.4.1', '7.3.0', '8.9.1', '11.3.0', '26.4.0', True, 33, True, True)");
 			await controller.dispose();
 			controller = undefined;
 
@@ -308,6 +384,91 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 			expect(await runPython(warm.pythonExecutable, warm.environment, "print(40 + 2)")).toBe("42");
 		} finally {
 			await controller?.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 180_000);
+
+	test("installs a locked validated package graph and rejects stale locks", async () => {
+		const uvExecutable = Bun.env.OMP_IPYTHON_TEST_UV;
+		if (!uvExecutable) throw new Error("OMP_IPYTHON_TEST_UV is required when OMP_IPYTHON_INTEGRATION=1");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-package-runtime-"));
+		const runtimeRoot = path.join(tempRoot, "runtime");
+		const packageRoot = path.join(tempRoot, "tiny-package");
+		const packageSource = path.join(packageRoot, "src", "tiny_runtime_pkg");
+		const home = path.join(tempRoot, "home");
+		await fs.mkdir(packageSource, { recursive: true });
+		await fs.mkdir(home);
+		await fs.writeFile(
+			path.join(packageRoot, "pyproject.toml"),
+			'[project]\nname = "tiny-runtime-package"\nversion = "0.1.0"\nrequires-python = ">=3.11,<3.12"\ndependencies = ["dill==0.4.1"]\n\n[tool.uv]\npackage = false\n',
+		);
+		await fs.writeFile(path.join(packageRoot, "SKILL.md"), "---\nname: tiny-runtime\ndescription: tiny\n---\n");
+		await fs.writeFile(path.join(packageSource, "__init__.py"), "import dill\nVALUE = dill.__version__\n");
+		const environment = {
+			HOME: home,
+			PATH: `${path.dirname(uvExecutable)}${path.delimiter}${Bun.env.PATH ?? ""}`,
+			UV_NO_CONFIG: "1",
+			UV_CACHE_DIR: path.join(tempRoot, "uv-cache"),
+		};
+		const lockProcess = Bun.spawn([uvExecutable, "lock", "--project", packageRoot, "--no-config"], {
+			cwd: packageRoot,
+			env: environment,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [lockExit, lockStderr] = await Promise.all([lockProcess.exited, new Response(lockProcess.stderr).text()]);
+		if (lockExit !== 0) throw new Error(`uv lock failed: ${lockStderr}`);
+		const skill: Skill = {
+			name: "tiny-runtime",
+			description: "tiny",
+			filePath: path.join(packageRoot, "SKILL.md"),
+			baseDir: packageRoot,
+			source: "test:project",
+			pythonImport: "tiny_runtime_pkg",
+			pythonCallable: "run",
+			pythonPath: path.join(packageRoot, "src"),
+		};
+		const firstResolved = await resolvePythonSkillPackages([skill]);
+		if (firstResolved.warnings.length > 0 || firstResolved.packages.length !== 1) {
+			throw new Error(`package validation failed: ${JSON.stringify(firstResolved.warnings)}`);
+		}
+		const packageOptions = { runtimeRoot, uvExecutable, environment, pythonPackages: firstResolved.packages };
+		try {
+			const first = await ensureIpythonRuntime(packageOptions);
+			const imported = await runPython(
+				first.pythonExecutable,
+				first.environment,
+				`import sys; sys.path.insert(0, ${JSON.stringify(first.pythonPackagePaths?.[0])}); import tiny_runtime_pkg; print(tiny_runtime_pkg.VALUE)`,
+			);
+			expect(imported).toBe("0.4.1");
+			const warm = await ensureIpythonRuntime({
+				...packageOptions,
+				uvExecutable: path.join(tempRoot, "uv-must-not-run"),
+			});
+			expect(warm.runtimeDir).toBe(first.runtimeDir);
+
+			await fs.writeFile(path.join(packageSource, "__init__.py"), 'import dill\nVALUE = "changed"\n');
+			const changedResolved = await resolvePythonSkillPackages([skill]);
+			const changedPackage = changedResolved.packages[0];
+			if (!changedPackage) throw new Error("changed package did not validate");
+			const changed = await ensureIpythonRuntime({ ...packageOptions, pythonPackages: [changedPackage] });
+			expect(changed.runtimeDir).not.toBe(first.runtimeDir);
+
+			await fs.writeFile(
+				path.join(packageRoot, "pyproject.toml"),
+				'[project]\nname = "tiny-runtime-package"\nversion = "0.1.0"\nrequires-python = ">=3.11,<3.12"\ndependencies = ["dill==0.4.1", "missing-package-for-stale-lock==0.0.1"]\n\n[tool.uv]\npackage = false\n',
+			);
+			const staleResolved = await resolvePythonSkillPackages([skill]);
+			const stalePackage = staleResolved.packages[0];
+			if (!stalePackage) throw new Error("stale package did not validate structurally");
+			await expect(ensureIpythonRuntime({ ...packageOptions, pythonPackages: [stalePackage] })).rejects.toThrow();
+			const recovered = await ensureIpythonRuntime({
+				...packageOptions,
+				pythonPackages: [changedPackage],
+				uvExecutable: path.join(tempRoot, "uv-must-not-run-after-failure"),
+			});
+			expect(recovered.runtimeDir).toBe(changed.runtimeDir);
+		} finally {
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}
 	}, 180_000);

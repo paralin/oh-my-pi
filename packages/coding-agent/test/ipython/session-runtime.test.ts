@@ -11,6 +11,7 @@ import type {
 } from "../../src/ipython/controller.js";
 import { createFoundationalIpythonHostHandlers } from "../../src/ipython/host-bridge.js";
 import { ipythonSnapshotPath } from "../../src/ipython/provisioner.js";
+import type { PythonSkillPackage } from "../../src/ipython/python-packages.js";
 import {
 	classifyIpythonRestore,
 	formatIpythonRestoreNotice,
@@ -92,6 +93,8 @@ class MemoryGeneration implements IpythonSessionGeneration {
 	readonly options: IpythonSessionGenerationOptions;
 	readonly snapshots: Map<string, Map<string, string>>;
 	readonly processIds;
+	readonly reloadedPackages: PythonSkillPackage[][] = [];
+	failReload = false;
 	prewarmCount = 0;
 	flushCount = 0;
 	failSnapshots = false;
@@ -112,6 +115,11 @@ class MemoryGeneration implements IpythonSessionGeneration {
 
 	ready(): Promise<void> {
 		return this.provisioner.ensure();
+	}
+
+	async reloadPythonPackages(packages: readonly PythonSkillPackage[]): Promise<void> {
+		if (this.failReload) throw new Error("injected package reload failure");
+		this.reloadedPackages.push([...packages]);
 	}
 
 	async flushSnapshot(pathOverride?: string): Promise<IpythonSnapshotResult> {
@@ -172,6 +180,54 @@ function runtimeHarness(initialIdentity: IpythonSessionIdentity, runtimeOptions:
 }
 
 describe("session IPython runtime", () => {
+	test("updates pending package sets without creating a generation and reloads active generations transactionally", async () => {
+		const identity = {
+			sessionId: "root",
+			cwd: "/work/root",
+			sessionFile: "/sessions/root.jsonl",
+			sessionDir: "/sessions",
+		};
+		const first = {
+			importName: "first",
+			callableName: "run",
+			projectName: "first",
+			packageRoot: "/p",
+			sourceRoot: "/p/src",
+			skillPath: "/p/SKILL.md",
+			files: [],
+			contentHash: "a",
+			skill: { name: "pkg", description: "pkg", filePath: "/p/SKILL.md", baseDir: "/p", source: "test" },
+		} satisfies PythonSkillPackage;
+		const second = { ...first, importName: "second", projectName: "second", contentHash: "b" };
+		const harness = runtimeHarness(identity, { pythonPackages: () => [first] });
+		await harness.runtime.reloadPythonPackages([second]);
+		expect(harness.generations).toHaveLength(0);
+		await harness.runtime.execute({ code: "get:name", origin: "model" });
+		expect(harness.generations[0]?.options.pythonPackages).toEqual([second]);
+		await harness.runtime.reloadPythonPackages([first]);
+		expect(harness.generations[0]?.reloadedPackages).toEqual([[first]]);
+	});
+
+	test("keeps the accepted package set when an active generation rejects reload", async () => {
+		const identity = { sessionId: "root", cwd: "/work/root", sessionFile: undefined, sessionDir: "/sessions" };
+		const pkg = {
+			importName: "pkg",
+			callableName: "run",
+			projectName: "pkg",
+			packageRoot: "/p",
+			sourceRoot: "/p/src",
+			skillPath: "/p/SKILL.md",
+			files: [],
+			contentHash: "a",
+			skill: { name: "pkg", description: "pkg", filePath: "/p/SKILL.md", baseDir: "/p", source: "test" },
+		} satisfies PythonSkillPackage;
+		const harness = runtimeHarness(identity, { pythonPackages: () => [pkg] });
+		await harness.runtime.execute({ code: "get:name", origin: "model" });
+		harness.generations[0]!.failReload = true;
+		await expect(harness.runtime.reloadPythonPackages([])).rejects.toThrow("injected package reload failure");
+		await harness.runtime.dispose();
+	});
+
 	test("lazily shares one generation across model and direct cells and snapshots successful state", async () => {
 		const identity = {
 			sessionId: "root",

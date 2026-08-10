@@ -68,7 +68,11 @@ describe("musl release artifacts", () => {
 case "$*" in
   *api.github.com*) echo '{"tag_name":"v1.0.0"}' ;;
   *) while [ "$#" -gt 0 ]; do
-       [ "$1" = "-o" ] && { printf binary > "$2"; exit 0; }
+       [ "$1" = "-o" ] && {
+         printf '#!/bin/sh\necho "omp 1.0.0"\n' > "$2"
+         chmod +x "$2"
+         exit 0
+       }
        shift
      done ;;
 esac
@@ -84,6 +88,6 @@ esac
 
 		expect(result.exitCode, result.stderr).toBe(0);
 		expect(result.stdout).toContain("Downloading omp-linux-musl-x64...");
-		expect(await Bun.file(path.join(installDir, "omp")).text()).toBe("binary");
+		expect(await Bun.file(path.join(installDir, "omp")).text()).toContain("omp 1.0.0");
 	});
 });

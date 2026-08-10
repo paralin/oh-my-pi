@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { IpythonCellJournalDetail } from "@oh-my-pi/pi-coding-agent/ipython/journal";
 import {
 	buildCopyTargets,
 	type CopySource,
@@ -74,27 +75,6 @@ describe("extractLastCommand", () => {
 			]),
 		] as unknown as AgentMessage[];
 		expect(extractLastCommand(messages)).toEqual({ kind: "bash", code: "echo b", language: "bash" });
-	});
-
-	it("extracts eval code from flat args and reports the language", () => {
-		const py = [
-			assistantCalls([{ name: "eval", arguments: { language: "py", code: "print(1)" } }]),
-		] as unknown as AgentMessage[];
-		expect(extractLastCommand(py)).toEqual({ kind: "eval", code: "print(1)", language: "python" });
-
-		const js = [
-			assistantCalls([{ name: "eval", arguments: { language: "js", code: "log(1)" } }]),
-		] as unknown as AgentMessage[];
-		expect(extractLastCommand(js)?.language).toBe("javascript");
-	});
-
-	it("still joins legacy multi-cell eval args from older transcripts", () => {
-		const py = [
-			assistantCalls([
-				{ name: "eval", arguments: { cells: [{ language: "py", code: "print(1)" }, { code: "print(2)" }] } },
-			]),
-		] as unknown as AgentMessage[];
-		expect(extractLastCommand(py)).toEqual({ kind: "eval", code: "print(1)\n\nprint(2)", language: "python" });
 	});
 });
 
@@ -188,6 +168,69 @@ describe("buildCopyTargets", () => {
 		const fresh = buildCopyTargets(source({ getLastVisibleHandoffText: () => "<handoff>\nGoal" }));
 		expect(byId(fresh, "handoff")?.content).toBe("<handoff>\nGoal");
 		expect(byId(fresh, "handoff")?.copyMessage).toBe("Copied handoff context to clipboard");
+	});
+
+	it("lists replayed IPython cells with code, safe output, diffs, and artifact copy targets", () => {
+		const cell = {
+			version: 1,
+			kind: "cell",
+			cellId: "cell-copy",
+			executionId: "execution-copy",
+			sequence: 4,
+			origin: "direct",
+			authority: "trusted-cell",
+			code: "print('copied')",
+			status: "ok",
+			requestedAt: 1,
+			startedAt: 2,
+			finishedAt: 5,
+			durationMs: 3,
+			stdout: "copied\n",
+			stderr: "",
+			result: undefined,
+			events: [
+				{
+					kind: "display",
+					data: {
+						"text/html": "<script>unsafe()</script>",
+						"application/vnd.omp.diff+json": {
+							path: "src/file.ts",
+							diff: "@@ -1 +1 @@\n-old\n+new",
+						},
+					},
+					metadata: {},
+					transient: {},
+					update: false,
+					text: "[displayed MIME types]",
+				},
+			],
+			errors: [],
+			updates: [],
+			safeText: "copied\n[displayed MIME types]\n",
+			safeTextTruncated: false,
+			totalOutputBytes: 34,
+			artifacts: [{ path: "/tmp/result.txt", mimeType: "text/plain", bytes: 7, label: "result" }],
+		} satisfies IpythonCellJournalDetail;
+		const targets = buildCopyTargets(
+			source({
+				messages: [assistantText("answer")] as unknown as AgentMessage[],
+				getIpythonCellJournalDetails: () => [cell],
+			}),
+		);
+		const target = targets[0];
+		expect(target?.id).toBe("cell:cell-copy");
+		expect(target?.label).toBe("In [4] ok");
+		expect(target?.content).toContain("print('copied')");
+		expect(target?.content).toContain("copied");
+		expect(target?.content).not.toContain("<script>");
+		expect(target?.children?.map(child => child.id)).toEqual([
+			"cell:cell-copy:code",
+			"cell:cell-copy:output",
+			"cell:cell-copy:diff:0",
+			"cell:cell-copy:artifacts",
+		]);
+		expect(byId(target?.children ?? [], "cell:cell-copy:diff:0")?.content).toContain("-old\n+new");
+		expect(byId(target?.children ?? [], "cell:cell-copy:artifacts")?.content).toBe("/tmp/result.txt");
 	});
 
 	it("interleaves runnable commands after the assistant message that issued them", () => {

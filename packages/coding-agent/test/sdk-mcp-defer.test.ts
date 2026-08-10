@@ -10,14 +10,9 @@ import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-// Contract for B1 (interactive MCP deferral): when `hasUI` is true, MCP
-// discovery is deferred off the first-paint path, so an explicitly requested
-// MCP tool (e.g. via `--tools`) whose server has not yet connected MUST still
-// be a *known* tool — registered as a deterministic "still connecting"
-// placeholder — rather than vanishing and surfacing as "unknown tool" if the
-// model calls it before the background connection completes. With `hasUI`
-// false there is no deferral, so an MCP tool name with no real backing is not
-// registered at all (the non-UI paths keep the blocking discover path).
+// Interactive sessions defer MCP discovery off the first-paint path. Discovery
+// timing never changes the exclusive provider roster: configured servers remain
+// available through the typed MCP service after they connect.
 describe("createAgentSession MCP deferral (B1)", () => {
 	let registryDir: string;
 	let tempDir: string;
@@ -39,10 +34,8 @@ describe("createAgentSession MCP deferral (B1)", () => {
 		promptTemplates: [],
 		slashCommands: [],
 		enableLsp: false,
-		skipPythonPreflight: true,
 		// No .mcp.json in tempDir, so no real MCP server can ever back this name.
 		enableMCP: true,
-		toolNames: ["read", PENDING_MCP_TOOL],
 	});
 
 	beforeAll(async () => {
@@ -70,12 +63,12 @@ describe("createAgentSession MCP deferral (B1)", () => {
 		}
 	});
 
-	it("registers a pending placeholder for an explicit MCP tool when hasUI defers discovery", async () => {
+	it("does not reserve a provider schema while UI mode defers MCP discovery", async () => {
 		const { session } = await createAgentSession({ ...baseOptions(), hasUI: true });
 		try {
-			// The explicitly requested MCP tool is a known, resolvable tool even
-			// though no server has connected — deterministic, not "unknown tool".
-			expect(session.getActiveToolNames()).toContain(PENDING_MCP_TOOL);
+			// Discovery may be deferred, but it never mutates the provider roster.
+			expect(session.agent.state.tools.map(tool => tool.name)).not.toContain(PENDING_MCP_TOOL);
+			expect(session.agent.state.tools.map(tool => tool.name)).toEqual(["ipython"]);
 		} finally {
 			await session.dispose();
 		}
@@ -86,9 +79,9 @@ describe("createAgentSession MCP deferral (B1)", () => {
 		try {
 			// Without deferral there is no placeholder; the name has no real
 			// server backing, so it is simply not a registered tool.
-			expect(session.getActiveToolNames()).not.toContain(PENDING_MCP_TOOL);
+			expect(session.agent.state.tools.map(tool => tool.name)).not.toContain(PENDING_MCP_TOOL);
 			// A normal builtin is unaffected.
-			expect(session.getActiveToolNames()).toContain("read");
+			expect(session.agent.state.tools.map(tool => tool.name)).toEqual(["ipython"]);
 		} finally {
 			await session.dispose();
 		}

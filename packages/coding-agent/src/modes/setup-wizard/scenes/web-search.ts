@@ -27,7 +27,7 @@ const WEB_SEARCH_ITEMS: readonly SelectItem[] = SEARCH_PROVIDER_OPTIONS.map(opti
 type Availability = "checking" | boolean;
 
 /**
- * "Web search" panel: picks the provider the web_search tool should prefer and
+ * "Web search" panel: picks the provider the web-search host service should prefer and
  * reports whether the highlighted provider is ready to use given current
  * credentials (env keys or OAuth sign-ins from the Sign in tab) or an
  * unauthenticated fallback.
@@ -82,7 +82,7 @@ export class WebSearchTab implements SetupTab {
 	}
 
 	render(width: number, maxLines?: number): readonly string[] {
-		const lines = [theme.fg("muted", "Choose the provider the web_search tool should prefer."), ""];
+		const lines = [theme.fg("muted", "Choose the provider the web-search host service should prefer."), ""];
 		this.#listRowStart = lines.length;
 		if (maxLines !== undefined) {
 			// Above: hint + blank. Below: the list's own search-status row plus

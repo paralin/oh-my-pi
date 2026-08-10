@@ -1,34 +1,34 @@
-import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
-import * as path from "node:path";
-import {
-	Filesystem,
-	type InMemorySnapshotStore,
-	NotFoundError,
-	Patch,
-	Patcher,
-	type WriteResult,
-} from "@oh-my-pi/hashline";
-import { GrepOutputMode, grep } from "@oh-my-pi/pi-natives";
-import { withFileLock } from "@oh-my-pi/pi-utils";
-import { generateDiffString } from "../edit/diff";
-import { canonicalSnapshotKey, getFileSnapshotStore, recordFileSnapshot } from "../edit/file-snapshot-store";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { callTool, listTools } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
-import type { MCPServerConfig } from "../mcp/types";
+import { isRetriableConnectionError } from "../mcp/reconnect";
+import type { MCPAuthChallenge, MCPServerConfig, MCPServerConnection } from "../mcp/types";
+import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import type { IpythonDisplayEvent, IpythonHostHandlers, IpythonHostRequest } from "./controller";
 import type { HarnessKind, HarnessScope, HarnessService } from "./harness-service";
 import { composeIpythonHostHandlers } from "./host-bridge";
 
-const MAX_SEARCH_PATHS = 20;
-const MAX_SEARCH_MATCHES = 200;
-const MAX_SEARCH_LINE_CHARS = 2_000;
-const MAX_EDIT_FILE_BYTES = 8 * 1024 * 1024;
-const MAX_EDIT_VALUE_CHARS = 1024 * 1024;
 const MAX_ATTACHMENT_DATA_CHARS = 350_000;
 const MAX_MCP_JSON_BYTES = 1024 * 1024;
-const DIFF_DISPLAY_MIME = "application/vnd.omp.diff+json";
 const ATTACHMENT_DISPLAY_MIME = "application/vnd.omp.attachment+json";
+
+export type IpythonMcpManagerOwner = Pick<
+	MCPManager,
+	| "getAllServerNames"
+	| "getConnectedServers"
+	| "getServerConfig"
+	| "getConnection"
+	| "reconnectServer"
+	| "getNotificationState"
+	| "addNotificationListener"
+	| "getServerResources"
+	| "readServerResource"
+	| "getServerPrompts"
+	| "executePrompt"
+	| "refreshServerResources"
+	| "refreshServerPrompts"
+>;
 
 export interface IpythonMcpOwner {
 	getAllServerNames(): string[];
@@ -45,13 +45,34 @@ export interface IpythonMcpOwner {
 		args?: Record<string, string>,
 		options?: { signal?: AbortSignal },
 	): Promise<unknown>;
-	refreshCredentials(name: string): Promise<boolean>;
+	reconnect(name: string, signal: AbortSignal): Promise<boolean>;
+	getNotificationState?(): unknown;
+	waitNotification?(options: {
+		server?: string;
+		method?: string;
+		timeoutMs: number;
+		signal: AbortSignal;
+	}): Promise<unknown>;
 	refreshServerResources(name: string): Promise<void>;
 	refreshServerPrompts(name: string): Promise<void>;
 }
 
-/** Adapts OMP's MCP manager without exposing its AgentTool wrappers. */
-export function createIpythonMcpOwner(manager: MCPManager): IpythonMcpOwner {
+async function reconnectMcpServer(
+	manager: IpythonMcpManagerOwner,
+	name: string,
+	signal: AbortSignal,
+	options?: { manual?: boolean; authChallenge?: MCPAuthChallenge },
+): Promise<MCPServerConnection | null> {
+	try {
+		return await untilAborted(signal, () => manager.reconnectServer(name, options));
+	} catch (error) {
+		if (signal.aborted || (error instanceof Error && error.name === "AbortError")) throw new ToolAbortError();
+		throw error;
+	}
+}
+
+/** Adapts the MCP manager to the typed IPython capability boundary. */
+export function createIpythonMcpOwner(manager: IpythonMcpManagerOwner): IpythonMcpOwner {
 	return {
 		getAllServerNames: () => manager.getAllServerNames(),
 		getConnectedServers: () => manager.getConnectedServers(),
@@ -63,28 +84,58 @@ export function createIpythonMcpOwner(manager: MCPManager): IpythonMcpOwner {
 			return await listTools(connection, { signal });
 		},
 		callTool: async (name, tool, args, signal) => {
-			const connection = manager.getConnection(name);
+			let connection = manager.getConnection(name);
 			if (!connection) throw new Error(`MCP server is not connected: ${name}`);
-			return await callTool(connection, tool, args, { signal });
+			let retried = false;
+			const reconnect = async (options?: { authChallenge?: MCPAuthChallenge }) =>
+				await reconnectMcpServer(manager, name, signal, options);
+			try {
+				const result = await callTool(connection, tool, args, { signal });
+				const values = result._meta?.["mcp/www_authenticate"];
+				const challenge =
+					result.isError && Array.isArray(values)
+						? {
+								wwwAuthenticate: values.filter(
+									(value): value is string => typeof value === "string" && value.trim() !== "",
+								),
+							}
+						: undefined;
+				if (!challenge?.wwwAuthenticate.length || retried) return result;
+				retried = true;
+				const refreshed = await reconnect({ authChallenge: challenge });
+				if (!refreshed) return result;
+				connection = refreshed;
+				return await callTool(connection, tool, args, { signal });
+			} catch (error) {
+				throwIfAborted(signal);
+				if (retried || !isRetriableConnectionError(error)) throw error;
+				retried = true;
+				const refreshed = await reconnect();
+				if (!refreshed) throw error;
+				connection = refreshed;
+				return await callTool(connection, tool, args, { signal });
+			}
 		},
 		getServerResources: name => manager.getServerResources(name),
 		readServerResource: (name, uri, options) => manager.readServerResource(name, uri, options),
 		getServerPrompts: name => manager.getServerPrompts(name),
 		executePrompt: (name, promptName, args, options) => manager.executePrompt(name, promptName, args, options),
-		refreshCredentials: async name => {
-			const config = manager.getServerConfig(name);
-			if (!config) return false;
-			await manager.prepareConfig(config);
-			return true;
+		reconnect: async (name, signal) => Boolean(await reconnectMcpServer(manager, name, signal, { manual: true })),
+		getNotificationState: () => {
+			const state = manager.getNotificationState();
+			return {
+				enabled: state.enabled,
+				subscriptions: [...state.subscriptions].map(([server, methods]) => ({ server, methods: [...methods] })),
+			};
 		},
+		waitNotification: ({ server, method, timeoutMs, signal }) =>
+			waitForMcpNotification(manager, { server, method, timeoutMs, signal }),
 		refreshServerResources: name => manager.refreshServerResources(name),
 		refreshServerPrompts: name => manager.refreshServerPrompts(name),
 	};
 }
 
 export interface IpythonCapabilityServiceOptions {
-	readonly cwd: string;
-	readonly snapshotOwner: { fileSnapshotStore?: InMemorySnapshotStore };
 	readonly harness: HarnessService;
 	readonly modelInfo: () => Readonly<Record<string, unknown>>;
 	readonly mcp?: IpythonMcpOwner;
@@ -135,19 +186,6 @@ function booleanValue(data: Readonly<Record<string, unknown>>, name: string, fal
 	return value;
 }
 
-async function canonicalWorkspacePath(cwd: string, input: string): Promise<string> {
-	const root = await fs.realpath(cwd);
-	const resolved = await fs.realpath(path.resolve(cwd, input));
-	const relative = path.relative(root, resolved);
-	if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return resolved;
-	throw new RangeError(`path is outside the active workspace: ${input}`);
-}
-
-function safeRelative(cwd: string, absolute: string): string {
-	const relative = path.relative(cwd, absolute).replaceAll("\\", "/");
-	return relative || ".";
-}
-
 function richDisplay(mime: string, payload: Readonly<Record<string, unknown>>, text: string): IpythonDisplayEvent {
 	return {
 		kind: "display",
@@ -157,241 +195,6 @@ function richDisplay(mime: string, payload: Readonly<Record<string, unknown>>, t
 		update: false,
 		text,
 	};
-}
-
-async function searchWorkspace(
-	cwd: string,
-	snapshotOwner: { fileSnapshotStore?: InMemorySnapshotStore },
-	request: IpythonHostRequest,
-): Promise<Record<string, unknown>> {
-	const root = await fs.realpath(cwd);
-	const data = request.data;
-	strict(data, ["query", "paths", "limit", "case_sensitive", "gitignore"]);
-	const query = stringValue(data, "query", { max: 4_096 });
-	const limit = integerValue(data, "limit", 100, 1, MAX_SEARCH_MATCHES);
-	const caseSensitive = booleanValue(data, "case_sensitive", true);
-	const useGitignore = booleanValue(data, "gitignore", true);
-	const rawPaths = data.paths ?? ["."];
-	if (!Array.isArray(rawPaths) || rawPaths.length === 0 || rawPaths.length > MAX_SEARCH_PATHS) {
-		throw new RangeError(`paths must contain 1 through ${MAX_SEARCH_PATHS} strings`);
-	}
-	const paths: string[] = [];
-	for (const value of rawPaths) {
-		if (typeof value !== "string" || !value || value.length > 4_096)
-			throw new TypeError("paths must contain strings");
-		paths.push(await canonicalWorkspacePath(cwd, value));
-	}
-	const matches: Array<Record<string, unknown>> = [];
-	let filesSearched = 0;
-	let totalMatches = 0;
-	let limitReached = false;
-	const seen = new Map<string, Set<number>>();
-	for (const searchPath of paths) {
-		if (matches.length >= limit) break;
-		const result = await grep(
-			{
-				pattern: query,
-				path: searchPath,
-				ignoreCase: !caseSensitive,
-				hidden: true,
-				gitignore: useGitignore,
-				maxCount: limit - matches.length,
-				maxColumns: MAX_SEARCH_LINE_CHARS,
-				mode: GrepOutputMode.Content,
-				signal: request.signal,
-				timeoutMs: 30_000,
-			},
-			undefined,
-		);
-		filesSearched += result.filesSearched;
-		totalMatches += result.totalMatches;
-		limitReached ||= Boolean(result.limitReached);
-		for (const match of result.matches.slice(0, limit - matches.length)) {
-			const absolute = path.isAbsolute(match.path) ? match.path : path.resolve(searchPath, match.path);
-			const lines = seen.get(absolute) ?? new Set<number>();
-			lines.add(match.lineNumber);
-			seen.set(absolute, lines);
-			matches.push({
-				path: safeRelative(root, absolute),
-				line: match.lineNumber,
-				text: match.line.slice(0, MAX_SEARCH_LINE_CHARS),
-				truncated: Boolean(match.truncated),
-			});
-		}
-	}
-	const snapshots: Array<Record<string, unknown>> = [];
-	for (const [absolute, lines] of seen) {
-		const tag = await recordFileSnapshot(snapshotOwner, absolute, lines);
-		if (!tag) continue;
-		const relative = safeRelative(root, absolute);
-		snapshots.push({ path: relative, tag, header: `[${relative}#${tag}]` });
-	}
-	return {
-		matches,
-		snapshots,
-		total_matches: totalMatches,
-		files_searched: filesSearched,
-		truncated: limitReached || totalMatches > matches.length,
-	};
-}
-
-class WorkspaceHashlineFilesystem extends Filesystem {
-	readonly #cwd: string;
-	readonly #signal: AbortSignal;
-
-	constructor(cwd: string, signal: AbortSignal) {
-		super();
-		this.#cwd = cwd;
-		this.#signal = signal;
-	}
-
-	#resolve(input: string): string {
-		const absolute = path.resolve(this.#cwd, input);
-		const relative = path.relative(this.#cwd, absolute);
-		if (relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative))) return absolute;
-		throw new RangeError(`path is outside the active workspace: ${input}`);
-	}
-
-	override canonicalPath(input: string): string {
-		return canonicalSnapshotKey(this.#resolve(input));
-	}
-
-	override allowTagPathRecovery(): boolean {
-		return false;
-	}
-
-	async readText(input: string): Promise<string> {
-		if (this.#signal.aborted) throw this.#signal.reason;
-		const absolute = this.#resolve(input);
-		try {
-			const stat = await fs.lstat(absolute);
-			if (!stat.isFile() || stat.isSymbolicLink()) throw new TypeError("hashline target must be a regular file");
-			if (stat.size > MAX_EDIT_FILE_BYTES) throw new RangeError("file is too large for workspace.hashline_edit");
-			return await fs.readFile(absolute, "utf8");
-		} catch (error) {
-			if ((error as { code?: string }).code === "ENOENT") throw new NotFoundError(input, error);
-			throw error;
-		}
-	}
-
-	async writeText(input: string, content: string): Promise<WriteResult> {
-		if (this.#signal.aborted) throw this.#signal.reason;
-		const absolute = this.#resolve(input);
-		const stat = await fs.lstat(absolute);
-		if (!stat.isFile() || stat.isSymbolicLink()) throw new TypeError("hashline target must be a regular file");
-		const temporary = path.join(path.dirname(absolute), `.${path.basename(absolute)}.${randomUUID()}.tmp`);
-		try {
-			await fs.writeFile(temporary, content, { mode: stat.mode });
-			await fs.rename(temporary, absolute);
-		} finally {
-			await fs.rm(temporary, { force: true });
-		}
-		return { text: content };
-	}
-}
-
-async function hashlineEditWorkspace(
-	cwd: string,
-	snapshotOwner: { fileSnapshotStore?: InMemorySnapshotStore },
-	request: IpythonHostRequest,
-): Promise<Record<string, unknown>> {
-	const data = request.data;
-	strict(data, ["input"]);
-	const input = stringValue(data, "input", { max: MAX_EDIT_VALUE_CHARS });
-	const patch = Patch.parse(input, { cwd });
-	if (patch.sections.length !== 1) throw new RangeError("workspace.hashline_edit accepts exactly one file section");
-	const section = patch.sections[0];
-	if (!section.fileHash) throw new TypeError("hashline edit requires a snapshot tag from workspace.search");
-	if (section.parse().fileOp)
-		throw new TypeError("hashline create, delete, and move operations are not supported here");
-	const authoredPath = path.resolve(cwd, section.path);
-	const authoredStat = await fs.lstat(authoredPath);
-	if (!authoredStat.isFile() || authoredStat.isSymbolicLink())
-		throw new TypeError("hashline target must be a regular file");
-	const absolute = await canonicalWorkspacePath(cwd, section.path);
-	return await withFileLock(
-		absolute,
-		async () => {
-			const patcher = new Patcher({
-				fs: new WorkspaceHashlineFilesystem(cwd, request.signal),
-				snapshots: getFileSnapshotStore(snapshotOwner),
-				enforceSeenLines: true,
-			});
-			const applied = await patcher.apply(patch);
-			const result = applied.sections[0];
-			if (!result) throw new Error("hashline edit produced no result");
-			const diff = generateDiffString(result.before, result.after, undefined, { path: section.path });
-			const displayPath = path.resolve(cwd, section.path);
-			await request.publishDisplay(
-				richDisplay(
-					DIFF_DISPLAY_MIME,
-					{ path: displayPath, diff: diff.diff, start_line: result.firstChangedLine },
-					`Edited ${displayPath}`,
-				),
-			);
-			return {
-				path: displayPath,
-				op: result.op,
-				header: result.header,
-				tag: result.fileHash,
-				diff: diff.diff,
-				start_line: result.firstChangedLine ?? null,
-				warnings: result.warnings,
-			};
-		},
-		{ signal: request.signal },
-	);
-}
-
-async function editWorkspace(cwd: string, request: IpythonHostRequest): Promise<Record<string, unknown>> {
-	const data = request.data;
-	strict(data, ["path", "old_str", "new_str"]);
-	const inputPath = stringValue(data, "path", { max: 4_096 });
-	const authoredPath = path.resolve(cwd, inputPath);
-	const authoredStat = await fs.lstat(authoredPath);
-	if (authoredStat.isSymbolicLink()) throw new TypeError("path must not be a symbolic link");
-	const oldValue = stringValue(data, "old_str", { max: MAX_EDIT_VALUE_CHARS });
-	const newValue = stringValue(data, "new_str", { optional: true, max: MAX_EDIT_VALUE_CHARS });
-	const absolute = await canonicalWorkspacePath(cwd, inputPath);
-	const displayPath = authoredPath;
-	return await withFileLock(
-		absolute,
-		async () => {
-			const stat = await fs.lstat(absolute);
-			if (!stat.isFile() || stat.isSymbolicLink()) throw new TypeError("path must be a regular file");
-			if (stat.size > MAX_EDIT_FILE_BYTES) throw new RangeError("file is too large for workspace.edit");
-			const before = await fs.readFile(absolute, "utf8");
-			let count = 0;
-			let cursor = before.indexOf(oldValue);
-			while (cursor >= 0) {
-				count += 1;
-				if (count > 1) break;
-				cursor = before.indexOf(oldValue, cursor + oldValue.length);
-			}
-			if (count !== 1)
-				throw new RangeError(count === 0 ? "old_str was not found" : "old_str must match exactly once");
-			const offset = before.indexOf(oldValue);
-			const after = `${before.slice(0, offset)}${newValue}${before.slice(offset + oldValue.length)}`;
-			const temporary = path.join(path.dirname(absolute), `.${path.basename(absolute)}.${randomUUID()}.tmp`);
-			try {
-				await fs.writeFile(temporary, after, { mode: stat.mode });
-				await fs.rename(temporary, absolute);
-			} finally {
-				await fs.rm(temporary, { force: true });
-			}
-			const diff = generateDiffString(before, after, undefined, { path: inputPath });
-			const startLine = before.slice(0, offset).split("\n").length;
-			await request.publishDisplay(
-				richDisplay(
-					DIFF_DISPLAY_MIME,
-					{ path: displayPath, diff: diff.diff, start_line: startLine },
-					`Edited ${displayPath}`,
-				),
-			);
-			return { path: displayPath, diff: diff.diff, start_line: startLine };
-		},
-		{ signal: request.signal },
-	);
 }
 
 function canonicalBase64(value: string): Buffer {
@@ -490,6 +293,67 @@ function capabilityHandlers(harness: HarnessService, refresh?: () => Promise<voi
 	return handlers;
 }
 
+async function waitForMcpNotification(
+	manager: IpythonMcpManagerOwner,
+	options: { server?: string; method?: string; timeoutMs: number; signal: AbortSignal },
+): Promise<Readonly<Record<string, unknown>>> {
+	throwIfAborted(options.signal);
+	const pending = Promise.withResolvers<Readonly<Record<string, unknown>>>();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	let unsubscribe: (() => void) | undefined;
+	let settled = false;
+	const finish = (callback: () => void) => {
+		if (settled) return;
+		settled = true;
+		if (timer !== undefined) clearTimeout(timer);
+		unsubscribe?.();
+		callback();
+	};
+	const onAbort = () => finish(() => pending.reject(new ToolAbortError()));
+	options.signal.addEventListener("abort", onAbort, { once: true });
+	try {
+		unsubscribe = manager.addNotificationListener((server, method, params) => {
+			if (options.server && options.server !== server) return;
+			if (options.method && options.method !== method) return;
+			finish(() => pending.resolve({ server, method, params: sanitizeMcpValue(params) }));
+		});
+		if (settled) unsubscribe();
+		if (!settled && options.timeoutMs > 0) {
+			timer = setTimeout(() => finish(() => pending.resolve({ timeout: true })), options.timeoutMs);
+			timer.unref?.();
+		}
+		return await pending.promise;
+	} finally {
+		options.signal.removeEventListener("abort", onAbort);
+		if (!settled) finish(() => {});
+	}
+}
+
+const PRIVATE_MCP_KEYS = new Set([
+	"_meta",
+	"api_key",
+	"apikey",
+	"authorization",
+	"cookie",
+	"credential",
+	"password",
+	"refresh_token",
+	"secret",
+	"set-cookie",
+	"token",
+	"access_token",
+]);
+
+function sanitizeMcpValue(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(sanitizeMcpValue);
+	if (!value || typeof value !== "object") return value;
+	return Object.fromEntries(
+		Object.entries(value)
+			.filter(([key]) => !PRIVATE_MCP_KEYS.has(key.toLowerCase()))
+			.map(([key, item]) => [key, sanitizeMcpValue(item)]),
+	);
+}
+
 function mcpServer(
 	owner: IpythonMcpOwner | undefined,
 	data: Readonly<Record<string, unknown>>,
@@ -502,11 +366,27 @@ function mcpServer(
 	return { owner, server };
 }
 
-function boundedJson<T>(value: T, label: string): T {
+async function boundedJson<T>(
+	request: IpythonHostRequest,
+	value: T,
+	label: string,
+): Promise<T | Readonly<Record<string, unknown>>> {
 	const encoded = JSON.stringify(value);
 	if (encoded === undefined) throw new TypeError(`${label} is not JSON-compatible`);
-	if (Buffer.byteLength(encoded) > MAX_MCP_JSON_BYTES) throw new RangeError(`${label} is too large`);
-	return JSON.parse(encoded) as T;
+	if (Buffer.byteLength(encoded) <= MAX_MCP_JSON_BYTES) return JSON.parse(encoded) as T;
+	throwIfAborted(request.signal);
+	const artifact = await request.allocateArtifact({
+		label: `mcp-${label.toLowerCase().replaceAll(" ", "-")}`,
+		mimeType: "application/json",
+		suffix: ".json",
+	});
+	throwIfAborted(request.signal);
+	await fs.writeFile(artifact.path, encoded, "utf8");
+	throwIfAborted(request.signal);
+	return {
+		truncated: true,
+		artifact: { ...artifact, bytes: Buffer.byteLength(encoded), mime_type: "application/json" },
+	};
 }
 
 function publicConfig(config: MCPServerConfig | undefined): Record<string, unknown> {
@@ -544,7 +424,7 @@ function createMcpHandlers(owner: IpythonMcpOwner | undefined): IpythonHostHandl
 				request.signal,
 				booleanValue(request.data, "refresh", false),
 			);
-			return { tools: boundedJson(tools, "MCP tool list") };
+			return { tools: await boundedJson(request, sanitizeMcpValue(tools), "MCP tool list") };
 		},
 		"mcp.call_tool": async request => {
 			strict(request.data, ["server", "tool", "arguments"]);
@@ -552,22 +432,51 @@ function createMcpHandlers(owner: IpythonMcpOwner | undefined): IpythonHostHandl
 			const tool = stringValue(request.data, "tool", { max: 256 });
 			const args = record(request.data.arguments ?? {}, "arguments") as Record<string, unknown>;
 			const response = record(
-				boundedJson(await target.owner.callTool(target.server, tool, args, request.signal), "MCP tool result"),
+				await target.owner.callTool(target.server, tool, args, request.signal),
 				"MCP tool result",
 			);
-			return { result: response.content ?? null, is_error: Boolean(response.isError) };
+			return {
+				result: await boundedJson(request, sanitizeMcpValue(response.content ?? null), "MCP tool result"),
+				is_error: Boolean(response.isError),
+			};
 		},
 		"mcp.list_resources": async request => {
 			strict(request.data, ["server", "refresh"]);
 			const target = mcpServer(owner, request.data);
-			if (booleanValue(request.data, "refresh", false)) await target.owner.refreshServerResources(target.server);
-			const resources = record(
-				boundedJson(target.owner.getServerResources(target.server) ?? {}, "MCP resources"),
-				"MCP resources",
-			);
+			if (booleanValue(request.data, "refresh", false)) {
+				throwIfAborted(request.signal);
+				await untilAborted(request.signal, () => target.owner.refreshServerResources(target.server));
+				throwIfAborted(request.signal);
+			}
+			const value = record(target.owner.getServerResources(target.server) ?? {}, "MCP resources");
 			return {
-				resources: Array.isArray(resources.resources) ? resources.resources : [],
-				templates: Array.isArray(resources.templates) ? resources.templates : [],
+				resources: await boundedJson(
+					request,
+					sanitizeMcpValue(Array.isArray(value.resources) ? value.resources : []),
+					"MCP resources",
+				),
+				templates: await boundedJson(
+					request,
+					sanitizeMcpValue(Array.isArray(value.templates) ? value.templates : []),
+					"MCP resource templates",
+				),
+			};
+		},
+		"mcp.resource_templates": async request => {
+			strict(request.data, ["server", "refresh"]);
+			const target = mcpServer(owner, request.data);
+			if (booleanValue(request.data, "refresh", false)) {
+				throwIfAborted(request.signal);
+				await untilAborted(request.signal, () => target.owner.refreshServerResources(target.server));
+				throwIfAborted(request.signal);
+			}
+			const resources = record(target.owner.getServerResources(target.server) ?? {}, "MCP resources");
+			return {
+				templates: await boundedJson(
+					request,
+					sanitizeMcpValue(Array.isArray(resources.templates) ? resources.templates : []),
+					"MCP resource templates",
+				),
 			};
 		},
 		"mcp.read_resource": async request => {
@@ -578,13 +487,23 @@ function createMcpHandlers(owner: IpythonMcpOwner | undefined): IpythonHostHandl
 				stringValue(request.data, "uri", { max: 8_192 }),
 				{ signal: request.signal },
 			);
-			return { result: boundedJson(result ?? null, "MCP resource") };
+			return { result: await boundedJson(request, sanitizeMcpValue(result ?? null), "MCP resource") };
 		},
 		"mcp.list_prompts": async request => {
 			strict(request.data, ["server", "refresh"]);
 			const target = mcpServer(owner, request.data);
-			if (booleanValue(request.data, "refresh", false)) await target.owner.refreshServerPrompts(target.server);
-			return { prompts: boundedJson(target.owner.getServerPrompts(target.server) ?? [], "MCP prompts") };
+			if (booleanValue(request.data, "refresh", false)) {
+				throwIfAborted(request.signal);
+				await untilAborted(request.signal, () => target.owner.refreshServerPrompts(target.server));
+				throwIfAborted(request.signal);
+			}
+			return {
+				prompts: await boundedJson(
+					request,
+					sanitizeMcpValue(target.owner.getServerPrompts(target.server) ?? []),
+					"MCP prompts",
+				),
+			};
 		},
 		"mcp.get_prompt": async request => {
 			strict(request.data, ["server", "name", "arguments"]);
@@ -602,7 +521,29 @@ function createMcpHandlers(owner: IpythonMcpOwner | undefined): IpythonHostHandl
 				args,
 				{ signal: request.signal },
 			);
-			return { result: boundedJson(result ?? null, "MCP prompt") };
+			return { result: await boundedJson(request, sanitizeMcpValue(result ?? null), "MCP prompt") };
+		},
+		"mcp.notification_state": request => {
+			strict(request.data, []);
+			return sanitizeMcpValue(owner?.getNotificationState?.() ?? { enabled: false, subscriptions: [] }) as Readonly<
+				Record<string, unknown>
+			>;
+		},
+		"mcp.wait_notification": async request => {
+			strict(request.data, ["server", "method", "timeout"]);
+			if (!owner?.waitNotification) throw new Error("MCP notifications are not available");
+			const server = stringValue(request.data, "server", { optional: true, max: 256 }) || undefined;
+			const method = stringValue(request.data, "method", { optional: true, max: 256 }) || undefined;
+			const timeout = integerValue(request.data, "timeout", 30, 0, 120);
+			const notification = await owner.waitNotification({
+				server,
+				method,
+				timeoutMs: timeout * 1_000,
+				signal: request.signal,
+			});
+			return (await boundedJson(request, sanitizeMcpValue(notification), "MCP notification")) as Readonly<
+				Record<string, unknown>
+			>;
 		},
 		"mcp.config": request => {
 			strict(request.data, ["server"]);
@@ -616,23 +557,24 @@ function createMcpHandlers(owner: IpythonMcpOwner | undefined): IpythonHostHandl
 		"mcp.refresh": async request => {
 			strict(request.data, ["server"]);
 			const target = mcpServer(owner, request.data);
-			return { refreshed: await target.owner.refreshCredentials(target.server) };
+			const refreshed = await target.owner.reconnect(target.server, request.signal);
+			return {
+				refreshed,
+				connected: target.owner.getConnectedServers().includes(target.server),
+				connection: refreshed ? "connected" : "disconnected",
+			};
 		},
 	};
 }
 
 /** Builds typed session services used by the Python capability surface without invoking an AgentTool. */
 export function createIpythonCapabilityHostHandlers(options: IpythonCapabilityServiceOptions): IpythonHostHandlers {
-	const cwd = path.resolve(options.cwd);
 	return composeIpythonHostHandlers(
 		{
 			"model.info": request => {
 				strict(request.data, []);
 				return { ...options.modelInfo() };
 			},
-			"workspace.search": request => searchWorkspace(cwd, options.snapshotOwner, request),
-			"workspace.edit": request => editWorkspace(cwd, request),
-			"workspace.hashline_edit": request => hashlineEditWorkspace(cwd, options.snapshotOwner, request),
 			"attachment.admit": admitAttachment,
 		},
 		capabilityHandlers(options.harness, options.refreshSystemPrompt),

@@ -4,10 +4,10 @@ import {
 	measurePromptText,
 	promptPayloadDelta,
 } from "@oh-my-pi/pi-coding-agent/ipython/prompt-measurement";
-import recordedBaseline from "./fixtures/pre-ipython-provider-baseline.json" with { type: "json" };
-import { capturePreIpythonPromptBaseline } from "./prompt-baseline-fixture";
+import recordedBaseline from "./fixtures/ipython-provider-request.json" with { type: "json" };
+import { captureIpythonProviderRequest } from "./prompt-baseline-fixture";
 
-const PRE_IPYTHON_TOOL_NAMES = ["read", "bash", "edit", "eval", "glob", "grep", "task", "todo", "web_search", "write"];
+const PROVIDER_TOOL_NAMES = ["ipython"];
 
 describe("provider prompt measurement", () => {
 	test("measures UTF-8 text, JSON framing, and signed fixture deltas", () => {
@@ -18,12 +18,22 @@ describe("provider prompt measurement", () => {
 		expect(measurePromptJson({ value: "one" }).bytes).toBe(Buffer.byteLength('{"value":"one"}', "utf8"));
 	});
 
-	test("captures a hermetic pre-cutover first request without making size a CI threshold", async () => {
-		const current = await capturePreIpythonPromptBaseline();
+	test("captures the exclusive one-tool request and ordered prompt blocks", async () => {
+		const current = await captureIpythonProviderRequest();
 
 		expect(current.provider).toBe("anthropic-messages");
-		expect(current.systemPromptParts).toBeGreaterThan(1);
-		expect(current.toolNames).toEqual(PRE_IPYTHON_TOOL_NAMES);
+		expect(current.systemPromptParts).toBe(3);
+		expect(current.toolNames).toEqual(PROVIDER_TOOL_NAMES);
+		expect(current.toolConcurrency).toBe("exclusive");
+		expect(current.toolSchema).toEqual({
+			type: "object",
+			properties: { code: { type: "string" } },
+			required: ["code"],
+			additionalProperties: false,
+		});
+		expect(current.runtimeInstructionIndex).toBe(0);
+		expect(current.projectContextIndex).toBeGreaterThan(current.runtimeInstructionIndex);
+		expect(current.volatileNoticeIndex).toBeGreaterThan(current.projectContextIndex);
 		for (const measurement of Object.values(current.categories)) {
 			expect(measurement.bytes).toBeGreaterThan(0);
 			expect(measurement.tokens).toBeGreaterThan(0);
@@ -31,10 +41,7 @@ describe("provider prompt measurement", () => {
 		expect(current.totalFirstRequest.bytes).toBeGreaterThan(current.categories.toolSchemas.bytes);
 		expect(current.bodySha256).toMatch(/^[a-f0-9]{64}$/);
 
-		// The checked-in values are comparison evidence, not numeric pass/fail limits.
-		expect(recordedBaseline.sourceRevision).toBe("6c079d5149b177258e20adb12c00399cda5ce548");
-		expect(recordedBaseline.provider).toBe(current.provider);
-		expect(recordedBaseline.toolNames).toEqual(PRE_IPYTHON_TOOL_NAMES);
-		expect(recordedBaseline.bodySha256).toMatch(/^[a-f0-9]{64}$/);
+		// The checked-in request is authoritative comparison evidence, not a size limit.
+		expect(current).toEqual(recordedBaseline as unknown as typeof current);
 	});
 });

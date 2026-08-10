@@ -2,10 +2,15 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createIpythonCapabilityHostHandlers, type IpythonMcpOwner } from "../../src/ipython/capability-service.js";
+import {
+	createIpythonCapabilityHostHandlers,
+	createIpythonMcpOwner,
+	type IpythonMcpManagerOwner,
+	type IpythonMcpOwner,
+} from "../../src/ipython/capability-service.js";
 import type { IpythonDisplayEvent, IpythonHostRequest } from "../../src/ipython/controller.js";
 import { OmpHarnessService } from "../../src/ipython/harness-service.js";
-import type { MCPServerConfig } from "../../src/mcp/types.js";
+import type { MCPServerConfig, MCPServerConnection, MCPTransport } from "../../src/mcp/types.js";
 
 const temporaryRoots: string[] = [];
 
@@ -23,8 +28,6 @@ async function fixture(mcp?: IpythonMcpOwner) {
 	let refreshes = 0;
 	const harness = new OmpHarnessService({ localRoot: () => local, globalRoot: global });
 	const handlers = createIpythonCapabilityHostHandlers({
-		cwd: root,
-		snapshotOwner: {},
 		harness,
 		mcp,
 		modelInfo: () => ({ id: "provider/vision", input: ["text", "image"] }),
@@ -80,16 +83,25 @@ function mcpFixture(): { owner: IpythonMcpOwner; calls: Array<Record<string, unk
 				calls.push({ operation: "call", name, tool, args, aborted: signal.aborted });
 				return { content: [{ type: "text", text: String(args.value) }], isError: false };
 			},
-			getServerResources: () => ({ resources: [{ uri: "demo://one" }], templates: [] }),
+			getServerResources: () => ({
+				resources: [{ uri: "demo://one" }],
+				templates: [{ uriTemplate: "demo://{id}" }],
+			}),
 			readServerResource: async (_name, uri) => ({ contents: [{ uri, text: "resource" }] }),
 			getServerPrompts: () => [{ name: "summarize" }],
 			executePrompt: async (_name, promptName, args) => ({
 				messages: [{ role: "user", content: `${promptName}:${args?.topic}` }],
 			}),
-			refreshCredentials: async name => {
-				calls.push({ operation: "refresh-credentials", name });
+			reconnect: async name => {
+				calls.push({ operation: "reconnect", name });
 				return true;
 			},
+			getNotificationState: () => ({ enabled: true, subscriptions: [{ server: "demo", methods: ["changed"] }] }),
+			waitNotification: async options => ({
+				server: options.server ?? "demo",
+				method: options.method ?? "changed",
+				params: { value: 1, access_token: "private" },
+			}),
 			refreshServerResources: async name => {
 				calls.push({ operation: "refresh-resources", name });
 			},
@@ -100,48 +112,45 @@ function mcpFixture(): { owner: IpythonMcpOwner; calls: Array<Record<string, unk
 	};
 }
 
-describe("IPython typed capability services", () => {
-	test("searches and edits only regular files inside the workspace and publishes the OMP diff", async () => {
-		const f = await fixture();
-		const file = path.join(f.root, "example.txt");
-		await fs.writeFile(file, "alpha\nbeta\n");
-		await fs.writeFile(path.join(f.root, "hashline.txt"), "delta\nepsilon\n");
-		const search = await f.call("workspace.search", { query: "beta", paths: ["."], limit: 10 });
-		expect(search).toMatchObject({
-			matches: [{ path: "example.txt", line: 2, text: "beta" }],
-			truncated: false,
-		});
-		const anchored = await f.call("workspace.search", { query: "epsilon", paths: ["hashline.txt"], limit: 10 });
-		const snapshot = (anchored.snapshots as Array<{ header: string }>)[0];
-		if (!snapshot) throw new Error("search did not return a hashline snapshot");
-		await expect(
-			f.call("workspace.hashline_edit", { input: `${snapshot.header}\nPUT 1-1:\n+changed` }),
-		).rejects.toThrow("never displayed");
-		const hashline = await f.call("workspace.hashline_edit", {
-			input: `${snapshot.header}\nPUT 2-2:\n+zeta`,
-		});
-		expect(hashline).toMatchObject({ op: "update", start_line: 2 });
-		expect(await fs.readFile(path.join(f.root, "hashline.txt"), "utf8")).toBe("delta\nzeta\n");
-		const edited = await f.call("workspace.edit", { path: "example.txt", old_str: "beta", new_str: "gamma" });
-		expect(edited).toMatchObject({ start_line: 2 });
-		expect(path.basename(String(edited.path))).toBe("example.txt");
-		expect(await fs.readFile(file, "utf8")).toBe("alpha\ngamma\n");
-		expect(f.displays).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({
-					kind: "display",
-					data: expect.objectContaining({
-						"application/vnd.omp.diff+json": expect.objectContaining({ path: edited.path, start_line: 2 }),
-					}),
-				}),
-			]),
-		);
-		await expect(f.call("workspace.edit", { path: "example.txt", old_str: "a", new_str: "x" })).rejects.toThrow(
-			"exactly once",
-		);
-		await expect(f.call("workspace.search", { query: "x", paths: [".."] })).rejects.toThrow("outside");
-	});
+function mcpConnection(request: () => unknown | Promise<unknown>): MCPServerConnection {
+	const transport: MCPTransport = {
+		connected: true,
+		request: async <T>() => (await request()) as T,
+		notify: async () => {},
+		close: async () => {},
+	};
+	return {
+		name: "demo",
+		config: { type: "http", url: "https://example.test/mcp" },
+		transport,
+		serverInfo: { name: "demo", version: "1" },
+		capabilities: {},
+	};
+}
 
+function mcpManager(
+	connection: MCPServerConnection,
+	reconnect: IpythonMcpManagerOwner["reconnectServer"],
+	addNotificationListener: IpythonMcpManagerOwner["addNotificationListener"] = () => () => {},
+): IpythonMcpManagerOwner {
+	return {
+		getAllServerNames: () => ["demo"],
+		getConnectedServers: () => ["demo"],
+		getServerConfig: () => connection.config,
+		getConnection: () => connection,
+		reconnectServer: reconnect,
+		getNotificationState: () => ({ enabled: true, subscriptions: new Map() }),
+		addNotificationListener,
+		getServerResources: () => undefined,
+		readServerResource: async () => undefined,
+		getServerPrompts: () => undefined,
+		executePrompt: async () => undefined,
+		refreshServerResources: async () => {},
+		refreshServerPrompts: async () => {},
+	};
+}
+
+describe("IPython typed capability services", () => {
 	test("admits bounded signature-checked images and reports the active model without exposing HTML", async () => {
 		const f = await fixture();
 		expect(await f.call("model.info")).toEqual({ id: "provider/vision", input: ["text", "image"] });
@@ -187,6 +196,22 @@ describe("IPython typed capability services", () => {
 		expect(f.refreshes()).toBe(6);
 	});
 
+	test("spills oversized MCP values without exposing private metadata", async () => {
+		const mcp = mcpFixture();
+		mcp.owner.callTool = async () => ({
+			content: [{ type: "text", text: "x".repeat(1024 * 1024) }],
+			isError: false,
+			_meta: { access_token: "private" },
+		});
+		const f = await fixture(mcp.owner);
+		const result = await f.call("mcp.call_tool", { server: "demo", tool: "large" });
+		expect(result).toMatchObject({ result: { truncated: true, artifact: { mime_type: "application/json" } } });
+		const artifact = await fs.readFile(path.join(f.root, "artifact.json"), "utf8");
+		expect(artifact.length).toBeGreaterThan(1024 * 1024);
+		expect(artifact).not.toContain("access_token");
+		expect(artifact).not.toContain("private");
+	});
+
 	test("uses the host MCP owner for tools, resources, prompts, safe config, and refresh", async () => {
 		const mcp = mcpFixture();
 		const f = await fixture(mcp.owner);
@@ -198,7 +223,10 @@ describe("IPython typed capability services", () => {
 		});
 		expect(await f.call("mcp.list_resources", { server: "demo", refresh: true })).toMatchObject({
 			resources: [{ uri: "demo://one" }],
-			templates: [],
+			templates: [{ uriTemplate: "demo://{id}" }],
+		});
+		expect(await f.call("mcp.resource_templates", { server: "demo" })).toEqual({
+			templates: [{ uriTemplate: "demo://{id}" }],
 		});
 		expect(await f.call("mcp.read_resource", { server: "demo", uri: "demo://one" })).toMatchObject({
 			result: { contents: [{ text: "resource" }] },
@@ -212,12 +240,109 @@ describe("IPython typed capability services", () => {
 		const config = await f.call("mcp.config", { server: "demo" });
 		expect(config).toEqual({ server: "demo", connected: true, type: "http", url: "https://example.test/mcp" });
 		expect(JSON.stringify(config)).not.toContain("secret");
-		expect(await f.call("mcp.refresh", { server: "demo" })).toEqual({ refreshed: true });
+		expect(await f.call("mcp.notification_state")).toMatchObject({ enabled: true });
+		expect(await f.call("mcp.wait_notification", { server: "demo", method: "changed", timeout: 1 })).toEqual({
+			server: "demo",
+			method: "changed",
+			params: { value: 1 },
+		});
+		expect(await f.call("mcp.refresh", { server: "demo" })).toEqual({
+			refreshed: true,
+			connected: true,
+			connection: "connected",
+		});
 		expect(mcp.calls).toEqual(
 			expect.arrayContaining([
 				expect.objectContaining({ operation: "call", tool: "echo" }),
-				expect.objectContaining({ operation: "refresh-credentials" }),
+				expect.objectContaining({ operation: "reconnect" }),
 			]),
 		);
+	});
+
+	test("reconnects once for stale transports and host-owned auth challenges", async () => {
+		let firstCalls = 0;
+		const stale = mcpConnection(() => {
+			firstCalls += 1;
+			throw new Error("ECONNRESET");
+		});
+		const recovered = mcpConnection(() => ({ content: [{ type: "text", text: "recovered" }], isError: false }));
+		let reconnects = 0;
+		const owner = createIpythonMcpOwner(
+			mcpManager(stale, async () => {
+				reconnects += 1;
+				return recovered;
+			}),
+		);
+		expect(await owner.callTool("demo", "echo", {}, new AbortController().signal)).toMatchObject({
+			content: [{ text: "recovered" }],
+		});
+		expect({ firstCalls, reconnects }).toEqual({ firstCalls: 1, reconnects: 1 });
+
+		const challenged = mcpConnection(() => ({
+			content: [{ type: "text", text: "authenticate" }],
+			isError: true,
+			_meta: { "mcp/www_authenticate": ["Bearer resource_metadata=demo"] },
+		}));
+		let challenge: unknown;
+		const authOwner = createIpythonMcpOwner(
+			mcpManager(challenged, async (_name, options) => {
+				challenge = options?.authChallenge;
+				return recovered;
+			}),
+		);
+		expect(await authOwner.callTool("demo", "echo", {}, new AbortController().signal)).toMatchObject({
+			content: [{ text: "recovered" }],
+		});
+		expect(challenge).toEqual({ wwwAuthenticate: ["Bearer resource_metadata=demo"] });
+	});
+
+	test("cancels MCP notification waits and removes their listener", async () => {
+		let listener: ((server: string, method: string, params: unknown) => void) | undefined;
+		let removed = 0;
+		const connection = mcpConnection(() => null);
+		const owner = createIpythonMcpOwner(
+			mcpManager(
+				connection,
+				async () => connection,
+				next => {
+					listener = next;
+					return () => {
+						removed += 1;
+					};
+				},
+			),
+		);
+		const abort = new AbortController();
+		const waiting = owner.waitNotification?.({ timeoutMs: 1_000, signal: abort.signal });
+		expect(listener).toBeDefined();
+		abort.abort(new Error("cancel wait"));
+		await expect(waiting).rejects.toThrow("Operation aborted");
+		expect(removed).toBe(1);
+	});
+
+	test("waits for a matching MCP notification and cleans up a synchronous buffered delivery", async () => {
+		let removed = 0;
+		const connection = mcpConnection(() => null);
+		const owner = createIpythonMcpOwner(
+			mcpManager(
+				connection,
+				async () => connection,
+				listener => {
+					listener("demo", "changed", { value: 1, access_token: "private" });
+					return () => {
+						removed += 1;
+					};
+				},
+			),
+		);
+		expect(
+			await owner.waitNotification?.({
+				server: "demo",
+				method: "changed",
+				timeoutMs: 100,
+				signal: new AbortController().signal,
+			}),
+		).toEqual({ server: "demo", method: "changed", params: { value: 1 } });
+		expect(removed).toBe(1);
 	});
 });

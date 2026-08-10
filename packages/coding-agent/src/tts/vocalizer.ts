@@ -33,7 +33,7 @@
  *
  * Errors are swallowed (debug-logged) so a synthesis or playback failure never
  * throws into the turn. A process-level singleton ({@link vocalizer}) is shared
- * by the event controller (streaming deltas) and the ask tool (spoken
+ * by the event controller (streaming deltas) and the question prompt (spoken
  * questions); the event controller wires the per-session enhancer via
  * {@link Vocalizer.setEnhancer}.
  */
@@ -415,5 +415,5 @@ export class Vocalizer {
 	}
 }
 
-/** Process-level vocalizer shared by the event controller and the ask tool. */
+/** Process-level vocalizer shared by the event controller and the question prompt. */
 export const vocalizer = new Vocalizer();

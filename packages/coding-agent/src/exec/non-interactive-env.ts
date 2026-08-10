@@ -13,8 +13,9 @@ export const NON_INTERACTIVE_ENV: Readonly<Record<string, string>> = {
 	AWS_PAGER: "",
 	HOMEBREW_PAGER: "cat",
 	LESS: "FRX",
-	// Disable terminal features that can block the process.
+	// Disable terminal features and macOS shell-session bookkeeping.
 	TERM: "dumb",
+	SHELL_SESSIONS_DISABLE: "1",
 	NO_COLOR: "1",
 	PYTHONUNBUFFERED: "1",
 	// Disable editor and terminal credential prompts.

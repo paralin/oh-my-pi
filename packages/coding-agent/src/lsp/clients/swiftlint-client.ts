@@ -66,11 +66,6 @@ export class SwiftLintClient implements LinterClient {
 		private readonly cwd: string,
 	) {}
 
-	async format(_filePath: string, content: string): Promise<string> {
-		// SwiftLint doesn't support formatting
-		return content;
-	}
-
 	async lint(filePath: string): Promise<Diagnostic[]> {
 		const result = await runSwiftLint(
 			["lint", "--quiet", "--reporter", "json", filePath],

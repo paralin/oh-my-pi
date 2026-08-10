@@ -42,8 +42,7 @@ const READ_RAW_ONLY_RE = /^raw$/i;
 /**
  * Split a read-tool path into its base path and trailing selector, mirroring the
  * read tool's own splitter. Single source of the grammar in this package: the
- * file-operations list strips selectors via {@link stripReadSelector}, and the
- * supersede-prune pass keys on both parts via `readToolSupersedeKey`.
+ * file-operations list strips selectors via {@link stripReadSelector}, and compaction records a stable base path.
  */
 export function splitReadSelector(path: string): { path: string; sel?: string } {
 	const colon = path.lastIndexOf(":");

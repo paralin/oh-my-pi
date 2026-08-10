@@ -31,19 +31,16 @@ import { runExtensionCompact } from "../../extensibility/extensions/compact-hand
 import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
-import { type AgentSession, persistenceSafeAgentSessionEvent } from "../../session/agent-session";
+import type { AgentSession } from "../../session/agent-session";
 import type { AgentSessionEvent } from "../../session/agent-session-events";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { sessionMessageUsage } from "../../session/session-stats";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
 import { parseSlashCommand } from "../../slash-commands/helpers/parse";
-import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
 import { initializeExtensions } from "../runtime-init";
-import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
-import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import {
 	type RpcHarnessEvent,
@@ -58,14 +55,6 @@ import type {
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
-	RpcHostToolCallRequest,
-	RpcHostToolCancelRequest,
-	RpcHostToolDefinition,
-	RpcHostToolResult,
-	RpcHostToolUpdate,
-	RpcHostUriCancelRequest,
-	RpcHostUriRequest,
-	RpcHostUriResult,
 	RpcResponse,
 	RpcSessionState,
 	RpcSessionUsage,
@@ -313,7 +302,7 @@ export async function deliverRpcSteeringIfNeeded(
 
 function providerSafeAssistantText(event: AgentSessionEvent): string | undefined {
 	if (event.type !== "message_end" || event.message.role !== "assistant") return undefined;
-	const safeEvent = persistenceSafeAgentSessionEvent(event);
+	const safeEvent = event;
 	if (safeEvent.type !== "message_end" || safeEvent.message.role !== "assistant") return undefined;
 	const text = safeEvent.message.content
 		.filter(block => block.type === "text")
@@ -375,16 +364,7 @@ export class RpcPendingExtensionRequests extends Map<string, PendingExtensionReq
 	}
 }
 
-type RpcOutput = (
-	obj:
-		| RpcResponse
-		| RpcExtensionUIRequest
-		| RpcHostToolCallRequest
-		| RpcHostToolCancelRequest
-		| RpcHostUriRequest
-		| RpcHostUriCancelRequest
-		| object,
-) => void;
+type RpcOutput = (obj: RpcResponse | RpcExtensionUIRequest | object) => void;
 
 export type RpcSessionChangeCommand = Extract<
 	RpcCommand,
@@ -674,7 +654,7 @@ export function streamRpcSessionEvent(
 		return undefined;
 	}
 	if (ledger.hasResult) return undefined;
-	const eventPersistence = ledger.appendEvent(persistenceSafeAgentSessionEvent(event), event).then(() => undefined);
+	const eventPersistence = ledger.appendEvent(event, event).then(() => undefined);
 	void eventPersistence.catch(errorValue => {
 		if (ledger.hasResult) return;
 		deps.onLedgerFailure("session.watch", errorValue);
@@ -713,9 +693,6 @@ export interface RpcInputFrameDeps {
 	errorResponse: (id: string | undefined, command: string, message: string) => RpcResponse;
 	trackBackgroundTask?: (task: Promise<void>) => void;
 	pendingExtensionRequests: Map<string, PendingExtensionRequest>;
-	onHostToolResult: (frame: RpcHostToolResult) => void;
-	onHostToolUpdate: (frame: RpcHostToolUpdate) => void;
-	onHostUriResult: (frame: RpcHostUriResult) => void;
 }
 
 /**
@@ -737,41 +714,25 @@ export function dispatchRpcControlFrame(parsed: unknown, deps: RpcInputFrameDeps
 		return true;
 	}
 
-	if (isRpcHostToolResult(parsed)) {
-		deps.onHostToolResult(parsed);
-		return true;
-	}
-
-	if (isRpcHostToolUpdate(parsed)) {
-		deps.onHostToolUpdate(parsed);
-		return true;
-	}
-
-	if (isRpcHostUriResult(parsed)) {
-		deps.onHostUriResult(parsed);
-		return true;
-	}
-
 	return false;
 }
 
 /**
  * Dispatch a single parsed frame from the RPC input stream.
  *
- * Bash commands are dispatched in the background so the caller can keep reading
- * subsequent frames while a shell command is still running. This lets a client
- * send `abort_bash` while a long-running `bash` is in flight. Response
- * correlation is preserved via each command's `id`; ordering across concurrent
- * commands is not guaranteed and clients MUST match on `id`.
+ * A `session.result` wait is dispatched in the background so the caller can
+ * continue sending controls while it waits for the terminal session state.
+ * Response correlation is preserved via each command's `id`.
  *
  * @returns `undefined` when the frame was routed to a side-channel handler
- *   (extension UI response, host tool/URI frames) or dispatched in the
- *   background (`bash`). Otherwise a promise that resolves once the response
- *   for the command has been emitted via `output`. Errors from `handleCommand`
- *   on non-`bash` commands propagate; the caller is expected to wrap them.
+ *   (for example, an extension UI response) or when `session.result` was
+ *   dispatched in the background. Otherwise a promise that resolves once the
+ *   response for the command has been emitted via `output`. Errors from
+ *   `handleCommand` on serial commands propagate; the caller is expected to
+ *   wrap them.
  */
 function isBackgroundRpcCommand(command: RpcCommand): boolean {
-	return command.type === "bash" || command.type === "session.result";
+	return command.type === "session.result";
 }
 
 export function dispatchRpcInputFrame(parsed: unknown, deps: RpcInputFrameDeps): Promise<void> | undefined {
@@ -1002,11 +963,10 @@ export function shouldForceLedgerSeal(ledger: RpcHarnessSessionOwner | undefined
  * Coordinates deferred shutdown with in-flight background input tasks.
  *
  * `pi.shutdown()` from an extension only *requests* shutdown; the process must
- * not exit while a background-dispatched command (`bash`, see
+ * not exit while a background `session.result` wait (see
  * {@link dispatchRpcInputFrame}) still owes the client a response frame. The
  * coordinator tracks those tasks, re-checks the shutdown request whenever one
- * settles (covering a shutdown requested mid-bash with no follow-up client
- * frame), and drains every tracked task before invoking `performShutdown`.
+ * settles, and drains every tracked task before invoking `performShutdown`.
  * The shutdown sequence is latched so concurrent triggers (input loop and
  * settling tasks) run it exactly once.
  */
@@ -1096,31 +1056,6 @@ export async function handleRpcSessionChange(
 		}
 	}
 	throw new Error("Unsupported RPC session change command");
-}
-
-function normalizeHostToolDefinitions(tools: RpcHostToolDefinition[]): RpcHostToolDefinition[] {
-	return tools.map((tool, index) => {
-		const name = typeof tool.name === "string" ? tool.name.trim() : "";
-		if (!name) {
-			throw new Error(`Host tool at index ${index} must provide a non-empty name`);
-		}
-		const description = typeof tool.description === "string" ? tool.description.trim() : "";
-		if (!description) {
-			throw new Error(`Host tool "${name}" must provide a non-empty description`);
-		}
-		if (!tool.parameters || typeof tool.parameters !== "object" || Array.isArray(tool.parameters)) {
-			throw new Error(`Host tool "${name}" must provide a JSON Schema object`);
-		}
-		const label = typeof tool.label === "string" && tool.label.trim() ? tool.label.trim() : name;
-		return {
-			name,
-			label,
-			description,
-			parameters: tool.parameters,
-			hidden: tool.hidden === true,
-			loadMode: defaultLoadModeForToolName(name, tool.loadMode),
-		};
-	});
 }
 
 function parseValueDialogResponse(
@@ -1326,8 +1261,6 @@ export async function runRpcMode(
 	const extensionUserMessageTracker = new RpcExtensionUserMessageTracker();
 
 	const pendingExtensionRequests = new RpcPendingExtensionRequests();
-	const hostToolBridge = new RpcHostToolBridge(output);
-	const hostUriBridge = new RpcHostUriBridge(output);
 	const subagentRegistry = eventBus ? new RpcSubagentRegistry(eventBus, output) : undefined;
 	// The durable ledger stays dormant until a supervisor claims a run through
 	// `session.start` or `session.resume`. A client that never sends those keeps
@@ -1364,10 +1297,10 @@ export async function runRpcMode(
 						path.join(path.dirname(sessionFile), "rpc-runs.jsonl"),
 						{
 							acquireSessionLease: true,
-							displayEvent: event => session.restoreProviderValueForDisplay(event),
+							displayEvent: event => event,
 							displayResult: result => ({
 								...result,
-								finalMessage: session.restoreProviderTextForDisplay(result.finalMessage),
+								finalMessage: result.finalMessage,
 							}),
 						},
 					));
@@ -1657,7 +1590,7 @@ export async function runRpcMode(
 		}
 	}
 
-	// Wire up UI context for tool execution (ask tool, etc.) and extensions.
+	// Wire up UI context for host execution (questions, etc.) and extensions.
 	// A single shared instance routes all responses received on stdin to the
 	// correct waiting promise regardless of which code path created the request.
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
@@ -2029,22 +1962,6 @@ export async function runRpcMode(
 				return success(id, "set_todos", { todoPhases: session.getTodoPhases() });
 			}
 
-			case "set_host_tools": {
-				const tools = normalizeHostToolDefinitions(command.tools);
-				const rpcTools = hostToolBridge.setTools(tools);
-				await session.refreshRpcHostTools(rpcTools);
-				return success(id, "set_host_tools", { toolNames: tools.map(tool => tool.name) });
-			}
-
-			case "set_host_uri_schemes": {
-				try {
-					const schemes = hostUriBridge.setSchemes(command.schemes);
-					return success(id, "set_host_uri_schemes", { schemes });
-				} catch (err) {
-					return error(id, "set_host_uri_schemes", err instanceof Error ? err.message : String(err));
-				}
-			}
-
 			case "set_subagent_subscription": {
 				if (!subagentRegistry) {
 					return error(id, "set_subagent_subscription", "Subagent event bus is unavailable");
@@ -2199,24 +2116,6 @@ export async function runRpcMode(
 			case "abort_retry": {
 				session.abortRetry();
 				return success(id, "abort_retry");
-			}
-
-			// =================================================================
-			// Bash
-			// =================================================================
-
-			case "bash": {
-				bindingGuard.assertWorkAllowed();
-				harnessOwner?.assertAcceptingWork();
-				const bashTask = session.executeBash(command.command);
-				if (harnessOwner) terminalTasks.track(bashTask);
-				const result = await bashTask;
-				return success(id, "bash", result);
-			}
-
-			case "abort_bash": {
-				session.abortBash();
-				return success(id, "abort_bash");
 			}
 
 			// =================================================================
@@ -2377,7 +2276,7 @@ export async function runRpcMode(
 	};
 
 	// Deferred shutdown (pi.shutdown() from an extension) must not kill the
-	// process while a background-dispatched bash still owes the client its
+	// process while a background session.result wait still owes the client its
 	// response frame. The coordinator drains tracked tasks before exiting and
 	// re-checks the request as each task settles.
 	const shutdownCoordinator = new RpcShutdownCoordinator({
@@ -2409,9 +2308,6 @@ export async function runRpcMode(
 		errorResponse: error,
 		trackBackgroundTask: task => shutdownCoordinator.track(task),
 		pendingExtensionRequests,
-		onHostToolResult: frame => hostToolBridge.handleResult(frame),
-		onHostToolUpdate: frame => hostToolBridge.handleUpdate(frame),
-		onHostUriResult: frame => hostUriBridge.handleResult(frame),
 	};
 
 	const inputDispatcher = new RpcInputDispatcher({
@@ -2426,9 +2322,9 @@ export async function runRpcMode(
 	});
 
 	// Keep the stdin reader moving: side-channel frames dispatch immediately,
-	// ordinary commands serialize through inputDispatcher, and bash remains
-	// background-dispatched so abort_bash can overtake it. Frames are read
-	// line-by-line and parsed here (not via readJsonl) so a single malformed
+	// ordinary commands serialize through inputDispatcher, and session.result
+	// waits in the background. Frames are read line-by-line and parsed here (not
+	// via readJsonl) so a single malformed
 	// line is reported as an error frame and the loop keeps running instead of
 	// throwing out of the generator and killing the whole process (issue #5194).
 	const decoder = new TextDecoder();
@@ -2452,8 +2348,6 @@ export async function runRpcMode(
 	// requested before terminal state waits on the seal this path still owes it,
 	// so those waits are drained afterwards together with background tasks.
 	pendingExtensionRequests.rejectAll("RPC client disconnected before extension UI response completed");
-	hostToolBridge.close("RPC client disconnected before host tool execution completed");
-	hostUriBridge.clear("RPC client disconnected before host URI request completed");
 	// Abort started serial work that only an abort can settle, before the drain
 	// below waits on it. `session.dispose()` aborts the same work, but it runs
 	// after this drain and the seal, so leaving it to disposal means a stalled

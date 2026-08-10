@@ -10,7 +10,6 @@ Programmatic usage of omp-coding-agent via `createAgentSession()`.
 | `02-custom-model.ts`       | Select model and thinking level                |
 | `03-custom-prompt.ts`      | Replace or modify system prompt                |
 | `04-skills.ts`             | Discover, filter, or replace skills            |
-| `05-tools.ts`              | Built-in tools, custom tools                   |
 | `06-hooks.ts`              | Logging, blocking, result modification         |
 | `07-context-files.ts`      | AGENTS.md context files                        |
 | `08-slash-commands.ts`     | File-based slash commands                      |
@@ -37,16 +36,12 @@ import {
 	discoverModels,
 	discoverSkills,
 	discoverHooks,
-	discoverCustomTools,
 	discoverContextFiles,
 	discoverSlashCommands,
 	loadSettings,
 	buildSystemPrompt,
 	ModelRegistry,
 	SessionManager,
-	BUILTIN_TOOLS,
-	HIDDEN_TOOLS,
-	createTools,
 } from "@oh-my-pi/pi-coding-agent";
 
 // Auth and models setup
@@ -67,9 +62,6 @@ const { session } = await createAgentSession({
 	modelRegistry,
 });
 
-// Read-only tools
-const { session } = await createAgentSession({ toolNames: ["read", "search", "find"], authStorage, modelRegistry });
-
 // In-memory
 const { session } = await createAgentSession({
 	sessionManager: SessionManager.inMemory(),
@@ -87,8 +79,6 @@ const { session } = await createAgentSession({
 	authStorage: customAuth,
 	modelRegistry: customRegistry,
 	systemPrompt: ["You are helpful."],
-	toolNames: ["read", "bash"],
-	customTools: [{ tool: myTool }],
 	hooks: [{ factory: myHook }],
 	skills: [],
 	contextFiles: [],
@@ -105,24 +95,6 @@ session.subscribe((event) => {
 await session.prompt("Hello");
 ```
 
-## Resolve preview workflow (AST edit apply/discard)
-
-`ast_edit` now always returns a preview. To finalize, write plain text to the appropriate virtual device with the `write` tool.
-
-- `xd://resolve` → apply the pending preview; body = reason text
-- `xd://reject` → discard the pending preview; body = reason text
-
-`createAgentSession()` / `createTools()` auto-include `write` whenever a deferrable tool (e.g. `ast_edit`) is present, so the devices are always reachable.
-
-```typescript
-const tools = await createTools(toolSession, ["ast_edit"]); // write is auto-included
-const writeTool = tools.find(t => t.name === "write")!;
-
-await writeTool.execute("call-1", {
-  path: "xd://resolve",
-  content: "Preview matches expected replacements",
-});
-```
 ## Options
 
 | Option                      | Default                       | Description                       |
@@ -134,9 +106,6 @@ await writeTool.execute("call-1", {
 | `model`                     | From settings/first available | Model to use                      |
 | `thinkingLevel`             | From settings/"off"           | off, low, medium, high            |
 | `systemPrompt`              | Discovered                    | String or `(default) => modified` |
-| `toolNames`                 | All built-in tools            | Filter which tools to include     |
-| `customTools`               | Discovered                    | Replaces discovery                |
-| `additionalCustomToolPaths` | `[]`                          | Merge with discovery              |
 | `hooks`                     | Discovered                    | Replaces discovery                |
 | `additionalHookPaths`       | `[]`                          | Merge with discovery              |
 | `skills`                    | Discovered                    | Skills for prompt                 |

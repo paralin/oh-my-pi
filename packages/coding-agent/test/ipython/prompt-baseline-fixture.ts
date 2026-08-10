@@ -1,27 +1,21 @@
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { Context, FetchImpl, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	measurePromptJson,
 	measurePromptText,
 	type PromptPayloadSize,
 	promptPayloadDelta,
 } from "@oh-my-pi/pi-coding-agent/ipython/prompt-measurement";
-import {
-	type BuildSystemPromptOptions,
-	buildSystemPrompt,
-	buildSystemPromptToolMetadata,
-} from "@oh-my-pi/pi-coding-agent/system-prompt";
-import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createIpythonProviderTool } from "@oh-my-pi/pi-coding-agent/ipython/provider-tool";
+import { type BuildSystemPromptOptions, buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
 
 const WORKSPACE = "/workspace/omp-prompt-baseline";
 const PROJECT_CONTEXT = "# Project instructions\n\nPreserve observable behavior and verify the changed path.\n";
-const BASELINE_SOURCE_REVISION = "6c079d5149b177258e20adb12c00399cda5ce548";
 
-export interface PreIpythonPromptBaseline {
+export interface IpythonProviderRequestCapture {
 	readonly fixtureVersion: 1;
-	readonly sourceRevision: string;
 	readonly provider: "anthropic-messages";
 	readonly categories: {
 		readonly fixedOmp: PromptPayloadSize;
@@ -35,62 +29,23 @@ export interface PreIpythonPromptBaseline {
 	readonly bodySha256: string;
 	readonly systemPromptParts: number;
 	readonly toolNames: readonly string[];
+	readonly toolSchema: Record<string, unknown>;
+	readonly toolConcurrency: string;
+	readonly projectContextIndex: number;
+	readonly runtimeInstructionIndex: number;
+	readonly volatileNoticeIndex: number;
 }
 
-function baselineSettings(): Settings {
-	return Settings.isolated({
-		"autolearn.enabled": false,
-		"checkpoint.enabled": false,
-		"goal.enabled": false,
-		"memory.backend": "disabled",
-	});
-}
-
-function toolSession(settings: Settings): ToolSession {
+function promptOptions(contextFiles: BuildSystemPromptOptions["contextFiles"]): BuildSystemPromptOptions {
 	return {
-		cwd: WORKSPACE,
-		enableIrc: false,
-		enableLsp: false,
-		enableMCP: false,
-		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
-		hasUI: false,
-		settings,
-		skipPythonPreflight: true,
-	};
-}
-
-function promptOptions(
-	tools: Map<string, Tool>,
-	contextFiles: BuildSystemPromptOptions["contextFiles"],
-): BuildSystemPromptOptions {
-	const contextPath = `${WORKSPACE}/AGENTS.md`;
-	return {
-		activeRepoContext: null,
 		calendarDate: "2026-08-06",
 		contextFiles,
 		cwd: WORKSPACE,
-		environmentInfo: [
-			{ label: "OS", value: "baseline-os 1" },
-			{ label: "Arch", value: "baseline-arch" },
-		],
-		includeModelInPrompt: true,
-		includeWorkspaceTree: false,
-		model: "anthropic/claude-sonnet-4-6",
-		obsidianAvailable: false,
+		recursiveDepth: 0,
 		resolvedAppendSystemPrompt: "",
 		resolvedSystemPromptCustomization: null,
-		rules: [],
-		skills: [],
-		toolNames: Array.from(tools.keys()),
-		tools: buildSystemPromptToolMetadata(tools),
-		workspaceTree: {
-			rootPath: WORKSPACE,
-			rendered: "",
-			truncated: false,
-			totalLines: 0,
-			agentsMdFiles: contextFiles?.length ? [contextPath] : [],
-		},
+		sessionLogLocation: `${WORKSPACE}/session.jsonl`,
+		sessionNotice: "baseline",
 	};
 }
 
@@ -115,15 +70,15 @@ function sha256(value: string): string {
 	return hasher.digest("hex");
 }
 
-/** Capture the pre-cutover first request through a mock transport; no provider or optional extension is loaded. */
-export async function capturePreIpythonPromptBaseline(): Promise<PreIpythonPromptBaseline> {
-	const tools = await createTools(toolSession(baselineSettings()));
-	const toolMap = new Map<string, Tool>(tools.map(tool => [tool.name, tool]));
-	const emptyTools = new Map<string, Tool>();
-	const fixed = await buildSystemPrompt(promptOptions(emptyTools, []));
-	const generated = await buildSystemPrompt(promptOptions(toolMap, []));
+/** Capture the one-tool first request through a mock transport; no provider or optional extension is loaded. */
+export async function captureIpythonProviderRequest(): Promise<IpythonProviderRequestCapture> {
+	const ipython = createIpythonProviderTool(async () => {
+		throw new Error("fixture tool is not executable");
+	});
+	const tools: AgentTool<any, any, any>[] = [ipython as AgentTool<any, any, any>];
+	const fixed = await buildSystemPrompt(promptOptions([]));
 	const full = await buildSystemPrompt(
-		promptOptions(toolMap, [{ path: `${WORKSPACE}/AGENTS.md`, content: PROJECT_CONTEXT, depth: 0 }]),
+		promptOptions([{ path: `${WORKSPACE}/AGENTS.md`, content: PROJECT_CONTEXT, depth: 0 }]),
 	);
 
 	const context: Context = {
@@ -148,8 +103,8 @@ export async function capturePreIpythonPromptBaseline(): Promise<PreIpythonPromp
 	}
 	if (!body) throw new Error("Anthropic request fixture did not reach the mock transport");
 
-	const fixedSize = measurePromptText(fixed.systemPrompt);
-	const generatedSize = measurePromptText(generated.systemPrompt);
+	const fixedSize = measurePromptText([fixed.systemPrompt[0] ?? ""]);
+	const generatedSize = measurePromptText(fixed.systemPrompt);
 	const fullSize = measurePromptText(full.systemPrompt);
 	const wrapper = { ...body, system: [], messages: [], tools: [] };
 	const serializedBody = JSON.stringify(body);
@@ -163,7 +118,6 @@ export async function capturePreIpythonPromptBaseline(): Promise<PreIpythonPromp
 
 	return {
 		fixtureVersion: 1,
-		sourceRevision: BASELINE_SOURCE_REVISION,
 		provider: "anthropic-messages",
 		categories: {
 			fixedOmp: fixedSize,
@@ -177,5 +131,10 @@ export async function capturePreIpythonPromptBaseline(): Promise<PreIpythonPromp
 		bodySha256: sha256(serializedBody),
 		systemPromptParts: full.systemPrompt.length,
 		toolNames,
+		toolSchema: (wireTools[0] as { input_schema?: Record<string, unknown> })?.input_schema ?? {},
+		toolConcurrency: ipython.concurrency === "exclusive" ? "exclusive" : "other",
+		projectContextIndex: full.systemPrompt.findIndex(part => part.includes(PROJECT_CONTEXT.trim())),
+		runtimeInstructionIndex: full.systemPrompt.findIndex(part => part.includes("Persistent IPython")),
+		volatileNoticeIndex: full.systemPrompt.findIndex(part => part.includes("Today is 2026-08-06.")),
 	};
 }

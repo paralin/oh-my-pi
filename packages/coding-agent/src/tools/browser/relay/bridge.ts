@@ -1,7 +1,7 @@
 /**
  * CDP façade over `chrome.debugger`.
  *
- * Puppeteer clients (the omp browser tool: one supervisor connection plus one
+ * Puppeteer clients (the omp browser service: one supervisor connection plus one
  * per tab worker) connect to this bridge as if it were Chrome's browser
  * debugging endpoint. Chrome only allows a single debugger attachment per tab,
  * so the bridge owns ONE `chrome.debugger` attachment per tab (via the

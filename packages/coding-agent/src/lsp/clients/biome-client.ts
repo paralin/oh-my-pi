@@ -112,7 +112,7 @@ async function runBiome(
 }
 
 // Surface broken-binary / CLI failures once instead of silently reporting
-// "no diagnostics" forever (and instead of spamming every writethrough).
+// "no diagnostics" forever.
 const reportedBiomeFailures = new Set<string>();
 
 function warnBiomeOnce(key: string, message: string, meta: Record<string, unknown>): void {
@@ -139,21 +139,6 @@ export class BiomeClient implements LinterClient {
 		private readonly config: ServerConfig,
 		private readonly cwd: string,
 	) {}
-
-	async format(filePath: string, content: string): Promise<string> {
-		// Keep the standalone LinterClient contract: callers supply the content to
-		// format, regardless of what is currently on disk.
-		await Bun.write(filePath, content);
-
-		const result = await runBiome(["format", "--write", filePath], this.cwd, this.config.resolvedCommand);
-
-		if (result.success) {
-			return await Bun.file(filePath).text();
-		}
-
-		// Format failed, return original
-		return content;
-	}
 
 	async lint(filePath: string): Promise<Diagnostic[]> {
 		// Run biome lint with JSON reporter

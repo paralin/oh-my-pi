@@ -1105,7 +1105,7 @@ class SandboxManager:
         """Strip re-creatable dependency caches from an idle workspace.
 
         Every task run reinstalls ``node_modules`` (see
-        ``host_tools.ensure_workspace_dependencies``), so between runs the
+        ``operations.ensure_workspace_dependencies``), so between runs the
         checkout's ``node_modules`` and the workspace-private bun install
         cache are dead weight — multiple GB per issue that would otherwise
         persist until the issue closes, which is exactly how the host runs

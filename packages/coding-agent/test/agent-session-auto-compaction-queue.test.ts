@@ -13,7 +13,6 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { getProjectAgentDir, TempDir, withTimeout } from "@oh-my-pi/pi-utils";
-import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const runtimeSignalStoreKey = "__ompRuntimeSignals";
 
@@ -277,7 +276,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 		// listener before `await abort()`, so the abort-finally stranded-message
 		// drain is suppressed while disconnected. Unlike /new (which resets the
 		// queue), compaction preserves the agent queues, so a steer/follow-up that
-		// arrives mid-compaction (async IRC, an xd:// mount notice, an SDK steer)
+		// arrives mid-compaction (async IRC or an SDK steer)
 		// would hang until the next explicit prompt unless compact() re-drains
 		// after reconnecting.
 		session.settings.set("compaction.keepRecentTokens", 1);
@@ -392,153 +391,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(appendCompactionSpy).not.toHaveBeenCalled();
 	});
 
-	it("runs threshold compaction for active goal turns that end with yield", async () => {
-		const now = Date.now();
-		session.setGoalModeState({
-			enabled: true,
-			mode: "active",
-			goal: {
-				id: "goal-threshold",
-				objective: "continue until compacted",
-				status: "active",
-				tokensUsed: 0,
-				timeUsedSeconds: 0,
-				createdAt: now,
-				updatedAt: now,
-			},
-		});
-
-		const yieldCall = {
-			type: "toolCall" as const,
-			id: "call_goal_yield",
-			name: "yield",
-			arguments: { status: "progress" },
-		};
-		const assistantMsg = {
-			role: "assistant" as const,
-			content: [yieldCall],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "toolUse" as const,
-			usage: {
-				input: 190000,
-				output: 1000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: now,
-		};
-
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({
-			type: "tool_execution_end",
-			toolCallId: yieldCall.id,
-			toolName: "yield",
-			isError: false,
-			result: {
-				content: [{ type: "text" as const, text: "Yielded." }],
-				details: { status: "success" },
-			},
-		});
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
-
-		await session.waitForIdle();
-
-		const runtimeSignals = getRuntimeSignals();
-		expect(runtimeSignals).toContain("compaction:start:threshold");
-		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
-	});
-
-	it("runs active-goal threshold compaction after yield followed by a trailing empty stop", async () => {
-		const debugSpy = vi.spyOn(logger, "debug").mockImplementation(() => {});
-
-		const now = Date.now();
-		session.setGoalModeState({
-			enabled: true,
-			mode: "active",
-			goal: {
-				id: "goal-yield-empty-stop-threshold",
-				objective: "continue after compacting",
-				status: "active",
-				tokensUsed: 0,
-				timeUsedSeconds: 0,
-				createdAt: now,
-				updatedAt: now,
-			},
-		});
-
-		const yieldCall = {
-			type: "toolCall" as const,
-			id: "call_goal_yield_then_empty",
-			name: "yield",
-			arguments: { status: "progress" },
-		};
-		const yieldMsg = {
-			role: "assistant" as const,
-			content: [yieldCall],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "toolUse" as const,
-			usage: {
-				input: 190000,
-				output: 1000,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191000,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: now,
-		};
-		const trailingEmptyStop = {
-			role: "assistant" as const,
-			content: [],
-			api: "anthropic-messages" as const,
-			provider: "anthropic" as const,
-			model: "claude-sonnet-4-5",
-			stopReason: "stop" as const,
-			usage: {
-				input: 191000,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 191001,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: now + 1,
-		};
-
-		session.agent.emitExternalEvent({ type: "message_end", message: yieldMsg });
-		session.agent.emitExternalEvent({
-			type: "tool_execution_end",
-			toolCallId: yieldCall.id,
-			toolName: "yield",
-			isError: false,
-			result: {
-				content: [{ type: "text" as const, text: "Yielded." }],
-				details: { status: "success" },
-			},
-		});
-		session.agent.emitExternalEvent({ type: "message_end", message: trailingEmptyStop });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [yieldMsg, trailingEmptyStop] });
-
-		await session.waitForIdle();
-
-		const runtimeSignals = getRuntimeSignals();
-		expect(runtimeSignals).toContain("compaction:start:threshold");
-		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
-		expect(
-			debugSpy.mock.calls.some(([message, context]) => {
-				if (message !== "agent_end maintenance routing") return false;
-				if (context?.route !== "post-yield-trailing-stop-active-goal-checkCompaction") return false;
-				return context.successfulYield === true;
-			}),
-		).toBe(true);
-	});
-
 	it("triggers threshold compaction in active goals even when per-turn pruning shaves the post-prune estimate below threshold", async () => {
 		// Regression for #3174. Goal mode is the most common scenario: the agent
 		// runs many tool-result-heavy turns and the per-turn "useless" /
@@ -649,7 +501,6 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.settings.set("compaction.thresholdPercent", -1);
 		session.settings.set("compaction.strategy", "context-full");
 		session.settings.set("compaction.dropUseless", true);
-		session.settings.set("compaction.supersedeReads", true);
 		session.settings.set("compaction.keepRecentTokens", 10000);
 		session.settings.set("compaction.reserveTokens", 16384);
 

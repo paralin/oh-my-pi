@@ -14,9 +14,9 @@ import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import type { ExtensionRunner, SessionBeforeSwitchResult } from "../extensibility/extensions";
-import { obfuscateProviderContext, type SecretObfuscator } from "../secrets/obfuscator";
 import type { HandoffResult, SessionHandoffOptions } from "./agent-session-types";
 import type { BashSessionTransition } from "./bash-runner";
+import { projectIpythonJournalSummaryMessages } from "./ipython-summary";
 import type { SessionContext } from "./session-context";
 import type { SessionManager } from "./session-manager";
 import { overrideSessionMetadataCompactionStrategy } from "./session-metadata";
@@ -38,7 +38,6 @@ export interface SessionHandoffHost {
 	modelRegistry: ModelRegistry;
 	extensionRunner: ExtensionRunner | undefined;
 	sideStreamFn: StreamFn;
-	obfuscator: SecretObfuscator | undefined;
 	model(): Model | undefined;
 	thinkingLevel(): ThinkingLevel | undefined;
 	sessionId(): string;
@@ -46,8 +45,6 @@ export interface SessionHandoffHost {
 	baseSystemPrompt(): string[];
 	assertVibeSessionTransitionAllowed(action: string): void;
 	setSkipPostTurnMaintenance(timestamp: number | undefined): void;
-	obfuscateTextForProvider(text: string | undefined): string | undefined;
-	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
 	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
@@ -148,8 +145,8 @@ export class SessionHandoff {
 			// (`runEphemeralTurn` / `/btw` share it) so the oneshot reads the
 			// provider prompt cache the main turn populated instead of cold-missing
 			// the whole prefix: identical system prompt, normalized tools, and
-			// transform-/obfuscation-matched message history via
-			// `convertMessagesToLlm` + `buildSideRequestContext`, plus the live turn's
+			// transformed message history via `convertMessagesToLlm` + `buildSideRequestContext`,
+			// plus the live turn's
 			// effective provider cache key with a unique side `sessionId` so
 			// OpenAI/Codex append-only state never mixes with the live turn.
 			const cacheSessionId = this.#host.sessionId();
@@ -158,9 +155,9 @@ export class SessionHandoff {
 			// Both can diverge from this.#host.sessionId() (tan/subagent/shared sessions), so
 			// mirror exactly what the live turn populated the cache under.
 			const handoffPromptCacheKey = this.#host.agent.promptCacheKey ?? this.#host.agent.sessionId;
-			const handoffPromptText = renderHandoffPrompt(this.#host.obfuscateTextForProvider(customInstructions));
+			const handoffPromptText = renderHandoffPrompt(customInstructions);
 			const handoffSnapshot: AgentMessage[] = [
-				...this.#host.agent.state.messages,
+				...projectIpythonJournalSummaryMessages(this.#host.buildDisplaySessionContext().messages),
 				{
 					role: "user",
 					content: [{ type: "text", text: handoffPromptText }],
@@ -194,24 +191,19 @@ export class SessionHandoff {
 				},
 				model.provider,
 			);
-			const rawHandoffText = await generateHandoffFromContext(
-				obfuscateProviderContext(this.#host.obfuscator, handoffContext),
-				model,
-				{
-					streamOptions: handoffStreamOptions,
-					completeImpl: async (requestModel, requestContext, requestOptions) => {
-						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
-						return stream.result();
-					},
-					telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
-					// Honor the user's /model thinking selection on the handoff path.
-					// Clamped per-model inside generateHandoffFromContext via
-					// resolveCompactionEffort so unsupported-effort models don't trip
-					// requireSupportedEffort.
-					thinkingLevel: this.#host.thinkingLevel(),
+			const handoffText = await generateHandoffFromContext(handoffContext, model, {
+				streamOptions: handoffStreamOptions,
+				completeImpl: async (requestModel, requestContext, requestOptions) => {
+					const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+					return stream.result();
 				},
-			);
-			const handoffText = this.#host.deobfuscateFromProvider(rawHandoffText);
+				telemetry: resolveTelemetry(this.#host.agent.telemetry, this.#host.sessionId()),
+				// Honor the user's /model thinking selection on the handoff path.
+				// Clamped per-model inside generateHandoffFromContext via
+				// resolveCompactionEffort so unsupported-effort models don't trip
+				// requireSupportedEffort.
+				thinkingLevel: this.#host.thinkingLevel(),
+			});
 
 			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");

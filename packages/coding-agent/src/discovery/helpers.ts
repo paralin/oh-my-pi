@@ -13,17 +13,11 @@ import {
 } from "@oh-my-pi/pi-utils";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
-import {
-	parseRuleConditionAndScope,
-	parseSemanticCondition,
-	type Rule,
-	type RuleFrontmatter,
-} from "../capability/rule";
+import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
-import { normalizeToolNames } from "../tools/builtin-names";
 
 import { buildPluginDirRoot } from "./plugin-dir-roots";
 
@@ -196,8 +190,7 @@ export function buildRuleFromMarkdown(
 ): Rule {
 	const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
 	const resolvedName = options?.ruleName ?? name.replace(options?.stripNamePattern ?? /\.(md|mdc)$/, "");
-	const semanticCondition = parseSemanticCondition(resolvedName, frontmatter.semanticCondition);
-	const { condition, astCondition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
+	const { condition, scope } = parseRuleConditionAndScope(frontmatter as RuleFrontmatter);
 
 	let globs: string[] | undefined;
 	if (Array.isArray(frontmatter.globs)) {
@@ -219,8 +212,6 @@ export function buildRuleFromMarkdown(
 		alwaysApply: frontmatter.alwaysApply === true,
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
 		condition,
-		astCondition,
-		semanticCondition,
 		scope,
 		interruptMode,
 		_source: source,
@@ -247,10 +238,7 @@ export interface ParsedAgentFields {
 	output?: unknown;
 	thinkingLevel?: ConfiguredThinkingLevel;
 	autoloadSkills?: string[];
-	readSummarize?: boolean;
 	blocking?: boolean;
-	/** `true` = prewalk into the default target; string = prewalk into that model pattern. */
-	prewalk?: boolean | string;
 }
 
 /**
@@ -266,7 +254,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	}
 
 	let tools = parseArrayOrCSV(frontmatter.tools);
-	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
 	if (tools && !tools.includes("yield")) {
@@ -288,11 +275,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		spawns = parseArrayOrCSV(frontmatter.spawns);
 	}
 
-	// Backward compat: infer spawns: "*" when tools includes "task"
-	if (spawns === undefined && tools?.includes("task")) {
-		spawns = "*";
-	}
-
 	const output = frontmatter.output !== undefined ? frontmatter.output : undefined;
 	const rawThinkingLevel =
 		typeof frontmatter.thinkingLevel === "string"
@@ -304,13 +286,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	const thinkingLevel = parseConfiguredThinkingLevel(rawThinkingLevel);
 	const model = parseModelList(frontmatter.model);
 	const blocking = parseBoolean(frontmatter.blocking);
-	const readSummarize = parseBoolean(frontmatter.readSummarize);
-	// prewalk: true → hand off to the default prewalk target; "<pattern>" → custom target.
-	let prewalk: boolean | string | undefined = parseBoolean(frontmatter.prewalk);
-	if (prewalk === undefined && typeof frontmatter.prewalk === "string") {
-		const trimmed = frontmatter.prewalk.trim();
-		if (trimmed) prewalk = trimmed;
-	}
 	const autoloadSkills = parseArrayOrCSV(frontmatter.autoloadSkills)
 		?.map(s => s.trim())
 		.filter(Boolean);
@@ -324,8 +299,6 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		thinkingLevel,
 		blocking,
 		autoloadSkills,
-		readSummarize,
-		prewalk,
 	};
 }
 

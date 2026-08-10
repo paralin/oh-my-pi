@@ -18,7 +18,7 @@ class FakeGithubOwner implements IpythonGithubOwner {
 
 	async execute(params: GithubInput, signal: AbortSignal) {
 		this.calls.push({ operation: "execute", params, signal });
-		return { content: [{ type: "text" as const, text: "ok" }], details: { op: params.op } };
+		return { content: [{ type: "text" as const, text: "ok" }], details: { repo: params.op } };
 	}
 
 	async issue(params: { issue: string; repo?: string; comments: boolean }, signal: AbortSignal) {

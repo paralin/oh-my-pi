@@ -1,10 +1,12 @@
 # Skills
 
-Skills are file-backed capability packs discovered at startup and exposed to the model as:
+Skills are file-backed capability packs discovered at startup and exposed through:
 
-- lightweight metadata in the system prompt (name + description)
-- on-demand content via the `read` tool against `skill://...`
-- optional interactive `/skill:<name>` commands
+- validated Python packages and their adjacent `SKILL.md` metadata;
+- on-demand authored content via `await omp.files.read("skill://...")`;
+- optional interactive `/skill:<name>` commands and Task autoloading.
+
+The fixed provider prompt does not embed a skill catalog. First-party Python capabilities are discoverable with `omp.capabilities()`, `dir()`, `help()`, and `omp.skill_path(name)`.
 
 This document covers current runtime behavior in `packages/coding-agent/src/extensibility/skills.ts`, `packages/coding-agent/src/discovery/builtin.ts`, `packages/coding-agent/src/internal-urls/skill-protocol.ts`, and `packages/coding-agent/src/discovery/agents-md.ts`.
 
@@ -126,18 +128,11 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 ## Runtime usage behavior
 
-### System prompt exposure
+### Fixed prompt and runtime discovery
 
-System prompt construction (`src/system-prompt.ts`) uses discovered skills as follows:
+`src/system-prompt.ts` does not render discovered skills into the fixed provider prompt. Validated Python packages participate in the managed runtime and expose adjacent metadata through normal Python discovery. Authored Markdown skills remain reachable through `await omp.files.read("skill://<name>")`, `/skill:<name>`, and Task autoloading.
 
-- if `read` tool is available:
-  - include discovered skills list in prompt, excluding skills with `hide: true`
-- otherwise:
-  - omit discovered list
-
-`hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
-
-Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
+`hide: true` does not disable a skill; it prevents model-triggered discovery where a host surfaces authored metadata. Interactive commands and explicit Task configuration can still select it. Task subagents receive the session's discovered skills through normal session creation; there is no per-task skill pinning override.
 
 ### Interactive `/skill:<name>` commands
 
@@ -210,10 +205,10 @@ No fallback search is performed for missing assets.
 - **Slash commands**: user-invoked command entry points
 - `/skill:<name>` is a convenience wrapper that injects skill text; it does not change skill discovery semantics
 
-### Skills vs custom tools
+### Skills vs typed host capabilities
 
-- **Skills**: documentation/workflow content loaded through prompt context and `read`
-- **Custom tools**: executable tool APIs callable by the model with schemas and runtime side effects
+- **Skills**: documentation and reusable Python workflows loaded through prompt context
+- **Typed host capabilities**: narrow `omp.*` APIs called from IPython when an operation needs host state or authority
 
 ### Skills vs hooks
 

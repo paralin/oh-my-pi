@@ -492,7 +492,6 @@ export class WorldCoordinationBackend implements CoordinationBackend {
 				label: candidate.label,
 				request: candidate.request,
 				policy: candidate.policy,
-				planReference: candidate.planReference,
 			});
 			const encoded = encodeExternalSubagentProfile(profile);
 			const worktreePath =

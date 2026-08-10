@@ -5,9 +5,9 @@ import { Settings } from "../config/settings";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import { discoverAuthStorage } from "../sdk";
 import { SessionManager } from "../session/session-manager";
+import type { ToolSession } from "../session/tool-session";
 import { mapWithConcurrencyLimitAllSettled } from "../task/parallel";
 import { runStructuredSubagent } from "../task/structured-subagent";
-import type { ToolSession } from "../tools";
 import { EventBus } from "../utils/event-bus";
 import assignmentPrompt from "./prompts/assignment.md" with { type: "text" };
 import type {
@@ -115,7 +115,6 @@ export async function createCleanseAgentRuntime(options: {
 					options.hooks?.onStart?.(name, assignment);
 					const result = await runStructuredSubagent({
 						session: toolSession,
-						invocationKind: "task",
 						assignment: renderAssignment(assignment, assignments, wave, index + 1, report.checks),
 						agent: "sonic",
 						model: modelSelector,

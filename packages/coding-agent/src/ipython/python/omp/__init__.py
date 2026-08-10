@@ -7,6 +7,30 @@ from pathlib import Path
 
 from rlm import host_request
 
+from . import (
+    ask,
+    autoresearch,
+    browser,
+    code,
+    computer,
+    cron,
+    debug,
+    github,
+    harness,
+    images,
+    mcp,
+    memory,
+    qa,
+    remote,
+    rules,
+    security,
+    session,
+    skills,
+    web,
+    vibe,
+    world,
+)
+
 
 @dataclass(frozen=True)
 class Capability:
@@ -68,19 +92,32 @@ _CAPABILITIES = (
         _ROOT / "skills/rlm-heartbeat/SKILL.md",
     ),
     Capability(
+        "websearch",
+        "websearch",
+        "Search the web through OMP's host-owned web service.",
+        _ROOT / "skills/websearch/SKILL.md",
+    ),
+    Capability(
+        "linear",
+        "linear",
+        "Access Linear through OMP's host-owned MCP transport.",
+        _ROOT / "skills/linear/SKILL.md",
+    ),
+    Capability(
+        "notion",
+        "notion",
+        "Access Notion through OMP's host-owned MCP transport.",
+        _ROOT / "skills/notion/SKILL.md",
+    ),
+    Capability(
         "omp.session",
         "omp.session",
         "Inspect active-cell context and publish progress or artifacts.",
     ),
     Capability(
-        "omp.files",
-        "omp.files",
-        "Read, write, and glob bounded workspace files through OMP owners.",
-    ),
-    Capability(
         "omp.code",
         "omp.code",
-        "Search and rewrite syntax trees and query language intelligence.",
+        "Query host-owned language intelligence.",
     ),
     Capability(
         "omp.debug",
@@ -103,22 +140,53 @@ _CAPABILITIES = (
         "Use host-owned SSH connections and file-transfer services.",
     ),
     Capability(
-        "omp.workspace",
-        "omp.workspace",
-        "Use validated OMP workspace search and edit services.",
-    ),
-    Capability(
         "omp.harness",
         "omp.harness",
         "Access continual harness, todo, and checkpoint services.",
     ),
     Capability("omp.memory", "omp.memory", "Manage host-owned OMP memory records."),
+    Capability("omp.qa", "omp.qa", "Report bounded tool grievances through host-owned Auto-QA."),
+    Capability("omp.autoresearch", "omp.autoresearch", "Run bounded host-owned autoresearch operations."),
+    Capability("omp.vibe", "omp.vibe", "Drive addressable task-backed Vibe workers."),
     Capability("omp.rules", "omp.rules", "Manage host-owned OMP rule records."),
     Capability("omp.skills", "omp.skills", "Manage host-owned OMP skill records."),
     Capability(
         "omp.mcp",
         "omp.mcp",
-        "Call host-owned MCP tools, resources, prompts, config, and refresh.",
+        "Call host-owned MCP tools, resources, prompts, reconnect, and notifications.",
+    ),
+    Capability(
+        "omp.cron",
+        "omp.cron",
+        "Create, inspect, update, and delete scheduled session prompts.",
+    ),
+    Capability(
+        "omp.world",
+        "omp.world",
+        "Run authority-checked World dispatch, question, and session operations.",
+    ),
+    Capability(
+        "omp.ask",
+        "omp.ask",
+        "Ask ordered structured questions through the interactive session UI.",
+    ),
+    Capability(
+        "omp.browser",
+        "omp.browser",
+        "Drive session-owned browser tabs through opaque handles.",
+    ),
+    Capability(
+        "omp.computer", "omp.computer", "Drive the session-owned desktop supervisor."
+    ),
+    Capability(
+        "omp.images",
+        "omp.images",
+        "Generate images through host-owned providers and inspect attachment metadata.",
+    ),
+    Capability(
+        "omp.security",
+        "omp.security",
+        "Run native security scans and inspect public findings and provenance.",
     ),
 )
 
@@ -136,38 +204,30 @@ def skill_path(name: str) -> Path:
     raise KeyError(name)
 
 
-from . import (
-    code,
-    debug,
-    files,
-    github,
-    harness,
-    mcp,
-    memory,
-    remote,
-    rules,
-    session,
-    skills,
-    web,
-    workspace,
-)
-
 __all__ = [
     "Capability",
+    "ask",
+    "autoresearch",
+    "browser",
     "capabilities",
     "code",
+    "computer",
+    "cron",
     "debug",
-    "files",
     "github",
     "harness",
     "host_request",
+    "images",
     "mcp",
     "memory",
+    "qa",
     "remote",
     "rules",
+    "security",
     "session",
     "skill_path",
     "skills",
     "web",
-    "workspace",
+    "vibe",
+    "world",
 ]

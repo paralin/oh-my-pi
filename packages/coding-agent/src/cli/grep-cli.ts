@@ -1,7 +1,7 @@
 /**
  * Grep CLI command handlers.
  *
- * Handles `omp grep` subcommand for testing grep tool on Windows.
+ * Handles the `omp grep` file-search subcommand on Windows.
  */
 import * as path from "node:path";
 import { GrepOutputMode, grep } from "@oh-my-pi/pi-natives";
@@ -132,7 +132,7 @@ export async function runGrepCommand(cmd: GrepCommandArgs): Promise<void> {
 }
 
 export function printGrepHelp(): void {
-	console.log(`${chalk.bold(`${APP_NAME} grep`)} - Test grep tool
+	console.log(`${chalk.bold(`${APP_NAME} grep`)} - Search files with the grep CLI
 
 ${chalk.bold("Usage:")}
   ${APP_NAME} grep <pattern> [path] [options]

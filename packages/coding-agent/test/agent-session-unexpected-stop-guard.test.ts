@@ -12,7 +12,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import * as unexpectedStopClassifier from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
-const recordToolSchema = z.object({ value: z.string() });
+const recordToolSchema = z.object({ code: z.string() });
 
 type Harness = {
 	session: AgentSession;
@@ -24,21 +24,21 @@ type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 const activeHarnesses: Harness[] = [];
 
 const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
-	name: "record",
+	name: "ipython",
 	label: "Record",
 	description: "Record a value",
 	parameters: recordToolSchema,
 	async execute(_toolCallId, params) {
 		return {
-			content: [{ type: "text", text: `recorded:${params.value}` }],
-			details: { value: params.value },
+			content: [{ type: "text", text: `recorded:${params.code}` }],
+			details: { value: params.code },
 		};
 	},
 };
 
 function recordCall(value: string, id: string): MockResponse {
 	return {
-		content: [{ type: "toolCall", id, name: "record", arguments: { value } }],
+		content: [{ type: "toolCall", id, name: "ipython", arguments: { value } }],
 		stopReason: "toolUse",
 	};
 }
@@ -71,7 +71,6 @@ async function createHarness(
 		"compaction.enabled": false,
 		"retry.enabled": false,
 		"todo.enabled": false,
-		"todo.eager": "default",
 		"todo.reminders": false,
 		...settingsOverrides,
 	});
@@ -96,7 +95,6 @@ async function createHarness(
 		sessionManager,
 		settings,
 		modelRegistry,
-		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
 	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);

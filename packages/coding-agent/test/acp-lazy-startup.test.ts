@@ -98,7 +98,7 @@ class LazyFakeSession {
 	async waitForIdle(): Promise<void> {}
 	async abort(): Promise<void> {}
 	async promptCustomMessage(): Promise<void> {}
-	async refreshMCPTools(): Promise<void> {}
+	async refreshMCPInstructions(): Promise<void> {}
 	getContextUsage(): undefined {
 		return undefined;
 	}
@@ -119,18 +119,7 @@ class LazyFakeSession {
 	async navigateTree(): Promise<{ cancelled: boolean }> {
 		return { cancelled: false };
 	}
-	getActiveToolNames(): string[] {
-		return [];
-	}
-	getAllToolNames(): string[] {
-		return [];
-	}
-	setActiveToolsByName(): void {}
 	setClientBridge(): void {}
-	getPlanModeState(): undefined {
-		return undefined;
-	}
-	setPlanModeState(): void {}
 	async sendCustomMessage(): Promise<void> {}
 	async sendUserMessage(): Promise<void> {}
 	async compact(): Promise<void> {}
@@ -181,7 +170,6 @@ describe("ACP lazy startup", () => {
 						unrecognizedFlags: [],
 						noSkills: true,
 						noRules: true,
-						noTools: true,
 						noLsp: true,
 						sessionDir: cwd,
 					},
@@ -254,7 +242,6 @@ describe("ACP lazy startup", () => {
 			"task.isolation.apply": false,
 			"task.isolation.merge": "branch",
 			"task.isolation.commits": "ai",
-			"task.eager": "always",
 			"task.batch": false,
 			"task.maxConcurrency": 4,
 			"task.maxRecursionDepth": 5,
@@ -304,7 +291,6 @@ describe("ACP lazy startup", () => {
 						unrecognizedFlags: [],
 						noSkills: true,
 						noRules: true,
-						noTools: true,
 						noLsp: true,
 						noExtensions: true,
 						sessionDir: cwd,
@@ -342,7 +328,6 @@ describe("ACP lazy startup", () => {
 		type ObservedTodoSettings = {
 			enabled: boolean;
 			reminders: boolean;
-			eager: "default" | "preferred" | "always";
 		};
 
 		const runProtocolStartup = async (mode: "rpc" | "rpc-ui" | "acp"): Promise<ObservedTodoSettings> => {
@@ -352,7 +337,6 @@ describe("ACP lazy startup", () => {
 			const settings = Settings.isolated({
 				"todo.enabled": false,
 				"todo.reminders": false,
-				"todo.eager": "always",
 			});
 			let observed: ObservedTodoSettings | undefined;
 			const stopMessage = "stop test protocol todo settings";
@@ -360,7 +344,6 @@ describe("ACP lazy startup", () => {
 				observed = {
 					enabled: settings.get("todo.enabled"),
 					reminders: settings.get("todo.reminders"),
-					eager: settings.get("todo.eager"),
 				};
 				throw new Error(stopMessage);
 			};
@@ -375,7 +358,6 @@ describe("ACP lazy startup", () => {
 						unrecognizedFlags: [],
 						noSkills: true,
 						noRules: true,
-						noTools: true,
 						noLsp: true,
 						noExtensions: true,
 						sessionDir: cwd,
@@ -406,7 +388,6 @@ describe("ACP lazy startup", () => {
 			await expect(runProtocolStartup(mode)).resolves.toEqual({
 				enabled: false,
 				reminders: false,
-				eager: "always",
 			});
 		}
 	});
@@ -505,7 +486,6 @@ describe("ACP lazy startup", () => {
 					unrecognizedFlags: [],
 					noSkills: true,
 					noRules: true,
-					noTools: true,
 					noLsp: true,
 					sessionDir: cwd,
 					extensions: [path.join(cwd, "runtime-provider.ts")],

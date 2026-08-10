@@ -33,6 +33,9 @@ import {
 } from "./messages";
 import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
 import {
+	type ActStartEntry,
+	type ActTerminalEntry,
+	type ActTerminalStatus,
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type CredentialPinEntry,
@@ -171,9 +174,7 @@ function isAssistantEntry(entry: SessionEntry): boolean {
 
 function isDraftOnlyMetadataEntry(entry: SessionEntry): boolean {
 	// Startup-recorded selector state that does not survive as user intent
-	// once the draft is cleared. `mode_change` covers the `plan.defaultOnStartup`
-	// path (interactive-mode.ts enters plan mode before draft restoration) and
-	// `/plan` toggles that leave the session otherwise empty; entries carrying
+	// once the draft is cleared. `mode_change` covers mode changes that leave the session otherwise empty; entries carrying
 	// real conversation state — messages, compactions, branch summaries,
 	// custom/custom_message, session_init, labels, title/tool selection — never
 	// reach this branch and always keep the file resumable.
@@ -461,11 +462,6 @@ export class SessionManager {
 	 * in-memory (pre-blob-externalization) entry, so inline images survive.
 	 */
 	onEntryAppended?: (entry: SessionEntry) => void;
-
-	#turnBudgetTotal: number | null = null;
-	#turnBudgetHard = false;
-	#turnOutputBaseline = 0;
-	#turnEvalOutput = 0;
 
 	/** The single open append writer; the manager only ever writes one file at a time. */
 	#writer: SessionStorageWriter | undefined;
@@ -764,7 +760,12 @@ export class SessionManager {
 	}
 
 	#shouldHaveSessionFile(): boolean {
-		return this.#forceFileCreation || this.#fileIsCurrent || this.#historyContainsAssistantMessage();
+		return (
+			this.#forceFileCreation ||
+			this.#fileIsCurrent ||
+			this.#historyContainsAssistantMessage() ||
+			this.#entries.some(entry => entry.type === "act_start")
+		);
 	}
 
 	/**
@@ -1044,10 +1045,6 @@ export class SessionManager {
 		this.#rewriteRequired = false;
 		this.#forceFileCreation = false;
 		this.#draftOnlySessionCleanupArmed = false;
-		this.#turnBudgetTotal = null;
-		this.#turnBudgetHard = false;
-		this.#turnOutputBaseline = 0;
-		this.#turnEvalOutput = 0;
 		this.#artifactManager = null;
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
@@ -1789,26 +1786,6 @@ export class SessionManager {
 		return this.#index.usageSnapshot();
 	}
 
-	/**
-	 * Open a new per-turn budget window: snapshot the cumulative output baseline,
-	 * reset the eval-subagent counter, and set the (optional) ceiling.
-	 */
-	beginTurnBudget(total: number | null, hard: boolean): void {
-		this.#turnBudgetTotal = total;
-		this.#turnBudgetHard = hard;
-		this.#turnOutputBaseline = this.#index.usageSnapshot().output;
-		this.#turnEvalOutput = 0;
-	}
-
-	recordEvalSubagentOutput(output: number): void {
-		if (Number.isFinite(output) && output > 0) this.#turnEvalOutput += output;
-	}
-
-	getTurnBudget(): { total: number | null; spent: number; hard: boolean } {
-		const mainOutput = Math.max(0, this.#index.usageSnapshot().output - this.#turnOutputBaseline);
-		return { total: this.#turnBudgetTotal, spent: mainOutput + this.#turnEvalOutput, hard: this.#turnBudgetHard };
-	}
-
 	getSessionDir(): string {
 		return this.#sessionDir;
 	}
@@ -2078,12 +2055,64 @@ export class SessionManager {
 		outputSchemaMode?: StructuredSubagentSchemaMode;
 		restrictToolNames?: boolean;
 		spawns?: string;
-		readSummarize?: boolean;
 		runtime?: SessionInitEntry["runtime"];
 	}): string {
 		const entry: SessionInitEntry = { type: "session_init", ...this.#freshEntryFields(), ...init };
 		this.#recordEntry(entry);
 		return entry.id;
+	}
+
+	/** Persist the usage baseline before a root Act starts. */
+	appendActStart(actId: string, usageBaseline: Usage, sessionKey?: string): string {
+		if (!actId) throw new Error("Act id is required");
+		const entry: ActStartEntry = {
+			type: "act_start",
+			...this.#freshEntryFields(),
+			actId,
+			usageBaseline: structuredClone(usageBaseline),
+			sessionKey,
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/** Persist the terminal fact for a root Act; replay never stores returned values. */
+	appendActTerminal(
+		actId: string,
+		status: ActTerminalStatus,
+		usage: Usage,
+		options: {
+			model?: { provider: string; id: string };
+			error?: string;
+			sessionKey?: string;
+		} = {},
+	): string {
+		if (!actId) throw new Error("Act id is required");
+		const error = options.error === undefined ? undefined : options.error.slice(0, 4096);
+		const entry: ActTerminalEntry = {
+			type: "act_terminal",
+			...this.#freshEntryFields(),
+			actId,
+			status,
+			usage: structuredClone(usage),
+			model: options.model,
+			error,
+			sessionKey: options.sessionKey,
+		};
+		this.#recordEntry(entry);
+		return entry.id;
+	}
+
+	/** Root Acts started on the active branch without a terminal fact. */
+	getUnmatchedActStarts(): ActStartEntry[] {
+		const terminalIds = new Set(
+			this.getBranch()
+				.filter((entry): entry is ActTerminalEntry => entry.type === "act_terminal")
+				.map(entry => entry.actId),
+		);
+		return this.getBranch().filter(
+			(entry): entry is ActStartEntry => entry.type === "act_start" && !terminalIds.has(entry.actId),
+		);
 	}
 
 	appendCompaction<T = unknown>(
@@ -2573,7 +2602,6 @@ export class SessionManager {
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
 			spawns?: string;
-			readSummarize?: boolean;
 			runtime?: SessionInitEntry["runtime"];
 		} | null;
 	} | null> {
@@ -2597,7 +2625,6 @@ export class SessionManager {
 			outputSchemaMode?: StructuredSubagentSchemaMode;
 			restrictToolNames?: boolean;
 			spawns?: string;
-			readSummarize?: boolean;
 			runtime?: SessionInitEntry["runtime"];
 		} | null = null;
 		for (let index = loaded.length - 1; index >= 0; index--) {
@@ -2613,7 +2640,6 @@ export class SessionManager {
 					outputSchema: entry.outputSchema,
 					outputSchemaMode: entry.outputSchemaMode,
 					restrictToolNames: entry.restrictToolNames,
-					readSummarize: entry.readSummarize,
 					spawns: entry.spawns,
 					runtime: entry.runtime,
 				};

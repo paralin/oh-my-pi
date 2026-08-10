@@ -12,9 +12,9 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const failingToolSchema = z.object({ value: z.string() });
+const failingToolSchema = z.object({ code: z.string() });
 const failingTool: AgentTool<typeof failingToolSchema, Record<string, never>> = {
-	name: "boom",
+	name: "ipython",
 	label: "Boom",
 	description: "Always fails",
 	parameters: failingToolSchema,
@@ -52,7 +52,6 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { ses
 		sessionManager,
 		settings,
 		modelRegistry,
-		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
 	const harness = { session, authStorage, tempDir };
 	activeHarnesses.push(harness);
@@ -84,7 +83,7 @@ describe("AgentSession terminal error persistence", () => {
 	it("persists the terminal empty error turn that ends the run after a failed tool result", async () => {
 		const { session, sessionManager } = await createHarness([
 			{
-				content: [{ type: "toolCall", id: "call-1", name: "boom", arguments: { value: "x" } }],
+				content: [{ type: "toolCall", id: "call-1", name: "ipython", arguments: { code: "x" } }],
 				stopReason: "toolUse",
 			},
 			{ content: [], stopReason: "error", errorMessage: "provider rejected the continuation" },

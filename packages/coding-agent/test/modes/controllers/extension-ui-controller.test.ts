@@ -55,7 +55,7 @@ function makeHarness() {
 		setFocus,
 		controller,
 		async init(): Promise<ExtensionUIContext> {
-			await controller.initHooksAndCustomTools();
+			await controller.initExtensions();
 			expect(uiContext).toBeDefined();
 			return uiContext!;
 		},

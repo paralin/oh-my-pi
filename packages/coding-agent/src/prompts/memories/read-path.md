@@ -12,6 +12,6 @@ Memory summary:
 {{memory_summary}}
 {{/if}}
 {{#if learned}}
-Learned lessons (captured via the `learn` tool; durable but may be stale — verify against the repo before relying on them):
+Learned lessons from legacy storage (durable but may be stale — verify against the repo before relying on them):
 {{learned}}
 {{/if}}

@@ -227,22 +227,6 @@ function formatLoopLimit(limit: NonNullable<SegmentContext["loopMode"]>["limit"]
 const modeSegment: StatusLineSegment = {
 	id: "mode",
 	render(ctx) {
-		const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
-
-		const plan = ctx.planMode;
-		if (plan && (plan.enabled || plan.paused)) {
-			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
-			const content = withIcon(theme.icon.plan, label);
-			const color = plan.paused ? "warning" : "accent";
-			return { content: theme.fg(color, content), visible: true };
-		}
-
-		const prewalk = ctx.prewalk;
-		if (prewalk?.enabled) {
-			const content = withIcon(theme.icon.prewalk, "Prewalk");
-			return { content: theme.fg("accent", content), visible: true };
-		}
-
 		const goal = ctx.goalMode;
 		if (goal && (goal.enabled || goal.paused)) {
 			return renderGoalMode(ctx, goal);

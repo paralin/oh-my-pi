@@ -3,7 +3,6 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
-import { matchesAppFollowUp } from "@oh-my-pi/pi-coding-agent/modes/utils/keybinding-matchers";
 import { type KeybindingsConfig, setKeybindings } from "@oh-my-pi/pi-tui";
 import {
 	__resetDirsFromEnvForTests,
@@ -13,10 +12,6 @@ import {
 	setProfile,
 } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
-
-function ctrl(key: string): string {
-	return String.fromCharCode(key.toLowerCase().charCodeAt(0) & 31);
-}
 
 async function writeKeybindingsYaml(agentDir: string, config: KeybindingsConfig): Promise<void> {
 	await fs.mkdir(agentDir, { recursive: true });
@@ -137,32 +132,6 @@ describe("KeybindingsManager.create", () => {
 
 			expect(manager.getKeys("app.session.fork")).toEqual(["ctrl+f"]);
 			expect(manager.getKeys("app.clipboard.copyPrompt")).toEqual(["alt+c", "ctrl+shift+c"]);
-		} finally {
-			await removeWithRetries(agentDir);
-		}
-	});
-
-	it("accepts keybindings.yaml when present", async () => {
-		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-keybindings-"));
-		const yamlPath = path.join(agentDir, "keybindings.yaml");
-		const canonicalPath = path.join(agentDir, "keybindings.yml");
-
-		await Bun.write(
-			yamlPath,
-			YAML.stringify(
-				{
-					"app.plan.toggle": "alt+shift+p",
-				},
-				null,
-				2,
-			),
-		);
-
-		try {
-			const manager = KeybindingsManager.create(agentDir);
-
-			expect(manager.getKeys("app.plan.toggle")).toEqual(["alt+shift+p"]);
-			expect(await Bun.file(canonicalPath).exists()).toBe(false);
 		} finally {
 			await removeWithRetries(agentDir);
 		}
@@ -318,20 +287,6 @@ describe("KeybindingsManager.create", () => {
 		} finally {
 			await removeWithRetries(agentDir);
 		}
-	});
-
-	it("removes the Ctrl+Q follow-up default when a user remap already claims it (#1903)", () => {
-		const manager = KeybindingsManager.inMemory({
-			"app.plan.toggle": "ctrl+q",
-		});
-		setKeybindings(manager);
-
-		expect(manager.getKeys("app.plan.toggle")).toEqual(["ctrl+q"]);
-		expect(manager.getKeys("app.message.followUp")).toEqual(["ctrl+enter"]);
-		expect(manager.getDisplayString("app.message.followUp")).toBe("Ctrl+Enter");
-		expect(manager.getEffectiveConfig()["app.message.followUp"]).toBe("ctrl+enter");
-		expect(matchesAppFollowUp(ctrl("q"))).toBe(false);
-		expect(matchesAppFollowUp("\x1b[13;5u")).toBe(true);
 	});
 
 	it("keeps the Ctrl+Q follow-up default when only an unknown config key claims it (#1903)", () => {
