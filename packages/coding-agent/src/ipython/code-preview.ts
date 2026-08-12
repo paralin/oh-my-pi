@@ -5,6 +5,8 @@ const BASH_LINE_PATTERN = /^\s*!/;
 const IMPORT_LINE_PATTERN = /^\s*(?:import\s+\S|from\s+\S+\s+import\s+)/;
 const SECRET_NAME_PATTERN = /\b((?=\w*(?:token|key|secret|password))[A-Za-z_]\w*)\s*=\s*(?:(["'])[^"']*\2|\S+)/gi;
 const SECRET_FLAG_PATTERN = /((?:--(?:api[-_]?key|token|secret|password)|-(?:k|t)))\s+(?:(["'])[^"']*\2|\S+)/gi;
+const QUOTED_AUTHORIZATION_PATTERN = /(["'])Authorization\s*:\s*Bearer\s+[^"']*\1/gi;
+const AUTHORIZATION_PATTERN = /Authorization\s*:\s*Bearer\s+[^\s;&|"']+/gi;
 const TOKEN_VALUE_PATTERN = /\b(?:Bearer\s+)?(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_-]+)\b/g;
 
 export type IpythonPreviewLanguage = "bash" | "python";
@@ -16,6 +18,8 @@ export interface IpythonCodePreview {
 
 function descriptor(text: string): string {
 	const redacted = text
+		.replace(QUOTED_AUTHORIZATION_PATTERN, quote => `${quote[0]}Authorization: Bearer <redacted>${quote[0]}`)
+		.replace(AUTHORIZATION_PATTERN, "Authorization: Bearer <redacted>")
 		.replace(/[A-Za-z0-9+/_-]{80,}={0,2}/g, "<blob>")
 		.replace(SECRET_NAME_PATTERN, "$1=<redacted>")
 		.replace(SECRET_FLAG_PATTERN, "$1 <redacted>")
@@ -246,10 +250,35 @@ export function previewPythonCode(code: string): IpythonCodePreview {
 	return { language: "python", text: fallbackPythonPreview(code) };
 }
 
+function shellCommandParts(line: string): string[] {
+	const parts: string[] = [];
+	let start = 0;
+	let quote: "'" | '"' | undefined;
+	for (let index = 0; index < line.length; index++) {
+		const char = line[index];
+		if (char === "\\" && quote !== "'") {
+			index += 1;
+			continue;
+		}
+		if (char === "'" || char === '"') {
+			quote = quote === char ? undefined : (quote ?? char);
+			continue;
+		}
+		if (quote) continue;
+		const separatorLength = char === ";" ? 1 : line.slice(index, index + 2) === "&&" ? 2 : 0;
+		if (separatorLength === 0) continue;
+		parts.push(line.slice(start, index));
+		start = index + separatorLength;
+		index += separatorLength - 1;
+	}
+	parts.push(line.slice(start));
+	return parts;
+}
+
 export function previewBashCommand(command: string): IpythonCodePreview {
 	let preview = "";
 	for (const line of command.split("\n")) {
-		for (const part of line.split(/(?:&&|;)/)) {
+		for (const part of shellCommandParts(line)) {
 			const trimmed = part.trim().replace(BASH_LINE_PATTERN, "").trim();
 			if (!trimmed || trimmed.startsWith("#") || /^set\s+[-+]/.test(trimmed)) continue;
 			if (/^(?:export\s+\w+=|source\s+\S+|\.\s+\S+)/.test(trimmed)) continue;

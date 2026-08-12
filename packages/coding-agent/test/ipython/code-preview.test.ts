@@ -55,5 +55,18 @@ describe("IPython code preview", () => {
 		const preview = previewPythonCode('subprocess.run(["curl", "--api-key", "sk live must not render"])');
 		expect(preview.text).toBe("curl --api-key <redacted>");
 		expect(preview.text).not.toContain("sk live must not render");
+		expect(previewPythonCode('subprocess.run(["curl", "-H", "Authorization: Bearer abc123"])').text).toBe(
+			"curl -H Authorization: Bearer <redacted>",
+		);
+	});
+
+	test("splits shell chains only outside quotes and redacts authorization headers", () => {
+		expect(previewIpythonCode('%%bash\necho "left;right"').text).toBe('echo "left;right"');
+		const preview = previewIpythonCode(
+			'%%bash\ncurl -H "Authorization: Bearer abc123;stillsecret" https://example.test',
+		);
+		expect(preview.text).toContain("Authorization: Bearer <redacted>");
+		expect(preview.text).not.toContain("abc123");
+		expect(preview.text).not.toContain("stillsecret");
 	});
 });
