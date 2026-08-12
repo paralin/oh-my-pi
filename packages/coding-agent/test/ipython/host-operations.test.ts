@@ -181,6 +181,18 @@ describe("IPython nested host-operation lifecycle", () => {
 			],
 		};
 		expect(isIpythonJournalDetail(payloadBearing)).toBe(false);
+		expect(
+			isIpythonJournalDetail({
+				...detail,
+				events: [operation("i".repeat(201), "ast.search", "start", 2_001)],
+			}),
+		).toBe(false);
+		expect(
+			isIpythonJournalDetail({
+				...detail,
+				events: [operation("comm-long", "o".repeat(201), "start", 2_002)],
+			}),
+		).toBe(false);
 
 		const normalized = projectIpythonCellPresentation(
 			cellResult([
@@ -414,6 +426,22 @@ describe("IPython controller nested operation records", () => {
 			const at = records.map(record => record.at);
 			expect(at).toEqual([...at].sort((left, right) => left - right));
 			expect(JSON.stringify(records)).not.toContain(SECRET);
+		} finally {
+			await controller.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 15_000);
+
+	test("does not record an unknown secret-shaped operation", async () => {
+		const { controller, tempRoot } = await scriptedController({});
+		try {
+			const result = await controller.execute(
+				JSON.stringify({ done: "none", requests: [{ comm_id: "comm-unknown", data: { type: SECRET } }] }),
+				{ hostContext },
+			);
+			expect(result.status).toBe("ok");
+			expect(operations(result.events)).toEqual([]);
+			expect(JSON.stringify(result.events)).not.toContain(SECRET);
 		} finally {
 			await controller.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });

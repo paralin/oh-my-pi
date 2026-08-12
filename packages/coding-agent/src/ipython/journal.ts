@@ -140,7 +140,11 @@ function isHostOperationEvent(value: Record<string, unknown>): boolean {
 			),
 		) ||
 		typeof value.operationId !== "string" ||
+		value.operationId.length === 0 ||
+		value.operationId.length > 200 ||
 		typeof value.operation !== "string" ||
+		value.operation.length === 0 ||
+		value.operation.length > 200 ||
 		(phase !== "start" && phase !== "progress" && phase !== "terminal") ||
 		!Number.isSafeInteger(value.at)
 	) {
