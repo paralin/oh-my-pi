@@ -217,7 +217,9 @@ describe("buildCopyTargets", () => {
 				getIpythonCellJournalDetails: () => [cell],
 			}),
 		);
-		const target = targets[0];
+		expect(targets[0]?.id).toBe("msg:1");
+		expect(targets[0]?.content).toBe("answer");
+		const target = targets[1];
 		expect(target?.id).toBe("cell:cell-copy");
 		expect(target?.label).toBe("In [4] ok");
 		expect(target?.content).toContain("print('copied')");

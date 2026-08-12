@@ -365,10 +365,6 @@ function ipythonCellTarget(detail: IpythonCellJournalDetail, rank: number): Copy
  */
 export function buildCopyTargets(source: CopySource): CopyTarget[] {
 	const targets: CopyTarget[] = [];
-	const cells = source.getIpythonCellJournalDetails?.(MAX_MESSAGES) ?? [];
-	for (let index = cells.length - 1, rank = 1; index >= 0 && rank <= MAX_MESSAGES; index--, rank++) {
-		targets.push(ipythonCellTarget(cells[index]!, rank));
-	}
 	const pendingCommands: LastCommand[] = [];
 	let messageRank = 0;
 	let commandRank = 0;
@@ -402,6 +398,11 @@ export function buildCopyTargets(source: CopySource): CopyTarget[] {
 		appendCommands(pendingCommands);
 		appendCommands(commands);
 		pendingCommands.length = 0;
+	}
+
+	const cells = source.getIpythonCellJournalDetails?.(MAX_MESSAGES) ?? [];
+	for (let index = cells.length - 1, rank = 1; index >= 0 && rank <= MAX_MESSAGES; index--, rank++) {
+		targets.push(ipythonCellTarget(cells[index]!, rank));
 	}
 
 	if (messageRank === 0) {
