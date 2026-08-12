@@ -2,6 +2,7 @@ import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { IpythonMimeRenderer } from "../../extensibility/extensions/types";
 import type { IpythonCellUpdate } from "../../ipython/cell";
+import { previewIpythonCode } from "../../ipython/code-preview";
 import { collectIpythonMimeItems } from "../../ipython/extension-registry";
 import type { IpythonCellJournalDetail, IpythonJournalDetail } from "../../ipython/journal";
 import {
@@ -40,6 +41,27 @@ function clampPreviewLines(text: string, width: number): string {
 		.split("\n")
 		.map(line => truncateToWidth(line, contentWidth))
 		.join("\n");
+}
+
+function cellCodePreview(
+	code: string,
+	expanded: boolean,
+	width: number,
+): {
+	code: string;
+	language: string;
+	codeHiddenLines?: number;
+} {
+	const safeCode = sanitizeText(code);
+	if (expanded) return { code: safeCode, language: "python" };
+	const preview = previewIpythonCode(safeCode);
+	const text = clampPreviewLines(preview.text, width);
+	const sourceLines = displayText(safeCode).split("\n").length;
+	return {
+		code: text,
+		language: preview.language,
+		codeHiddenLines: text ? sourceLines : undefined,
+	};
 }
 
 function cellStatus(detail: IpythonCellJournalDetail): "complete" | "warning" | "error" {
@@ -174,13 +196,13 @@ export class IpythonCellMessageComponent extends Container {
 
 		const presentation = projectIpythonCellPresentation(detail);
 		const cell: Component = {
-			render: width =>
-				renderCodeCell(
+			render: width => {
+				const code = cellCodePreview(presentation.code, this.#expanded, width);
+				return renderCodeCell(
 					{
-						code: this.#expanded
-							? sanitizeText(presentation.code)
-							: clampPreviewLines(sanitizeText(presentation.code), width),
-						language: "python",
+						code: code.code,
+						language: code.language,
+						codeHiddenLines: code.codeHiddenLines,
 						showLanguage: true,
 						title: `In [${presentation.sequence}]${presentation.origin === "direct" ? " · direct" : ""}`,
 						status: cellStatus(detail),
@@ -196,7 +218,8 @@ export class IpythonCellMessageComponent extends Container {
 						width,
 					},
 					theme,
-				),
+				);
+			},
 		};
 		this.addChild(cell);
 		this.#appendOperations(presentation);
@@ -231,11 +254,13 @@ export class IpythonCellMessageComponent extends Container {
 		if (!live) return;
 		const presentation = projectIpythonLiveCellPresentation(live);
 		const cell: Component = {
-			render: width =>
-				renderCodeCell(
+			render: width => {
+				const code = cellCodePreview(live.code, this.#expanded, width);
+				return renderCodeCell(
 					{
-						code: this.#expanded ? sanitizeText(live.code) : clampPreviewLines(sanitizeText(live.code), width),
-						language: "python",
+						code: code.code,
+						language: code.language,
+						codeHiddenLines: code.codeHiddenLines,
 						showLanguage: true,
 						title: `IPython${live.origin === "direct" ? " · direct" : ""}`,
 						status: "running",
@@ -250,7 +275,8 @@ export class IpythonCellMessageComponent extends Container {
 						width,
 					},
 					theme,
-				),
+				);
+			},
 		};
 		this.addChild(cell);
 		this.#appendOperations(presentation);

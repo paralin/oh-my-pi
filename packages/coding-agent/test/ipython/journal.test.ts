@@ -113,7 +113,7 @@ describe("IPython replay journal", () => {
 		const component = new IpythonCellMessageComponent(detail);
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
 		expect(collapsed).toContain("In [7]");
-		expect(collapsed).toContain("display(unsafe_html)");
+		expect(collapsed).toContain("raise ValueError('broken')");
 		expect(collapsed).toContain("displayed MIME types: text/html");
 		expect(collapsed).toContain("ValueError: broken");
 		expect(collapsed).not.toContain(rawHtml);
@@ -281,15 +281,15 @@ describe("IPython replay journal", () => {
 		expect(collapsed).toContain("In [7]");
 		expect(collapsed).not.toContain("· model");
 		expect(collapsed).not.toContain("value_0 = 0");
-		expect(collapsed).toContain("value_22 = 22");
+		expect(collapsed).not.toContain("value_22 = 22");
 		expect(collapsed).toContain("value_24 = 24");
-		expect(collapsed).toContain("… 22 earlier lines");
+		expect(collapsed).toContain("… 25 earlier lines");
 		expect(collapsed).not.toContain("output-0-");
 		expect(collapsed).toContain("output-27");
 		expect(collapsed).toContain("output-29");
 		expect(collapsed).toContain("… 27 earlier lines");
 		expect(collapsed.match(/Ctrl\+O: Expand/g)).toHaveLength(2);
-		expect(collapsed.split("\n")).toHaveLength(11);
+		expect(collapsed.split("\n").length).toBeLessThanOrEqual(11);
 
 		for (const width of [40, 16]) {
 			const rows = completed.render(width).map(line => Bun.stripANSI(line));

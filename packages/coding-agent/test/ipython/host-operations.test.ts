@@ -230,6 +230,54 @@ describe("IPython nested host-operation lifecycle", () => {
 		}
 	});
 
+	test("uses the same semantic preview beside nested operations live and in replay", () => {
+		const code = `import subprocess
+subprocess.run(
+	args=["rg", "-n", "needle", "src"],
+	check=True,
+)`;
+		const result = cellResult(astEvents(), { code, origin: "direct" });
+		const replayed = new IpythonCellMessageComponent(createIpythonCellJournalDetail(result));
+		const live = new IpythonCellMessageComponent({ code, origin: "direct" });
+		for (const event of result.events) {
+			live.applyUpdate({ kind: "execution", cellId: result.cellId, origin: "direct", event });
+		}
+
+		for (const component of [live, replayed]) {
+			const collapsed = Bun.stripANSI(component.render(100).join("\n"));
+			expect(collapsed).toContain("rg -n needle src");
+			expect(collapsed).not.toContain("subprocess.run(");
+			expect(collapsed).toContain("· direct");
+			expect(collapsed).toContain("Operations");
+			expect(collapsed).toContain("ast.search · src/app.ts · 3 matches (30ms)");
+			for (const width of [40, 16]) {
+				const rows = component.render(width).map(line => Bun.stripANSI(line));
+				expect(rows.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+			}
+
+			component.setExpanded(true);
+			const expanded = Bun.stripANSI(component.render(100).join("\n"));
+			expect(expanded).toContain("subprocess.run(");
+			expect(expanded).toContain('args=["rg", "-n", "needle", "src"]');
+			expect(expanded).toContain("Syntax-tree search completed");
+		}
+	});
+
+	test("keeps Ctrl-O discoverable when a one-line command becomes a semantic preview", () => {
+		const code = 'subprocess.run(["rg", "-n", "needle", "src"])';
+		const component = new IpythonCellMessageComponent(
+			createIpythonCellJournalDetail(cellResult([], { code, origin: "direct" })),
+		);
+		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
+		expect(collapsed).toContain("rg -n needle src");
+		expect(collapsed).not.toContain("subprocess.run(");
+		expect(collapsed).toContain("Ctrl+O: Expand");
+
+		component.setExpanded(true);
+		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain(code);
+	});
+
 	test("bounds the collapsed operation list and keeps direct-origin failure and abort states legible", () => {
 		const events: IpythonExecutionEvent[] = [];
 		for (let index = 0; index < 6; index++) {

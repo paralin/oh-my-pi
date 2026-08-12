@@ -33,6 +33,8 @@ export interface CodeCellOptions {
 	codeTail?: boolean;
 	/** Show the LAST `outputMaxLines` rows so a bounded preview follows streaming output. */
 	outputTail?: boolean;
+	/** Source rows omitted by a semantic one-line code preview while collapsed. */
+	codeHiddenLines?: number;
 	expanded?: boolean;
 	/**
 	 * Prefix the header with the cell's language icon (resolved through the
@@ -131,7 +133,7 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 	const normalizedCode = replaceTabs(code ?? "");
 	const rawCodeLines = sanitizeTerminalLines(normalizedCode);
 	const maxCodeLines = expanded ? rawCodeLines.length : Math.min(rawCodeLines.length, codeMaxLines);
-	const hiddenCodeLines = rawCodeLines.length - maxCodeLines;
+	const hiddenCodeLines = expanded ? 0 : Math.max(0, options.codeHiddenLines ?? rawCodeLines.length - maxCodeLines);
 	const tail = options.codeTail === true && !expanded && hiddenCodeLines > 0;
 	const startIndex = tail ? rawCodeLines.length - maxCodeLines : 0;
 	const visibleCode = rawCodeLines.slice(startIndex, startIndex + maxCodeLines).join("\n");
