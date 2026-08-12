@@ -167,7 +167,9 @@ describe("IPython replay journal", () => {
 		expect(running).not.toContain(rawHtml);
 		component.complete(createIpythonCellJournalDetail(cellResult()));
 		const complete = Bun.stripANSI(component.render(100).join("\n"));
-		expect(complete).toContain("failed");
+		expect(complete).toContain("In [7]");
+		expect(complete).toContain("· direct");
+		expect(complete).toContain("ValueError: broken");
 		expect(complete).toContain("25ms");
 	});
 
@@ -248,7 +250,7 @@ describe("IPython replay journal", () => {
 		expect(expanded).toContain("startup · restore: Restoring IPython state...");
 	});
 
-	test("keeps complete cell input visible while Ctrl-O expands bounded output", () => {
+	test("matches compact tool cards while Ctrl-O reveals the complete cell", () => {
 		const codeLines = Array.from({ length: 25 }, (_, index) => `value_${index} = ${index}`);
 		codeLines[12] = `blob = '${"y".repeat(4_100)}'`;
 		const code = codeLines.join("\n");
@@ -276,19 +278,34 @@ describe("IPython replay journal", () => {
 
 		const completed = new IpythonCellMessageComponent(createIpythonCellJournalDetail(result));
 		const collapsed = Bun.stripANSI(completed.render(100).join("\n"));
-		expect(collapsed).toContain("value_0 = 0");
+		expect(collapsed).toContain("In [7]");
+		expect(collapsed).not.toContain("· model");
+		expect(collapsed).not.toContain("value_0 = 0");
+		expect(collapsed).toContain("value_22 = 22");
 		expect(collapsed).toContain("value_24 = 24");
-		expect(collapsed.replaceAll(/\s/g, "")).toContain(codeLines[12]!.replaceAll(/\s/g, ""));
-		expect(collapsed).not.toContain("code lines omitted");
-		expect(collapsed).toContain("… 10 output lines omitted (Ctrl+O to expand)");
+		expect(collapsed).toContain("… 22 earlier lines");
 		expect(collapsed).not.toContain("output-0-");
+		expect(collapsed).toContain("output-27");
 		expect(collapsed).toContain("output-29");
+		expect(collapsed).toContain("… 27 earlier lines");
+		expect(collapsed.match(/Ctrl\+O: Expand/g)).toHaveLength(2);
+		expect(collapsed.split("\n")).toHaveLength(11);
+
+		for (const width of [40, 16]) {
+			const rows = completed.render(width).map(line => Bun.stripANSI(line));
+			expect(rows.length).toBeLessThanOrEqual(20);
+			expect(rows.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+		}
 
 		completed.setExpanded(true);
 		const expanded = Bun.stripANSI(completed.render(100).join("\n"));
-		expect(expanded.replaceAll(/\s/g, "")).toContain(outputLines[0]!);
+		expect(expanded).toContain("blob =");
+		expect(expanded.split("y").length - 1).toBeGreaterThanOrEqual(4_100);
+		expect(expanded).toContain("output-0-");
+		expect(expanded.split("x").length - 1).toBeGreaterThanOrEqual(4_100);
+		expect(expanded).toContain("value_24 = 24");
 		expect(expanded).toContain("output-29");
-		expect(expanded).not.toContain("output lines omitted");
+		expect(expanded).not.toContain("more lines");
 
 		const live = new IpythonCellMessageComponent({ code, origin: "model" });
 		live.applyUpdate({
@@ -298,18 +315,23 @@ describe("IPython replay journal", () => {
 			event: { kind: "stream", name: "stdout", text: output },
 		});
 		const liveCollapsed = Bun.stripANSI(live.render(100).join("\n"));
+		expect(liveCollapsed).toContain("IPython");
 		expect(liveCollapsed).toContain("value_24 = 24");
-		expect(liveCollapsed).toContain("… 10 output lines omitted (Ctrl+O to expand)");
+		expect(liveCollapsed).not.toContain("value_0 = 0");
+		expect(liveCollapsed).toContain("output-29");
 		expect(liveCollapsed).not.toContain("output-0-");
 		live.setExpanded(true);
-		expect(Bun.stripANSI(live.render(100).join("\n")).replaceAll(/\s/g, "")).toContain(outputLines[0]!);
+		const liveExpanded = Bun.stripANSI(live.render(100).join("\n"));
+		expect(liveExpanded).toContain("output-0-");
+		expect(liveExpanded.split("x").length - 1).toBeGreaterThanOrEqual(4_100);
 
 		const direct = new IpythonCellMessageComponent(
 			createIpythonCellJournalDetail({ ...result, origin: "direct", cellId: "cell-direct" }),
 		);
 		const directCollapsed = Bun.stripANSI(direct.render(100).join("\n"));
-		expect(directCollapsed).toContain("· direct ·");
+		expect(directCollapsed).toContain("· direct");
 		expect(directCollapsed).toContain("value_24 = 24");
+		expect(directCollapsed).not.toContain("value_0 = 0");
 	});
 
 	test("projects ordered live and replayed output through one structured record", () => {
@@ -398,8 +420,13 @@ describe("IPython replay journal", () => {
 		const replayText = Bun.stripANSI(
 			new IpythonCellMessageComponent(createIpythonCellJournalDetail(result)).render(120).join("\n"),
 		);
-		expect(liveText).toContain("leftright");
-		expect(replayText).toContain("leftright");
+		expect(liveText).not.toContain("leftright");
+		expect(replayText).not.toContain("leftright");
+		expect(liveText).toContain("earlier lines");
+		expect(replayText).toContain("earlier lines");
+		liveComponent.setExpanded(true);
+		const expandedLiveText = Bun.stripANSI(liveComponent.render(120).join("\n"));
+		expect(expandedLiveText).toContain("leftright");
 		expect(liveText).not.toContain(rawHtml);
 		expect(replayText).not.toContain(rawHtml);
 	});

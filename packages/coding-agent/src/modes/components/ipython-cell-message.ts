@@ -1,4 +1,4 @@
-import { Container, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { IpythonMimeRenderer } from "../../extensibility/extensions/types";
 import type { IpythonCellUpdate } from "../../ipython/cell";
@@ -10,24 +10,32 @@ import {
 	projectIpythonLiveCellPresentation,
 } from "../../ipython/projection";
 import type { ActProjectionEvent } from "../../session/act-events";
-import { expandKeyHint, shortenPath, truncateToWidth } from "../../tools/render-utils";
-import { highlightCode, theme } from "../theme/theme";
+import { PREVIEW_LIMITS, shortenPath, truncateToWidth } from "../../tools/render-utils";
+import { outputBlockContentWidth, renderCodeCell } from "../../tui";
+import { theme } from "../theme/theme";
 
-const COLLAPSED_OUTPUT_LINES = 20;
 const MAX_DISPLAY_LINE_CHARS = 4_000;
 
 function clampLine(line: string): string {
 	return truncateToWidth(line, MAX_DISPLAY_LINE_CHARS);
 }
 
-function statusLabel(detail: IpythonCellJournalDetail): string {
-	if (detail.status === "ok") return theme.fg("success", "completed");
-	if (detail.status === "aborted") return theme.fg("warning", "aborted");
-	return theme.fg("error", "failed");
+function displayText(text: string): string {
+	return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
-function durationLabel(durationMs: number): string {
-	return durationMs < 1_000 ? `${durationMs}ms` : `${(durationMs / 1_000).toFixed(2)}s`;
+function clampPreviewLines(text: string, width: number): string {
+	const contentWidth = outputBlockContentWidth(width);
+	return displayText(text)
+		.split("\n")
+		.map(line => truncateToWidth(line, contentWidth))
+		.join("\n");
+}
+
+function cellStatus(detail: IpythonCellJournalDetail): "complete" | "warning" | "error" {
+	if (detail.status === "ok") return "complete";
+	if (detail.status === "aborted") return "warning";
+	return "error";
 }
 
 export interface IpythonLiveCellView {
@@ -106,27 +114,32 @@ export class IpythonCellMessageComponent extends Container {
 		}
 
 		const presentation = projectIpythonCellPresentation(detail);
-		const origin = presentation.origin === "direct" ? "direct" : "model";
-		const heading = `${theme.fg("pythonMode", theme.bold(`In [${presentation.sequence}]`))} ${theme.fg("muted", `· ${origin} · `)}${statusLabel(detail)}${theme.fg("muted", ` · ${durationLabel(presentation.durationMs)}`)}`;
-		const codeLines = highlightCode(sanitizeText(presentation.code), "python");
-		const code = codeLines
-			.map((line, index) => `${theme.fg("pythonMode", index === 0 ? ">>>" : "...")} ${line}`)
-			.join("\n");
-		this.addChild(new Text(`${heading}\n${code}`, 1, 0));
-
-		const cleanOutput = sanitizeText(presentation.safeText.text);
-		const outputLines = cleanOutput
-			? cleanOutput.split("\n").filter((line, index, lines) => line.length > 0 || index < lines.length - 1)
-			: [];
-		const shownOutput = this.#expanded ? outputLines : outputLines.slice(-COLLAPSED_OUTPUT_LINES).map(clampLine);
-		const outputOmitted = outputLines.length - shownOutput.length;
-		if (shownOutput.length > 0) {
-			const prefix =
-				outputOmitted > 0
-					? theme.fg("dim", `… ${outputOmitted} output lines omitted (${expandKeyHint()} to expand)\n`)
-					: "";
-			this.addChild(new Text(`\n${prefix}${shownOutput.map(line => theme.fg("muted", line)).join("\n")}`, 1, 0));
-		}
+		const cell: Component = {
+			render: width =>
+				renderCodeCell(
+					{
+						code: this.#expanded
+							? sanitizeText(presentation.code)
+							: clampPreviewLines(sanitizeText(presentation.code), width),
+						language: "python",
+						showLanguage: true,
+						title: `In [${presentation.sequence}]${presentation.origin === "direct" ? " · direct" : ""}`,
+						status: cellStatus(detail),
+						duration: presentation.durationMs,
+						output: this.#expanded
+							? displayText(sanitizeText(presentation.safeText.text))
+							: clampPreviewLines(sanitizeText(presentation.safeText.text), width),
+						codeMaxLines: PREVIEW_LIMITS.COLLAPSED_LINES,
+						outputMaxLines: PREVIEW_LIMITS.OUTPUT_COLLAPSED,
+						codeTail: true,
+						outputTail: true,
+						expanded: this.#expanded,
+						width,
+					},
+					theme,
+				),
+		};
+		this.addChild(cell);
 
 		if (this.#expanded) {
 			const progress = presentation.startupProgress.map(
@@ -156,25 +169,31 @@ export class IpythonCellMessageComponent extends Container {
 	#rebuildLive(): void {
 		const live = this.#live;
 		if (!live) return;
-		const heading = `${theme.fg("pythonMode", theme.bold("IPython"))} ${theme.fg("muted", `· ${live.origin} · `)}${theme.fg("accent", "running")}`;
-		const codeLines = highlightCode(sanitizeText(live.code), "python");
-		const code = codeLines
-			.map((line, index) => `${theme.fg("pythonMode", index === 0 ? ">>>" : "...")} ${line}`)
-			.join("\n");
-		this.addChild(new Text(`${heading}\n${code}`, 1, 0));
 		const presentation = projectIpythonLiveCellPresentation(live);
-		const outputLines = sanitizeText(presentation.safeText.text)
-			.split("\n")
-			.filter((line, index, lines) => line.length > 0 || index < lines.length - 1);
-		const shownOutput = this.#expanded ? outputLines : outputLines.slice(-COLLAPSED_OUTPUT_LINES).map(clampLine);
-		const outputOmitted = outputLines.length - shownOutput.length;
-		if (shownOutput.length > 0) {
-			const prefix =
-				outputOmitted > 0
-					? theme.fg("dim", `… ${outputOmitted} output lines omitted (${expandKeyHint()} to expand)\n`)
-					: "";
-			this.addChild(new Text(`\n${prefix}${shownOutput.map(line => theme.fg("muted", line)).join("\n")}`, 1, 0));
-		}
+		const cell: Component = {
+			render: width =>
+				renderCodeCell(
+					{
+						code: this.#expanded ? sanitizeText(live.code) : clampPreviewLines(sanitizeText(live.code), width),
+						language: "python",
+						showLanguage: true,
+						title: `IPython${live.origin === "direct" ? " · direct" : ""}`,
+						status: "running",
+						output: this.#expanded
+							? displayText(sanitizeText(presentation.safeText.text))
+							: clampPreviewLines(sanitizeText(presentation.safeText.text), width),
+						codeMaxLines: PREVIEW_LIMITS.COLLAPSED_LINES,
+						outputMaxLines: PREVIEW_LIMITS.OUTPUT_COLLAPSED,
+						codeTail: true,
+						outputTail: true,
+						expanded: this.#expanded,
+						width,
+					},
+					theme,
+				),
+		};
+		this.addChild(cell);
+
 		const progress = presentation.startupProgress.at(-1);
 		if (progress) {
 			this.addChild(new Text(theme.fg("dim", `\n${progress.stage}: ${sanitizeText(progress.message)}`), 1, 0));
@@ -243,7 +262,7 @@ export class IpythonCellMessageComponent extends Container {
 						break;
 				}
 			}
-			const shown = this.#expanded ? lines : lines.slice(-COLLAPSED_OUTPUT_LINES);
+			const shown = this.#expanded ? lines : lines.slice(-PREVIEW_LIMITS.OUTPUT_COLLAPSED);
 			if (shown.length > 0) this.addChild(new Text(`\n${shown.join("\n")}`, 2, 0));
 		}
 	}

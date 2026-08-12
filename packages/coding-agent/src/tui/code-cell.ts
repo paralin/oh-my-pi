@@ -31,6 +31,8 @@ export interface CodeCellOptions {
 	 * follow code as it is written while staying bounded. Ignored when `expanded`.
 	 */
 	codeTail?: boolean;
+	/** Show the LAST `outputMaxLines` rows so a bounded preview follows streaming output. */
+	outputTail?: boolean;
 	expanded?: boolean;
 	/**
 	 * Prefix the header with the cell's language icon (resolved through the
@@ -180,18 +182,23 @@ export function renderCodeCell(options: CodeCellOptions, theme: Theme): string[]
 	if (output?.trim()) {
 		const rawLines = sanitizeTerminalLines(output);
 		const maxLines = expanded ? rawLines.length : Math.min(rawLines.length, outputMaxLines);
-		const displayLines = rawLines
-			.slice(0, maxLines)
-			.map(line => (line.includes("\x1b[") ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))));
-		outputLines.push(...displayLines);
 		const remaining = rawLines.length - maxLines;
-		if (remaining > 0) {
-			const hint = formatExpandHint(theme, expanded, remaining > 0);
+		const tail = options.outputTail === true && !expanded && remaining > 0;
+		const startIndex = tail ? rawLines.length - maxLines : 0;
+		const displayLines = rawLines
+			.slice(startIndex, startIndex + maxLines)
+			.map(line => (line.includes("\x1b[") ? replaceTabs(line) : theme.fg("toolOutput", replaceTabs(line))));
+		const hint = formatExpandHint(theme, expanded, remaining > 0);
+		if (tail) {
+			const earlier = `… ${remaining} earlier line${remaining === 1 ? "" : "s"}${hint ? ` ${hint}` : ""}`;
+			outputLines.push(theme.fg("dim", earlier));
+		}
+		outputLines.push(...displayLines);
+		if (!tail && remaining > 0) {
 			const moreLine = `${formatMoreItems(remaining, "line")}${hint ? ` ${hint}` : ""}`;
 			outputLines.push(theme.fg("dim", moreLine));
 		}
 	}
-
 	const sections: Array<{ label?: string; lines: string[] }> = [{ lines: codeLines }];
 	if (outputLines.length > 0) {
 		sections.push({ label: theme.fg("toolTitle", "Output"), lines: outputLines });

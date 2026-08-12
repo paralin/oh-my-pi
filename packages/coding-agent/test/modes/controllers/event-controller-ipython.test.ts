@@ -102,7 +102,7 @@ describe("EventController IPython projection", () => {
 		const rendered = Bun.stripANSI(chatContainer.render(100).join("\n"));
 		expect(chatContainer.children).toHaveLength(1);
 		expect(rendered).toContain("In [3]");
-		expect(rendered).toContain("completed");
+		expect(rendered).not.toContain("completed");
 		expect(rendered).toContain("early");
 		expect(rendered).toContain("late");
 		expect(rendered).toContain("[rich output]");
