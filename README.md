@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/paralin/oh-my-python/blob/main/assets/hero.png?raw=true" alt="omp">
+  <img src="https://github.com/paralin/oh-my-python/blob/main/assets/hero.png?raw=true" alt="Oh My Python">
 </p>
 
 <p align="center">
@@ -15,37 +15,15 @@
   <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
 </p>
 
-<p align="center">
-  Downstream fork of <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a>.
-  This fork regularly merges changes from upstream Oh My Pi.
-</p>
+Oh My Python is a terminal coding agent built around a persistent IPython session. Every model works through one fixed `ipython` interface, while typed Python packages provide code intelligence, browser control, long-running processes, search, subagents, and other host services.
 
-Oh My Python adopts [Prime Agent's](https://github.com/PrimeIntellect-ai/prime-agent)
-persistent IPython single-tool approach: every model receives one `ipython` tool.
-The existing OMP filesystem, shell, browser, subagent, extension, and other host
-capabilities are mapped into typed Python APIs available in the persistent kernel.
+This design keeps imports, variables, working directories, and useful results available across turns. It also gives different models the same provider-visible interface, even when you add skills, extensions, or host integrations.
 
-## Fork highlights
-
-Oh My Python keeps Oh My Pi's terminal agent and provider support while changing
-how models act inside a session:
-
-- **One persistent IPython interface.** Every model receives one stable
-  provider-visible `ipython` tool instead of a changing tool catalog. Python
-  variables, imports, and helpers survive across turns and compaction.
-- **Typed OMP capabilities.** The kernel exposes host-managed services through
-  `omp.*`, including structural AST search and rewrite, LSP, long-lived process
-  control, speech synthesis, and configured long-term memory.
-- **Compact execution cards.** Live and replayed cells show the latest three
-  input and output rows. `Ctrl+O` reveals the complete bounded projection.
-- **Retained coordination.** Parent-agent messaging, subagents, goals, skills,
-  MCP, browser automation, and the other OMP services remain available through
-  Python packages and typed host calls.
+Oh My Python is a downstream fork of [Oh My Pi](https://github.com/can1357/oh-my-pi) and regularly merges upstream changes.
 
 ## Install
 
-Oh My Python runs from this fork's source tree and requires
-[Bun](https://bun.sh).
+Oh My Python currently runs from its source tree. Install [Bun](https://bun.sh), then clone and set up the repository:
 
 ```sh
 git clone git@github.com:paralin/oh-my-python.git
@@ -53,30 +31,50 @@ cd oh-my-python
 bun i && bun setup
 ```
 
-## One stable provider interface
+`bun setup` installs the workspace dependencies, builds the native addon, and links the `omp` command into Bun's global bin directory. Make sure that directory, usually `~/.bun/bin`, is on your `PATH`.
 
-OMP gives every model the same single function: `ipython`. A call runs one
-complete Python or `%%bash` cell in the session's persistent IPython process.
-Cells are serialized, so imports, variables, the working directory, and useful
-intermediate results remain available to later cells in the same session.
+## First use
+
+Run the setup assistant to sign in to a provider and choose a default model:
+
+```sh
+omp setup
+```
+
+Start an interactive session in a project:
+
+```sh
+cd /path/to/project
+omp
+```
+
+You can also send the first request on the command line or run one non-interactive request:
+
+```sh
+omp "Explain this repository"
+omp -p "List the failing tests"
+```
+
+Use `/login` to add provider credentials, `/model` to select models for configured roles, and `Ctrl+P` to cycle through the configured model list.
+
+## Persistent IPython
+
+Each model receives one function named `ipython`. A call runs one complete Python or `%%bash` cell in the session's retained IPython process. Cells run in order, so later cells can reuse earlier imports, variables, objects, and the current directory.
 
 ```python
 from pathlib import Path
 
-paths = list(Path(".").glob("*.ts"))
+paths = sorted(Path(".").glob("*.ts"))
 print([path.name for path in paths])
 ```
 
-The provider no longer receives a changing catalog of filesystem, shell,
-browser, subagent, or extension functions. This makes the provider boundary
-stable across models and host applications.
+The TUI shows cell startup, progress, output, errors, cancellation, and artifacts. RPC and ACP clients control the same session without changing the model's interface. The session journal records bounded cell output and host-service results for replay and resume.
 
-### Typed host capabilities
+A model-originated cell is one exec-level action. `tools.approvalMode` decides whether OMP runs, prompts for, or rejects the whole cell. The runtime does not split a cell into separately approved operations. See the [persistent IPython runtime reference](docs/ipython.md) for lifecycle and authority details.
 
-Python handles ordinary computation and workspace work. For operations that
-must remain in the host, import a typed async capability from `omp` or a focused
-skill package. The host validates the request, applies its authority policy,
-and returns structured data to the active cell.
+## Typed capabilities
+
+Python handles normal computation and workspace work. Stateful or authority-sensitive operations remain in the host and are available through typed async Python APIs. The host validates each request, applies session permissions, carries cancellation, and returns structured data.
 
 ```python
 import omp
@@ -85,57 +83,43 @@ symbols = await omp.code.symbols("packages/coding-agent/src/main.ts")
 tabs = await omp.browser.tabs()
 ```
 
-The typed domains cover language intelligence, debugging, browser and computer
-control, project-scoped long-lived processes, speech-file synthesis, web and GitHub
-access, remote connections, MCP, memory, skills, rules, images, cron, security,
-Vibe workers, and World operations. `rlm` and its
-companion skill packages provide retained task, communication, image,
-compaction, editing, goal, and web-search operations.
+The main capability surfaces are:
 
-A model-originated cell is one exec-level action. `tools.approvalMode` controls
-whether OMP runs, prompts for, or rejects the
-whole cell. Direct cells remain operator actions. Read the [persistent IPython
-runtime reference](docs/ipython.md) for lifecycle, authority, and capability
-details.
+- **Typed OMP capabilities.** The kernel exposes `omp.*` services for structural AST work, LSP, process control, speech synthesis, and long-term memory.
+- **Retained agent operations.** `rlm` provides task and agent-family operations. Focused packages such as `agent_message`, `agent_observe`, `attach_image`, `compact`, `edit`, `goal`, and `websearch` provide documented workflows.
+- **Runtime discovery.** `omp.capabilities()` returns the capability index available in the current session.
 
-### Sessions and integration
+Read a focused package's `SKILL.md` before calling it. Prefer a typed `omp.*` or skill API when one exists.
 
-The TUI renders IPython cells as they start, produce progress, finish, fail, or
-are cancelled. RPC and ACP control the same session and retain the same fixed
-provider interface. Session history records bounded cell output and host-service
-results, so a resumed session has a clear execution trail.
+## Models and providers
 
-OMP still discovers rules, skills, extensions, model providers, and MCP
-configuration. Those integrations change the host-side Python capability layer
-or prompt context; they do not add provider-callable functions.
+OMP supports direct model APIs, subscription-backed coding plans, gateways, and local OpenAI-compatible servers. Model roles route work by purpose. `default` handles normal turns, while `smol` and `slow` can select inexpensive or deeper-reasoning models. Other supported roles include `vision`, `designer`, `commit`, `tiny`, `task`, and `advisor`.
 
-## Sixty-plus providers, a thousand models, _one /model away_.
+Authentication labels used below:
 
-Model roles route work by intent. `default` handles normal turns, `smol` supports inexpensive subagent work, and `slow` supports deeper reasoning. Other configured roles such as `vision`, `designer`, `task`, `advisor`, and `tiny` serve their corresponding host capabilities. Override `smol` or `slow` at launch, cycle configured models with `Ctrl+P`, or select the active model with `/model`.
+- `oauth`: sign in with the provider account through `/login`
+- `plan`: use a coding-plan subscription
+- `local`: connect to a local server; an API key is optional
 
-Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
-
-### Frontier APIs
-
-Direct APIs and gateways. Mix providers per role.
+### Direct APIs and gateways
 
 Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Vertex · Google Antigravity `oauth` · xAI · SuperGrok `oauth` · DeepSeek · Mistral · Groq · Cerebras · Fireworks · Together · Baseten · Hugging Face · NVIDIA · Meta · Amazon Bedrock · Azure OpenAI · SiliconFlow · GMI Cloud · CoreWeave · Sakana AI · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless
 
 ### Coding plans
 
-Subscription-routed. `/login` attaches the session.
-
 Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Devin `oauth` · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal `oauth` · Z.AI / GLM Coding Plan `plan` · Zhipu Coding Plan `plan` · Xiaomi MiMo · Qianfan · Umans `plan` · NanoGPT · Novita · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
-### Run it yourself
+### Local and self-hosted servers
 
-OpenAI-compatible `/v1/models`. Local instances skip the key.
+OMP can discover models from OpenAI-compatible `/v1/models` endpoints.
 
 Ollama `local` · Ollama Cloud · LM Studio `local` · llama.cpp `local` · vLLM `local` · LiteLLM
 
+See the [provider reference](docs/providers.md) for credential precedence, environment variables, local engines, project-specific configuration, and troubleshooting.
+
 ### Custom OpenAI-compatible providers
 
-Define custom providers in `~/.omp/agent/models.yml`:
+Define a provider in `~/.omp/agent/models.yml`:
 
 ```yaml
 providers:
@@ -150,326 +134,124 @@ providers:
         maxTokens: 32000
 ```
 
-Run `omp models spark` to verify discovery. Then run `omp setup` and choose the model in the default-model step, or open `/model` in a session and assign it to the `default` role.
-
-To preconfigure the default without the picker, add the selector to `~/.omp/agent/config.yml`:
+Check discovery with `omp models spark`. Then use `omp setup` or `/model` to assign `spark/minimax-m3` to the `default` role. You can also configure the role directly in `~/.omp/agent/config.yml`:
 
 ```yaml
 modelRoles:
   default: spark/minimax-m3
 ```
 
-### Four knobs that make routing useful
+Custom providers can use `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, or `google-vertex`.
 
-- **Custom providers** — Declare anything that speaks `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `bedrock-converse-stream`, `google-generative-ai`, `google-gemini-cli`, or `google-vertex` in `~/.omp/agent/models.yml`.
-- **Fallback chains** — Per-role or per-model chains under `retry.fallbackChains`. When the primary throws 429s or hits a quota wall, the next entry takes the rest of the turn — restored on cooldown.
-- **Path-scoped models** — Scope `enabledModels` and `disabledProviders` entries to a `path:` prefix to pin a different model set on one repo without touching the global config. Scoped entries cover the path and everything under it.
-- **Round-robin credentials** — Stack API keys per provider and the runtime rotates with session affinity and per-credential backoff. Useful when one key would burn its quota by lunch.
+OMP also supports fallback chains, path-scoped model and provider rules, and multiple credentials with session affinity and per-credential backoff. The [provider reference](docs/providers.md) documents these settings.
 
-Full provider & routing reference at [omp.sh/docs/providers](https://omp.sh/docs/providers).
+## Web search
 
-## Twenty-three backends. _One host capability_.
+`await omp.web.search(query, provider="auto")` searches through the configured provider chain. Pass a provider ID to select one explicitly. Search handlers can extract structured Markdown from code hosts, package registries, research sources, forums, and documentation sites while retaining links and anchors.
 
-`omp.web.search()` is a typed host capability. `provider="auto"` walks the configured provider chain; pin one by name when you already pay for it. Site-aware extraction turns GitHub, registries, arXiv, Stack Overflow, and docs into structured markdown while preserving anchors and link targets.
+| Provider     | Authentication                                      |
+| ------------ | --------------------------------------------------- |
+| `auto`       | Configured chain                                    |
+| `perplexity` | `PERPLEXITY_API_KEY` or anonymous fallback          |
+| `gemini`     | OAuth                                               |
+| `anthropic`  | OAuth                                               |
+| `codex`      | OAuth                                               |
+| `xai`        | OAuth or `XAI_API_KEY`                              |
+| `zai`        | `ZAI_API_KEY`                                       |
+| `exa`        | `EXA_API_KEY`, `/login exa`, or public MCP fallback |
+| `tinyfish`   | `TINYFISH_API_KEY`                                  |
+| `jina`       | `JINA_API_KEY`                                      |
+| `kagi`       | `KAGI_API_KEY`                                      |
+| `tavily`     | `TAVILY_API_KEY`                                    |
+| `firecrawl`  | `FIRECRAWL_API_KEY` or keyless fallback             |
+| `brave`      | `BRAVE_API_KEY`                                     |
+| `kimi`       | `/login kimi-code` or search key                    |
+| `parallel`   | `PARALLEL_API_KEY`                                  |
+| `synthetic`  | `SYNTHETIC_API_KEY`                                 |
+| `searxng`    | Self-hosted                                         |
+| `duckduckgo` | No key                                              |
+| `startpage`  | No key                                              |
+| `google`     | No key, browser-backed                              |
+| `ecosia`     | No key, browser-backed                              |
+| `mojeek`     | No key, browser-backed                              |
+| `public`     | Consolidated keyless search                         |
 
-### Search providers
+Specialized handlers cover GitHub, GitLab, npm, PyPI, crates.io, Hex, Hackage, NuGet, Maven, RubyGems, Packagist, pub.dev, Go packages, arXiv, Semantic Scholar, Stack Overflow, Reddit, Hacker News, MDN, Read the Docs, and docs.rs. Security lookups use NVD, OSV, and CISA KEV data.
 
-Twenty-three backends. Pin one, or let `auto` walk the chain in order.
+## Entry points
 
-| provider     | auth                                      |
-| ------------ | ----------------------------------------- |
-| `auto`       | chain                                     |
-| `perplexity` | `PERPLEXITY_API_KEY` (anonymous fallback) |
-| `gemini`     | oauth                                     |
-| `anthropic`  | oauth                                     |
-| `codex`      | oauth                                     |
-| `xai`        | oauth or `XAI_API_KEY`                    |
-| `zai`        | `ZAI_API_KEY`                             |
-| `exa`        | `EXA_API_KEY` (or mcp)                    |
-| `tinyfish`   | `TINYFISH_API_KEY`                        |
-| `jina`       | `JINA_API_KEY`                            |
-| `kagi`       | `KAGI_API_KEY`                            |
-| `tavily`     | `TAVILY_API_KEY`                          |
-| `firecrawl`  | `FIRECRAWL_API_KEY` (keyless fallback)    |
-| `brave`      | `BRAVE_API_KEY`                           |
-| `kimi`       | `/login kimi-code` or search key          |
-| `parallel`   | `PARALLEL_API_KEY`                        |
-| `synthetic`  | `SYNTHETIC_API_KEY`                       |
-| `searxng`    | self-hosted                               |
-| `duckduckgo` | no key                                    |
-| `startpage`  | no key                                    |
-| `google`     | no key (browser)                          |
-| `ecosia`     | no key (browser)                          |
-| `mojeek`     | no key (browser)                          |
-| `public`     | no key (all of the above, consolidated)   |
+The same session engine supports interactive use, one-shot requests, Node or TypeScript embedding, RPC clients, and editors that speak the Agent Client Protocol.
 
-Exa also accepts a stored API key through `/login exa`; explicit keyless selection uses the public MCP fallback.
+### Terminal
 
-### Specialised handlers
+`omp` starts the TUI. `omp -p` processes a prompt and exits. Run `omp --help` for session, model, profile, extension, and output options.
 
-The agent gets structured content, not stripped HTML.
+### Node and TypeScript SDK
 
-- **Code hosts** — github, gitlab
-- **Package registries** — npm, PyPI, crates.io, Hex, Hackage, NuGet, Maven, RubyGems, Packagist, pub.dev, Go packages
-- **Research sources** — arxiv, semantic scholar
-- **Forums** — stack overflow, reddit, hn
-- **Docs** — mdn, readthedocs, docs.rs
-
-Pages convert to markdown with link structure intact. The agent can cite, follow, and quote without losing anchors.
-
-### Security databases
-
-Vuln lookups answer with vendor data, not blog summaries.
-
-- **NVD** — national vulnerability database
-- **OSV** — open source vuln feed
-- **CISA KEV** — known exploited vulns
-
-[Persistent IPython runtime reference ↗](docs/ipython.md)
-
-## Roughly **~80,000** lines of Rust, doing the work other harnesses shell out for.
-
-Nine crates, one platform-tagged N-API addon. Search, shell, AST, highlight, PTY, desktop control, image decode, BPE counting — all in-process on the libuv pool. No fork/exec on the hot path. Another ~77k lines ride along vendored: the brush bash fork, a jq engine (jaq), and 46 uutils coreutils compiled straight into the shell.
-
-- Crates: `pi-natives`, `pi-shell`, `pi-ast`, `pi-iso`, `pi-voice`, `pi-walker`, `pi-uu-grep`, `pi-uu-diff`, `pi-uutils-ctx`
-- Platforms: `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64`, `win32-x64` — x64 ships dual AVX2 and baseline binaries
-
-Per crate, code lines only:
-
-| Crate         | What it does                                                                           |   ~LoC |
-| ------------- | -------------------------------------------------------------------------------------- | -----: |
-| pi-shell      | Embedded bash engine · persistent sessions · in-process coreutils dispatch · minimizer | 38,000 |
-| pi-natives    | The N-API surface — every module in the table below                                    | 25,000 |
-| pi-walker     | Parallel ignore-aware walker + scan cache shared by grep · glob · workspace · shell    |  5,200 |
-| pi-iso        | Workspace isolation · apfs · btrfs · zfs · reflink · overlayfs · projfs · rcopy        |  3,300 |
-| pi-uu-grep    | ripgrep-backed grep, run as an in-process shell builtin                                |  3,300 |
-| pi-ast        | tree-sitter + ast-grep matching, block resolution, structural summaries                |  2,900 |
-| pi-voice      | Audio capture/playback · Opus · live WebRTC                                            |  1,000 |
-| pi-uu-diff    | Structured diff builtin backed by similar                                              |    500 |
-| pi-uutils-ctx | Thread-local stdio/cwd/env so builtins run concurrently without a fork                 |    300 |
-
-Inside `pi-natives`, the per-module breakdown (glue and tests omitted):
-
-| Module        | What it does                                                                      | Powered by                                |   ~LoC |
-| ------------- | --------------------------------------------------------------------------------- | ----------------------------------------- | -----: |
-| desktop       | Window/display enumeration · screenshot · native input · AX tree for `computer`   | xcap · enigo · OS AX FFI                  | 10,600 |
-| grep          | Regex search · parallel/sequential · glob & type filters · fuzzy find             | grep-regex · grep-searcher                |  3,280 |
-| text          | ANSI-aware width · truncation · column slicing · SGR-preserving wrap              | unicode-width · segmentation              |  2,070 |
-| snapcompact   | Bitmap-frame rasterization + PNG encode for context compression                   | image · png                               |  1,760 |
-| keys          | Kitty keyboard protocol with xterm fallback · PHF perfect-hash lookup             | phf                                       |  1,740 |
-| ast           | ast-grep pattern matching and structural rewrites                                 | ast-grep-core                             |  1,510 |
-| diff          | Structured file diffing for tools and previews                                    | in-tree                                   |  1,030 |
-| pty           | Native PTY allocation for sudo · ssh interactive prompts                          | portable-pty                              |    630 |
-| crash_handler | Native crash capture and reporting                                                | in-tree                                   |    610 |
-| highlight     | Syntax highlighting · 11 semantic categories · 30+ aliases                        | syntect                                   |    550 |
-| appearance    | Mode 2031 + native macOS dark/light via CoreFoundation FFI                        | core-foundation                           |    450 |
-| task          | Blocking work on libuv thread pool · cancellation · timeout · profiling           | tokio · napi                              |    440 |
-| glob          | Discovery with glob · type filters · mtime sort · gitignore respect               | ignore · globset                          |    430 |
-| fd            | Filesystem walker for find-tool replacement                                       | ignore                                    |    385 |
-| clipboard     | Text copy and image read from system clipboard · no xclip/pbcopy                  | arboard                                   |    370 |
-| workspace     | Workspace walker with gitignore + AGENTS.md discovery in one pass                 | ignore                                    |    275 |
-| power         | macOS power-assertion API for idle/system/display-sleep prevention                | IOKit FFI                                 |    270 |
-| prof          | Circular buffer profiler with folded-stack and SVG flamegraph output              | inferno                                   |    240 |
-| file_lock     | Cross-process advisory file locking                                               | in-tree                                   |    210 |
-| ps            | Cross-platform process-tree kill and descendant listing                           | libc · libproc · CreateToolhelp32Snapshot |    195 |
-| tokens        | O200k / Cl100k BPE token counting · both tables embedded                          | tiktoken-rs                               |     70 |
-| html          | HTML to Markdown with optional content cleaning                                   | html-to-markdown-rs                       |     60 |
-| sixel         | Terminal image rendering · decode PNG · JPEG · WebP · GIF · resize · SIXEL encode | icy_sixel · image                         |     55 |
-
-## Four entry points: _interactive_, _one-shot_, RPC, and ACP.
-
-Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt and exits. The Node SDK embeds the session in your process. `omp --mode rpc` and `omp acp` hand the wheel to another program over stdio.
-
-### Interactive — when in doubt, the agent asks
-
-The TUI is the default surface. Model work runs as persistent IPython cells, with ordered output, rich displays, progress, and artifacts rendered from the session journal. When a decision needs user input, Python calls the typed `omp.ask` host service.
-
-The same question cards surface over ACP, so editors get the picker without implementing another prompt protocol.
-
-### SDK — embed in Node
-
-`@oh-my-pi/pi-coding-agent`
-
-Node and TypeScript hosts pull the engine in directly. The package exposes `ModelRegistry`, `SessionManager`, `createAgentSession`, and `discoverAuthStorage`; the session emits typed events you subscribe to.
+The `@oh-my-pi/pi-coding-agent` package exports the session, model, and authentication APIs. A minimal embedded session can discover local configuration automatically:
 
 ```ts
-import {
-  ModelRegistry,
-  SessionManager,
-  createAgentSession,
-  discoverAuthStorage,
-} from "@oh-my-pi/pi-coding-agent";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent";
 
-const auth = await discoverAuthStorage();
-const models = new ModelRegistry(auth);
-await models.refresh();
-
-const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
-  authStorage: auth,
-  modelRegistry: models,
-});
-await session.prompt("list .ts files");
+const { session } = await createAgentSession();
+await session.prompt("List the TypeScript files");
 ```
 
-### RPC — drive over stdio
+For explicit model and session wiring, see the [SDK reference](docs/sdk.md).
 
-`omp --mode rpc`
+### RPC
 
-For non-Node embedders, or when you want process isolation. NDJSON commands in, response and event frames out. `--mode rpc-ui` adds tool cards, selectors, and dialogs as `extension_ui_request` frames the host must answer.
+`omp --mode rpc` starts an NDJSON server on standard input and output. Requests carry IDs, responses echo them, and asynchronous session events stream separately.
 
+```text
+< {"type":"ready","protocolVersion":1,"supportedProtocolVersions":[1,2]}
+> {"id":"p1","type":"prompt","message":"Inspect this repository"}
+< {"id":"p1","type":"response","command":"prompt","success":true,...}
+< {"type":"ipython_cell_start",...}
+< {"type":"ipython_cell_end",...}
 ```
-$ omp --mode rpc --no-session
-> {"id":"r1","type":"prompt","message":"list .ts files"}
-< {"id":"r1","type":"response", ...}
-> {"id":"r2","type":"set_model","provider":"anthropic","modelId":"sonnet-4.5"}
-> {"id":"r3","type":"abort"}
-```
 
-### ACP — speak to editors
+Use `--mode rpc-ui` when the client will answer extension UI requests. See the [RPC protocol reference](docs/rpc.md) for commands, events, durable sessions, limits, and version negotiation.
 
-`omp acp`
+### ACP
 
-The [Agent Client Protocol](https://github.com/zed-industries/agent-client-protocol) over JSON-RPC. When the editor advertises capabilities, tool I/O routes through it and writes are gated by `session/request_permission`.
+`omp acp` runs an [Agent Client Protocol](https://github.com/agentclientprotocol/agent-client-protocol) server over JSON-RPC for compatible editors. The editor can provide filesystem and terminal services and participate in permission requests, while the model continues to use the fixed `ipython` interface.
 
-| omp tool     | ACP route                           |
-| ------------ | ----------------------------------- |
-| `bash`       | `terminal/create + terminal/output` |
-| `read`       | `fs/read_text_file`                 |
-| `write`      | `fs/write_text_file`                |
-| `edit, bash` | `session/request_permission`        |
+## Extensibility
 
-Full reference: [omp.sh/docs/sdk](https://omp.sh/docs/sdk).
+OMP discovers compatible rules, skills, and MCP configuration from common project directories, including `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`.
 
-## A harness worth keeping is one you _don't_ outgrow.
+Python skill packages provide reusable model workflows. Host-side TypeScript extensions can add prompt context, slash commands, rules, skills, session observation, and UI behavior. Extensions do not add provider-callable functions. Reload installed extensions with `/reload-plugins`.
 
-Start with the [source installation](#install).
-
-### Primitives
-
-An extension is a TypeScript module. Same tool API, same slash-command registry, same hotkey table, same TUI primitives the built-ins use. Nothing is reserved.
-
-### Discovery
-
-On first run omp inherits whatever is already on disk: rules, skills, and MCP servers from `.claude`, `.cursor`, `.windsurf`, `.gemini`, `.codex`, `.cline`, `.github/copilot`, and `.vscode`. No migration script.
-
-### Extensibility
-
-Ask omp to write the piece you're missing, then `/reload-plugins`. Keep it local, ship it in a `marketplace`, or publish it to npm.
-
-## Philosophy
-
-Oh My Python extends [Oh My Pi](https://github.com/can1357/oh-my-pi) with the persistent IPython runtime and the coding workflow described above.
-
-Key ideas:
-
-- Keep interactive terminal-first UX for real coding work
-- Include practical built-ins (tools, sessions, branching, subagents, extensibility)
-- Make advanced behavior configurable rather than hidden
-
----
+See the [extensions guide](docs/extensions.md), [skills guide](docs/skills.md), [MCP configuration guide](docs/mcp-config.md), and [marketplace guide](docs/marketplace.md).
 
 ## Development
 
-### Getting started from source
-
-Fresh clones need both workspace dependencies and the local Rust/N-API addon before the source CLI can start.
+A fresh clone needs the Bun workspace dependencies and local Rust/N-API addon before the source CLI starts:
 
 ```sh
 bun setup
 bun dev
 ```
 
-`bun setup` installs Bun workspaces and builds `@oh-my-pi/pi-natives`. Re-run `bun run build:native` after changing Rust crates or `packages/natives`.
-
-Nix users get the pinned Bun and Rust toolchains plus all native build dependencies:
-
-```sh
-nix develop
-bun setup
-bun dev
-```
-
-Build and smoke-test the distributable Nix package with `nix build .#omp`. Wayland screencast support is off by default (linking libpipewire adds ~750 MB of runtime closure); enable it with `omp.override { withWaylandScreencast = true; }`. `nix/bun.nix` is generated only when `bun.lock` changes; releases regenerate it automatically. For dependency changes, run:
-
-```sh
-bun run gen:nix
-```
-
-The command uses `bun2nix` from `nix develop` when available, otherwise enters the development shell through Nix, then falls back to the pinned `bunx bun2nix@2.1.2`. Do not edit `nix/bun.nix` manually.
-
-For a non-interactive smoke check:
+Run a non-interactive smoke check with:
 
 ```sh
 bun dev -- --version
 ```
 
-### Debug Command
-
-`/debug` opens tools for debugging, reporting, and profiling.
-
-For architecture and contribution guidelines, see [packages/coding-agent/DEVELOPMENT.md](packages/coding-agent/DEVELOPMENT.md).
-
----
-
-## Monorepo Packages
-
-| Package                                                                       | Description                                                                 |
-| ----------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| **[@oh-my-pi/collab-web](packages/collab-web)**                               | Browser guest client, mock host, and local relay for collab live sessions   |
-| **[@oh-my-pi/pi-ai](packages/ai)**                                            | Multi-provider LLM client with streaming and model/provider integration     |
-| **[@oh-my-pi/pi-catalog](packages/catalog)**                                  | Model catalog: bundled model database, provider descriptors, and identity   |
-| **[@oh-my-pi/pi-agent-core](packages/agent)**                                 | Agent runtime with tool calling and state management                        |
-| **[@oh-my-pi/pi-coding-agent](packages/coding-agent)**                        | Interactive coding agent CLI and SDK                                        |
-| **[@oh-my-pi/pi-tui](packages/tui)**                                          | Terminal UI library with differential rendering                             |
-| **[@oh-my-pi/pi-natives](packages/natives)**                                  | N-API bindings for grep, shell, image, text, syntax highlighting, and more  |
-| **[@oh-my-pi/omp-stats](packages/stats)**                                     | Local observability dashboard for AI usage statistics                       |
-| **[@oh-my-pi/omptype](packages/omptype)**                                     | ArkType-compatible schema validation with lazy JIT compilation              |
-| **[@oh-my-pi/pi-utils](packages/utils)**                                      | Shared utilities (logging, streams, dirs/env/process helpers)               |
-| **[@oh-my-pi/pi-wire](packages/wire)**                                        | Shared collab live-session protocol types and relay constants               |
-| **[@oh-my-pi/hashline](packages/hashline)**                                   | Standalone line-anchored patch language and applier             |
-| **[@oh-my-pi/pi-mnemopi](packages/mnemopi)**                                  | Local SQLite memory engine for Oh My Pi agents                              |
-| **[@oh-my-pi/snapcompact](packages/snapcompact)**                             | Bitmap-frame context compression package and SQuAD benchmark suite               |
-| **[@oh-my-pi/browser-relay](packages/browser-relay)**                         | Chrome extension that lets the browser tool drive your existing tabs        |
-| **[@oh-my-pi/pi-metaharness](packages/metaharness)**                          | Unified benchmark runners, Harbor run storage, REST/SSE API, live dashboard |
-
-### Rust Crates
-
-| Crate                                              | Description                                                                                         |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
-| **[pi-natives](crates/pi-natives)**                | Core Rust native addon (N-API `cdylib`) used by `@oh-my-pi/pi-natives`; aggregates the crates below |
-| **[pi-shell](crates/pi-shell)**                    | Embedded shell / PTY / process management split out of `pi-natives` (wraps `brush-*`)               |
-| **[pi-ast](crates/pi-ast)**                        | tree-sitter-based code summarizer and AST utilities (50+ language grammars)                         |
-| **[pi-iso](crates/pi-iso)**                        | Task isolation backend resolver: APFS clones, btrfs/zfs reflinks, overlayfs, projfs, rcopy          |
-| **[pi-voice](crates/pi-voice)**                    | Audio capture/playback, Opus codecs, and live WebRTC streaming primitives                           |
-| **[pi-walker](crates/pi-walker)**                  | Parallel ignore-aware filesystem walker with the scan cache shared by grep, glob, and workspace     |
-| **[pi-uu-grep](crates/pi-uu-grep)**                | ripgrep-library-backed grep executed as an in-process shell builtin                                 |
-| **[pi-uu-diff](crates/pi-uu-diff)**                | Structured diff builtin backed by the similar crate                                                 |
-| **[pi-uutils-ctx](crates/pi-uutils-ctx)**          | Thread-local stdio/cwd/env context so in-process builtins run concurrently                          |
-| **[brush-core](crates/vendor/brush-core)**         | Vendored fork of [brush-shell](https://github.com/reubeno/brush) for embedded bash execution        |
-| **[brush-builtins](crates/vendor/brush-builtins)** | Vendored bash builtins (cd, echo, test, printf, read, export, etc.)                                 |
-| **[jaq](crates/vendor/jaq)**                       | Vendored jq-compatible JSON query engine, run as an in-process builtin                              |
-| **uu-\* family** ([crates/vendor](crates/vendor))  | 46 vendored uutils coreutils (ls, sed, sort, xargs, …) executed in-process, no fork/exec            |
+After changing Rust crates or `packages/natives`, rebuild the addon with `bun run build:native`. See [DEVELOPMENT.md](packages/coding-agent/DEVELOPMENT.md) for architecture, tests, debugging, and contribution details.
 
 ## Contributing
 
-Open issues and pull requests for Oh My Python at
-[`paralin/oh-my-python`](https://github.com/paralin/oh-my-python). Read
-[CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Changes intended
-for the original project should go to
-[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi) instead.
-
----
+Open issues and pull requests for this fork at [`paralin/oh-my-python`](https://github.com/paralin/oh-my-python). Read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Send changes intended for the original project to [`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi).
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Oh My Python is available under the [MIT License](LICENSE).
 
 - © 2025 Mario Zechner
 - © 2025-2026 Can Bölük
 - © 2026 Christian Stewart <christian@cjs.zip>
 
-- [Oh My Python on GitHub](https://github.com/paralin/oh-my-python)
-- [Upstream Oh My Pi](https://github.com/can1357/oh-my-pi)
-- [Changelog](packages/coding-agent/CHANGELOG.md)
-- [MIT License](LICENSE)
+[Changelog](packages/coding-agent/CHANGELOG.md) · [Fork repository](https://github.com/paralin/oh-my-python) · [Upstream Oh My Pi](https://github.com/can1357/oh-my-pi)
