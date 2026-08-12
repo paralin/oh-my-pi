@@ -252,6 +252,33 @@ describe("IPython nested host-operation lifecycle", () => {
 		}
 	});
 
+	test("keeps completed process transcripts without repeating the exit narration", () => {
+		const transcript = "/tmp/ipython/process-run.txt";
+		const events: IpythonExecutionEvent[] = [
+			operation("process", "process.run", "start", 1_000),
+			operation("process", "process.run", "progress", 1_010, {
+				message: "Process run started",
+				summary: { path: transcript, count: 0, unit: "bytes" },
+			}),
+			operation("process", "process.run", "progress", 1_020, {
+				message: "Process run exited\nhello",
+				summary: { path: transcript, count: 6, unit: "bytes" },
+			}),
+			operation("process", "process.run", "terminal", 1_030, { status: "ok", durationMs: 30 }),
+		];
+		const component = new IpythonCellMessageComponent(createIpythonCellJournalDetail(cellResult(events)));
+		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
+		expect(collapsed).toContain("process.run · /tmp/ipython/process-run.txt · 6 bytes (30ms)");
+		expect(collapsed).not.toContain("Process run exited");
+		expect(collapsed).toContain("hello");
+
+		component.setExpanded(true);
+		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain("Process run started");
+		expect(expanded).toContain("Process run exited");
+		expect(expanded).toContain("hello");
+	});
+
 	test("coalesces repeated gh watch tables only in the compact current result", () => {
 		const runningTable = "NAME              STATUS   ELAPSED\nunit / linux      pending  00:42";
 		const failingTable = "NAME              STATUS   ELAPSED\nunit / linux      failed   00:43";
@@ -398,7 +425,8 @@ subprocess.run(
 
 		for (const component of [live, replay]) {
 			const compact = Bun.stripANSI(component.render(120).join("\n"));
-			expect(compact).toContain("Process run timed_out stdout: build 2 stderr: warning");
+			expect(compact).toContain("stdout: build 2 stderr: warning");
+			expect(compact).not.toContain("Process run timed_out");
 			expect(compact).not.toContain("build 1");
 			const narrow = component.render(48).map(Bun.stripANSI);
 			expect(narrow.every(row => Bun.stringWidth(row) <= 48)).toBeTrue();

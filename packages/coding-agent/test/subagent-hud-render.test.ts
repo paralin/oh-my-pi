@@ -105,6 +105,19 @@ describe("subagent HUD lines", () => {
 		expect(out).toContain("Subagents");
 		expect(out).toContain("AuthLoader: Refactoring the auth flow");
 		expect(out).toContain("SchemaMigrator: Migrating the users table");
+		expect(out).toContain("working");
+	});
+
+	it("summarizes worker prompts without showing their wrapper or prompt dump", () => {
+		const prompt =
+			"Complete assignment thoroughly:\n\nFix heartbeat status in the default bar. Read every internal instruction before editing.";
+		for (const width of [120, 72, 40]) {
+			const out = render([makeSession({ id: "Worker", description: prompt })], width);
+			expect(out).toContain("Fix heartbeat");
+			expect(out).not.toContain("Complete assignment thoroughly");
+			expect(out).not.toContain("Read every internal instruction");
+			for (const line of out.split("\n")) expect(Bun.stringWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 
 	it("only shows active subagents and clears once everything finished", () => {

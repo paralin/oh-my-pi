@@ -48,6 +48,7 @@ function makeSession(sessionName = "Cache Session") {
 		isAdvisorActive: () => false,
 		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		getAsyncJobSnapshot: () => ({ running: [] }),
+		getRlmHeartbeatStatus: () => ({ active: 0, paused: 0 }),
 		settings: { get: () => false },
 		modelRegistry: { isUsingOAuth: () => false },
 		sessionManager: {
@@ -168,6 +169,22 @@ describe("StatusLineComponent effective settings cache", () => {
 		const content = stripVTControlCharacters(component.getTopBorder(120).content);
 		expect(content).toContain("2 agents");
 		expect(content).not.toContain("running");
+	});
+
+	it("shows heartbeat counts only while this session owns heartbeats", () => {
+		const session = makeSession() as unknown as { getRlmHeartbeatStatus: () => { active: number; paused: number } };
+		const component = new StatusLineComponent(session as never);
+		component.updateSettings({ preset: "default", sessionAccent: false });
+
+		for (const width of [120, 72, 40]) {
+			expect(stripVTControlCharacters(component.getTopBorder(width).content)).not.toContain("active");
+		}
+		session.getRlmHeartbeatStatus = () => ({ active: 2, paused: 1 });
+		expect(stripVTControlCharacters(component.getTopBorder(120).content)).toContain("♥ 2 active/1 paused");
+		for (const width of [72, 40]) {
+			const line = stripVTControlCharacters(component.getTopBorder(width).content);
+			expect(Bun.stringWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 
 	it("does not mutate shared preset segment options during narrow renders", () => {

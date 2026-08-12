@@ -1725,6 +1725,14 @@ export class StatusLineComponent implements Component {
 			}
 		}
 
+		const heartbeats = this.session.getRlmHeartbeatStatus?.() ?? { active: 0, paused: 0 };
+		if (heartbeats.active > 0 || heartbeats.paused > 0) {
+			const counts = [
+				heartbeats.active > 0 ? `${heartbeats.active} active` : undefined,
+				heartbeats.paused > 0 ? `${heartbeats.paused} paused` : undefined,
+			].filter(Boolean);
+			rightParts.unshift(theme.fg("statusLineSubagents", `♥ ${counts.join("/")}`));
+		}
 		const runningBackgroundJobs = this.session.getAsyncJobSnapshot()?.running.length ?? 0;
 		if (runningBackgroundJobs > 0) {
 			rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));

@@ -179,6 +179,20 @@ function operationRows(
 			);
 		}
 		for (const snapshot of visibleProgress) {
+			if (!expanded && operation.operation === "process.run" && operation.status !== "running") {
+				const message = snapshot.progress.message.replace(/^Process run [^\n]*\n?/u, "").trim();
+				if (message) {
+					rows.push(
+						...operationProgressRows(
+							{ ...snapshot.progress, message, summary: undefined },
+							snapshot.repetitions,
+							false,
+							width,
+						),
+					);
+				}
+				continue;
+			}
 			rows.push(...operationProgressRows(snapshot.progress, snapshot.repetitions, expanded, width));
 		}
 	}

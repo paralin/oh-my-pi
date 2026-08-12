@@ -4615,6 +4615,16 @@ export class AgentSession {
 		return { operation, phases, storage: "session" };
 	}
 
+	getRlmHeartbeatStatus(): { active: number; paused: number } {
+		let active = 0;
+		let paused = 0;
+		for (const heartbeat of this.#ipythonControls.listHeartbeats()) {
+			if (heartbeat.status === "active") active++;
+			else if (heartbeat.status === "paused") paused++;
+		}
+		return { active, paused };
+	}
+
 	async #deliverIpythonHeartbeat(heartbeat: RlmHeartbeat): Promise<void> {
 		await this.sendCustomMessage(
 			{

@@ -377,6 +377,16 @@ const SUBAGENT_OBSERVER_UI_COALESCE_MS = 100;
  * eval `agent()` spawns are rendered by their own eval cell tree.
  * Returns an empty array when nothing is running so the container can clear.
  */
+function subagentTaskSummary(text: string): string {
+	const ordinary = replaceTabs(text)
+		.replace(/^Complete assignment thoroughly:\s*/u, "")
+		.replace(/\s+/gu, " ")
+		.trim();
+	if (!ordinary) return "Working";
+	const sentenceEnd = ordinary.search(/[.!?](?:\s|$)/u);
+	return sentenceEnd < 0 ? ordinary : ordinary.slice(0, sentenceEnd + 1);
+}
+
 export function renderSubagentHudLines(sessions: ObservableSession[], columns: number): string[] {
 	const running = sessions.filter(
 		session => session.kind === "subagent" && session.status === "active" && session.detached === true,
@@ -395,14 +405,15 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				if (description) {
-					const budget = Math.max(TRUNCATE_LENGTHS.SHORT, columns - visibleWidth(displayId) - 10);
-					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(replaceTabs(description), budget))}`;
+					const state = theme.fg("dim", `${theme.sep.dot}working`);
+					const budget = Math.max(1, columns - visibleWidth(displayId) - visibleWidth(state) - 8);
+					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(subagentTaskSummary(description), budget))}${state}`;
 				} else {
 					// No spawn description: fall back to a muted task preview, same as
 					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview) {
-						line += ` ${theme.fg("muted", truncateToWidth(replaceTabs(taskPreview), TRUNCATE_LENGTHS.SHORT))}`;
+						line += ` ${theme.fg("muted", truncateToWidth(subagentTaskSummary(taskPreview), TRUNCATE_LENGTHS.SHORT))}`;
 					}
 				}
 				return line;
