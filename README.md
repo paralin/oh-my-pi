@@ -1,21 +1,18 @@
 <p align="center">
-  <img src="https://github.com/can1357/oh-my-pi/blob/main/assets/hero.png?raw=true" alt="omp">
+  <img src="https://github.com/paralin/oh-my-python/blob/main/assets/hero.png?raw=true" alt="omp">
 </p>
 
 <p align="center">
   <strong>Oh My Python</strong>
-  <strong><a href="https://omp.sh">omp.sh</a></strong>
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent"><img src="https://img.shields.io/npm/v/@oh-my-pi/pi-coding-agent?style=flat&colorA=222222&colorB=CB3837" alt="npm version"></a>
-  <a href="https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="Changelog"></a>
-  <a href="https://github.com/can1357/oh-my-pi/actions"><img src="https://img.shields.io/github/actions/workflow/status/can1357/oh-my-pi/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
-  <a href="https://github.com/can1357/oh-my-pi/blob/main/LICENSE"><img src="https://img.shields.io/github/license/can1357/oh-my-pi?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
+  <a href="https://github.com/paralin/oh-my-python/blob/main/packages/coding-agent/CHANGELOG.md"><img src="https://img.shields.io/badge/changelog-keep-E05735?style=flat&colorA=222222" alt="Changelog"></a>
+  <a href="https://github.com/paralin/oh-my-python/actions"><img src="https://img.shields.io/github/actions/workflow/status/paralin/oh-my-python/ci.yml?style=flat&colorA=222222&colorB=3FB950" alt="CI"></a>
+  <a href="https://github.com/paralin/oh-my-python/blob/main/LICENSE"><img src="https://img.shields.io/github/license/paralin/oh-my-python?style=flat&colorA=222222&colorB=58A6FF" alt="License"></a>
   <a href="https://www.typescriptlang.org"><img src="https://img.shields.io/badge/TypeScript-3178C6?style=flat&colorA=222222&logo=typescript&logoColor=white" alt="TypeScript"></a>
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/Rust-DEA584?style=flat&colorA=222222&logo=rust&logoColor=white" alt="Rust"></a>
   <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
-  <a href="https://discord.gg/4NMW9cdXZa"><img src="https://img.shields.io/badge/Discord-5865F2?style=flat&colorA=222222&logo=discord&logoColor=white" alt="Discord"></a>
 </p>
 
 <p align="center">
@@ -28,86 +25,35 @@ persistent IPython single-tool approach: every model receives one `ipython` tool
 The existing OMP filesystem, shell, browser, subagent, extension, and other host
 capabilities are mapped into typed Python APIs available in the persistent kernel.
 
-> [!NOTE]
-> Pull requests are **temporarily open to everyone** as a trial. We previously
-> required a vouch before accepting PRs; that requirement is lifted for now
-> while we evaluate how open contributions go. Depending on the results, the
-> vouch system may return.
+## Fork highlights
+
+Oh My Python keeps Oh My Pi's terminal agent and provider support while changing
+how models act inside a session:
+
+- **One persistent IPython interface.** Every model receives one stable
+  provider-visible `ipython` tool instead of a changing tool catalog. Python
+  variables, imports, and helpers survive across turns and compaction.
+- **Typed OMP capabilities.** The kernel exposes host-managed services through
+  `omp.*`, including structural AST search and rewrite, LSP, long-lived process
+  control, speech synthesis, and configured long-term memory.
+- **Compact execution cards.** Live and replayed cells show the latest three
+  input and output rows. `Ctrl+O` reveals the complete bounded projection.
+- **Retained coordination.** Parent-agent messaging, subagents, goals, skills,
+  MCP, browser automation, and the other OMP services remain available through
+  Python packages and typed host calls.
+- **Fork runtime work.** The fork carries its own persistent-kernel lifecycle,
+  Claude runtime, World coordination, process cleanup, provider-neutral parent
+  environment, and cross-platform runtime smoke coverage.
 
 ## Install
 
-**macOS · Linux**
+Oh My Python runs from this fork's source tree and requires
+[Bun](https://bun.sh).
 
 ```sh
-curl -fsSL https://omp.sh/install | sh
-```
-
-> **Alpine / musl:** the prebuilt musl binary links `libstdc++`/`libgcc` dynamically, which stock Alpine does not ship. Install them first: `apk add libstdc++ libgcc`.
-
-**Homebrew**
-
-```sh
-brew install can1357/tap/omp
-```
-
-**Bun (recommended)**
-
-```sh
-bun install -g @oh-my-pi/pi-coding-agent
-```
-
-**Nix**
-
-```sh
-# Run without installing
-nix run github:can1357/oh-my-pi
-
-# Or install into the active profile
-nix profile install github:can1357/oh-my-pi
-```
-
-Flake consumers can use `packages.<system>.omp`, `overlays.default`, `nixosModules.default`, or `homeManagerModules.default`. A Home Manager configuration can install OMP and own its settings declaratively:
-
-```nix
-{
-  inputs.omp.url = "github:can1357/oh-my-pi";
-
-  # In your Home Manager module:
-  imports = [ inputs.omp.homeManagerModules.default ];
-  programs.omp = {
-    enable = true;
-    settings.startup.quiet = true;
-  };
-}
-```
-
-**Windows (PowerShell)**
-
-```powershell
-irm https://omp.sh/install.ps1 | iex
-```
-
-**Pinned versions (mise)**
-
-```sh
-mise use -g github:can1357/oh-my-pi
-```
-
-macOS · Linux · Windows · bun ≥ 1.3.14
-
-### Shell completions
-
-`omp` generates its own completion scripts for **bash**, **zsh**, and **fish** from the live command/flag metadata, so they never drift from the actual CLI. Subcommands, flags, and enum values complete statically; model names (`--model`, `--smol`, `--slow`) resolve against the bundled model catalog and `--resume` against your on-disk sessions.
-
-```sh
-# zsh — add to ~/.zshrc (or write the output into a file on your $fpath)
-source <(omp completions zsh)
-
-# bash — add to ~/.bashrc
-source <(omp completions bash)
-
-# fish
-omp completions fish > ~/.config/fish/completions/omp.fish
+git clone git@github.com:paralin/oh-my-python.git
+cd oh-my-python
+bun i && bun setup
 ```
 
 ## One stable provider interface
@@ -400,9 +346,7 @@ Full reference: [omp.sh/docs/sdk](https://omp.sh/docs/sdk).
 
 ## A harness worth keeping is one you _don't_ outgrow.
 
-Pick it up at **[omp.sh](https://omp.sh)**.
-
-Oh My Python is a downstream fork of [Oh My Pi](https://github.com/can1357/oh-my-pi) that regularly merges upstream changes. It keeps the coding-first surface with sessions, subagents, slash commands, and extensions. It uses the persistent IPython runtime described above.
+Start with the [source installation](#install).
 
 ### Primitives
 
@@ -512,10 +456,11 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 
 ## Contributing
 
-Issues and pull requests are open to everyone. Open PRs are currently a
-**trial** — the previous vouch requirement is lifted while we evaluate how it
-goes, and it may return. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for
-guidelines on contributing.
+Open issues and pull requests for Oh My Python at
+[`paralin/oh-my-python`](https://github.com/paralin/oh-my-python). Read
+[CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change. Changes intended
+for the original project should go to
+[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi) instead.
 
 ---
 
@@ -523,14 +468,11 @@ guidelines on contributing.
 
 MIT. See [LICENSE](LICENSE).
 
-© 2025 Mario Zechner  
-© 2025-2026 Can Bölük
+- © 2025 Mario Zechner
+- © 2025-2026 Can Bölük
+- © 2026 Christian Stewart <christian@cjs.zip>
 
-_made for terminals that stay open_
-
-- [omp.sh](https://omp.sh)
-- [GitHub](https://github.com/can1357/oh-my-pi)
-- [Changelog](https://github.com/can1357/oh-my-pi/blob/main/packages/coding-agent/CHANGELOG.md)
-- [npm](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent)
-- [Discord](https://discord.gg/4NMW9cdXZa)
-- [MIT](https://github.com/can1357/oh-my-pi/blob/main/LICENSE)
+- [Oh My Python on GitHub](https://github.com/paralin/oh-my-python)
+- [Upstream Oh My Pi](https://github.com/can1357/oh-my-pi)
+- [Changelog](packages/coding-agent/CHANGELOG.md)
+- [MIT License](LICENSE)
