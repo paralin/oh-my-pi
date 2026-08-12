@@ -1837,9 +1837,18 @@ async function prepareToolCallDispatch(
 				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
 				return validateToolArguments(tool, { ...toolCall, arguments: args });
 			} catch (validationError) {
-				entry.args = "__parseError" in args ? { __parseError: args.__parseError } : args;
+				entry.args =
+					typeof args === "object" && args !== null && "__parseError" in args
+						? { __parseError: args.__parseError }
+						: args;
+				let formattedError: string | undefined;
+				try {
+					formattedError = tool?.formatValidationError?.(args, validationError);
+				} catch {
+					// A diagnostic formatter cannot replace the validation failure it describes.
+				}
 				entry.validationErrorMessage =
-					validationError instanceof Error ? validationError.message : String(validationError);
+					formattedError ?? (validationError instanceof Error ? validationError.message : String(validationError));
 				return undefined;
 			}
 		};

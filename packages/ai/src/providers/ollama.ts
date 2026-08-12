@@ -599,6 +599,7 @@ const streamOllamaOnce = (
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 			let response: Response;
 			try {
+				await options.onFinalPayload?.(body, model);
 				response = await fetchWithRetry(`${baseUrl}/api/chat`, {
 					method: "POST",
 					headers: {

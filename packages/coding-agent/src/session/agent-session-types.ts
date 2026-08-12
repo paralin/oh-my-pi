@@ -44,6 +44,7 @@ import type { ConfiguredThinkingLevel } from "../thinking";
 import type { ActPrivateSession } from "./act-lane";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { IpythonSessionGenerationFactory } from "./ipython-session";
+import type { RequestProfileOwner } from "./request-profile";
 import type { SessionManager } from "./session-manager";
 import type { EffectiveIdleThreshold } from "./session-metadata";
 
@@ -114,6 +115,7 @@ export type ActPrivateSessionFactory = (options: {
 
 export interface AgentSessionConfig {
 	agent: Agent;
+	requestProfileOwner?: RequestProfileOwner;
 	sessionManager: SessionManager;
 	settings: Settings;
 	/** Awaited custody boundary for session and model identity changes. */

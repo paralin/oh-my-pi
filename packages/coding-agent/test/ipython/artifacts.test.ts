@@ -155,7 +155,8 @@ describe("IPython artifact spill", () => {
 			const withPath = createIpythonCellText(events, [], "error", modelText.outputBytes, full.path);
 
 			expect(withPath.outputBytes).toBeLessThanOrEqual(modelText.outputBytes);
-			expect(withPath.text).toContain(`full result: ${full.path}`);
+			expect(withPath.text.split("\n", 1)[0]).toContain(`Full IPython output: ${full.path}`);
+			expect(withPath.text.split("\n", 1)[0]).toMatch(/4 lines, 204911 bytes total; 0 lines, \d+ bytes omitted/);
 			expect(JSON.parse(await fs.readFile(full.path, "utf8")).events).toEqual(events);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });

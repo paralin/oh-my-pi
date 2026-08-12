@@ -1,4 +1,16 @@
-"""Callable RLM admission and typed host bridge for OMP's IPython runtime."""
+"""Admit OMP child agents with ``await rlm(prompt, **selectors)``.
+
+``prompt`` describes one bounded outcome and its decisive evidence. Admission
+returns an :class:`RLMSpawnHandle` immediately; the handle confirms admission
+and never contains the child's eventual result. Use ``model`` for an ordinary
+model selector, ``service_tier`` for a supported provider tier, and the other
+documented keyword selectors only when the task requires them.
+
+Inspect retained direct children with ``await rlm.list_subagents()``. Results
+arrive asynchronously through ``agent_message`` or files, not as the admission
+return value. ``rlm.act`` runs retained low-level cells, while ``rlm.harness``
+and ``rlm.get_harness_state()`` expose continual-harness state and mutation.
+"""
 
 from __future__ import annotations
 
@@ -440,6 +452,7 @@ rlm = _RLMCallable()
 
 class _CallableModule(types.ModuleType):
     async def __call__(self, prompt: str, **kwargs: Any) -> RLMSpawnHandle:
+        """Admit one child and return its handle immediately, never its result."""
         return await run(prompt, **kwargs)
 
 

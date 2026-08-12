@@ -15,10 +15,9 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import type { ExecutorOptions } from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
-import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type VibeCli, VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
 
-function makeParentSession(settings: Settings): ToolSession {
+function makeParentSession(settings: Settings): Parameters<VibeSessionRegistry["spawn"]>[0] {
 	return {
 		cwd: "/tmp",
 		settings,
@@ -29,7 +28,7 @@ function makeParentSession(settings: Settings): ToolSession {
 		getArtifactsDir: () => null,
 		taskDepth: 0,
 		enableLsp: false,
-	} as unknown as ToolSession;
+	} as unknown as Parameters<VibeSessionRegistry["spawn"]>[0];
 }
 
 /** Spawn one worker and capture the ExecutorOptions the vibe path hands the executor. */

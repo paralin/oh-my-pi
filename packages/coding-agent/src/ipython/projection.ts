@@ -12,12 +12,32 @@ import type { IpythonErrorEvent, IpythonExecutionEvent, IpythonHostOperationSumm
 import type { IpythonCellJournalDetail } from "./journal";
 import type { IpythonStartupProgress } from "./provisioner";
 
-function truncationMarker(totalBytes: number, omittedBytes: number, fullResultPath?: string): string {
-	const artifact = fullResultPath ? `; full result: ${sanitizeText(fullResultPath)}` : "";
-	return `\n[IPython output truncated: ${totalBytes} bytes total; ${omittedBytes} bytes omitted${artifact}]\n`;
+function lineCount(text: string): number {
+	if (!text) return 0;
+	let lines = text.endsWith("\n") ? 0 : 1;
+	for (const character of text) if (character === "\n") lines += 1;
+	return lines;
 }
 
-const MIN_IPYTHON_PRESENTATION_BYTES = Buffer.byteLength(truncationMarker(0, 0), "utf-8");
+function omittedLineCount(text: string, headBytes: number, tailBytes: number): number {
+	const bytes = Buffer.from(text, "utf-8");
+	let lines = 0;
+	for (const byte of bytes.subarray(headBytes, bytes.length - tailBytes)) if (byte === 0x0a) lines += 1;
+	return lines;
+}
+
+function truncationHeader(
+	path: string,
+	totalLines: number,
+	totalBytes: number,
+	omittedLines: number,
+	omittedBytes: number,
+): string {
+	return `[Full IPython output: ${sanitizeText(path)}; ${totalLines} lines, ${totalBytes} bytes total; ${omittedLines} lines, ${omittedBytes} bytes omitted]\n`;
+}
+
+const PREVIEW_GAP = "\n[... IPython preview gap ...]\n";
+const MIN_IPYTHON_PRESENTATION_BYTES = 32;
 
 export type IpythonCellPresentationStatus = "running" | "ok" | "error" | "aborted";
 
@@ -150,33 +170,95 @@ export function createIpythonCellText(
 	validateIpythonCellTextBudget(maxBytes);
 	const text = executionSafeText(events, errors, status);
 	const totalBytes = Buffer.byteLength(text, "utf-8");
-	if (totalBytes <= maxBytes) return { text, truncated: false, totalBytes, outputBytes: totalBytes };
+	const totalLines = lineCount(text);
+	if (totalBytes <= maxBytes) return { text, truncated: false, totalLines, totalBytes, outputBytes: totalBytes };
+	if (!fullResultPath) {
+		const head = truncateHeadBytes(text, Math.ceil((maxBytes - Buffer.byteLength(PREVIEW_GAP)) / 2));
+		const tail = truncateTailBytes(text, Math.floor((maxBytes - Buffer.byteLength(PREVIEW_GAP)) / 2));
+		return {
+			text: `${head.text}${PREVIEW_GAP}${tail.text}`,
+			truncated: true,
+			totalLines,
+			totalBytes,
+			omittedLines: omittedLineCount(text, head.bytes, tail.bytes),
+			omittedBytes: totalBytes - head.bytes - tail.bytes,
+			outputBytes: head.bytes + Buffer.byteLength(PREVIEW_GAP) + tail.bytes,
+		};
+	}
 
-	const artifactPath =
-		fullResultPath && Buffer.byteLength(truncationMarker(totalBytes, totalBytes, fullResultPath), "utf-8") <= maxBytes
-			? fullResultPath
-			: undefined;
 	let omittedBytes = totalBytes;
-	for (let attempt = 0; attempt < 3; attempt++) {
-		const marker = truncationMarker(totalBytes, omittedBytes, artifactPath);
-		const markerBytes = Buffer.byteLength(marker, "utf-8");
-		const contentBytes = maxBytes - markerBytes;
-
+	let omittedLines = totalLines;
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const header = truncationHeader(fullResultPath, totalLines, totalBytes, omittedLines, omittedBytes);
+		const fixedBytes = Buffer.byteLength(header) + Buffer.byteLength(PREVIEW_GAP);
+		if (fixedBytes >= maxBytes) throw new RangeError("IPython presentation-text budget cannot fit the artifact path");
+		const contentBytes = maxBytes - fixedBytes;
 		const head = truncateHeadBytes(text, Math.ceil(contentBytes / 2));
 		const tail = truncateTailBytes(text, Math.floor(contentBytes / 2));
 		const nextOmittedBytes = totalBytes - head.bytes - tail.bytes;
-		if (nextOmittedBytes !== omittedBytes) {
+		const nextOmittedLines = omittedLineCount(text, head.bytes, tail.bytes);
+		if (nextOmittedBytes !== omittedBytes || nextOmittedLines !== omittedLines) {
 			omittedBytes = nextOmittedBytes;
+			omittedLines = nextOmittedLines;
 			continue;
 		}
-
-		const output = `${head.text}${marker}${tail.text}`;
+		const output = `${header}${head.text}${PREVIEW_GAP}${tail.text}`;
 		return {
 			text: output,
 			truncated: true,
+			totalLines,
 			totalBytes,
+			omittedLines,
 			omittedBytes,
-			outputBytes: Buffer.byteLength(output, "utf-8"),
+			outputBytes: Buffer.byteLength(output),
+		};
+	}
+	throw new Error("IPython output truncation did not converge");
+}
+
+/** Builds a bounded projection from incrementally retained presentation bytes. */
+export function createIpythonCellTextFromBounds(
+	headText: string,
+	tailText: string,
+	totalBytes: number,
+	totalLines: number,
+	totalNewlines: number,
+	maxBytes: number,
+	fullResultPath?: string,
+): IpythonCellText {
+	validateIpythonCellTextBudget(maxBytes);
+	if (totalBytes <= maxBytes) {
+		const text = truncateHeadBytes(headText, totalBytes).text;
+		return { text, truncated: false, totalLines, totalBytes, outputBytes: totalBytes };
+	}
+	let omittedBytes = totalBytes;
+	let omittedLines = totalNewlines;
+	for (let attempt = 0; attempt < 5; attempt++) {
+		const header = fullResultPath
+			? truncationHeader(fullResultPath, totalLines, totalBytes, omittedLines, omittedBytes)
+			: "";
+		const fixedBytes = Buffer.byteLength(header) + Buffer.byteLength(PREVIEW_GAP);
+		if (fixedBytes >= maxBytes) throw new RangeError("IPython presentation-text budget cannot fit the artifact path");
+		const contentBytes = maxBytes - fixedBytes;
+		const head = truncateHeadBytes(headText, Math.ceil(contentBytes / 2));
+		const tail = truncateTailBytes(tailText, Math.floor(contentBytes / 2));
+		const nextOmittedBytes = totalBytes - head.bytes - tail.bytes;
+		const retainedNewlines = (head.text.match(/\n/g)?.length ?? 0) + (tail.text.match(/\n/g)?.length ?? 0);
+		const nextOmittedLines = Math.max(0, totalNewlines - retainedNewlines);
+		if (nextOmittedBytes !== omittedBytes || nextOmittedLines !== omittedLines) {
+			omittedBytes = nextOmittedBytes;
+			omittedLines = nextOmittedLines;
+			continue;
+		}
+		const text = `${header}${head.text}${PREVIEW_GAP}${tail.text}`;
+		return {
+			text,
+			truncated: true,
+			totalLines,
+			totalBytes,
+			omittedLines,
+			omittedBytes,
+			outputBytes: Buffer.byteLength(text, "utf8"),
 		};
 	}
 	throw new Error("IPython output truncation did not converge");
@@ -278,7 +360,9 @@ function completedText(source: IpythonCellResult | IpythonCellJournalDetail): Ip
 	return {
 		text,
 		truncated: source.safeTextTruncated,
+		totalLines: source.totalOutputLines ?? lineCount(text),
 		totalBytes: source.totalOutputBytes,
+		...(source.omittedOutputLines === undefined ? {} : { omittedLines: source.omittedOutputLines }),
 		...(source.omittedOutputBytes === undefined ? {} : { omittedBytes: source.omittedOutputBytes }),
 		outputBytes: Buffer.byteLength(text, "utf-8"),
 	};
@@ -322,6 +406,9 @@ export function projectIpythonLiveCellPresentation(
 ): IpythonLiveCellPresentation {
 	const events = source.updates.flatMap(update => (update.kind === "execution" ? [update.event] : []));
 	const errors = events.filter((event): event is IpythonErrorEvent => event.kind === "error");
+	const artifacts = source.updates.flatMap(update => (update.kind === "artifact" ? [update.artifact] : []));
+	const output = source.updates.findLast(update => update.kind === "output");
+	const safeText = output?.modelText ?? createIpythonCellText(events, errors, "running", maxBytes);
 	return {
 		kind: "cell",
 		phase: "live",
@@ -334,7 +421,7 @@ export function projectIpythonLiveCellPresentation(
 		updates: source.updates,
 		startupProgress: startupProgress(source.updates),
 		operations: collectIpythonHostOperations(events),
-		safeText: createIpythonCellText(events, errors, "running", maxBytes),
-		artifacts: [],
+		safeText,
+		artifacts: safeText.truncated ? artifacts : [],
 	};
 }

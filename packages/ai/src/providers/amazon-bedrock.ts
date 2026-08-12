@@ -444,6 +444,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			const watchdog = armPreResponseTimeout(options.signal, firstEventTimeoutMs);
 			let response: Response;
 			try {
+				await options.onFinalPayload?.(commandInput, model);
 				response = await fetchWithRetry(url, {
 					method: "POST",
 					headers: requestHeaders,

@@ -1,7 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { Markdown } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../../src/config/settings";
-import { createTheme, getBuiltinThemes } from "../../../src/modes/theme/loader";
 import {
 	getMarkdownTheme,
 	getThemeByName,
@@ -39,11 +38,11 @@ describe("Mermaid rendering setting", () => {
 	it("uses content-visible Titanium colors for Mermaid structure", async () => {
 		const dark = await getThemeByName("dark");
 		if (!dark) throw new Error("fallback theme unavailable");
-		const titaniumJson = getBuiltinThemes().titanium;
-		if (!titaniumJson) throw new Error("Titanium theme unavailable");
+		const titanium = await getThemeByName("titanium");
+		if (!titanium) throw new Error("Titanium theme unavailable");
 
 		try {
-			setThemeInstance(createTheme(titaniumJson, { mode: "truecolor" }));
+			setThemeInstance(titanium);
 			const renderer = getMarkdownTheme().resolveMermaidAscii;
 			if (!renderer) throw new Error("Mermaid renderer unavailable");
 			const rendered = renderer("stateDiagram-v2\n  [*] --> Capture\n  Capture --> [*]", 80);

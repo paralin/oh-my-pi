@@ -43,6 +43,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"apiKey",
 	"fetch",
 	"onPayload",
+	"onFinalPayload",
 	"onResponse",
 	"onSseEvent",
 	"providerSessionState",
@@ -177,6 +178,14 @@ export function streamPiNative<TApi extends Api>(
 				stream: true,
 			});
 
+			await options?.onFinalPayload?.(
+				{
+					kind: "unsupported",
+					transport: "pi-native",
+					reason: "The exact provider request is created beyond the auth-gateway boundary",
+				},
+				model,
+			);
 			response = await fetchImpl(url, { method: "POST", headers, body, signal: abortTracker.requestSignal });
 			if (!response.ok) {
 				stream.fail(await decodeGatewayError(response));

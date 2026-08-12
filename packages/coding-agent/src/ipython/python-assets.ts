@@ -52,6 +52,9 @@ import asset22 from "./python/skills/edit/src/edit/__init__.py" with { type: "te
 import asset27 from "./python/skills/goal/pyproject.toml" with { type: "text" };
 import asset26 from "./python/skills/goal/SKILL.md" with { type: "text" };
 import asset25 from "./python/skills/goal/src/goal/__init__.py" with { type: "text" };
+import asset75 from "./python/skills/helpers/pyproject.toml" with { type: "text" };
+import asset74 from "./python/skills/helpers/SKILL.md" with { type: "text" };
+import asset73 from "./python/skills/helpers/src/helpers/__init__.py" with { type: "text" };
 import asset58 from "./python/skills/linear/pyproject.toml" with { type: "text" };
 import asset59 from "./python/skills/linear/SKILL.md" with { type: "text" };
 import asset60 from "./python/skills/linear/src/linear/__init__.py" with { type: "text" };
@@ -126,6 +129,9 @@ export const IPYTHON_PYTHON_ASSETS: readonly IpythonPythonAsset[] = [
 	{ path: "goal/__init__.py", content: asset25 },
 	{ path: "skills/goal/SKILL.md", content: asset26 },
 	{ path: "skills/goal/pyproject.toml", content: asset27 },
+	{ path: "helpers/__init__.py", content: asset73 },
+	{ path: "skills/helpers/SKILL.md", content: asset74 },
+	{ path: "skills/helpers/pyproject.toml", content: asset75 },
 	{ path: "refine/__init__.py", content: asset28 },
 	{ path: "skills/refine/SKILL.md", content: asset29 },
 	{ path: "skills/refine/pyproject.toml", content: asset30 },

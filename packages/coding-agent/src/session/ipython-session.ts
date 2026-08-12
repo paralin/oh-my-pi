@@ -6,7 +6,6 @@ import { escapeXmlText, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	allocateIpythonHostArtifact,
 	finalizeIpythonHostArtifacts,
-	IPYTHON_FULL_RESULT_ARTIFACT_LABEL,
 	spillIpythonCellArtifacts,
 } from "../ipython/artifacts";
 import { type IpythonCellRequest, type IpythonCellResult, IpythonCellService } from "../ipython/cell";
@@ -18,7 +17,7 @@ import type {
 	IpythonSnapshotResult,
 } from "../ipython/controller";
 import { createIpythonCellText } from "../ipython/projection";
-import { IpythonKernelProvisioner, ipythonSnapshotPath } from "../ipython/provisioner";
+import { IpythonKernelProvisioner, type IpythonReadyStatus, ipythonSnapshotPath } from "../ipython/provisioner";
 import type { PythonSkillPackage } from "../ipython/python-packages";
 import { snapshotManifestPath } from "../ipython/state-snapshot";
 import { sessionSidecarDir } from "./session-paths";
@@ -46,8 +45,9 @@ export interface IpythonSessionGenerationOptions {
 	readonly pythonPackages: readonly PythonSkillPackage[];
 	readonly hostHandlers: IpythonHostHandlers;
 	readonly extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver;
+	readonly extensionHostOperations?: () => readonly string[];
 	readonly onRestore: (result: IpythonRestoreResult) => void;
-	readonly onReady: (processIds: IpythonProcessIds, status: { readonly restart: boolean }) => void;
+	readonly onReady: (processIds: IpythonProcessIds, status: IpythonReadyStatus) => void;
 }
 
 export interface IpythonSessionGeneration {
@@ -67,6 +67,7 @@ export interface IpythonSessionRuntimeOptions {
 	readonly pythonPackages?: () => readonly PythonSkillPackage[];
 	readonly hostHandlers?: () => IpythonHostHandlers;
 	readonly extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver;
+	readonly extensionHostOperations?: () => readonly string[];
 }
 
 export interface IpythonSessionRuntimeHost {
@@ -74,7 +75,7 @@ export interface IpythonSessionRuntimeHost {
 	onRestore(result: IpythonRestoreResult, status: IpythonRestoreStatus): void;
 	onSnapshotFailure(message: string): void;
 	onArtifactFailure(message: string): void;
-	onReady(processIds: IpythonProcessIds, status: { readonly restart: boolean }): void;
+	onReady(processIds: IpythonProcessIds, status: IpythonReadyStatus): void;
 }
 
 interface ActiveGeneration {
@@ -103,6 +104,7 @@ class DefaultIpythonSessionGeneration implements IpythonSessionGeneration {
 			pythonPackages: options.pythonPackages,
 			hostHandlers: options.hostHandlers,
 			extensionHostHandlerResolver: options.extensionHostHandlerResolver,
+			extensionHostOperations: options.extensionHostOperations,
 			onRestore: options.onRestore,
 			onReady: options.onReady,
 		});
@@ -192,30 +194,45 @@ async function removeSnapshot(snapshotPath: string): Promise<void> {
 	);
 }
 
-function stateNotice(snapshot: IpythonSnapshotResult, maxBytes = STATE_NOTICE_MAX_BYTES): string {
-	const names = [...snapshot.saved]
-		.sort()
-		.map(name => escapeXmlText(sanitizeText(name).replaceAll("\n", "\\n").replaceAll("\t", "\\t")));
-	const failed = snapshot.failed.length + snapshot.oversized.length;
-	const header = failed > 0 ? `<ipython_state status="partial">\n` : "<ipython_state>\n";
+export function formatIpythonStateNotice(snapshot: IpythonSnapshotResult, maxBytes = STATE_NOTICE_MAX_BYTES): string {
+	const sanitizeName = (name: string) =>
+		escapeXmlText(sanitizeText(name).replaceAll("\n", "\\n").replaceAll("\t", "\\t"));
+	const saved = new Set(snapshot.saved);
+	const pins = [...(snapshot.pins ?? [])].filter(name => saved.has(name)).sort();
+	const pinned = new Set(pins);
+	const latest = [...(snapshot.latestScratch ?? [])].filter(name => saved.has(name) && !pinned.has(name)).sort();
+	const latestNames = new Set(latest);
+	const otherSaved = snapshot.saved.filter(name => !pinned.has(name) && !latestNames.has(name)).length;
+	const omittedValues = snapshot.skipped.length + snapshot.oversized.length;
+	const failures = snapshot.failed.length;
+	const partial = omittedValues > 0 || failures > 0;
+	const header = partial ? '<ipython_state status="partial">' : "<ipython_state>";
 	const footer = "</ipython_state>";
-	const prefix = `${header}Live admitted names: `;
-	let body = names.length === 0 ? "(none)" : "";
-	let included = 0;
-	for (const name of names.slice(0, STATE_NOTICE_MAX_NAMES)) {
-		const candidate = `${body}${included > 0 ? ", " : ""}${name}`;
-		const remaining = names.length - (included + 1);
-		const suffix = `${remaining > 0 ? `\n${remaining} more name${remaining === 1 ? "" : "s"} omitted.` : ""}${
-			failed > 0 ? `\n${failed} value${failed === 1 ? " was" : "s were"} not snapshotted.` : ""
-		}\n${footer}`;
-		if (Buffer.byteLength(`${prefix}${candidate}${suffix}`, "utf-8") > maxBytes) break;
-		body = candidate;
-		included += 1;
+	const summary = `Other saved: ${otherSaved}; omitted: ${omittedValues}; failures: ${failures}.`;
+	const includedPins: string[] = [];
+	const includedLatest: string[] = [];
+	const render = (): string => {
+		const pinOmitted = pins.length - includedPins.length;
+		const latestOmitted = latest.length - includedLatest.length;
+		const pinText = includedPins.length > 0 ? includedPins.join(", ") : "(none)";
+		const latestText = includedLatest.length > 0 ? includedLatest.join(", ") : "(none)";
+		return [
+			header,
+			`Pins: ${pinText}${pinOmitted > 0 ? ` (${pinOmitted} omitted)` : ""}`,
+			`Latest delta: ${latestText}${latestOmitted > 0 ? ` (${latestOmitted} omitted)` : ""}`,
+			summary,
+			footer,
+		].join("\n");
+	};
+	for (const name of pins.slice(0, STATE_NOTICE_MAX_NAMES)) {
+		includedPins.push(sanitizeName(name));
+		if (Buffer.byteLength(render(), "utf-8") > maxBytes) includedPins.pop();
 	}
-	const omitted = names.length - included;
-	const omittedText = omitted > 0 ? `\n${omitted} more name${omitted === 1 ? "" : "s"} omitted.` : "";
-	const failureText = failed > 0 ? `\n${failed} value${failed === 1 ? " was" : "s were"} not snapshotted.` : "";
-	return `${prefix}${body || "(none)"}${omittedText}${failureText}\n${footer}`;
+	for (const name of latest.slice(0, STATE_NOTICE_MAX_NAMES)) {
+		includedLatest.push(sanitizeName(name));
+		if (Buffer.byteLength(render(), "utf-8") > maxBytes) includedLatest.pop();
+	}
+	return render();
 }
 
 /** Owns the lazy IPython generation that follows one AgentSession identity at a time. */
@@ -226,6 +243,7 @@ export class IpythonSessionRuntime {
 	#pythonPackages: readonly PythonSkillPackage[];
 	readonly #hostHandlers: () => IpythonHostHandlers;
 	readonly #extensionHostHandlerResolver: IpythonExtensionHostHandlerResolver;
+	readonly #extensionHostOperations: () => readonly string[];
 	readonly #checkpointTasks = new Map<string, Promise<IpythonSnapshotResult | undefined>>();
 	readonly #availableCheckpoints = new Set<string>();
 	#active: ActiveGeneration | undefined;
@@ -246,6 +264,7 @@ export class IpythonSessionRuntime {
 		this.#pythonPackages = [...(options.pythonPackages?.() ?? [])];
 		this.#hostHandlers = options.hostHandlers ?? (() => ({}));
 		this.#extensionHostHandlerResolver = options.extensionHostHandlerResolver ?? (() => undefined);
+		this.#extensionHostOperations = options.extensionHostOperations ?? (() => []);
 		if (!Number.isSafeInteger(this.#snapshotDrainTimeoutMs) || this.#snapshotDrainTimeoutMs < 0) {
 			throw new RangeError("IPython snapshot drain timeout must be a non-negative integer");
 		}
@@ -282,25 +301,78 @@ export class IpythonSessionRuntime {
 			const hostArtifacts = await finalizeIpythonHostArtifacts(result.artifacts, active.sidecarDir);
 			const finalized = { ...result, artifacts: hostArtifacts };
 			const artifacts = await spillIpythonCellArtifacts(finalized, active.sidecarDir);
-			const fullResult = artifacts.find(artifact => artifact.label === IPYTHON_FULL_RESULT_ARTIFACT_LABEL);
-			return {
+			const fullResult = [...hostArtifacts, ...artifacts].find(artifact => artifact.label === "Full IPython result");
+			const modelText =
+				fullResult && !finalized.modelText.text.startsWith("[Full IPython output:")
+					? createIpythonCellText(
+							finalized.events,
+							finalized.errors,
+							finalized.status,
+							finalized.modelText.outputBytes,
+							fullResult.path,
+						)
+					: finalized.modelText;
+			const projected = {
 				...finalized,
 				artifacts: [...hostArtifacts, ...artifacts],
-				...(fullResult
-					? {
-							modelText: createIpythonCellText(
-								finalized.events,
-								finalized.errors,
-								finalized.status,
-								finalized.modelText.outputBytes,
-								fullResult.path,
-							),
-						}
-					: {}),
+				modelText,
+			};
+			if (!modelText.truncated) return projected;
+			return {
+				...projected,
+				stdout: "",
+				stderr: "",
+				result: undefined,
+				events: projected.events.filter(event => event.kind === "host_operation" || event.kind === "host_progress"),
+				errors: [],
+				updates: projected.updates.filter(
+					update =>
+						update.kind !== "execution" ||
+						update.event.kind === "host_operation" ||
+						update.event.kind === "host_progress",
+				),
 			};
 		} catch (error) {
-			this.#host.onArtifactFailure(error instanceof Error ? error.message : String(error));
-			return result;
+			const detail = sanitizeText(error instanceof Error ? error.message : String(error)).slice(0, 1_024);
+			this.#host.onArtifactFailure(detail);
+			const removals = await Promise.allSettled(
+				result.artifacts.map(artifact => fsp.rm(artifact.path, { force: true })),
+			);
+			const removalFailed = removals.some(removal => removal.status === "rejected");
+			const text = `IPython output artifact failed${removalFailed ? "; cleanup also failed" : ""}.\n`;
+			const structured = {
+				kind: "error" as const,
+				ename: "ArtifactError",
+				evalue: text.trim(),
+				traceback: [] as string[],
+			};
+			const events = result.events.filter(
+				event => event.kind === "host_operation" || event.kind === "host_progress",
+			);
+			const updates = result.updates.filter(
+				update =>
+					update.kind !== "execution" ||
+					update.event.kind === "host_operation" ||
+					update.event.kind === "host_progress",
+			);
+			return {
+				...result,
+				status: "error",
+				stdout: "",
+				stderr: "",
+				result: undefined,
+				events: [...events, structured],
+				errors: [structured],
+				updates,
+				artifacts: [],
+				modelText: {
+					text,
+					truncated: false,
+					totalLines: 1,
+					totalBytes: Buffer.byteLength(text, "utf8"),
+					outputBytes: Buffer.byteLength(text, "utf8"),
+				},
+			};
 		}
 	}
 
@@ -340,7 +412,7 @@ export class IpythonSessionRuntime {
 		if (active?.lastSnapshotError) {
 			return '<ipython_state status="failed">\nThe live kernel remains active, but admitted names could not be listed.\n</ipython_state>';
 		}
-		return snapshot ? stateNotice(snapshot) : undefined;
+		return snapshot ? formatIpythonStateNotice(snapshot) : undefined;
 	}
 
 	createCheckpoint(checkpointId: string): Promise<IpythonSnapshotResult | undefined> {
@@ -489,6 +561,7 @@ export class IpythonSessionRuntime {
 			pythonPackages: this.#pythonPackages,
 			hostHandlers: this.#hostHandlers(),
 			extensionHostHandlerResolver: this.#extensionHostHandlerResolver,
+			extensionHostOperations: this.#extensionHostOperations,
 			onRestore: result => this.#host.onRestore(result, classifyIpythonRestore(result)),
 			onReady: (processIds, status) => this.#host.onReady(processIds, status),
 		};

@@ -946,6 +946,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const watchdog = armPreResponseTimeout(callerSignal, firstEventTimeoutMs);
 					let response: Response;
 					try {
+						await options?.onFinalPayload?.(requestBody, model);
 						response = await fetchWithRetry(() => `${endpoint}/v1internal:streamGenerateContent?alt=sse`, {
 							method: "POST",
 							headers: requestHeaders,

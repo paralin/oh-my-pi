@@ -143,6 +143,8 @@ export interface AgentOptions {
 	 * Inspect or replace provider payloads before they are sent.
 	 */
 	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Observe the final provider body after all transformations, immediately before sending. */
+	onFinalPayload?: SimpleStreamOptions["onFinalPayload"];
 	/**
 	 * Inspect provider response metadata after headers arrive and before streaming body consumption.
 	 */
@@ -303,6 +305,7 @@ export class Agent {
 	#dialect?: Dialect;
 	#abortOnFabricatedToolResult?: boolean;
 	#onPayload?: SimpleStreamOptions["onPayload"];
+	#onFinalPayload?: SimpleStreamOptions["onFinalPayload"];
 	#onResponse?: SimpleStreamOptions["onResponse"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
@@ -368,6 +371,7 @@ export class Agent {
 		this.#maxRetryDelayMs = opts.maxRetryDelayMs;
 		this.getApiKey = opts.getApiKey;
 		this.#onPayload = opts.onPayload;
+		this.#onFinalPayload = opts.onFinalPayload;
 		this.#onResponse = opts.onResponse;
 		this.#onSseEvent = opts.onSseEvent;
 		this.#cwd = opts.cwd;
@@ -1147,6 +1151,7 @@ export class Agent {
 			transformProviderContext: this.#transformProviderContext,
 			transformContext: this.#transformContext,
 			onPayload: this.#onPayload,
+			onFinalPayload: this.#onFinalPayload,
 			onResponse: this.#onResponse,
 			onSseEvent: this.#onSseEvent,
 			getApiKey: this.getApiKey,

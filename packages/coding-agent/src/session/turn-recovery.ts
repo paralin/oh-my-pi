@@ -56,6 +56,7 @@ import {
 	type RetryFallbackRevertPolicy,
 	type RetryFallbackSelector,
 	resolveRetryFallbackChainKey,
+	type ServingModel,
 	validateRetryFallbackChains,
 } from "./retry-fallback-chains";
 import { getLatestCompactionEntry } from "./session-context";
@@ -180,6 +181,12 @@ export class TurnRecovery {
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
+	#fallbackRouted = false;
+	#attributionSessionId: string;
+	#lastServed: { sessionId: string; attribution: ServingModel } | undefined;
+	#bootstrapServingModel:
+		| { sessionId: string; model: Model; level: ThinkingLevel | undefined; routed: boolean; value: ServingModel }
+		| undefined;
 	#usageReserveApprovedSelector: string | undefined;
 	#pendingRecoveredRetryErrors: PendingRecoveredRetryError[] = [];
 	#usageLimitOutcomes = new WeakMap<AssistantMessage, Promise<UsageLimitOutcome>>();
@@ -189,7 +196,9 @@ export class TurnRecovery {
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
+		this.#attributionSessionId = host.sessionManager.getSessionId();
 		if (options.initialRetryFallback) {
+			this.#fallbackRouted = true;
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
 				lastAppliedFallbackThinkingLevel: host.configuredThinkingLevel(),
@@ -217,6 +226,37 @@ export class TurnRecovery {
 			: undefined;
 	}
 
+	/** Model that produced this session's work, rather than an unproven routing candidate. */
+	get servingModel(): ServingModel | undefined {
+		if (this.#lastServed?.sessionId === this.#host.sessionManager.getSessionId()) {
+			return this.#lastServed.attribution;
+		}
+		const model = this.#host.model();
+		if (!model) return undefined;
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const level = this.#host.thinkingLevel();
+		const routed = sessionId === this.#attributionSessionId && this.#fallbackRouted;
+		const cached = this.#bootstrapServingModel;
+		if (
+			cached?.sessionId === sessionId &&
+			cached.model === model &&
+			cached.level === level &&
+			cached.routed === routed
+		) {
+			return cached.value;
+		}
+		const value = { selector: formatRetryFallbackSelector(model, level), isFallback: routed };
+		this.#bootstrapServingModel = { sessionId, model, level, routed, value };
+		return value;
+	}
+
+	/** Preserve served attribution when a fork gives the same conversation a new session id. */
+	carryServingModelAcrossFork(): void {
+		const sessionId = this.#host.sessionManager.getSessionId();
+		this.#attributionSessionId = sessionId;
+		if (this.#lastServed) this.#lastServed.sessionId = sessionId;
+	}
+
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
 	resetForNewPrompt(): void {
 		this.#emptyStopRetryCount = 0;
@@ -231,22 +271,28 @@ export class TurnRecovery {
 
 	/** Closes a successful retry saga and annotates recovered persisted errors. */
 	async onAssistantSettledSuccessfully(message: AssistantMessage): Promise<void> {
-		if (
-			message.stopReason === "error" ||
-			message.stopReason === "aborted" ||
-			this.#isEmptyAssistantStop(message) ||
-			this.#retryAttempt === 0
-		) {
+		if (message.stopReason === "error" || message.stopReason === "aborted" || this.#isEmptyAssistantStop(message)) {
 			return;
 		}
 		const model = this.#host.model();
-		if (this.#activeRetryFallback && model) {
+		if (model) {
+			this.#lastServed = {
+				sessionId: this.#host.sessionManager.getSessionId(),
+				attribution: {
+					selector: formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
+					isFallback: this.#fallbackRouted,
+				},
+			};
+		}
+		if (this.#activeRetryFallback && !this.#activeRetryFallback.served && model) {
+			this.#activeRetryFallback.served = true;
 			await this.#host.emitSessionEvent({
 				type: "retry_fallback_succeeded",
 				model: formatRetryFallbackSelector(model, this.#host.thinkingLevel()),
 				role: this.#activeRetryFallback.role,
 			});
 		}
+		if (this.#retryAttempt === 0) return;
 		const recoveredErrors = await this.#markPendingRecoveredRetryErrors(message);
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
@@ -1029,6 +1075,7 @@ export class TurnRecovery {
 	/** Clears fallback ownership after an explicit model change. */
 	clearActiveRetryFallback(): void {
 		this.#activeRetryFallback = undefined;
+		this.#fallbackRouted = false;
 	}
 
 	/** Checks whether a fallback selector remains in cooldown. */
@@ -1269,6 +1316,7 @@ export class TurnRecovery {
 				: clampThinkingLevelToCeiling(candidate, requestedThinkingLevel, this.#host.thinkingLevelCeiling());
 		const candidateSelector = formatModelStringWithRouting(candidate);
 		const previousModel = this.#host.model();
+		this.#fallbackRouted = true;
 		await this.#host.setModelWithProviderSessionReset(candidate);
 		if (options?.signal?.aborted) {
 			if (previousModel && this.#host.model() === candidate) {
@@ -1287,8 +1335,10 @@ export class TurnRecovery {
 				originalThinkingLevel: currentThinkingLevel,
 				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
 				pinned: options?.pinFallback === true,
+				served: false,
 			};
 		} else {
+			this.#activeRetryFallback.served = false;
 			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
 			this.#activeRetryFallback.pinned = this.#activeRetryFallback.pinned || options?.pinFallback === true;
 		}
@@ -1396,6 +1446,7 @@ export class TurnRecovery {
 		const apiKey = await this.#host.modelRegistry.getApiKey(baseModel, this.#host.sessionId());
 		if (!apiKey) return false;
 		const baseSelector = formatModelStringWithRouting(baseModel);
+		this.#fallbackRouted = true;
 		await this.#host.setModelWithProviderSessionReset(baseModel);
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);

@@ -1,11 +1,11 @@
 import { type } from "@oh-my-pi/omptype";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import changelogSystemPrompt from "../../commit/prompts/changelog-system.md" with { type: "text" };
 import changelogUserPrompt from "../../commit/prompts/changelog-user.md" with { type: "text" };
 import type { ChangelogGenerationResult } from "../../commit/types";
+import { RequestProfileOwner } from "../../session/request-profile";
 import { toReasoningEffort } from "../../thinking";
 import { extractTextContent, parseJsonPayload } from "../utils";
 
@@ -51,12 +51,10 @@ export async function generateChangelogEntries({
 		stat,
 		diff,
 	});
-	const response = await completeSimple(
+	const requestProfile = RequestProfileOwner.noTools([prompt.render(changelogSystemPrompt)]);
+	const response = await requestProfile.complete(
 		model,
-		{
-			systemPrompt: [prompt.render(changelogSystemPrompt)],
-			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-		},
+		[{ role: "user", content: userContent, timestamp: Date.now() }],
 		{ apiKey, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
 	);
 

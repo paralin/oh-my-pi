@@ -108,6 +108,8 @@ export interface MCPHttpServerConfig extends MCPServerConfigBase {
 	type: "http";
 	url: string;
 	headers?: Record<string, string>;
+	/** Keep configured headers on the configured endpoint origin. */
+	headerPolicy?: "origin-locked";
 }
 
 /** SSE server configuration (deprecated, use HTTP) */
@@ -115,6 +117,8 @@ export interface MCPSseServerConfig extends MCPServerConfigBase {
 	type: "sse";
 	url: string;
 	headers?: Record<string, string>;
+	/** See {@link MCPHttpServerConfig.headerPolicy}. */
+	headerPolicy?: "origin-locked";
 }
 
 export type MCPServerConfig = MCPStdioServerConfig | MCPHttpServerConfig | MCPSseServerConfig;

@@ -4,7 +4,7 @@ import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { type AgentRef, MAIN_AGENT_ID } from "../../registry/agent-registry";
-import { isAgentSession } from "../../session/agent-session";
+import type { AgentSession } from "../../session/agent-session";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession } from "../session-observer-registry";
@@ -109,7 +109,7 @@ export function formatResolvedModelBadge(
  */
 export function modelBadge(ref: AgentRef, observed: ObservableSession | undefined): string | undefined {
 	const progress = observed?.progress;
-	const session = isAgentSession(ref.session) ? ref.session : undefined;
+	const session = ref.session as Partial<AgentSession> | undefined;
 	const liveThinkingLevel = session?.thinkingLevel;
 	const serving = session?.servingModel;
 	const fallbackSelector =

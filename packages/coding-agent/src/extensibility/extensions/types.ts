@@ -28,7 +28,16 @@ import type {
 	TextContent,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
-import type { AutocompleteItem, AutocompleteProvider, Component, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
+import type {
+	AutocompleteItem,
+	AutocompleteProvider,
+	Component,
+	EditorTheme,
+	KeyId,
+	OverlayHandle,
+	OverlayOptions,
+	TUI,
+} from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
@@ -207,6 +216,15 @@ export type AutocompleteProviderFactory = (current: AutocompleteProvider) => Aut
 // (custom editor component, header/footer, widgets, theming, terminal input)
 // and may be invoked from event handlers that have already taken the agent
 // loop's lock — hooks intentionally cannot.
+export interface ExtensionCustomOptions {
+	/** Render the component as an overlay over the transcript instead of replacing the editor area. */
+	overlay?: boolean;
+	/** Static or lazily resolved overlay positioning and sizing options. */
+	overlayOptions?: OverlayOptions | (() => OverlayOptions);
+	/** Called once the overlay has been created. */
+	onHandle?: (handle: OverlayHandle) => void;
+}
+
 export interface ExtensionUIContext {
 	/** True when selector timeouts start only after the dialog is presented. */
 	timeoutStartsOnPresentation?: boolean;
@@ -261,7 +279,7 @@ export interface ExtensionUIContext {
 			keybindings: KeybindingsManager,
 			done: (result: T) => void,
 		) => ExtensionUiComponent | Promise<ExtensionUiComponent>,
-		options?: { overlay?: boolean },
+		options?: ExtensionCustomOptions,
 	): Promise<T>;
 
 	/** Set the text in the core input editor. */

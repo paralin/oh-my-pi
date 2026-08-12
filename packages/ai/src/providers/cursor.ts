@@ -591,6 +591,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				});
 			}
 
+			await options?.onFinalPayload?.(requestBytes, model);
 			h2Request.write(frameConnectMessage(requestBytes));
 			heartbeatTimer = setInterval(sendHeartbeat, 5000);
 			await h2Completion.promise;

@@ -5,6 +5,17 @@ import type { IpythonHostArtifact, IpythonHostArtifactRequest } from "./controll
 
 export const IPYTHON_FULL_RESULT_ARTIFACT_LABEL = "Full IPython result";
 
+export interface IpythonArtifactFileSystem {
+	mkdir(path: string, options: { recursive: true }): Promise<unknown>;
+	open(path: string, flags: string): Promise<{ close(): Promise<unknown> }>;
+	writeFile(path: string, data: Uint8Array, options: { flag: string }): Promise<unknown>;
+	rename(oldPath: string, newPath: string): Promise<unknown>;
+	rm(path: string, options: { force: true }): Promise<unknown>;
+	lstat(path: string): Promise<{ size: number; isFile(): boolean; isSymbolicLink(): boolean }>;
+}
+
+const defaultArtifactFileSystem: IpythonArtifactFileSystem = fs;
+
 function cellDirectoryName(cellId: string): string {
 	const safe = cellId.replaceAll(/[^a-zA-Z0-9._-]/g, "_").slice(0, 160);
 	return safe || "cell";
@@ -45,15 +56,22 @@ function mimeBytes(mimeType: string, value: unknown): Uint8Array {
 	return new TextEncoder().encode(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-async function writeAtomic(filePath: string, bytes: Uint8Array): Promise<void> {
-	await fs.mkdir(path.dirname(filePath), { recursive: true });
+async function writeAtomic(filePath: string, bytes: Uint8Array, fileSystem: IpythonArtifactFileSystem): Promise<void> {
+	await fileSystem.mkdir(path.dirname(filePath), { recursive: true });
 	const temporary = `${filePath}.${crypto.randomUUID()}.tmp`;
+	let failure: unknown;
 	try {
-		await fs.writeFile(temporary, bytes, { flag: "wx" });
-		await fs.rename(temporary, filePath);
-	} finally {
-		await fs.rm(temporary, { force: true });
+		await fileSystem.writeFile(temporary, bytes, { flag: "wx" });
+		await fileSystem.rename(temporary, filePath);
+	} catch (error) {
+		failure = error;
 	}
+	try {
+		await fileSystem.rm(temporary, { force: true });
+	} catch (error) {
+		failure ??= error;
+	}
+	if (failure) throw failure;
 }
 
 function fullResultBytes(result: IpythonCellResult): Uint8Array {
@@ -65,6 +83,7 @@ function fullResultBytes(result: IpythonCellResult): Uint8Array {
 export async function finalizeIpythonHostArtifacts(
 	artifacts: readonly IpythonArtifactReference[],
 	sidecarDir: string,
+	fileSystem: IpythonArtifactFileSystem = defaultArtifactFileSystem,
 ): Promise<readonly IpythonArtifactReference[]> {
 	const root = path.resolve(sidecarDir);
 	return await Promise.all(
@@ -74,7 +93,7 @@ export async function finalizeIpythonHostArtifacts(
 			if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
 				throw new Error("IPython host artifact escaped the session sidecar");
 			}
-			const stats = await fs.lstat(artifactPath);
+			const stats = await fileSystem.lstat(artifactPath);
 			if (!stats.isFile() || stats.isSymbolicLink()) {
 				throw new Error("IPython host artifact must be a regular file");
 			}
@@ -87,13 +106,17 @@ export async function finalizeIpythonHostArtifacts(
 export async function spillIpythonCellArtifacts(
 	result: IpythonCellResult,
 	sidecarDir: string,
+	fileSystem: IpythonArtifactFileSystem = defaultArtifactFileSystem,
 ): Promise<readonly IpythonArtifactReference[]> {
 	const cellDir = path.join(sidecarDir, "ipython", "artifacts", cellDirectoryName(result.cellId));
 	const artifacts: IpythonArtifactReference[] = [];
-	if (result.modelText.truncated) {
+	if (
+		result.modelText.truncated &&
+		!result.artifacts.some(artifact => artifact.label === IPYTHON_FULL_RESULT_ARTIFACT_LABEL)
+	) {
 		const bytes = fullResultBytes(result);
 		const artifactPath = path.join(cellDir, "full-result.json");
-		await writeAtomic(artifactPath, bytes);
+		await writeAtomic(artifactPath, bytes, fileSystem);
 		artifacts.push({
 			path: artifactPath,
 			mimeType: "application/json",
@@ -112,7 +135,7 @@ export async function spillIpythonCellArtifacts(
 				cellDir,
 				`${String(displayIndex).padStart(3, "0")}-${event.kind}.${mimeExtension(mimeType)}`,
 			);
-			await writeAtomic(artifactPath, bytes);
+			await writeAtomic(artifactPath, bytes, fileSystem);
 			artifacts.push({
 				path: artifactPath,
 				mimeType,
@@ -135,6 +158,7 @@ export async function allocateIpythonHostArtifact(
 	cellId: string,
 	request: IpythonHostArtifactRequest,
 	signal: AbortSignal,
+	fileSystem: IpythonArtifactFileSystem = defaultArtifactFileSystem,
 ): Promise<IpythonHostArtifact> {
 	throwIfAborted(signal);
 	const label = request.label.trim();
@@ -147,13 +171,19 @@ export async function allocateIpythonHostArtifact(
 	const id = crypto.randomUUID();
 	const artifactDir = path.join(sidecarDir, "ipython", "artifacts", cellDirectoryName(cellId), "allocated");
 	const artifactPath = path.join(artifactDir, `${id}${request.suffix}`);
-	await fs.mkdir(artifactDir, { recursive: true });
-	const handle = await fs.open(artifactPath, "wx");
-	await handle.close();
+	await fileSystem.mkdir(artifactDir, { recursive: true });
+	let allocated = false;
 	try {
+		const handle = await fileSystem.open(artifactPath, "wx");
+		allocated = true;
+		await handle.close();
 		throwIfAborted(signal);
 	} catch (error) {
-		await fs.rm(artifactPath, { force: true });
+		if (allocated) {
+			try {
+				await fileSystem.rm(artifactPath, { force: true });
+			} catch {}
+		}
 		throw error;
 	}
 	return { id, path: artifactPath, mimeType, bytes: 0, label };

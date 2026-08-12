@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { allocateIpythonHostArtifact } from "../../src/ipython/artifacts.js";
 import { type IpythonCellProvisioner, IpythonCellService } from "../../src/ipython/cell.js";
 import type {
 	IpythonExecutionEvent,
@@ -15,6 +16,7 @@ import type { PythonSkillPackage } from "../../src/ipython/python-packages.js";
 import {
 	classifyIpythonRestore,
 	formatIpythonRestoreNotice,
+	formatIpythonStateNotice,
 	type IpythonRestoreStatus,
 	type IpythonSessionGeneration,
 	type IpythonSessionGenerationFactory,
@@ -72,7 +74,10 @@ class MemoryProvisioner implements IpythonCellProvisioner {
 		this.#options.onRestore({ restored: [...snapshot.keys()], failed: [], missing: false, path: restorePath });
 	}
 
-	async execute(code: string): Promise<IpythonExecutionResult> {
+	async execute(
+		code: string,
+		options?: { readonly onEvent?: (event: IpythonExecutionEvent) => void | Promise<void> },
+	): Promise<IpythonExecutionResult> {
 		const [operation, name, ...rest] = code.split(":");
 		if (operation === "fail-large") {
 			const error = {
@@ -81,20 +86,22 @@ class MemoryProvisioner implements IpythonCellProvisioner {
 				evalue: "final failing assertion",
 				traceback: ["AssertionError: final failing assertion", "gh run watch exited with status 1"],
 			};
+			const events: IpythonExecutionEvent[] = [
+				{
+					kind: "stream",
+					name: "stdout",
+					text: `$ gh run watch 481516 --exit-status\n${"x".repeat(200 * 1024)}`,
+				},
+				error,
+			];
+			for (const event of events) await options?.onEvent?.(event);
 			return {
 				id: code,
 				status: "error",
 				stdout: "",
 				stderr: "",
 				result: undefined,
-				events: [
-					{
-						kind: "stream",
-						name: "stdout",
-						text: `$ gh run watch 481516 --exit-status\n${"x".repeat(200 * 1024)}`,
-					},
-					error,
-				],
+				events,
 				errors: [error],
 				hostArtifacts: [],
 			};
@@ -125,11 +132,26 @@ class MemoryGeneration implements IpythonSessionGeneration {
 	failSnapshots = false;
 	hangSnapshots = false;
 
-	constructor(options: IpythonSessionGenerationOptions, index: number, snapshots: Map<string, Map<string, string>>) {
+	constructor(
+		options: IpythonSessionGenerationOptions,
+		index: number,
+		snapshots: Map<string, Map<string, string>>,
+		productionArtifacts: boolean,
+	) {
 		this.options = options;
 		this.snapshots = snapshots;
 		this.provisioner = new MemoryProvisioner(options, snapshots);
-		this.service = new IpythonCellService(this.provisioner);
+		this.service = new IpythonCellService(
+			this.provisioner,
+			productionArtifacts
+				? {
+						sessionId: options.identity.sessionId,
+						cwd: options.identity.cwd,
+						allocateArtifact: (request, signal, cellId) =>
+							allocateIpythonHostArtifact(options.sidecarDir, cellId, request, signal),
+					}
+				: {},
+		);
 		this.processIds = { controllerPid: index * 2 + 1, kernelPid: index * 2 + 2 };
 	}
 
@@ -170,14 +192,18 @@ class MemoryGeneration implements IpythonSessionGeneration {
 	}
 }
 
-function runtimeHarness(initialIdentity: IpythonSessionIdentity, runtimeOptions: IpythonSessionRuntimeOptions = {}) {
+function runtimeHarness(
+	initialIdentity: IpythonSessionIdentity,
+	runtimeOptions: IpythonSessionRuntimeOptions = {},
+	productionArtifacts = false,
+) {
 	let identity = initialIdentity;
 	const generations: MemoryGeneration[] = [];
 	const snapshots = new Map<string, Map<string, string>>();
 	const restores: Array<{ result: IpythonRestoreResult; status: IpythonRestoreStatus }> = [];
 	const snapshotFailures: string[] = [];
 	const factory: IpythonSessionGenerationFactory = options => {
-		const generation = new MemoryGeneration(options, generations.length, snapshots);
+		const generation = new MemoryGeneration(options, generations.length, snapshots, productionArtifacts);
 		generations.push(generation);
 		return generation;
 	};
@@ -289,17 +315,27 @@ describe("session IPython runtime", () => {
 	test("returns a bounded failure with its deterministic full-result artifact path", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-session-artifact-"));
 		const sessionFile = path.join(root, "session.jsonl");
-		const harness = runtimeHarness({ sessionId: "root", cwd: root, sessionFile, sessionDir: root });
+		const harness = runtimeHarness({ sessionId: "root", cwd: root, sessionFile, sessionDir: root }, {}, true);
 		try {
 			const result = await harness.runtime.execute({ code: "fail-large", origin: "model" });
 			const full = result.artifacts.find(artifact => artifact.label === "Full IPython result");
 			if (!full) throw new Error("full result artifact was not returned");
 			expect(result.modelText.outputBytes).toBeLessThanOrEqual(50 * 1024);
-			expect(result.modelText.text).toContain(`full result: ${full.path}`);
-			expect(full.path).toBe(
-				path.join(sessionSidecarDir(sessionFile), "ipython", "artifacts", result.cellId, "full-result.json"),
+			const firstLine = result.modelText.text.split("\n", 1)[0] ?? "";
+			expect(firstLine).toStartWith(`[Full IPython output: ${full.path}; `);
+			expect(firstLine).toMatch(/; \d+ lines, \d+ bytes total; \d+ lines, \d+ bytes omitted\]$/);
+			expect(result.events).toEqual([]);
+			expect(result.errors).toEqual([]);
+			expect(result.stdout).toBe("");
+			expect(full.path).toMatch(
+				new RegExp(
+					`^${sessionSidecarDir(sessionFile).replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&")}/ipython/artifacts/${result.cellId}/allocated/[a-f0-9-]+\\.txt$`,
+				),
 			);
-			expect(JSON.parse(await fs.readFile(full.path, "utf8")).events).toHaveLength(2);
+			const artifactText = await fs.readFile(full.path, "utf8");
+			expect(Buffer.byteLength(artifactText, "utf8")).toBe(result.modelText.totalBytes);
+			expect(artifactText).toStartWith("$ gh run watch 481516 --exit-status\n");
+			expect(artifactText).toEndWith("AssertionError: final failing assertion\ngh run watch exited with status 1\n");
 		} finally {
 			await harness.runtime.dispose();
 			await fs.rm(root, { recursive: true, force: true });
@@ -400,9 +436,9 @@ describe("session IPython runtime", () => {
 			const notice = await harness.runtime.stateNotice();
 			expect(notice).toStartWith("<ipython_state>");
 			expect(notice).toEndWith("</ipython_state>");
-			expect(notice).toContain("&lt;unsafe&gt;");
-			expect(notice).toContain("line\\nname");
-			expect(notice).toContain("more names omitted");
+			expect(notice).toContain("Pins: (none)");
+			expect(notice).toContain("Latest delta: (none)");
+			expect(notice).toContain("Other saved: 123; omitted: 0; failures: 0.");
 			expect(notice).not.toContain("secret-value");
 			expect(Buffer.byteLength(notice ?? "", "utf-8")).toBeLessThanOrEqual(2 * 1024);
 		} finally {
@@ -500,6 +536,27 @@ describe("session IPython runtime", () => {
 		expect(await Bun.file(path.join(ephemeralDir, "sentinel")).exists()).toBe(false);
 		await fs.rm(tempRoot, { recursive: true, force: true });
 	});
+});
+
+test("renders pins before latest delta within a deterministic 2 KiB bound", () => {
+	const snapshot: IpythonSnapshotResult = {
+		saved: ["other", ...Array.from({ length: 200 }, (_, index) => `pin-${index}`), "latest"],
+		pins: Array.from({ length: 200 }, (_, index) => `pin-${index}`),
+		latestScratch: ["latest"],
+		skipped: [{ name: "credential", reason: "credential-shaped name" }],
+		oversized: [],
+		failed: [{ name: "failed", reason: "failure" }],
+		bytes: 1,
+		path: "/snapshot",
+		manifestPath: "/manifest",
+	};
+	const first = formatIpythonStateNotice(snapshot);
+	const second = formatIpythonStateNotice(snapshot);
+	expect(first).toBe(second);
+	expect(first.indexOf("Pins:")).toBeLessThan(first.indexOf("Latest delta:"));
+	expect(first).toContain("Other saved: 1; omitted: 1; failures: 1.");
+	expect(first).not.toContain("namespace state reset");
+	expect(Buffer.byteLength(first, "utf-8")).toBeLessThanOrEqual(2 * 1024);
 });
 
 describe("IPython restore reports", () => {

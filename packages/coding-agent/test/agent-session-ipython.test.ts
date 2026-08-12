@@ -122,26 +122,32 @@ class SessionMemoryProvisioner implements IpythonCellProvisioner {
 			});
 		}
 		const events: IpythonExecutionEvent[] =
-			operation === "events"
-				? [
-						{ kind: "stream", name: "stdout", text: "early\n" },
-						{ kind: "result", data: { "text/plain": "late" } },
-					]
-				: operation === "rich"
+			operation === "many-events"
+				? Array.from({ length: 200 }, (_, index) => ({
+						kind: "stream" as const,
+						name: "stdout" as const,
+						text: `${index}\n`,
+					}))
+				: operation === "events"
 					? [
 							{ kind: "stream", name: "stdout", text: "early\n" },
-							{
-								kind: "display",
-								data: { "text/html": "<b>rich</b>" },
-								metadata: {},
-								transient: {},
-								update: false,
-								text: "[displayed MIME types: text/html]",
-							},
+							{ kind: "result", data: { "text/plain": "late" } },
 						]
-					: value === undefined
-						? []
-						: [{ kind: "result", data: { "text/plain": value } }];
+					: operation === "rich"
+						? [
+								{ kind: "stream", name: "stdout", text: "early\n" },
+								{
+									kind: "display",
+									data: { "text/html": "<b>rich</b>" },
+									metadata: {},
+									transient: {},
+									update: false,
+									text: "[displayed MIME types: text/html]",
+								},
+							]
+						: value === undefined
+							? []
+							: [{ kind: "result", data: { "text/plain": value } }];
 		for (const event of events) await options?.onEvent?.(event);
 		return {
 			id: code,
@@ -458,10 +464,9 @@ describe("AgentSession IPython ownership", () => {
 			const theme = await getThemeByName("dark");
 			if (!theme) throw new Error("dark theme is unavailable");
 			setThemeInstance(theme);
-			expect(detail?.events).toMatchObject([
-				{ kind: "stream", text: "early\n" },
-				{ kind: "display", data: { "text/html": "<b>rich</b>" } },
-			]);
+			expect(detail?.safeText).toBe("early\n[displayed MIME types: text/html]\n");
+			expect(detail?.events).toMatchObject([{ kind: "display", data: { "text/html": "<b>rich</b>" } }]);
+			expect(detail?.events.some(event => event.kind === "stream")).toBe(false);
 			expect(Bun.stripANSI(new IpythonCellMessageComponent(detail!).render(100).join("\n"))).toContain(
 				"displayed MIME types: text/html",
 			);
@@ -680,7 +685,8 @@ describe("AgentSession IPython ownership", () => {
 		const stateContent = stateMessages[0]?.content;
 		expect(typeof stateContent).toBe("string");
 		if (typeof stateContent !== "string") throw new Error("IPython state notice was not text");
-		expect(stateContent).toContain("Live admitted names: shared");
+		expect(stateContent).toContain("Other saved: 1; omitted: 0; failures: 0.");
+		expect(stateContent).not.toContain("shared");
 		expect(stateContent).not.toContain("41");
 		expect((await session.executeIpythonCell({ code: "get:shared", origin: "model" })).result).toBe("41");
 		expect(generations).toHaveLength(1);
@@ -973,6 +979,31 @@ describe("AgentSession IPython admission authority", () => {
 		expect(generations).toHaveLength(1);
 	});
 
+	test("retains one current output snapshot while external callbacks observe every evolution", async () => {
+		const { session } = await createSession({ settings: { "tools.approvalMode": "yolo" } });
+		const callbackText: string[] = [];
+		const liveOutputCounts: number[] = [];
+		session.subscribe(event => {
+			if (event.type === "ipython_cell_start" || event.type === "ipython_cell_update") {
+				liveOutputCounts.push(event.presentation.updates.filter(update => update.kind === "output").length);
+			}
+		});
+		const result = await session.executeIpythonCell({
+			code: "many-events",
+			origin: "model",
+			onUpdate: update => {
+				if (update.kind === "output") callbackText.push(update.modelText.text);
+			},
+		});
+		expect(callbackText).toHaveLength(200);
+		expect(callbackText[0]).toBe("0\n");
+		expect(callbackText.at(-1)).toEndWith("199\n");
+		expect(liveOutputCounts).toHaveLength(200);
+		expect(liveOutputCounts.every(count => count === 1)).toBe(true);
+		expect(result.updates.filter(update => update.kind === "output")).toHaveLength(1);
+		expect(result.updates.find(update => update.kind === "output")?.modelText.text).toEndWith("199\n");
+	});
+
 	test("emits one shared live projection and one complete terminal cell for protocol consumers", async () => {
 		const { session } = await createSession({ settings: { "tools.approvalMode": "yolo" } });
 		const cellEvents: AgentSessionEvent[] = [];
@@ -1006,7 +1037,12 @@ describe("AgentSession IPython admission authority", () => {
 			result: "late",
 			safeText: { text: "early\nlate\n" },
 		});
-		expect(callerUpdates).toEqual([...result.updates]);
+		expect(callerUpdates.filter(update => update.kind === "output").map(update => update.modelText.text)).toEqual([
+			"early\n",
+			"early\nlate\n",
+		]);
+		expect(result.updates.filter(update => update.kind === "output")).toHaveLength(1);
+		expect(result.updates.find(update => update.kind === "output")?.modelText.text).toBe("early\nlate\n");
 
 		cellEvents.length = 0;
 		await session.executeIpythonCell({ code: "set:no-events:value", origin: "direct" });

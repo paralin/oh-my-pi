@@ -14,8 +14,8 @@ from typing import TypeAlias
 
 from jupyter_client import AsyncKernelClient, AsyncKernelManager
 
-_MAX_STREAM_CHARS = 1_048_576
-_MAX_FRAME_CHARS = 8 * 1024 * 1024
+_MAX_FRAME_BYTES = 8 * 1024 * 1024
+_MAX_PAYLOAD_CHARS = 1_000_000
 _SHUTDOWN_TIMEOUT_SECONDS = 3.0
 _READY_TIMEOUT_SECONDS = 10.0
 HOST_COMM_TARGET = "host.request"
@@ -26,6 +26,7 @@ _MAX_ACTIVE_COMMS = 256
 class ExecuteCommand:
     request_id: str
     code: str
+    track_namespace: bool
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,8 @@ class StreamEvent:
 class ResultEvent:
     request_id: str
     data: dict[str, object]
+    chunk_start: bool = True
+    chunk_end: bool = True
 
 
 @dataclass(frozen=True)
@@ -84,6 +87,18 @@ class DisplayEvent:
     transient: dict[str, object]
     update: bool
     text: str
+    chunk_start: bool = True
+    chunk_end: bool = True
+
+
+@dataclass(frozen=True)
+class NamespaceEvent:
+    request_id: str
+    execution_count: int
+    added: list[dict[str, str]]
+    rebound: list[dict[str, str]]
+    deleted: list[dict[str, str]]
+    omitted: dict[str, int]
 
 
 @dataclass(frozen=True)
@@ -92,6 +107,8 @@ class ErrorEvent:
     ename: str
     evalue: str
     traceback: list[str]
+    chunk_start: bool = True
+    chunk_end: bool = True
 
 
 @dataclass(frozen=True)
@@ -139,6 +156,7 @@ WireEvent: TypeAlias = (
     | ResultEvent
     | DisplayEvent
     | ErrorEvent
+    | NamespaceEvent
     | CommEvent
     | DoneEvent
     | FailedEvent
@@ -147,13 +165,6 @@ WireEvent: TypeAlias = (
     | ProtocolErrorEvent
 )
 
-
-@dataclass
-class ExecutionState:
-    stdout_chars: int = 0
-    stderr_chars: int = 0
-    stdout_truncated: bool = False
-    stderr_truncated: bool = False
 
 
 @dataclass
@@ -169,7 +180,7 @@ def _event_payload(event: WireEvent) -> dict[str, object]:
     if isinstance(event, StreamEvent):
         return {"event": "stream", "id": event.request_id, "name": event.name, "text": event.text}
     if isinstance(event, ResultEvent):
-        return {"event": "result", "id": event.request_id, "data": event.data}
+        return {"event": "result", "id": event.request_id, "data": event.data, "chunk_start": event.chunk_start, "chunk_end": event.chunk_end}
     if isinstance(event, DisplayEvent):
         return {
             "event": "display",
@@ -179,6 +190,18 @@ def _event_payload(event: WireEvent) -> dict[str, object]:
             "transient": event.transient,
             "update": event.update,
             "text": event.text,
+            "chunk_start": event.chunk_start,
+            "chunk_end": event.chunk_end,
+        }
+    if isinstance(event, NamespaceEvent):
+        return {
+            "event": "namespace",
+            "id": event.request_id,
+            "execution_count": event.execution_count,
+            "added": event.added,
+            "rebound": event.rebound,
+            "deleted": event.deleted,
+            "omitted": event.omitted,
         }
     if isinstance(event, ErrorEvent):
         return {
@@ -187,6 +210,8 @@ def _event_payload(event: WireEvent) -> dict[str, object]:
             "ename": event.ename,
             "evalue": event.evalue,
             "traceback": event.traceback,
+            "chunk_start": event.chunk_start,
+            "chunk_end": event.chunk_end,
         }
     if isinstance(event, CommEvent):
         payload: dict[str, object] = {
@@ -213,16 +238,69 @@ def _event_payload(event: WireEvent) -> dict[str, object]:
     raise TypeError(f"unsupported controller event: {type(event).__name__}")
 
 
+def _text_chunks(text: str) -> list[str]:
+    if not text:
+        return [""]
+    return [text[offset:offset + _MAX_PAYLOAD_CHARS] for offset in range(0, len(text), _MAX_PAYLOAD_CHARS)]
+
+
+def _chunk_event(event: WireEvent) -> list[WireEvent]:
+    if isinstance(event, StreamEvent):
+        return [StreamEvent(event.request_id, event.name, chunk) for chunk in _text_chunks(event.text)]
+    if isinstance(event, ResultEvent):
+        chunks: list[WireEvent] = []
+        for mime_type, value in event.data.items():
+            if isinstance(value, str):
+                values = _text_chunks(value)
+                chunks.extend(
+                    ResultEvent(event.request_id, {mime_type: chunk}, index == 0, index == len(values) - 1)
+                    for index, chunk in enumerate(values)
+                )
+            else:
+                chunks.append(ResultEvent(event.request_id, {mime_type: value}))
+        return chunks
+    if isinstance(event, DisplayEvent):
+        chunks = []
+        for mime_type, value in event.data.items():
+            if isinstance(value, str):
+                values: list[object] = _text_chunks(value)
+            else:
+                values = [value]
+            for index, chunk in enumerate(values):
+                data = {mime_type: chunk}
+                chunks.append(DisplayEvent(
+                    event.request_id,
+                    data,
+                    event.metadata if index == 0 else {},
+                    event.transient if index == 0 else {},
+                    event.update,
+                    _display_text(data),
+                    index == 0,
+                    index == len(values) - 1,
+                ))
+        return chunks
+    if isinstance(event, ErrorEvent):
+        text = "\n".join(event.traceback) if event.traceback else f"{event.ename}: {event.evalue}"
+        values = _text_chunks(text)
+        return [
+            ErrorEvent(event.request_id, event.ename, "", [chunk], index == 0, index == len(values) - 1)
+            for index, chunk in enumerate(values)
+        ]
+    return [event]
+
+
 class EventWriter:
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
 
     async def write(self, event: WireEvent) -> None:
-        payload = json.dumps(_event_payload(event), separators=(",", ":"), ensure_ascii=False)
-        if len(payload) > _MAX_FRAME_CHARS:
-            raise RuntimeError("controller frame exceeds the limit")
+        frames = _chunk_event(event)
         async with self._lock:
-            sys.stdout.write(payload + "\n")
+            for frame in frames:
+                payload = json.dumps(_event_payload(frame), separators=(",", ":"), ensure_ascii=False)
+                if len(payload.encode("utf-8")) >= _MAX_FRAME_BYTES:
+                    raise RuntimeError("controller frame exceeds the limit")
+                sys.stdout.write(payload + "\n")
             sys.stdout.flush()
 
 
@@ -252,7 +330,7 @@ def _parse_command(value: object) -> Command:
         request_id = value.get("id")
         code = value.get("code")
         if isinstance(request_id, str) and isinstance(code, str):
-            return ExecuteCommand(request_id, code)
+            return ExecuteCommand(request_id, code, value.get("track_namespace") is True)
         return ProtocolErrorCommand("execute requires string id and code")
     if operation == "interrupt":
         request_id = value.get("id")
@@ -268,33 +346,6 @@ def _parse_command(value: object) -> Command:
     if operation == "shutdown":
         return ShutdownCommand()
     return ProtocolErrorCommand(f"unknown operation: {operation!r}")
-
-
-def _bounded_stream(state: ExecutionState, name: str, text: str) -> str:
-    if name == "stdout":
-        used = state.stdout_chars
-        truncated = state.stdout_truncated
-    else:
-        used = state.stderr_chars
-        truncated = state.stderr_truncated
-    if truncated:
-        return ""
-    remaining = _MAX_STREAM_CHARS - used
-    if len(text) <= remaining:
-        output = text
-    else:
-        marker = "\n[OMP output truncated]\n"
-        content_chars = max(0, remaining - len(marker))
-        output = text[:content_chars] + marker[: remaining - content_chars]
-        if name == "stdout":
-            state.stdout_truncated = True
-        else:
-            state.stderr_truncated = True
-    if name == "stdout":
-        state.stdout_chars += len(output)
-    else:
-        state.stderr_chars += len(output)
-    return output
 
 
 def _message_parent_id(message: object) -> str | None:
@@ -387,6 +438,70 @@ def _record_comm_parent(runtime: RuntimeState, comm_id: str, message: dict[str, 
     runtime.comm_parents[comm_id] = message
 
 
+def _namespace_entries(value: object) -> list[dict[str, str]] | None:
+    if not isinstance(value, list):
+        return None
+    entries: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            return None
+        name = item.get("name")
+        type_name = item.get("type")
+        if not isinstance(name, str) or not isinstance(type_name, str):
+            return None
+        entries.append({"name": name, "type": type_name})
+    return entries
+
+
+def _namespace_event(request_id: str, content: dict[str, object]) -> NamespaceEvent | None:
+    execution_count = content.get("execution_count")
+    added = _namespace_entries(content.get("added"))
+    rebound = _namespace_entries(content.get("rebound"))
+    deleted = _namespace_entries(content.get("deleted"))
+    omitted = content.get("omitted")
+    if (
+        not isinstance(execution_count, int)
+        or added is None
+        or rebound is None
+        or deleted is None
+        or not isinstance(omitted, dict)
+    ):
+        return None
+    omitted_added = omitted.get("added")
+    omitted_rebound = omitted.get("rebound")
+    omitted_deleted = omitted.get("deleted")
+    if not all(isinstance(value, int) for value in (omitted_added, omitted_rebound, omitted_deleted)):
+        return None
+    return NamespaceEvent(
+        request_id,
+        execution_count,
+        added,
+        rebound,
+        deleted,
+        {"added": omitted_added, "rebound": omitted_rebound, "deleted": omitted_deleted},
+    )
+
+
+def _send_execute_request(client: AsyncKernelClient, command: ExecuteCommand) -> str:
+    content = {
+        "code": command.code,
+        "silent": False,
+        "store_history": True,
+        "user_expressions": {},
+        "allow_stdin": False,
+        "stop_on_error": True,
+    }
+    metadata = {"cellId": command.request_id, "omp_track_namespace": command.track_namespace}
+    message = client.session.msg("execute_request", content=content)
+    message["metadata"] = metadata
+    client.shell_channel.send(message)
+    header = message.get("header")
+    message_id = header.get("msg_id") if isinstance(header, dict) else None
+    if not isinstance(message_id, str):
+        raise RuntimeError("jupyter_client did not create an execute request ID")
+    return message_id
+
+
 async def _execute(
     manager: AsyncKernelManager,
     client: AsyncKernelClient,
@@ -396,16 +511,16 @@ async def _execute(
     stop_event: asyncio.Event,
     runtime: RuntimeState,
 ) -> None:
-    message_id = client.execute(command.code, allow_stdin=False, stop_on_error=True)
+    message_id = _send_execute_request(client, command)
     shell_reply = asyncio.create_task(_next_shell_reply(client, message_id))
     kernel_exit = runtime.kernel_exit
     if kernel_exit is None:
         kernel_exit = asyncio.create_task(_kernel_exit(manager))
         runtime.kernel_exit = kernel_exit
     iopub_message: asyncio.Task[object] | None = asyncio.create_task(client.get_iopub_msg())
-    state = ExecutionState()
     result: str | None = None
     error_name: str | None = None
+    namespace: NamespaceEvent | None = None
     try:
         while True:
             tasks = {task for task in (iopub_message, kernel_exit) if task is not None}
@@ -439,9 +554,7 @@ async def _execute(
                 name = content.get("name")
                 text = content.get("text")
                 if name in ("stdout", "stderr") and isinstance(text, str):
-                    bounded = _bounded_stream(state, name, text)
-                    if bounded:
-                        await writer.write(StreamEvent(command.request_id, name, bounded))
+                    await writer.write(StreamEvent(command.request_id, name, text))
             elif message_type == "execute_result":
                 data = _object_content(content.get("data"))
                 if data:
@@ -490,6 +603,10 @@ async def _execute(
                 if isinstance(comm_id, str):
                     runtime.comm_parents.pop(comm_id, None)
                     await writer.write(CommEvent(command.request_id, "close", comm_id, None, None))
+            elif message_type == "omp_namespace" and command.track_namespace and namespace is None:
+                namespace = _namespace_event(command.request_id, content)
+                if namespace is not None:
+                    await writer.write(namespace)
             elif message_type == "error":
                 ename = content.get("ename")
                 evalue = content.get("evalue")
@@ -551,7 +668,12 @@ async def _execute(
             )
         else:
             status = "ok"
-        await writer.write(DoneEvent(command.request_id, status, result))
+        if command.track_namespace and namespace is None:
+            execution_count = reply.get("execution_count")
+            if not isinstance(execution_count, int):
+                execution_count = 0
+            await writer.write(NamespaceEvent(command.request_id, execution_count, [], [], [], {"added": 0, "rebound": 0, "deleted": 0}))
+        await writer.write(DoneEvent(command.request_id, status, None))
     except asyncio.CancelledError:
         raise
     except Exception as exc:

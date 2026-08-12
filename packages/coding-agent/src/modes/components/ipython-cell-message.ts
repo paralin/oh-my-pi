@@ -116,12 +116,22 @@ function operationProgressRows(
 	}
 
 	const lines = replaceTabs(sanitizeText(progress.message)).split("\n");
-	return lines.map((line, index) =>
+	const visible = lines.slice(0, PREVIEW_LIMITS.EXPANDED_LINES);
+	const rows = visible.map((line, index) =>
 		truncateToWidth(
 			`${index === 0 ? "    " : "      "}${theme.fg("dim", `${line}${index === 0 ? suffix : ""}`)}`,
 			width,
 		),
 	);
+	if (lines.length > visible.length) {
+		rows.push(
+			truncateToWidth(
+				`      ${theme.fg("dim", formatMoreItems(lines.length - visible.length, "evidence line"))}`,
+				width,
+			),
+		);
+	}
+	return rows;
 }
 
 function operationRows(
@@ -130,7 +140,8 @@ function operationRows(
 	width: number,
 ): string[] {
 	if (operations.length === 0) return [];
-	const visible = expanded ? operations : operations.slice(-PREVIEW_LIMITS.OUTPUT_COLLAPSED);
+	const operationLimit = expanded ? PREVIEW_LIMITS.OUTPUT_EXPANDED : PREVIEW_LIMITS.OUTPUT_COLLAPSED;
+	const visible = operations.slice(-operationLimit);
 	const hidden = operations.length - visible.length;
 	const rows = [theme.fg("toolTitle", "Operations")];
 	for (const operation of visible) {
@@ -159,7 +170,8 @@ function operationRows(
 		const progress = expanded
 			? operation.progress.map(snapshot => ({ progress: snapshot, repetitions: 1 }))
 			: coalesceProgress(operation.progress);
-		const visibleProgress = expanded ? progress : progress.slice(-PREVIEW_LIMITS.OUTPUT_COLLAPSED);
+		const progressLimit = expanded ? PREVIEW_LIMITS.OUTPUT_EXPANDED : 1;
+		const visibleProgress = progress.slice(-progressLimit);
 		const hiddenProgress = progress.length - visibleProgress.length;
 		if (hiddenProgress > 0) {
 			rows.push(
@@ -201,7 +213,11 @@ export class IpythonCellMessageComponent extends Container {
 
 	applyUpdate(update: IpythonCellUpdate): void {
 		if (!this.#live || this.#detail) return;
-		this.#live.updates.push(update);
+		if (update.kind === "output") {
+			const index = this.#live.updates.findIndex(candidate => candidate.kind === "output");
+			if (index >= 0) this.#live.updates[index] = update;
+			else this.#live.updates.push(update);
+		} else this.#live.updates.push(update);
 		this.#rebuild();
 	}
 
@@ -283,15 +299,24 @@ export class IpythonCellMessageComponent extends Container {
 		this.#appendOperations(presentation);
 
 		if (this.#expanded) {
-			const progress = presentation.startupProgress.map(
-				update => `${update.stage}: ${sanitizeText(update.message)}`,
-			);
-			const artifacts = presentation.artifacts.map(artifact => {
+			const visibleStartupProgress = presentation.startupProgress.slice(-PREVIEW_LIMITS.OUTPUT_EXPANDED);
+			const progress = visibleStartupProgress.map(update => `${update.stage}: ${sanitizeText(update.message)}`);
+			const hiddenStartupProgress = presentation.startupProgress.length - visibleStartupProgress.length;
+			const artifactLimit = PREVIEW_LIMITS.OUTPUT_EXPANDED;
+			const visibleArtifacts = presentation.artifacts.slice(-artifactLimit);
+			const artifacts = visibleArtifacts.map(artifact => {
 				const type = artifact.mimeType ? ` (${artifact.mimeType})` : "";
-				return `${sanitizeText(artifact.label ?? shortenPath(artifact.path))}${type}`;
+				const artifactPath = sanitizeText(shortenPath(artifact.path));
+				const label = artifact.label ? `${sanitizeText(artifact.label)} · ` : "";
+				return `${label}${artifactPath}${type}`;
 			});
+			const hiddenArtifacts = presentation.artifacts.length - visibleArtifacts.length;
 			const metadata = [
+				...(hiddenStartupProgress > 0
+					? [`startup · ${formatMoreItems(hiddenStartupProgress, "startup update")}`]
+					: []),
 				...progress.map(message => `startup · ${message}`),
+				...(hiddenArtifacts > 0 ? [`artifact · ${formatMoreItems(hiddenArtifacts, "artifact")}`] : []),
 				...artifacts.map(message => `artifact · ${message}`),
 			];
 			if (metadata.length > 0)

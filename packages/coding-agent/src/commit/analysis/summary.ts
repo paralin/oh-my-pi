@@ -1,10 +1,10 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import summarySystemPrompt from "../../commit/prompts/summary-system.md" with { type: "text" };
 import summaryUserPrompt from "../../commit/prompts/summary-user.md" with { type: "text" };
 import type { CommitSummary } from "../../commit/types";
+import { RequestProfileOwner } from "../../session/request-profile";
 import { toReasoningEffort } from "../../thinking";
 import { extractTextContent } from "../utils";
 
@@ -41,12 +41,10 @@ export async function generateSummary({
 		stat,
 	});
 
-	const response = await completeSimple(
+	const requestProfile = RequestProfileOwner.noTools([systemPrompt]);
+	const response = await requestProfile.complete(
 		model,
-		{
-			systemPrompt: [systemPrompt],
-			messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }],
-		},
+		[{ role: "user", content: userPrompt, timestamp: Date.now() }],
 		{ apiKey, maxTokens: 200, reasoning: toReasoningEffort(thinkingLevel) },
 	);
 

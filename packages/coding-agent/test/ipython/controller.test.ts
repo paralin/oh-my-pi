@@ -38,6 +38,25 @@ function eventLabel(event: IpythonExecutionEvent): string {
 const integrationEnabled = Bun.env.OMP_IPYTHON_INTEGRATION === "1";
 const describeIntegration = integrationEnabled ? describe : describe.skip;
 
+function pythonAbiSourcePath(): string {
+	const root = path.resolve(import.meta.dir, "../../src/ipython/python");
+	const skills = [
+		"agent-message",
+		"agent-observe",
+		"attach-image",
+		"compact",
+		"edit",
+		"goal",
+		"helpers",
+		"refine",
+		"rlm-heartbeat",
+		"websearch",
+		"linear",
+		"notion",
+	];
+	return [root, ...skills.map(skill => path.join(root, "skills", skill, "src"))].join(path.delimiter);
+}
+
 async function createIntegrationController(
 	prefix: string,
 	hostHandlers?: Readonly<Record<string, IpythonHostHandler>>,
@@ -66,6 +85,7 @@ async function createIntegrationController(
 				PYTHONPATH: "/must/not/reach/kernel",
 				SSH_AUTH_SOCK: "/must/not/reach/kernel.sock",
 				OMP_SESSION_ID: "integration-session",
+				OMP_IPYTHON_RUNTIME_PATH: pythonAbiSourcePath(),
 			},
 			hostHandlers,
 			extensionHostHandlerResolver,
@@ -183,6 +203,97 @@ setInterval(() => {}, 1_000);
 });
 
 describeIntegration("IPython controller real-kernel boundary", () => {
+	test("records identity-only namespace deltas after success, error, and interrupt", async () => {
+		const { controller, tempRoot } = await createIntegrationController("omp-ipython-namespace-");
+		const context = {
+			sessionId: "namespace-session",
+			cwd: tempRoot,
+			cellId: "cell",
+			sequence: 1,
+			origin: "model" as const,
+			authority: "trusted-cell" as const,
+		};
+		try {
+			const bootstrap = await controller.execute(
+				`
+import os as _omp_os
+import sys as _omp_sys
+for _omp_path in reversed(_omp_os.environ["OMP_IPYTHON_RUNTIME_PATH"].split(_omp_os.pathsep)):
+    if _omp_path:
+        _omp_sys.path.insert(0, _omp_path)
+from omp import session as _omp_session
+_omp_session._install_namespace_tracker()
+`.trim(),
+			);
+			expect(bootstrap.status).toBe("ok");
+			const added = await controller.execute("alpha = [1]", { hostContext: context });
+			expect(added.namespaceDelta?.added).toEqual([{ name: "alpha", type: "list" }]);
+			const afterSuccess = await controller.execute("print(alpha, In[2])", { hostContext: context });
+			expect(afterSuccess.status).toBe("ok");
+			expect(afterSuccess.stdout).toContain("[1] alpha = [1]");
+			const mutated = await controller.execute("alpha.append(2)", { hostContext: context });
+			expect(mutated.namespaceDelta?.added).toEqual([]);
+			expect(mutated.namespaceDelta?.rebound).toEqual([]);
+			const rebound = await controller.execute("alpha = [3]", { hostContext: context });
+			expect(rebound.namespaceDelta?.rebound).toEqual([{ name: "alpha", type: "list" }]);
+			const failed = await controller.execute("beta = 1; 1 / 0", { hostContext: context });
+			expect(failed.status).toBe("error");
+			expect(failed.namespaceDelta?.added).toContainEqual({ name: "beta", type: "int" });
+			const afterError = await controller.execute("print(beta)", { hostContext: context });
+			expect(afterError.status).toBe("ok");
+			expect(afterError.stdout).toBe("1\n");
+			const deleted = await controller.execute("del alpha", { hostContext: context });
+			expect(deleted.namespaceDelta?.deleted).toEqual([{ name: "alpha", type: "list" }]);
+			const abort = new AbortController();
+			const interrupted = controller.execute(
+				"gamma = 3; import time; time.sleep(30)",
+				{ hostContext: context },
+				abort.signal,
+			);
+			setTimeout(() => abort.abort(), 250);
+			const aborted = await interrupted;
+			expect(aborted.status).toBe("aborted");
+			expect(aborted.namespaceDelta?.added).toContainEqual({ name: "gamma", type: "int" });
+			const afterInterrupt = await controller.execute("print(gamma)", { hostContext: context });
+			expect(afterInterrupt.status).toBe("ok");
+			expect(afterInterrupt.stdout).toBe("3\n");
+		} finally {
+			await controller.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test("streams a 9 MB UTF-8 frame sequence with a bounded controller tail", async () => {
+		const pythonExecutable = Bun.env.OMP_IPYTHON_TEST_PYTHON;
+		if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-large-frame-"));
+		const controller = new IpythonController({ pythonExecutable, cwd: tempRoot });
+		try {
+			const finalSentinel = `FINAL_CONTROLLER_SENTINEL_${crypto.randomUUID()}_界`;
+			let streamedBytes = 0;
+			let maximumChunkBytes = 0;
+			let streamedTail = "";
+			const beyondFormerCap = await controller.execute(`print("界" * 3200000 + ${JSON.stringify(finalSentinel)})`, {
+				onStream: event => {
+					const bytes = Buffer.byteLength(event.text, "utf8");
+					streamedBytes += bytes;
+					maximumChunkBytes = Math.max(maximumChunkBytes, bytes);
+					streamedTail = `${streamedTail}${event.text}`.slice(-1_024);
+				},
+			});
+			expect(streamedBytes).toBeGreaterThan(9 * 1024 * 1024);
+			expect(maximumChunkBytes).toBeLessThan(8 * 1024 * 1024);
+			expect(streamedTail.endsWith(`${finalSentinel}\n`)).toBe(true);
+			expect(Buffer.byteLength(beyondFormerCap.stdout, "utf8")).toBeLessThanOrEqual(1024 * 1024);
+			expect(beyondFormerCap.stdout.endsWith(`${finalSentinel}\n`)).toBe(true);
+			expect(beyondFormerCap.events.some(event => event.kind === "stream")).toBe(false);
+			expect(streamedTail).not.toContain("�");
+		} finally {
+			await controller.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
 	test("executes, streams, interrupts, reuses its namespace, and shuts down", async () => {
 		const pythonExecutable = Bun.env.OMP_IPYTHON_TEST_PYTHON;
 		if (!pythonExecutable) throw new Error("OMP_IPYTHON_TEST_PYTHON is required when OMP_IPYTHON_INTEGRATION=1");
@@ -1017,7 +1128,7 @@ any = "shadowed any"
 			expect(snapshot.manifestPath).toBe(path.join(tempRoot, "state", "kernel-state.json"));
 			const manifest: unknown = await Bun.file(snapshot.manifestPath).json();
 			expect(manifest).toMatchObject({
-				version: 1,
+				version: 2,
 				saved: expect.arrayContaining(["container", "custom", "scalar"]),
 				skipped: expect.arrayContaining([expect.objectContaining({ name: "provider_api_key" })]),
 				oversized: expect.arrayContaining([expect.objectContaining({ name: "oversized" })]),
@@ -1061,6 +1172,10 @@ any = "shadowed any"
 			processIds = controller.processIds;
 			await controller.execute("good_value = 42");
 			await controller.snapshot(snapshotPath);
+			const manifestPath = path.join(tempRoot, "kernel-state.json");
+			const manifest = await Bun.file(manifestPath).json();
+			manifest.pins = ["good_value", "corrupt_value"];
+			await Bun.write(manifestPath, JSON.stringify(manifest));
 			const corrupt = await controller.execute(`
 import dill
 with open(${JSON.stringify(snapshotPath)}, "rb") as handle:
@@ -1082,6 +1197,7 @@ os.replace(${JSON.stringify(snapshotPath)} + ".tmp", ${JSON.stringify(snapshotPa
 				expect(restore.restored).toContain("good_value");
 				expect(restore.failed.some(entry => entry.name === "corrupt_value")).toBe(true);
 				expect(restore.failed.some(entry => entry.name === "get_ipython")).toBe(true);
+				expect(restore.pins).toEqual(["good_value"]);
 				const usable = await resumed.controller.execute("(good_value, callable(get_ipython))");
 				expect(usable.status).toBe("ok");
 				expect(usable.result).toBe("(42, True)");

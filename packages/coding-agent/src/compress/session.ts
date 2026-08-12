@@ -44,15 +44,13 @@ export async function createCompressSession(options: {
 		authStorage,
 		modelRegistry,
 		...(resolved?.model ? { model: resolved.model } : {}),
-		customTools: [options.protocol.rewriteTool(), options.protocol.approveTool()],
-		toolNames: ["rewrite", "approve"],
-		restrictToolNames: true,
-		allowRestrictedCustomTools: true,
-		// Replace the default blocks outright: a compressor needs its own contract, not
-		// the coding-agent workflow. Every discovery source below defaults to ON when
-		// omitted, and each one would inject instruction-shaped project text into a
-		// session whose only legitimate input is the source document.
-		systemPrompt: [systemPrompt.trim()],
+		// The compression profile is the single prompt-and-tools boundary; it avoids
+		// the removed SDK custom-tool restriction workaround.
+		requestProfile: {
+			kind: "compression",
+			systemPrompt: [systemPrompt.trim()],
+			tools: [options.protocol.rewriteTool(), options.protocol.approveTool()],
+		},
 		skills: [],
 		rules: [],
 		contextFiles: [],

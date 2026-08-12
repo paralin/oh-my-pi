@@ -180,6 +180,7 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 			frame.writeUInt32BE(gz.length, 1);
 			frame.set(gz, 5);
 
+			await options?.onFinalPayload?.(request, model);
 			const response = await fetchImpl(chatBaseUrl + CHAT_MESSAGE_PATH, {
 				method: "POST",
 				headers: {

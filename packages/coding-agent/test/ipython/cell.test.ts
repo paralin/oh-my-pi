@@ -2,7 +2,12 @@ import { describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { type IpythonCellProvisioner, IpythonCellService, type IpythonCellUpdate } from "../../src/ipython/cell.js";
+import {
+	type IpythonCellProvisioner,
+	IpythonCellService,
+	type IpythonCellUpdate,
+	normalizeIpythonCellCode,
+} from "../../src/ipython/cell.js";
 import type {
 	IpythonExecutionEvent,
 	IpythonExecutionHostContext,
@@ -91,6 +96,31 @@ function processExists(pid: number): boolean {
 }
 
 describe("IPython cell service", () => {
+	test("normalizes only blank and comment-only prefixes before an exact bash magic", () => {
+		expect(normalizeIpythonCellCode("\n# explain\n  # second\n%%bash\nprintf ok\n")).toBe("%%bash\nprintf ok\n");
+		for (const code of [
+			"value = 1\n%%bash\nprintf no",
+			"  %%bash\nprintf no",
+			"# comment\n%%bash --login\nprintf no",
+			"\n# comment only",
+		]) {
+			expect(normalizeIpythonCellCode(code)).toBe(code);
+		}
+	});
+
+	test("executes a normalized bash magic while retaining the submitted source", async () => {
+		const provisioner = new FakeCellProvisioner(async code => result(code));
+		const service = new IpythonCellService(provisioner);
+		const source = "\n# safe prefix\n%%bash\nprintf ok\n";
+		try {
+			const cell = await service.execute({ code: source, origin: "model" });
+			expect(provisioner.calls).toEqual(["%%bash\nprintf ok\n"]);
+			expect(cell.code).toBe(source);
+		} finally {
+			await service.dispose();
+		}
+	});
+
 	test("serializes model and direct cells with shared attribution and safe text", async () => {
 		const firstEntered = Promise.withResolvers<void>();
 		const releaseFirst = Promise.withResolvers<void>();
@@ -166,6 +196,7 @@ describe("IPython cell service", () => {
 	});
 
 	test("binds session and authority context and preserves host progress and allocated artifacts", async () => {
+		const artifactRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-cell-context-"));
 		const contexts: IpythonExecutionHostContext[] = [];
 		const provisioner = new FakeCellProvisioner(async (_code, onEvent, _signal, context) => {
 			if (!context) throw new Error("missing host context");
@@ -188,7 +219,9 @@ describe("IPython cell service", () => {
 			cwd: "/workspace",
 			allocateArtifact: async (request, signal, cellId) => {
 				expect(signal.aborted).toBe(false);
-				return { id: "artifact-1", path: `/sidecar/${cellId}${request.suffix}`, ...request };
+				const artifactPath = path.join(artifactRoot, `${cellId}${request.suffix}`);
+				await fs.writeFile(artifactPath, "");
+				return { id: "artifact-1", path: artifactPath, ...request };
 			},
 		});
 		try {
@@ -206,7 +239,7 @@ describe("IPython cell service", () => {
 			expect(cell.artifacts).toMatchObject([
 				{
 					id: "artifact-1",
-					path: `/sidecar/${cell.cellId}.json`,
+					path: path.join(artifactRoot, `${cell.cellId}.json`),
 					label: "search results",
 					mimeType: "application/json",
 				},
@@ -216,6 +249,7 @@ describe("IPython cell service", () => {
 			);
 		} finally {
 			await service.dispose();
+			await fs.rm(artifactRoot, { recursive: true, force: true });
 		}
 	});
 
@@ -285,7 +319,9 @@ describe("IPython cell service", () => {
 			expect(bounded.modelText.truncated).toBe(true);
 			expect(bounded.modelText.totalBytes).toBe(600);
 			expect(bounded.modelText.outputBytes).toBeLessThanOrEqual(128);
-			expect(bounded.modelText.text).toContain("[IPython output truncated: 600 bytes total; 540 bytes omitted]");
+			expect(bounded.modelText.text).toContain("[... IPython preview gap ...]");
+			expect(bounded.modelText.text).toStartWith("界");
+			expect(bounded.modelText.text).toEndWith("界");
 			expect(bounded.modelText.text).toEndWith("界界界界界界界界界界");
 		} finally {
 			await service.dispose();
@@ -310,6 +346,117 @@ describe("IPython cell service", () => {
 			expect(failed.modelText.text).toContain("Error: injected startup failure");
 		} finally {
 			await failedService.dispose();
+		}
+	});
+
+	test("streams output beyond the former controller cap before projecting a true tail", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-true-tail-"));
+		const finalSentinel = `FINAL_SENTINEL_${crypto.randomUUID()}_界`;
+		const output = `head\n${"\x1b[31mmiddle 界\x1b[0m\n".repeat(140_000)}${finalSentinel}\n`;
+		const safeOutput = `head\n${"middle 界\n".repeat(140_000)}${finalSentinel}\n`;
+		const events: IpythonExecutionEvent[] = [{ kind: "stream", name: "stdout", text: output }];
+		const service = new IpythonCellService(
+			new FakeCellProvisioner(async (_code, onEvent) => {
+				await onEvent?.(events[0]!);
+				return result("large", "ok", events);
+			}),
+			{
+				maxModelBytes: 50 * 1024,
+				sessionId: "session",
+				cwd: root,
+				allocateArtifact: async (request, signal, cellId) => {
+					if (signal.aborted) throw signal.reason;
+					const artifactPath = path.join(root, `${cellId.replaceAll("/", "_")}${request.suffix}`);
+					await fs.writeFile(artifactPath, "");
+					return { path: artifactPath, label: request.label, mimeType: request.mimeType };
+				},
+			},
+		);
+		try {
+			const cell = await service.execute({ code: "large", origin: "model" });
+			const full = cell.artifacts.find(artifact => artifact.label === "Full IPython result");
+			if (!full) throw new Error("full artifact missing");
+			expect(Buffer.byteLength(output)).toBeGreaterThan(1_048_576);
+			const artifactText = await fs.readFile(full.path, "utf8");
+			expect(artifactText).toBe(safeOutput);
+			expect(cell.modelText.text.split("\n", 1)[0]).toBe(
+				`[Full IPython output: ${full.path}; 140002 lines, ${Buffer.byteLength(artifactText)} bytes total; ${cell.modelText.omittedLines} lines, ${cell.modelText.omittedBytes} bytes omitted]`,
+			);
+			expect(cell.modelText.text).toContain(finalSentinel);
+			expect(cell.modelText.outputBytes).toBeLessThanOrEqual(50 * 1024);
+			expect(cell.modelText.text).not.toContain("�");
+		} finally {
+			await service.dispose();
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("contains artifact lifecycle failures without raw output or orphan references", async () => {
+		const secret = "RAW_PROVIDER_SECRET";
+		const makeProvisioner = () =>
+			new FakeCellProvisioner(async (_code, onEvent) => {
+				const event = { kind: "stream", name: "stdout", text: secret.repeat(1_000) } as const;
+				await onEvent?.(event);
+				return result("failure", "ok", [event]);
+			});
+		for (const failure of ["allocation", "open", "write", "projection"] as const) {
+			const removed: string[] = [];
+			const service = new IpythonCellService(makeProvisioner(), {
+				maxModelBytes: 512,
+				sessionId: "session",
+				cwd: "/workspace",
+				allocateArtifact: async request => {
+					if (failure === "allocation") throw new Error(secret);
+					return { path: `/tmp/${failure}.txt`, ...request };
+				},
+				openArtifact: async () => {
+					if (failure === "open") throw new Error(secret);
+					return {
+						write: async () => {
+							if (failure === "write") throw new Error(secret);
+						},
+						close: async () => {},
+					};
+				},
+				removeArtifact: async artifactPath => {
+					removed.push(artifactPath);
+				},
+				projectOutput:
+					failure === "projection"
+						? () => {
+								throw new Error(secret);
+							}
+						: undefined,
+			});
+			try {
+				const cell = await service.execute({ code: "failure", origin: "model" });
+				expect(cell.status).toBe("error");
+				expect(JSON.stringify(cell)).not.toContain(secret);
+				expect(cell.artifacts).toEqual([]);
+				if (failure !== "allocation") expect(removed).toEqual([`/tmp/${failure}.txt`]);
+			} finally {
+				await service.dispose();
+			}
+		}
+
+		const cleanup = new IpythonCellService(makeProvisioner(), {
+			maxModelBytes: 512 * 1024,
+			sessionId: "session",
+			cwd: "/workspace",
+			allocateArtifact: async request => ({ path: "/tmp/remove.txt", ...request }),
+			openArtifact: async () => ({ write: async () => {}, close: async () => {} }),
+			removeArtifact: async () => {
+				throw new Error(secret);
+			},
+		});
+		try {
+			const cell = await cleanup.execute({ code: "cleanup", origin: "model" });
+			expect(cell.status).toBe("ok");
+			expect(cell.modelText.text).toContain("artifact cleanup failed");
+			expect(JSON.stringify(cell)).not.toContain(secret);
+			expect(cell.artifacts).toEqual([]);
+		} finally {
+			await cleanup.dispose();
 		}
 	});
 });

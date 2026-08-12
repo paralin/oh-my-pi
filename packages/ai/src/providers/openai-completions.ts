@@ -701,6 +701,7 @@ const streamOpenAICompletionsOnce = (
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
+					await options?.onFinalPayload?.(params, model);
 					const { events, response, requestId } = await postOpenAIStream<ChatCompletionChunk>({
 						url: completionsUrl,
 						headers: headersWithTimeout,

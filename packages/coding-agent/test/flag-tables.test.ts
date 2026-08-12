@@ -2,6 +2,8 @@ import { describe, expect, it } from "bun:test";
 import { parseArgs } from "../src/cli/args";
 import { OPTIONAL_VALUE_FLAGS, STRING_VALUE_FLAGS } from "../src/cli/flag-tables";
 import { CliUsageError } from "../src/cli/usage-error";
+import { launchHelp } from "../src/commands/launch-help";
+import { SETTINGS_SCHEMA } from "../src/config/settings-schema";
 
 /**
  * Catches the set → args.ts direction of drift between
@@ -56,18 +58,24 @@ describe("OPTIONAL_VALUE_FLAGS table is honored by args.ts parseArgs", () => {
 	}
 });
 
-describe("--external-thinking", () => {
-	it("enables external thinking without consuming the initial message", () => {
+describe("removed external thinking surface", () => {
+	it("does not parse --external-thinking as a supported flag", () => {
 		const result = parseArgs(["--external-thinking", "check this"]);
 
-		expect(result.externalThinking).toBe(true);
+		expect(result).not.toHaveProperty("externalThinking");
+		expect(result.unrecognizedFlags).toContain("--external-thinking");
 		expect(result.messages).toEqual(["check this"]);
 	});
 
-	it("stays unset when omitted", () => {
-		expect(parseArgs([]).externalThinking).toBeUndefined();
+	it("does not advertise an externalThinking setting", () => {
+		expect(SETTINGS_SCHEMA).not.toHaveProperty("externalThinking");
+	});
+
+	it("does not advertise --external-thinking in launch help", () => {
+		expect(launchHelp.flags).not.toHaveProperty("external-thinking");
 	});
 });
+
 describe("--session-dir", () => {
 	it("uses PI_CODING_AGENT_SESSION_DIR unless the CLI flag overrides it", () => {
 		const previous = Bun.env.PI_CODING_AGENT_SESSION_DIR;

@@ -659,9 +659,40 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "effective-request",
+		description: "Write the last effective provider request diagnostic to a temporary file",
+		acpDescription: "Return the redacted last effective provider request diagnostic path",
+		handle: async (_command, runtime) => {
+			try {
+				const filePath = await runtime.session.dumpLlmRequestToTmpDir();
+				await runtime.output(
+					filePath
+						? `Effective request diagnostic: ${filePath}\nMessages and credentials are redacted.`
+						: "No effective provider request has been captured yet.",
+				);
+			} catch (err) {
+				await runtime.output(`Effective request diagnostic unavailable: ${errorMessage(err)}`);
+			}
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			try {
+				const filePath = await runtime.ctx.session.dumpLlmRequestToTmpDir();
+				runtime.ctx.showStatus(
+					filePath
+						? `Effective request diagnostic: ${filePath}\nMessages and credentials are redacted.`
+						: "No effective provider request has been captured yet.",
+				);
+			} catch (err) {
+				runtime.ctx.showError(`Effective request diagnostic unavailable: ${errorMessage(err)}`);
+			}
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "dump",
-		description: "Copy session transcript to clipboard (and write LLM request JSON to tmp)",
-		acpDescription: "Return full transcript as plain text, with LLM request JSON path",
+		description: "Copy session transcript to clipboard (and write effective request diagnostic to tmp)",
+		acpDescription: "Return full transcript as plain text, with Effective request diagnostic path",
 		allowArgs: true,
 		handle: async (_command, runtime) => {
 			const text = runtime.session.formatSessionAsText();
@@ -677,11 +708,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			const lines = [text];
 			if (sidecarPath)
-				lines.push(
-					"",
-					`LLM request JSON: ${sidecarPath}`,
-					"This file persists on disk and may contain raw context/secrets — treat accordingly.",
-				);
+				lines.push("", `Effective request diagnostic: ${sidecarPath}`, "Messages and credentials are redacted.");
 			await runtime.output(lines.join("\n"));
 			return commandConsumed();
 		},

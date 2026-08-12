@@ -89,7 +89,6 @@
 
 ### Added
 
-- Added `--external-thinking` CLI flag to force external thinking tool activation.
 - Added `omp compress` command, which uses an isolated, two-tool agent loop to rewrite single or multiple text files (supporting glob patterns and concurrent processing) into dense prompt registers.
 - Expanded tool discovery in `omp cleanse` to support `staticcheck` and `golangci-lint` (Go); `mypy`, `pylint`, `flake8`, `ty`, and `basedpyright` (Python); `oxlint`, `deno lint`, `stylelint`, and `vue-tsc` (JS/TS); and `actionlint` (GitHub Workflows).
 - Added support for natural language requests in `omp cleanse "<request>"`, which launches a discovery subagent to automatically inspect the project, determine the correct commands, and map outputs.
@@ -97,7 +96,6 @@
 
 ### Changed
 
-- Restricted the `think` tool to GPT, Claude, and Gemini transports that support native reasoning replacement.
 - Increased the default subagent cap for `omp cleanse` from 8 to 32.
 
 ### Fixed
@@ -113,7 +111,6 @@
 
 ### Added
 
-- Added `externalThinking` setting for private scratchpad reasoning via the new `think` tool
 
 ## [17.2.13] - 2026-08-11
 

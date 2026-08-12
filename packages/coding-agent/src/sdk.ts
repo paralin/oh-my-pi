@@ -3,6 +3,7 @@ import {
 	type AgentMessage,
 	type AgentOptions,
 	type AgentTelemetryConfig,
+	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
 	type ThinkingLevel,
@@ -77,6 +78,7 @@ import { createIpythonWebService } from "./ipython/web-service";
 import { getSecurityCoordinator } from "./security/coordinator";
 import type { SecurityPublisher } from "./security/publication";
 import { SecurityStore } from "./security/store";
+import { type RequestProfile, RequestProfileOwner } from "./session/request-profile";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
 import { withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
@@ -252,6 +254,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Provider-facing system prompt override. Replaces the fully rendered default blocks. */
 	systemPrompt?: string | string[] | ((defaultPrompt: string[]) => string | string[]);
+	/** Explicit prompt-and-tool profile for a specialized session such as compression. */
+	requestProfile?: RequestProfile;
 	/** Already-loaded custom prompt text rendered through the bundled custom system prompt template. */
 	customSystemPrompt?: string;
 	/** Already-loaded text appended through the bundled system prompt templates. */
@@ -2104,6 +2108,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				sessionNotice: agentKind === "sub" ? "subagent" : "root",
 			});
 
+			if (options.requestProfile) return { systemPrompt: [...options.requestProfile.systemPrompt] };
 			if (options.systemPrompt === undefined) {
 				return defaultPrompt;
 			}
@@ -2141,6 +2146,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		hasRegistered = options.expectedAgentRef === undefined || options.expectedAgentRef === null;
 
 		const { systemPrompt } = await logger.time("buildSystemPrompt", rebuildSystemPrompt);
+		const requestProfileOwner = options.requestProfile
+			? new RequestProfileOwner(options.requestProfile)
+			: RequestProfileOwner.primary(systemPrompt, ipythonTool);
 
 		const promptTemplates = await promptTemplatesPromise;
 		toolSession.promptTemplates = promptTemplates;
@@ -2194,10 +2202,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};
-		const onPayload = async (payload: unknown, model?: Model) => {
+		const extensionOnPayload = async (payload: unknown, model?: Model) => {
 			const toolSnapshot = snapshotIpythonProviderTools(payload);
 			const replacement = await extensionRunner.emitBeforeProviderRequest(payload, model);
 			return preserveIpythonProviderTools(toolSnapshot, replacement);
+		};
+		const onFinalPayload: SimpleStreamOptions["onFinalPayload"] = (payload, requestModel) => {
+			requestProfileOwner.captureEffectiveRequest({
+				provider: requestModel?.provider ?? "unknown",
+				payload,
+			});
 		};
 		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
 			await extensionRunner.emitAfterProviderResponse(response, model);
@@ -2207,7 +2221,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolContextStore.setUIContext(uiContext, hasUI);
 		};
 
-		const initialTools = [ipythonTool];
+		const initialTools: AgentTool[] = [...requestProfileOwner.request.tools];
 
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
@@ -2257,7 +2271,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// per turn from the SessionManager.
 			cwdResolver: () => sessionManager.getCwd(),
 			convertToLlm: convertToLlmFinal,
-			onPayload,
+			onPayload: extensionOnPayload,
+			onFinalPayload,
 			onResponse,
 			sessionId: providerSessionId,
 			promptCacheKey: providerPromptCacheKey,
@@ -2347,6 +2362,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorConfigs: discoveredAdvisors.advisors,
 			agent,
+			requestProfileOwner,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
@@ -2443,7 +2459,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createIpythonWebService: () => createIpythonWebService(toolSession),
 			transformContext,
 			transformProviderContext,
-			onPayload,
+			onPayload: extensionOnPayload,
 			onResponse,
 			sideStreamFn: settingsAwareStreamFn,
 			advisorStreamFn: settingsAwareStreamFn,

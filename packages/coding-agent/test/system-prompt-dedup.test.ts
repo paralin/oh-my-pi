@@ -49,7 +49,9 @@ describe("SYSTEM.md prompt assembly", () => {
 		expect(systemPrompt[0]).toContain("exclusive `ipython`");
 		expect(systemPrompt[0]).toContain("fresh subshell");
 		expect(systemPrompt[0]).toContain("native environment");
-		expect(systemPrompt[0]).toContain("`rlm`, `omp`, and installed Python skills are preloaded");
+		expect(systemPrompt[0]).toContain(
+			"`rlm`, `omp`, `helpers`, `show`, `rg`, `run`, and installed Python skills are preloaded",
+		);
 		expect(systemPrompt[0]).toContain("`SKILL.md`");
 		expect(systemPrompt[0]).toContain("appended operator and project instructions");
 		expect(systemPrompt[1].indexOf("Outer instruction")).toBeLessThan(systemPrompt[1].indexOf("Nested instruction"));

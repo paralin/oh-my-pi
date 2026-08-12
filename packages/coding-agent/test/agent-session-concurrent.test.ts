@@ -1127,7 +1127,6 @@ describe("AgentSession concurrent prompt guard", () => {
 			streamFn: createMockModel({ handler: () => ({ content: ["Done"] }) }).stream,
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth-extension-custody.db"));
-		authStorages.push(authStorage);
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models-extension-custody.yml"));
 		const extensionRuntime = new ExtensionRuntime();
 		const handlerStarted = Promise.withResolvers<void>();

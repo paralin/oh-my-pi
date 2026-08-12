@@ -399,18 +399,40 @@ describe("ACP builtin slash commands", () => {
 		expect(output[0]).toContain("Recent Jobs");
 	});
 
+	// /effective-request
+	it("effective-request: exposes the redacted final provider request diagnostic directly", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.dumpLlmRequestToTmpDir = async () => "/tmp/omp-effective-request-test.json";
+
+		const result = await executeAcpBuiltinSlashCommand("/effective-request", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual([
+			"Effective request diagnostic: /tmp/omp-effective-request-test.json\nMessages and credentials are redacted.",
+		]);
+	});
+
+	it("effective-request: explains when no provider request has completed", async () => {
+		const { output, runtime } = createRuntime();
+		runtime.session.dumpLlmRequestToTmpDir = async () => undefined;
+
+		await executeAcpBuiltinSlashCommand("/effective-request", runtime);
+
+		expect(output).toEqual(["No effective provider request has been captured yet."]);
+	});
+
 	// /dump
-	it("dump: outputs transcript with LLM request JSON path when sidecar succeeds", async () => {
+	it("dump: outputs transcript with effective request diagnostic path when sidecar succeeds", async () => {
 		const { output, runtime } = createRuntime();
 		runtime.session.formatSessionAsText = () => "Session content here";
-		runtime.session.dumpLlmRequestToTmpDir = async () => "/tmp/omp-llm-request-test.json";
+		runtime.session.dumpLlmRequestToTmpDir = async () => "/tmp/omp-effective-request-test.json";
 
 		const result = await executeAcpBuiltinSlashCommand("/dump", runtime);
 
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("Session content here");
-		expect(output[0]).toContain("LLM request JSON: /tmp/omp-llm-request-test.json");
-		expect(output[0]).toContain("persists on disk");
+		expect(output[0]).toContain("Effective request diagnostic: /tmp/omp-effective-request-test.json");
+		expect(output[0]).toContain("Messages and credentials are redacted.");
 	});
 
 	it("dump: outputs transcript without sidecar when dumpLlmRequestToTmpDir throws", async () => {

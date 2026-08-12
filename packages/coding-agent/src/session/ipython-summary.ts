@@ -41,8 +41,9 @@ export function renderBoundedIpythonJournalSummary(detail: IpythonJournalDetail,
 		lines.push(`[${presentation.operations.length - IPYTHON_SUMMARY_OPERATIONS} more operations omitted]`);
 	}
 	for (const artifact of presentation.artifacts.slice(0, IPYTHON_SUMMARY_ARTIFACTS)) {
-		const label = `Artifact: ${artifact.label ?? artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`;
-		lines.push(boundedSection(label, IPYTHON_SUMMARY_ARTIFACT_BYTES, "artifact label"));
+		const label = artifact.label ? `${artifact.label} · ` : "";
+		const reference = `Artifact: ${label}${artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`;
+		lines.push(boundedSection(reference, IPYTHON_SUMMARY_ARTIFACT_BYTES, "artifact reference"));
 	}
 	if (presentation.artifacts.length > IPYTHON_SUMMARY_ARTIFACTS) {
 		lines.push(`[${presentation.artifacts.length - IPYTHON_SUMMARY_ARTIFACTS} more artifacts omitted]`);

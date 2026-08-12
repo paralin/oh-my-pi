@@ -23,20 +23,31 @@ test("cold bundled Python assets search and describe indexed capabilities withou
 	);
 	const python = Bun.which("python3");
 	if (!python) throw new Error("python3 is required for bundled capability discovery");
+	const stdoutPath = path.join(root, "stdout.txt");
+	const stderrPath = path.join(root, "stderr.txt");
 	const child = Bun.spawn(
 		[
 			python,
 			"-c",
 			[
-				"import json",
+				"import json, os",
+				"os.environ['OMP_HOST_CAPABILITY_CENSUS'] = json.dumps(['extension.autoresearch.run', 'web.search'])",
 				"import omp",
 				"assert omp.capabilities() == omp.capabilities('')",
-				"assert [item.name for item in omp.capabilities('WeB')] == ['websearch', 'omp.web']",
+				"assert len(repr(omp.capabilities()).encode()) <= 8 * 1024",
+				"assert [item.name for item in omp.search('WeB')] == ['websearch', 'omp.web']",
+				"assert all(item.category == 'skill' for item in omp.search('', category='SKILL'))",
+				"try: omp.capabilities(category='process')",
+				'except ValueError as error: assert "use query=..." in str(error)',
+				"else: raise AssertionError('invalid category was accepted')",
+				"assert [item.name for item in omp.capabilities(query='process')] == ['omp.process']",
 				"detail = omp.describe('omp.web')",
 				"assert detail is not None",
 				"calls = {call.name: call for call in detail.calls}",
 				"assert detail.category == 'host'",
 				"assert detail.summary == 'Search and extract web resources through host-owned providers.'",
+				"assert detail.available is True and detail.example == \"await omp.web.search('OMP')\"",
+				"assert len(repr(detail).encode()) <= 8 * 1024",
 				"assert calls['search'].is_async",
 				"assert 'query' in calls['search'].signature",
 				"assert calls['search'].documentation == \"Search through the session's configured provider chain.\"",
@@ -46,17 +57,16 @@ test("cold bundled Python assets search and describe indexed capabilities withou
 				"debug = omp.describe('omp.debug')",
 				"assert debug is not None and len(debug.calls) == 16 and debug.omitted_calls > 0",
 				"assert omp.describe('missing') is None",
-				"assert not hasattr(omp.process, 'run')",
+				"assert omp.describe('omp.process').available is False",
+				"assert omp.describe('omp.autoresearch').available is True",
+				"assert callable(omp.process.run)",
 				"print(json.dumps({'web': [call.name for call in detail.calls], 'skill_path': str(skill.skill_path), 'debug_omitted': debug.omitted_calls}))",
 			].join("\n"),
 		],
-		{ cwd: root, stdout: "pipe", stderr: "pipe" },
+		{ cwd: root, stdout: Bun.file(stdoutPath), stderr: Bun.file(stderrPath) },
 	);
-	const [exitCode, stdout, stderr] = await Promise.all([
-		child.exited,
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-	]);
+	const exitCode = await child.exited;
+	const [stdout, stderr] = await Promise.all([fs.readFile(stdoutPath, "utf8"), fs.readFile(stderrPath, "utf8")]);
 	expect(exitCode).toBe(0);
 	expect(stderr).toBe("");
 	expect(JSON.parse(stdout)).toEqual({

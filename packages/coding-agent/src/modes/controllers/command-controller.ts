@@ -98,8 +98,8 @@ export class CommandController {
 				this.ctx.showError("No messages to dump yet.");
 				return;
 			}
-			// Build the LLM request JSON sidecar first so its path (and a
-			// raw-context warning) can be appended to the copied transcript.
+			// Build the Effective request diagnostic sidecar first so its path (and a
+			// redaction note) can be appended to the copied transcript.
 			let sidecarPath: string | undefined;
 			let sidecarError: string | undefined;
 			try {
@@ -108,12 +108,12 @@ export class CommandController {
 				sidecarError = error instanceof Error ? error.message : "Unknown error";
 			}
 			const doc = sidecarPath
-				? `${formatted}\n\n---\nLLM request JSON: ${sidecarPath}\nThis file persists on disk and may contain raw context/secrets — treat accordingly.`
+				? `${formatted}\n\n---\nEffective request diagnostic: ${sidecarPath}\nMessages and credentials are redacted.`
 				: formatted;
 			await copyToClipboard(doc);
 			const statusParts = ["Session copied to clipboard"];
-			if (sidecarPath) statusParts.push(`LLM request JSON: ${sidecarPath}`);
-			if (sidecarError) statusParts.push(`LLM request JSON unavailable: ${sidecarError}`);
+			if (sidecarPath) statusParts.push(`Effective request diagnostic: ${sidecarPath}`);
+			if (sidecarError) statusParts.push(`Effective request diagnostic unavailable: ${sidecarError}`);
 			this.ctx.showStatus(statusParts.join("\n"));
 		} catch (error: unknown) {
 			this.ctx.showError(`Failed to copy session: ${error instanceof Error ? error.message : "Unknown error"}`);

@@ -2026,7 +2026,11 @@ export function runGitLabDuoWorkflowSocket(
 				mcpTools: startPayload.mcpTools.length,
 				preapprovedTools: startPayload.preapproved_tools.length,
 			});
-			ws.send(JSON.stringify({ startRequest: startPayload }));
+			void (async () => {
+				const frame = { startRequest: startPayload };
+				await options.onFinalPayload?.(frame);
+				ws.send(JSON.stringify(frame));
+			})().catch(error => settle("closed", error));
 		};
 	}
 	resetIdleTimer();

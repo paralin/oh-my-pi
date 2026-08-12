@@ -49,6 +49,7 @@ const PYTHON_KEYWORDS = new Set([
 
 /** Imports installed with the managed runtime and therefore never dynamic. */
 export const FIXED_PYTHON_IMPORTS: ReadonlySet<string> = new Set([
+	"helpers",
 	"agent_message",
 	"agent_observe",
 	"attach_image",

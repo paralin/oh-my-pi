@@ -1,14 +1,41 @@
-"""Project-scoped long-lived process supervision through OMP's launch broker."""
+"""One-shot argv execution and project-scoped retained process supervision."""
 
 from __future__ import annotations
 
-from typing import Any, Literal, Mapping, Sequence
+import builtins
+from typing import Any, Literal, Mapping, Sequence, TypeAlias
 
 from rlm import host_request
 
 RestartPolicy = Literal["no", "on-failure", "always"]
 WaitTarget = Literal["ready", "exit"]
 ProcessSignal = Literal["SIGINT", "SIGTERM", "SIGHUP", "SIGQUIT", "SIGKILL"]
+Timeout: TypeAlias = float | str
+
+
+async def run(
+    application: str,
+    args: Sequence[str] = (),
+    *,
+    timeout: Timeout | None = None,
+    cwd: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Run one argv command under active-cell process custody.
+
+    Numeric timeouts are seconds; duration strings accept ``ms``, ``s``, ``m``,
+    or ``h`` suffixes. OMP bounds independent stdout and stderr head/tail windows and writes
+    the complete transcript to a runtime-managed artifact. Callers cannot select
+    the artifact path. Relative ``cwd`` paths stay inside the active project.
+    """
+    payload: dict[str, object] = {"application": application, "args": builtins.list(args)}
+    if timeout is not None:
+        payload["timeout"] = timeout
+    if cwd is not None:
+        payload["cwd"] = cwd
+    if env is not None:
+        payload["env"] = dict(env)
+    return await host_request("process.run", payload)
 
 
 async def start(
@@ -33,7 +60,7 @@ async def start(
     payload: dict[str, object] = {
         "name": name,
         "application": application,
-        "args": list(args),
+        "args": builtins.list(args),
         "pty": pty,
         "restart": restart,
         "persist": persist,
@@ -122,4 +149,4 @@ async def restart(name: str) -> dict[str, Any]:
     return await host_request("process.restart", {"name": name})
 
 
-__all__ = ["describe", "list", "logs", "restart", "send", "start", "stop", "wait"]
+__all__ = ["describe", "list", "logs", "restart", "run", "send", "start", "stop", "wait"]

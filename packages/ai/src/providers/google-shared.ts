@@ -977,9 +977,11 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 				headers: plan.headers,
 			};
 
-			const bodyJson = JSON.stringify(paramsToWireBody(params));
+			const wireBody = paramsToWireBody(params);
+			const bodyJson = JSON.stringify(wireBody);
 			const fetchImpl = plan.fetch ?? options?.fetch ?? (globalThis.fetch.bind(globalThis) as FetchImpl);
 			const openStreamAt = async (requestUrl: string): Promise<ReadableStream<Uint8Array>> => {
+				await options?.onFinalPayload?.(wireBody, model);
 				const response = await fetchImpl(requestUrl, {
 					method: "POST",
 					headers: { ...plan.headers, "Content-Type": "application/json", Accept: "text/event-stream" },

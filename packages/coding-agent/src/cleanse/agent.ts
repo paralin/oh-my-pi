@@ -125,7 +125,6 @@ export async function createCleanseAgentRuntime(options: {
 			sessionManager.appendCustomEntry("cleanse_discovery", { request });
 			const result = await runStructuredSubagent({
 				session: toolSession,
-				invocationKind: "task",
 				assignment: prompt.render(discoveryPrompt, { request }),
 				agent: "task",
 				model: modelSelector,

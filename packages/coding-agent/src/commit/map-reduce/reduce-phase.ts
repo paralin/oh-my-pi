@@ -1,10 +1,10 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import reduceSystemPrompt from "../../commit/prompts/reduce-system.md" with { type: "text" };
 import reduceUserPrompt from "../../commit/prompts/reduce-user.md" with { type: "text" };
 import type { ConventionalAnalysis, FileObservation } from "../../commit/types";
+import { RequestProfileOwner } from "../../session/request-profile";
 import { toReasoningEffort } from "../../thinking";
 import { parseConventionalAnalysisResponse } from "../shared-llm";
 
@@ -33,12 +33,10 @@ export async function runReducePhase({
 		stat,
 		scope_candidates: scopeCandidates,
 	});
-	const response = await completeSimple(
+	const requestProfile = RequestProfileOwner.noTools([prompt.render(reduceSystemPrompt)]);
+	const response = await requestProfile.complete(
 		model,
-		{
-			systemPrompt: [prompt.render(reduceSystemPrompt)],
-			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-		},
+		[{ role: "user", content: userContent, timestamp: Date.now() }],
 		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
 	);
 

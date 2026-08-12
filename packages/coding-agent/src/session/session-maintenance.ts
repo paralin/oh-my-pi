@@ -301,6 +301,7 @@ export interface SessionMaintenanceHost {
 	syncTodoPhasesFromBranch(): void;
 	resetAdvisorRuntimes(): void;
 	rebaseAfterCompaction(): void | Promise<void>;
+	appendIpythonStateAfterCompaction?(): Promise<void>;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
@@ -1043,6 +1044,7 @@ export class SessionMaintenance {
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			await this.#host.rebaseAfterCompaction();
+			await this.#host.appendIpythonStateAfterCompaction?.();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).
@@ -3168,6 +3170,7 @@ export class SessionMaintenance {
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
 			await this.#host.rebaseAfterCompaction();
+			await this.#host.appendIpythonStateAfterCompaction?.();
 			// Compaction discarded the conversation history that carried the approved
 			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 			// the plan from disk and re-injects it on the next turn (issue #1246).

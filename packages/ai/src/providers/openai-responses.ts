@@ -552,6 +552,7 @@ const streamOpenAIResponsesOnce = (
 							if (requestTimeoutMs !== undefined) {
 								headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 							}
+							await options?.onFinalPayload?.(requestParams, model);
 							const { events, response, requestId } = await postOpenAIStream<ResponseStreamEvent>({
 								url: requestUrl,
 								headers: headersWithTimeout,

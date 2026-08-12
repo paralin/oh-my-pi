@@ -50,6 +50,7 @@ import {
 import type {
 	AssistantMessage,
 	CodexCompactionContext,
+	Context,
 	ImageContent,
 	Message,
 	Model,
@@ -70,7 +71,6 @@ import type {
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
@@ -326,6 +326,7 @@ import {
 	queueChipText,
 	toRestoredQueuedMessage,
 } from "./queued-messages";
+import { RequestProfileOwner } from "./request-profile";
 import { RootForegroundLease } from "./root-foreground-lease";
 import {
 	buildScheduledNotification,
@@ -518,6 +519,7 @@ export class AgentSession {
 
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
+	readonly #requestProfileOwner: RequestProfileOwner | undefined;
 	readonly #autoApprove: boolean;
 
 	readonly #providerBoundary: SessionProviderBoundary;
@@ -667,6 +669,7 @@ export class AgentSession {
 	#detachLegacyBeforeModelCall: (() => void) | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
+	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
 	#onResponse: SimpleStreamOptions["onResponse"] | undefined;
 	#onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
@@ -956,6 +959,7 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.#pythonPackages = [...(config.pythonPackages ?? [])];
 		this.agent = config.agent;
+		this.#requestProfileOwner = config.requestProfileOwner;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
@@ -1134,17 +1138,21 @@ export class AgentSession {
 				},
 				onReady: (processIds, status) => {
 					const event = status.restart ? "restart" : "startup";
+					const level = status.recoveryError ? "warning" : "info";
 					const notice = status.restart
-						? "IPython controller or kernel restarted."
+						? status.recoveryError
+							? `IPython kernel restarted unexpectedly; user namespace state reset, but post-bootstrap preload restoration failed: ${status.recoveryError}`
+							: `IPython kernel restarted unexpectedly; user namespace state reset. Post-bootstrap preloads restored: ${status.restoredPreloads?.join(", ") ?? "none"}.`
 						: "IPython controller and kernel started.";
-					this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail(event, "info", notice, processIds));
-					this.emitNotice("info", notice, "ipython");
+					this.#appendIpythonJournalDetail(createIpythonLifecycleJournalDetail(event, level, notice, processIds));
+					this.emitNotice(level, notice, "ipython");
 				},
 			},
 			config.createIpythonSessionGeneration,
 			{
 				pythonPackages: () => this.#pythonPackages,
 				extensionHostHandlerResolver: operation => this.#ipythonExtensionRegistry.getHostHandler(operation),
+				extensionHostOperations: () => this.#ipythonExtensionRegistry.getHostOperations(),
 				hostHandlers: () =>
 					composeIpythonHostHandlers(
 						createFoundationalIpythonHostHandlers(),
@@ -1357,6 +1365,7 @@ export class AgentSession {
 		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#transformContext = config.transformContext ?? (messages => messages);
+		this.#transformProviderContext = config.transformProviderContext;
 		this.#sideStreamFn = config.sideStreamFn ?? streamSimple;
 		this.#preferWebsockets = config.preferWebsockets;
 		this.#onPayload = config.onPayload;
@@ -1685,11 +1694,11 @@ export class AgentSession {
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
 			resetCodexProviderAfterCompaction: compaction => this.#resetCodexProviderAfterCompaction(compaction),
-			rebaseAfterCompaction: async () => {
+			rebaseAfterCompaction: () => {
 				this.#stats.rebaseAfterCompaction();
 				this.#markPrefixReset();
-				await this.#appendIpythonStateAfterCompaction();
 			},
+			appendIpythonStateAfterCompaction: () => this.#appendIpythonStateAfterCompaction(),
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: () => this.#advisors.resetAllRuntimes(),
 			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
@@ -3973,6 +3982,11 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model | undefined {
 		return this.agent.state.model;
+	}
+
+	/** Model that produced this session's current work. */
+	get servingModel() {
+		return this.#recovery.servingModel;
 	}
 
 	/** Resolved selector while retry routing is using a fallback model. */
@@ -6473,6 +6487,7 @@ export class AgentSession {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				return false;
 			}
+			this.#recovery.carryServingModelAcrossFork();
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 
@@ -7245,20 +7260,28 @@ export class AgentSession {
 				Object.keys(serviceTierByFamily).length > 0 ? serviceTierByFamily : null,
 			);
 		}
+		const requestProfileOwner = RequestProfileOwner.act([ACT_SYSTEM_PROMPT], tool);
 		const privateAgent = new Agent({
 			initialState: {
-				systemPrompt: [ACT_SYSTEM_PROMPT],
+				systemPrompt: requestProfileOwner.request.systemPrompt,
 				model: selectedModel,
 				thinkingLevel: toReasoningEffort(effectiveThinking),
 				disableReasoning: shouldDisableReasoning(effectiveThinking),
-				tools: [tool],
+				tools: requestProfileOwner.request.tools,
 				messages: restored.messages,
 			},
 			convertToLlm: this.#convertToLlm,
 			transformContext: async (messages, signal) => await this.#transformContext(messages, signal),
+			transformProviderContext: this.#transformProviderContext,
 			streamFn: this.agent.streamFn,
 			getApiKey: this.agent.getApiKey,
 			onPayload: this.#onPayload,
+			onFinalPayload: (payload, requestModel) => {
+				requestProfileOwner.captureEffectiveRequest({
+					provider: requestModel?.provider ?? "unknown",
+					payload,
+				});
+			},
 			onResponse: this.#onResponse,
 			steeringMode: this.settings.get("steeringMode") ?? "one-at-a-time",
 			followUpMode: this.settings.get("followUpMode") ?? "one-at-a-time",
@@ -7270,6 +7293,7 @@ export class AgentSession {
 		});
 		return new AgentSession({
 			agent: privateAgent,
+			requestProfileOwner,
 			sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
@@ -7352,7 +7376,11 @@ export class AgentSession {
 		let started = false;
 		const live = () => projectIpythonLiveCellPresentation({ code: request.code, origin: request.origin, updates });
 		const onUpdate = (update: IpythonCellUpdate): void => {
-			updates.push(update);
+			if (update.kind === "output") {
+				const index = updates.findIndex(candidate => candidate.kind === "output");
+				if (index >= 0) updates[index] = update;
+				else updates.push(update);
+			} else updates.push(update);
 			this.#emit({
 				type: started ? "ipython_cell_update" : "ipython_cell_start",
 				presentation: live(),
@@ -9148,35 +9176,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Dump the current session's LLM-facing request context as JSON to a
-	 * auto-named file in `os.tmpdir()`. This is the synchronous
-	 * `convertToLlm`-boundary snapshot — system prompt, tools (wire schemas),
-	 * thinking/service tier, and converted messages — with no network round-trip
-	 * and no arming flag, so advisor/side requests cannot intercept it.
-	 *
-	 * The file persists on disk and may contain the same raw context/secrets
-	 * as `/dump`; treat the path accordingly.
-	 *
-	 * @returns the written file path, or `undefined` when there are no messages.
+	 * Write an operator-safe diagnostic for the last effective provider request.
+	 * The diagnostic comes from the post-extension provider payload capture; it
+	 * never rebuilds an earlier approximation and never includes messages or credentials.
 	 */
 	async dumpLlmRequestToTmpDir(): Promise<string | undefined> {
-		const messages = this.messages;
-		if (messages.length === 0) return undefined;
-		const llmMessages = await this.convertMessagesToLlm(messages);
-		const payload = {
-			model: this.agent.state.model ?? null,
-			thinkingLevel: this.thinkingLevel ?? null,
-			serviceTier: this.#models.serviceTierEntry(),
-			systemPrompt: this.agent.state.systemPrompt,
-			tools: this.agent.state.tools.map(tool => ({
-				name: tool.name,
-				description: tool.description,
-				parameters: toolWireSchema(tool),
-				...(tool.strict !== undefined ? { strict: tool.strict } : {}),
-			})),
-			messages: llmMessages,
-		};
-		const filePath = path.join(os.tmpdir(), `omp-llm-request-${Snowflake.next()}.json`);
+		const payload = this.#requestProfileOwner?.lastEffectiveRequestDiagnostic();
+		if (!payload) return undefined;
+		const filePath = path.join(os.tmpdir(), `omp-effective-request-${Snowflake.next()}.json`);
 		await Bun.write(filePath, `${JSON.stringify(payload, null, 2)}\n`);
 		return filePath;
 	}

@@ -3,8 +3,8 @@
   "provider": "anthropic-messages",
   "categories": {
     "fixedOmp": {
-      "bytes": 3354,
-      "tokens": 839
+      "bytes": 3696,
+      "tokens": 924
     },
     "generatedOmp": {
       "bytes": 185,
@@ -28,10 +28,10 @@
     }
   },
   "totalFirstRequest": {
-    "bytes": 4522,
-    "tokens": 1131
+    "bytes": 4864,
+    "tokens": 1216
   },
-  "bodySha256": "af4989685c2dc9148f57741e6685c0cc79c1056eb914bfc396c4b5f4a2de5f83",
+  "bodySha256": "04ba1646c85b4cca1d6a30cffd48bf4acffe9a2e915979f9a7547136ebc57366",
   "systemPromptParts": 3,
   "toolNames": [
     "ipython"

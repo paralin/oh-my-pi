@@ -235,8 +235,9 @@ describe("IPython nested host-operation lifecycle", () => {
 		expect(collapsed).toContain("Operations");
 		expect(collapsed).toContain("ast.search · src/app.ts · 3 matches (30ms)");
 		expect(collapsed).toContain("ast.rewrite · src/lib.ts · 2 replacements · applied (35ms)");
-		// Compact presentation keeps each distinct progress snapshot beside its operation.
-		expect(collapsed).toContain("Searching syntax trees");
+		// Compact presentation keeps only the latest allowlisted result beside each operation.
+		expect(collapsed).not.toContain("Searching syntax trees");
+		expect(collapsed).toContain("Syntax-tree search completed");
 		expect(collapsed).toContain("ordinary output");
 
 		component.setExpanded(true);
@@ -251,7 +252,7 @@ describe("IPython nested host-operation lifecycle", () => {
 		}
 	});
 
-	test("coalesces repeated gh watch tables only in compact live and replay cards", () => {
+	test("coalesces repeated gh watch tables only in the compact current result", () => {
 		const runningTable = "NAME              STATUS   ELAPSED\nunit / linux      pending  00:42";
 		const failingTable = "NAME              STATUS   ELAPSED\nunit / linux      failed   00:43";
 		const events: IpythonExecutionEvent[] = [
@@ -272,7 +273,11 @@ describe("IPython nested host-operation lifecycle", () => {
 		const detail = createIpythonCellJournalDetail(result);
 		const replayed = new IpythonCellMessageComponent(detail);
 		const live = new IpythonCellMessageComponent({ code: result.code, origin: result.origin });
-		for (const update of result.updates) live.applyUpdate(update);
+		for (const update of result.updates.slice(0, 9)) live.applyUpdate(update);
+		const repeatedCurrent = Bun.stripANSI(live.render(100).join("\n"));
+		expect(repeatedCurrent.match(/unit \/ linux/g)).toHaveLength(1);
+		expect(repeatedCurrent).toContain("×8 identical");
+		for (const update of result.updates.slice(9)) live.applyUpdate(update);
 
 		expect(projectIpythonCellPresentation(detail).operations[0]?.progress).toHaveLength(9);
 		const compactJournal = renderIpythonJournalText(detail);
@@ -280,8 +285,8 @@ describe("IPython nested host-operation lifecycle", () => {
 		expect(compactJournal).toContain("failed");
 		for (const component of [live, replayed]) {
 			const compact = Bun.stripANSI(component.render(100).join("\n"));
-			expect(compact.match(/unit \/ linux/g)).toHaveLength(2);
-			expect(compact).toContain("×8 identical");
+			expect(compact.match(/unit \/ linux/g)).toHaveLength(1);
+			expect(compact).not.toContain("×8 identical");
 			expect(compact).toContain("failed check");
 
 			component.setExpanded(true);
@@ -363,6 +368,84 @@ subprocess.run(
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
 		expect(expanded.match(/omp\.files\.read/g)).toHaveLength(6);
 		expect(expanded).not.toContain("more operations");
+	});
+
+	test("keeps the latest process tail current while replay retains bounded live history", () => {
+		const events: IpythonExecutionEvent[] = [
+			operation("tail", "process.run", "start", 1_000),
+			operation("tail", "process.run", "progress", 1_010, {
+				message: "Process output received\nstdout:\nbuild 1",
+				summary: { path: "/tmp/omp-artifacts/process.txt", count: 7, unit: "bytes" },
+			}),
+			operation("tail", "process.run", "progress", 1_020, {
+				message: "Process output received\nstdout:\nbuild 2\nstderr:\nwarning",
+				summary: { path: "/tmp/omp-artifacts/process.txt", count: 22, unit: "bytes" },
+			}),
+			operation("tail", "process.run", "progress", 1_030, {
+				message: "Process run timed_out\nstdout:\nbuild 2\nstderr:\nwarning",
+				summary: { path: "/tmp/omp-artifacts/process.txt", count: 22, unit: "bytes" },
+			}),
+			operation("tail", "process.run", "terminal", 1_040, { status: "ok", durationMs: 40 }),
+		];
+		const result = cellResult(events, {
+			artifacts: [
+				{ path: "/tmp/omp-artifacts/process.txt", mimeType: "text/plain", label: "OMP process transcript" },
+			],
+		});
+		const live = new IpythonCellMessageComponent({ code: result.code, origin: result.origin });
+		for (const update of result.updates) live.applyUpdate(update);
+		const replay = new IpythonCellMessageComponent(createIpythonCellJournalDetail(result));
+
+		for (const component of [live, replay]) {
+			const compact = Bun.stripANSI(component.render(120).join("\n"));
+			expect(compact).toContain("Process run timed_out stdout: build 2 stderr: warning");
+			expect(compact).not.toContain("build 1");
+			const narrow = component.render(48).map(Bun.stripANSI);
+			expect(narrow.every(row => Bun.stringWidth(row) <= 48)).toBeTrue();
+
+			component.setExpanded(true);
+			const expanded = Bun.stripANSI(component.render(120).join("\n"));
+			expect(expanded).toContain("build 1");
+			expect(expanded).toContain("build 2");
+			expect(expanded).toContain("stderr:");
+		}
+	});
+
+	test("bounds expanded evidence and shows directly readable artifact references", () => {
+		const progressEvents: IpythonExecutionEvent[] = [operation("bounded", "process.run", "start", 1_000)];
+		for (let index = 0; index < 20; index++) {
+			progressEvents.push(
+				operation("bounded", "process.run", "progress", 1_001 + index, {
+					message:
+						index === 19
+							? Array.from({ length: 20 }, (_, line) => `evidence ${line}`).join("\n")
+							: `step ${index}`,
+					summary: { count: index, unit: "records" },
+				}),
+			);
+		}
+		progressEvents.push(operation("bounded", "process.run", "terminal", 1_100, { status: "ok", durationMs: 100 }));
+		const artifacts = Array.from({ length: 15 }, (_, index) => ({
+			path: `/tmp/omp-artifacts/transcript-${index}.txt`,
+			mimeType: "text/plain",
+			label: `transcript ${index}`,
+		}));
+		const detail = createIpythonCellJournalDetail(cellResult(progressEvents, { artifacts }));
+		const component = new IpythonCellMessageComponent(detail);
+		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
+		expect(collapsed).toContain("evidence 0 evidence 1");
+		expect(collapsed).not.toContain("step 18");
+		expect(collapsed).not.toContain("/tmp/omp-artifacts");
+
+		component.setExpanded(true);
+		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain("… 10 more progress updates");
+		expect(expanded).toContain("… 8 more evidence lines");
+		expect(expanded).toContain("artifact · … 5 more artifacts");
+		expect(expanded).toContain("artifact · transcript 14 · /tmp/omp-artifacts/transcript-14.txt (text/plain)");
+		expect(expanded).not.toContain("transcript 0 · /tmp/omp-artifacts/transcript-0.txt");
+		expect(projectIpythonCellPresentation(detail).operations[0]?.progress).toHaveLength(20);
+		expect(detail.events).toEqual(progressEvents);
 	});
 
 	test("keeps legacy persisted host progress readable without a nested lifecycle", () => {

@@ -263,7 +263,7 @@ describe("formatSessionDumpText IPython projection", () => {
 		expect(out).toContain("IPython cell 3 (model, aborted, 25ms)");
 		expect(out).toContain("before\nwarning");
 		expect(out).toContain("displayed MIME types: text/html");
-		expect(out).toContain("Artifact: display (text/html)");
+		expect(out).toContain("Artifact: display · /tmp/cell-dump/display.html (text/html)");
 		expect(out).toContain("Output truncated from 4096 bytes.");
 		expect(out).not.toContain("<script>unsafe()</script>");
 	});

@@ -172,6 +172,7 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 					if (requestTimeoutMs !== undefined) {
 						headersWithTimeout["X-Stainless-Timeout"] = Math.floor(requestTimeoutMs / 1000).toString();
 					}
+					await options?.onFinalPayload?.(params, requestModel);
 					const handle = await postOpenAIStream<ResponseStreamEvent>({
 						url,
 						headers: headersWithTimeout,

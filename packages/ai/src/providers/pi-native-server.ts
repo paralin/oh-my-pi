@@ -38,7 +38,7 @@ export interface PiNativeParsedRequest {
 }
 /**
  * Subset of {@link SimpleStreamOptions} accepted from the wire. Function-valued
- * fields (`fetch`, `onPayload`, `onResponse`, `onSseEvent`, exec handlers, the
+ * fields (`fetch`, `onPayload`, `onFinalPayload`, `onResponse`, `onSseEvent`, exec handlers, the
  * provider-session map) and gateway-owned controls (`apiKey`, `signal`) are
  * intentionally absent — those are server-side concerns. Anything outside this
  * allow-list is dropped silently rather than 400ing, so clients can forward

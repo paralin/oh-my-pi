@@ -166,9 +166,10 @@ describe("AgentSession advisor provider-options parity", () => {
 		expect(typeof opts.onResponse).toBe("function");
 		expect(typeof opts.onSseEvent).toBe("function");
 
-		// Bare `onPayload` has no session-side wrapping so it reaches the stream
-		// call unchanged — proof the SDK-provided hook was installed.
+		// Extension payload replacement remains the session callback. The advisor
+		// observes the literal provider body separately after adapter mutation.
 		expect(opts.onPayload).toBe(onPayload);
+		expect(typeof opts.onFinalPayload).toBe("function");
 
 		// Cache routing identity threaded through into the actual stream call.
 		// Without a parent `providerPromptCacheKey`, the advisor's effective key

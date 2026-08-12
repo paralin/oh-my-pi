@@ -27,19 +27,23 @@ async function runPython(
 	environment: Readonly<Record<string, string>>,
 	code: string,
 ): Promise<string> {
-	const child = Bun.spawn([pythonExecutable, "-I", "-c", code], {
-		env: { ...environment },
-		stdin: "ignore",
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-	const [exitCode, stdout, stderr] = await Promise.all([
-		child.exited,
-		new Response(child.stdout).text(),
-		new Response(child.stderr).text(),
-	]);
-	if (exitCode !== 0) throw new Error(`Python exited with ${exitCode}: ${stderr}`);
-	return stdout.trim();
+	const outputRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-python-output-"));
+	const stdoutPath = path.join(outputRoot, "stdout.txt");
+	const stderrPath = path.join(outputRoot, "stderr.txt");
+	try {
+		const child = Bun.spawn([pythonExecutable, "-I", "-c", code], {
+			env: { ...environment },
+			stdin: "ignore",
+			stdout: Bun.file(stdoutPath),
+			stderr: Bun.file(stderrPath),
+		});
+		const exitCode = await child.exited;
+		const [stdout, stderr] = await Promise.all([fs.readFile(stdoutPath, "utf8"), fs.readFile(stderrPath, "utf8")]);
+		if (exitCode !== 0) throw new Error(`Python exited with ${exitCode}: ${stderr}`);
+		return stdout.trim();
+	} finally {
+		await fs.rm(outputRoot, { recursive: true, force: true });
+	}
 }
 
 function packageIdentity(importName: string, projectName: string, contentHash: string): PythonSkillPackage {
@@ -238,6 +242,7 @@ describe("IPython runtime environment", () => {
 			"compact/__init__.py",
 			"edit/__init__.py",
 			"goal/__init__.py",
+			"helpers/__init__.py",
 			"refine/__init__.py",
 			"rlm_heartbeat/__init__.py",
 			"websearch/__init__.py",
@@ -254,6 +259,7 @@ describe("IPython runtime environment", () => {
 			"compact",
 			"edit",
 			"goal",
+			"helpers",
 			"refine",
 			"rlm-heartbeat",
 			"websearch",
@@ -374,22 +380,40 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 			);
 			await fs.writeFile(pythonFixture, 'selected = print(1)\n# print("unrelated")\nliteral = "print(2)"\n');
 
+			const astHostHandlers = createIpythonAstHostHandlers({ cwd: tempRoot });
+			const liveHostOperations = [...Object.keys(astHostHandlers), "extension.autoresearch.run"].sort();
+			const negotiatedHostHandlers = Object.freeze({
+				...astHostHandlers,
+				"capability.census": () => ({ operations: liveHostOperations }),
+			});
 			controller = new IpythonController({
 				pythonExecutable: first.pythonExecutable,
 				cwd: tempRoot,
-				env: first.environment,
-				hostHandlers: createIpythonAstHostHandlers({ cwd: tempRoot }),
+				env: {
+					...first.environment,
+					OMP_HOST_CAPABILITY_CENSUS: JSON.stringify(["ast.search"]),
+				},
+				hostHandlers: negotiatedHostHandlers,
 			});
 			await controller.start();
 			const cell = await controller.execute(
-				"import json, os, sys; sys.path.insert(0, os.environ['OMP_IPYTHON_RUNTIME_PATH']); import dill, ipykernel, jupyter_client, PIL, zmq, rlm, omp, edit; capabilities = [item.name for item in omp.capabilities()]; print(json.dumps({'versions': [dill.__version__, ipykernel.__version__, jupyter_client.__version__, PIL.__version__, zmq.__version__], 'ast': callable(omp.ast.search) and callable(omp.ast.rewrite), 'rlm': callable(rlm), 'capabilities': {'ast': 'omp.ast' in capabilities, 'long_term_memory': 'omp.long_term_memory' in capabilities, 'lsp': 'omp.lsp' in capabilities, 'process': 'omp.process' in capabilities, 'tts': 'omp.tts' in capabilities}, 'edit': [omp.skill_path('edit').is_file(), callable(edit.run)]}))",
+				"import json, os, sys; sys.path.insert(0, os.environ['OMP_IPYTHON_RUNTIME_PATH']); import dill, ipykernel, jupyter_client, PIL, zmq, rlm, omp, edit; print(json.dumps({'versions': [dill.__version__, ipykernel.__version__, jupyter_client.__version__, PIL.__version__, zmq.__version__], 'ast': callable(omp.ast.search) and callable(omp.ast.rewrite), 'rlm': callable(rlm), 'edit': [omp.skill_path('edit').is_file(), callable(edit.run)]}))",
+				{
+					hostContext: {
+						sessionId: "runtime-test",
+						cwd: tempRoot,
+						cellId: "capability-index",
+						sequence: 0,
+						origin: "model",
+						authority: "trusted-cell",
+					},
+				},
 			);
 			expect(cell.status).toBe("ok");
 			expect(JSON.parse(cell.stdout.trim())).toEqual({
 				versions: ["0.4.1", "7.3.0", "8.9.1", "11.3.0", "26.4.0"],
 				ast: true,
 				rlm: true,
-				capabilities: { ast: true, long_term_memory: true, lsp: true, process: true, tts: true },
 				edit: [true, true],
 			});
 			const discovery = await controller.execute(
@@ -398,31 +422,61 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 					"web = omp.describe('omp.web')",
 					"edit = omp.describe('edit')",
 					"debug = omp.describe('omp.debug')",
+					"capabilities = [item.name for item in omp.capabilities()]",
 					"details = [omp.describe(item.name) for item in omp.capabilities()]",
 					"search = next(call for call in web.calls if call.name == 'search')",
-					"print(json.dumps({'matches': [item.name for item in omp.capabilities('WeB')], 'web': {'category': web.category, 'documentation': search.documentation, 'is_async': search.is_async, 'signature': search.signature}, 'edit_skill_path': edit.skill_path.is_file(), 'debug': {'calls': len(debug.calls), 'omitted': debug.omitted_calls}, 'all_details': all(detail is not None for detail in details), 'process_run': hasattr(omp.process, 'run')}))",
+					"print(json.dumps({'indexed': {'ast': 'omp.ast' in capabilities, 'long_term_memory': 'omp.long_term_memory' in capabilities, 'lsp': 'omp.lsp' in capabilities, 'process': 'omp.process' in capabilities, 'tts': 'omp.tts' in capabilities}, 'matches': [item.name for item in omp.capabilities('WeB')], 'web': {'available': web.available, 'category': web.category, 'documentation': search.documentation, 'example': web.example, 'is_async': search.is_async, 'signature': search.signature}, 'edit_skill_path': edit.skill_path.is_file(), 'debug': {'calls': len(debug.calls), 'omitted': debug.omitted_calls}, 'all_details': all(detail is not None for detail in details), 'autoresearch_available': omp.describe('omp.autoresearch').available, 'process_run': hasattr(omp.process, 'run')}))",
 				].join("\n"),
+				{
+					hostContext: {
+						sessionId: "runtime-test",
+						cwd: tempRoot,
+						cellId: "capability-discovery",
+						sequence: 1,
+						origin: "model",
+						authority: "trusted-cell",
+					},
+				},
 			);
 			expect(discovery.status).toBe("ok");
 			const discoveryDetail = JSON.parse(discovery.stdout.trim()) as {
+				indexed: { ast: boolean; long_term_memory: boolean; lsp: boolean; process: boolean; tts: boolean };
 				matches: string[];
-				web: { category: string; documentation: string; is_async: boolean; signature: string };
+				web: {
+					available: boolean;
+					category: string;
+					documentation: string;
+					example: string;
+					is_async: boolean;
+					signature: string;
+				};
 				edit_skill_path: boolean;
 				debug: { calls: number; omitted: number };
 				all_details: boolean;
+				autoresearch_available: boolean;
 				process_run: boolean;
 			};
+			expect(discoveryDetail.indexed).toEqual({
+				ast: true,
+				long_term_memory: true,
+				lsp: true,
+				process: true,
+				tts: true,
+			});
 			expect(discoveryDetail.matches).toEqual(["websearch", "omp.web"]);
 			expect(discoveryDetail.web).toMatchObject({
+				available: false,
 				category: "host",
 				documentation: "Search through the session's configured provider chain.",
+				example: "await omp.web.search('OMP')",
 				is_async: true,
 			});
 			expect(discoveryDetail.web.signature).toContain("query");
 			expect(discoveryDetail.edit_skill_path).toBe(true);
 			expect(discoveryDetail.debug).toEqual({ calls: 16, omitted: 15 });
 			expect(discoveryDetail.all_details).toBe(true);
-			expect(discoveryDetail.process_run).toBe(false);
+			expect(discoveryDetail.autoresearch_available).toBe(true);
+			expect(discoveryDetail.process_run).toBe(true);
 			const structural = await controller.execute(
 				[
 					"import json",

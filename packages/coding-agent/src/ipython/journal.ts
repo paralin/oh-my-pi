@@ -1,4 +1,4 @@
-import type { IpythonArtifactReference, IpythonCellResult, IpythonCellUpdate } from "./cell";
+import type { IpythonArtifactReference, IpythonCellNamespaceDelta, IpythonCellResult, IpythonCellUpdate } from "./cell";
 
 export type { IpythonArtifactReference } from "./cell";
 
@@ -34,9 +34,12 @@ export interface IpythonCellJournalDetail {
 	readonly updates: readonly IpythonCellUpdate[];
 	readonly safeText: string;
 	readonly safeTextTruncated: boolean;
+	readonly totalOutputLines?: number;
 	readonly totalOutputBytes: number;
+	readonly omittedOutputLines?: number;
 	readonly omittedOutputBytes?: number;
 	readonly artifacts: readonly IpythonArtifactReference[];
+	readonly namespaceDelta?: IpythonCellNamespaceDelta;
 }
 
 export interface IpythonLifecycleJournalDetail {
@@ -78,9 +81,12 @@ export function createIpythonCellJournalDetail(
 		updates: [...result.updates],
 		safeText: safeText.text,
 		safeTextTruncated: safeText.truncated,
+		totalOutputLines: safeText.totalLines,
 		totalOutputBytes: safeText.totalBytes,
+		...(safeText.omittedLines === undefined ? {} : { omittedOutputLines: safeText.omittedLines }),
 		...(safeText.omittedBytes === undefined ? {} : { omittedOutputBytes: safeText.omittedBytes }),
 		artifacts: [...artifacts],
+		...("namespaceDelta" in result && result.namespaceDelta ? { namespaceDelta: result.namespaceDelta } : {}),
 	};
 }
 
@@ -217,6 +223,20 @@ function isStoredUpdate(value: unknown): boolean {
 			typeof value.progress.message === "string"
 		);
 	}
+	if (value.kind === "artifact") return isArtifactReference(value.artifact);
+	if (value.kind === "output") {
+		const modelText = value.modelText;
+		return (
+			isRecord(modelText) &&
+			typeof modelText.text === "string" &&
+			typeof modelText.truncated === "boolean" &&
+			Number.isSafeInteger(modelText.totalBytes) &&
+			Number.isSafeInteger(modelText.outputBytes) &&
+			(modelText.totalLines === undefined || Number.isSafeInteger(modelText.totalLines)) &&
+			(modelText.omittedLines === undefined || Number.isSafeInteger(modelText.omittedLines)) &&
+			(modelText.omittedBytes === undefined || Number.isSafeInteger(modelText.omittedBytes))
+		);
+	}
 	return value.kind === "execution" && isExecutionEvent(value.event);
 }
 
@@ -228,6 +248,23 @@ function isArtifactReference(value: unknown): boolean {
 		(value.mimeType === undefined || typeof value.mimeType === "string") &&
 		(value.bytes === undefined || typeof value.bytes === "number") &&
 		(value.label === undefined || typeof value.label === "string")
+	);
+}
+
+function isNamespaceEntry(value: unknown): boolean {
+	return isRecord(value) && typeof value.name === "string" && typeof value.type === "string";
+}
+
+function isNamespaceDelta(value: unknown): boolean {
+	if (!isRecord(value) || (value.origin !== "model" && value.origin !== "direct")) return false;
+	if (!Number.isSafeInteger(value.executionCount)) return false;
+	if (
+		![value.added, value.rebound, value.deleted].every(items => Array.isArray(items) && items.every(isNamespaceEntry))
+	)
+		return false;
+	if (!isRecord(value.omitted)) return false;
+	return [value.omitted.added, value.omitted.rebound, value.omitted.deleted].every(
+		count => typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
 	);
 }
 
@@ -265,6 +302,14 @@ export function isIpythonJournalDetail(value: unknown): value is IpythonJournalD
 		(value.result === undefined || typeof value.result === "string") &&
 		typeof value.safeText === "string" &&
 		typeof value.safeTextTruncated === "boolean" &&
+		(value.totalOutputLines === undefined ||
+			(typeof value.totalOutputLines === "number" &&
+				Number.isSafeInteger(value.totalOutputLines) &&
+				value.totalOutputLines >= 0)) &&
+		(value.omittedOutputLines === undefined ||
+			(typeof value.omittedOutputLines === "number" &&
+				Number.isSafeInteger(value.omittedOutputLines) &&
+				value.omittedOutputLines >= 0)) &&
 		typeof value.totalOutputBytes === "number" &&
 		(value.omittedOutputBytes === undefined ||
 			(typeof value.omittedOutputBytes === "number" &&
@@ -278,7 +323,8 @@ export function isIpythonJournalDetail(value: unknown): value is IpythonJournalD
 		Array.isArray(value.updates) &&
 		value.updates.every(isStoredUpdate) &&
 		Array.isArray(value.artifacts) &&
-		value.artifacts.every(isArtifactReference)
+		value.artifacts.every(isArtifactReference) &&
+		(value.namespaceDelta === undefined || isNamespaceDelta(value.namespaceDelta))
 	);
 }
 
@@ -298,7 +344,8 @@ export function renderIpythonJournalText(detail: IpythonJournalDetail): string {
 		);
 	}
 	for (const artifact of presentation.artifacts) {
-		lines.push(`Artifact: ${artifact.label ?? artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`);
+		const label = artifact.label ? `${artifact.label} · ` : "";
+		lines.push(`Artifact: ${label}${artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`);
 	}
 	if (presentation.safeText.truncated) {
 		const omitted = presentation.safeText.omittedBytes;

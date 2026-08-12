@@ -121,6 +121,10 @@ export class IpythonExtensionRegistry {
 		return this.#disposed ? undefined : this.#snapshot.handlers.get(operation);
 	}
 
+	getHostOperations(): readonly string[] {
+		return this.#disposed ? [] : [...this.#snapshot.handlers.keys()].sort();
+	}
+
 	getMimeRenderer(mimeType: string): IpythonMimeRenderer | undefined {
 		return this.#disposed ? undefined : this.#snapshot.renderers.get(mimeType);
 	}

@@ -1792,6 +1792,7 @@ async function openCodexWebSocketTransport(
 		model.provider,
 		requestSetup.requestSignal,
 	);
+	await options?.onFinalPayload?.(websocketRequest, model);
 	const eventStream = websocketConnection.streamRequest(
 		websocketRequest,
 		{
@@ -1875,6 +1876,7 @@ async function openCodexSseTransport(
 		wireBody = replacementWireBody as RequestBody;
 	}
 	recordCodexTurnRequestDiagnostics(state, wireBody, "sse", canAppendBeforeRequest);
+	await options?.onFinalPayload?.(wireBody, model);
 	return { eventStream: await open(wireBody), requestBodyForState: structuredCloneJSON(wireBody), transport: "sse" };
 }
 

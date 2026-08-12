@@ -14,8 +14,7 @@
  * // …drive a session, then read protocol.latest / protocol.approved
  */
 import { type } from "@oh-my-pi/omptype";
-import { countTokens } from "@oh-my-pi/pi-agent-core";
-import type { ToolDefinition } from "../extensibility/extensions";
+import { type AgentTool, countTokens } from "@oh-my-pi/pi-agent-core";
 import approveDescription from "../prompts/tools/approve.md" with { type: "text" };
 import rewriteDescription from "../prompts/tools/rewrite.md" with { type: "text" };
 import type { CompressDraft, CompressLoss, CompressMetrics } from "./types";
@@ -161,7 +160,7 @@ export class CompressProtocol {
 	}
 
 	/** Tool that records a draft. Thin adapter over {@link submit}. */
-	rewriteTool(): ToolDefinition {
+	rewriteTool(): AgentTool {
 		return {
 			name: "rewrite",
 			label: "Rewrite",
@@ -187,7 +186,7 @@ export class CompressProtocol {
 	}
 
 	/** Tool that accepts the newest reviewed draft. Thin adapter over {@link accept}. */
-	approveTool(): ToolDefinition {
+	approveTool(): AgentTool {
 		return {
 			name: "approve",
 			label: "Approve",

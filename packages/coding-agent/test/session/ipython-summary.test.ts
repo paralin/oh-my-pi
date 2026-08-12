@@ -94,7 +94,7 @@ describe("IPython harness summary projection", () => {
 		expect(text).toContain("answer = 42");
 		expect(text).toContain("safe output");
 		expect(text).toContain("ValueError: bad value");
-		expect(text).toContain("Artifact: result (text/plain)");
+		expect(text).toContain("Artifact: result · /tmp/cell-summary/result.txt (text/plain)");
 		expect(text).toContain(
 			"Operation: ast.search · ok · src/app.ts · 1 matches (2ms) · Syntax-tree search completed",
 		);

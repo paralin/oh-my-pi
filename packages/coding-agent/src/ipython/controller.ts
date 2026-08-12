@@ -24,6 +24,8 @@ export { DEFAULT_SNAPSHOT_MAX_BYTES, snapshotManifestPath };
 const CONTROLLER_CACHE_DIR = path.join(os.tmpdir(), "omp-ipython-controller");
 const MAX_CONTROLLER_STDERR = 64 * 1024;
 const MAX_CONTROLLER_FRAME = 8 * 1024 * 1024;
+const MAX_CONTROLLER_CAPTURE_BYTES = 1024 * 1024;
+const MAX_CONTROLLER_RICH_EVENTS = 256;
 const MAX_HOST_REQUEST_BYTES = 1024 * 1024;
 const MAX_HOST_PROGRESS_BYTES = 64 * 1024;
 const MAX_HOST_MESSAGE_CHARS = 4_000;
@@ -50,6 +52,8 @@ export interface IpythonStreamEvent {
 export interface IpythonResultEvent {
 	readonly kind: "result";
 	readonly data: Readonly<Record<string, unknown>>;
+	readonly chunkStart?: boolean;
+	readonly chunkEnd?: boolean;
 }
 
 export interface IpythonDisplayEvent {
@@ -59,6 +63,8 @@ export interface IpythonDisplayEvent {
 	readonly transient: Readonly<Record<string, unknown>>;
 	readonly update: boolean;
 	readonly text: string;
+	readonly chunkStart?: boolean;
+	readonly chunkEnd?: boolean;
 }
 
 export interface IpythonErrorEvent {
@@ -66,6 +72,8 @@ export interface IpythonErrorEvent {
 	readonly ename: string;
 	readonly evalue: string;
 	readonly traceback: readonly string[];
+	readonly chunkStart?: boolean;
+	readonly chunkEnd?: boolean;
 }
 
 /**
@@ -144,6 +152,19 @@ export interface IpythonExecutionHostContext {
 	) => Promise<IpythonHostArtifact>;
 }
 
+export interface IpythonNamespaceEntry {
+	readonly name: string;
+	readonly type: string;
+}
+
+export interface IpythonExecutionNamespaceDelta {
+	readonly executionCount: number;
+	readonly added: readonly IpythonNamespaceEntry[];
+	readonly rebound: readonly IpythonNamespaceEntry[];
+	readonly deleted: readonly IpythonNamespaceEntry[];
+	readonly omitted: Readonly<{ added: number; rebound: number; deleted: number }>;
+}
+
 export interface IpythonExecutionResult {
 	readonly id: string;
 	readonly status: IpythonExecutionStatus;
@@ -153,6 +174,7 @@ export interface IpythonExecutionResult {
 	readonly events: readonly IpythonExecutionEvent[];
 	readonly errors: readonly IpythonErrorEvent[];
 	readonly hostArtifacts: readonly IpythonHostArtifact[];
+	readonly namespaceDelta?: IpythonExecutionNamespaceDelta;
 }
 
 export interface IpythonExecuteOptions {
@@ -221,7 +243,13 @@ export class IpythonControllerError extends Error {
 type ControllerFrame =
 	| { readonly event: "ready"; readonly controller_pid: number; readonly kernel_pid: number }
 	| { readonly event: "stream"; readonly id: string; readonly name: IpythonStreamName; readonly text: string }
-	| { readonly event: "result"; readonly id: string; readonly data: Readonly<Record<string, unknown>> }
+	| {
+			readonly event: "result";
+			readonly id: string;
+			readonly data: Readonly<Record<string, unknown>>;
+			readonly chunk_start: boolean;
+			readonly chunk_end: boolean;
+	  }
 	| {
 			readonly event: "display";
 			readonly id: string;
@@ -230,6 +258,17 @@ type ControllerFrame =
 			readonly transient: Readonly<Record<string, unknown>>;
 			readonly update: boolean;
 			readonly text: string;
+			readonly chunk_start: boolean;
+			readonly chunk_end: boolean;
+	  }
+	| {
+			readonly event: "namespace";
+			readonly id: string;
+			readonly execution_count: number;
+			readonly added: readonly IpythonNamespaceEntry[];
+			readonly rebound: readonly IpythonNamespaceEntry[];
+			readonly deleted: readonly IpythonNamespaceEntry[];
+			readonly omitted: Readonly<{ added: number; rebound: number; deleted: number }>;
 	  }
 	| {
 			readonly event: "error";
@@ -237,6 +276,8 @@ type ControllerFrame =
 			readonly ename: string;
 			readonly evalue: string;
 			readonly traceback: readonly string[];
+			readonly chunk_start: boolean;
+			readonly chunk_end: boolean;
 	  }
 	| {
 			readonly event: "comm";
@@ -258,7 +299,7 @@ type ControllerFrame =
 	| { readonly event: "protocol_error"; readonly error: string };
 
 type ControllerCommand =
-	| { readonly op: "execute"; readonly id: string; readonly code: string }
+	| { readonly op: "execute"; readonly id: string; readonly code: string; readonly track_namespace?: boolean }
 	| { readonly op: "interrupt"; readonly id?: string }
 	| { readonly op: "comm_reply"; readonly comm_id: string; readonly data: Readonly<Record<string, unknown>> }
 	| { readonly op: "shutdown" };
@@ -360,6 +401,7 @@ interface PendingExecution {
 	stdout: string;
 	stderr: string;
 	result: string | undefined;
+	namespaceDelta: IpythonExecutionNamespaceDelta | undefined;
 }
 
 let controllerScriptPath: string | undefined;
@@ -445,7 +487,7 @@ function parseFrame(value: unknown): ControllerFrame {
 		const id = asString(object.id);
 		const data = asObject(object.data);
 		if (!id || !data) throw new Error("result frame has invalid fields");
-		return { event, id, data };
+		return { event, id, data, chunk_start: object.chunk_start !== false, chunk_end: object.chunk_end !== false };
 	}
 	if (event === "display") {
 		const id = asString(object.id);
@@ -456,7 +498,60 @@ function parseFrame(value: unknown): ControllerFrame {
 		if (!id || !data || !metadata || !transient || text === undefined || typeof object.update !== "boolean") {
 			throw new Error("display frame has invalid fields");
 		}
-		return { event, id, data, metadata, transient, update: object.update, text };
+		return {
+			event,
+			id,
+			data,
+			metadata,
+			transient,
+			update: object.update,
+			text,
+			chunk_start: object.chunk_start !== false,
+			chunk_end: object.chunk_end !== false,
+		};
+	}
+	if (event === "namespace") {
+		const id = asString(object.id);
+		const executionCount = asNumber(object.execution_count);
+		const entryList = (value: unknown): IpythonNamespaceEntry[] | undefined => {
+			if (!Array.isArray(value)) return undefined;
+			const entries: IpythonNamespaceEntry[] = [];
+			for (const item of value) {
+				const candidate = asObject(item);
+				const name = asString(candidate?.name);
+				const type = asString(candidate?.type);
+				if (!name || type === undefined) return undefined;
+				entries.push({ name, type });
+			}
+			return entries;
+		};
+		const added = entryList(object.added);
+		const rebound = entryList(object.rebound);
+		const deleted = entryList(object.deleted);
+		const omitted = asObject(object.omitted);
+		const omittedAdded = asNumber(omitted?.added);
+		const omittedRebound = asNumber(omitted?.rebound);
+		const omittedDeleted = asNumber(omitted?.deleted);
+		if (
+			!id ||
+			executionCount === undefined ||
+			!added ||
+			!rebound ||
+			!deleted ||
+			omittedAdded === undefined ||
+			omittedRebound === undefined ||
+			omittedDeleted === undefined
+		)
+			throw new Error("namespace frame has invalid fields");
+		return {
+			event,
+			id,
+			execution_count: executionCount,
+			added,
+			rebound,
+			deleted,
+			omitted: { added: omittedAdded, rebound: omittedRebound, deleted: omittedDeleted },
+		};
 	}
 	if (event === "error") {
 		const id = asString(object.id);
@@ -472,7 +567,15 @@ function parseFrame(value: unknown): ControllerFrame {
 		) {
 			throw new Error("error frame has invalid fields");
 		}
-		return { event, id, ename, evalue, traceback };
+		return {
+			event,
+			id,
+			ename,
+			evalue,
+			traceback,
+			chunk_start: object.chunk_start !== false,
+			chunk_end: object.chunk_end !== false,
+		};
 	}
 	if (event === "comm") {
 		const id = asString(object.id);
@@ -534,6 +637,19 @@ function parseFrame(value: unknown): ControllerFrame {
 function appendBounded(current: string, next: string, limit: number): string {
 	if (current.length >= limit) return current;
 	return `${current}${next}`.slice(0, limit);
+}
+
+function appendTailBounded(current: string, next: string, maxBytes: number): string {
+	const combined = `${current}${next}`;
+	if (Buffer.byteLength(combined, "utf8") <= maxBytes) return combined;
+	const bytes = Buffer.from(combined, "utf8");
+	return new TextDecoder().decode(bytes.subarray(bytes.length - maxBytes)).replace(/^�/u, "");
+}
+
+function retainRichEvent(events: IpythonExecutionEvent[], event: IpythonExecutionEvent): void {
+	if (events.length >= MAX_CONTROLLER_RICH_EVENTS) return;
+	if (Buffer.byteLength(JSON.stringify(event), "utf8") > MAX_CONTROLLER_CAPTURE_BYTES) return;
+	events.push(event);
 }
 
 function errorMessage(error: unknown): string {
@@ -624,6 +740,7 @@ export class IpythonController {
 			stdout: "",
 			stderr: "",
 			result: undefined,
+			namespaceDelta: undefined,
 		};
 		this.#queue.push(pending);
 		signal?.addEventListener("abort", onAbort, { once: true });
@@ -716,7 +833,15 @@ export class IpythonController {
 				this.#active = pending;
 				const generation = this.#generation;
 				try {
-					await this.#write({ op: "execute", id: pending.id, code: pending.code }, generation);
+					await this.#write(
+						{
+							op: "execute",
+							id: pending.id,
+							code: pending.code,
+							track_namespace: pending.options?.hostContext !== undefined,
+						},
+						generation,
+					);
 					await pending.completion;
 				} catch (error) {
 					pending.reject(error);
@@ -867,6 +992,17 @@ export class IpythonController {
 			return;
 		}
 
+		if (frame.event === "namespace") {
+			if (!this.#active || this.#active.id !== frame.id) return;
+			this.#active.namespaceDelta = {
+				executionCount: frame.execution_count,
+				added: frame.added,
+				rebound: frame.rebound,
+				deleted: frame.deleted,
+				omitted: frame.omitted,
+			};
+			return;
+		}
 		if (
 			frame.event === "stream" ||
 			frame.event === "result" ||
@@ -878,7 +1014,12 @@ export class IpythonController {
 				frame.event === "stream"
 					? ({ kind: "stream", name: frame.name, text: frame.text } satisfies IpythonStreamEvent)
 					: frame.event === "result"
-						? ({ kind: "result", data: frame.data } satisfies IpythonResultEvent)
+						? ({
+								kind: "result",
+								data: frame.data,
+								chunkStart: frame.chunk_start,
+								chunkEnd: frame.chunk_end,
+							} satisfies IpythonResultEvent)
 						: frame.event === "display"
 							? ({
 									kind: "display",
@@ -887,6 +1028,8 @@ export class IpythonController {
 									transient: frame.transient,
 									update: frame.update,
 									text: frame.text,
+									chunkStart: frame.chunk_start,
+									chunkEnd: frame.chunk_end,
 								} satisfies IpythonDisplayEvent)
 							: ({
 									kind: "error",
@@ -894,18 +1037,19 @@ export class IpythonController {
 									evalue: frame.evalue,
 									traceback: frame.traceback,
 								} satisfies IpythonErrorEvent);
-			this.#active.events.push(event);
 			if (event.kind === "stream") {
 				if (event.name === "stdout")
-					this.#active.stdout = appendBounded(this.#active.stdout, event.text, MAX_CONTROLLER_FRAME);
-				else this.#active.stderr = appendBounded(this.#active.stderr, event.text, MAX_CONTROLLER_FRAME);
+					this.#active.stdout = appendTailBounded(this.#active.stdout, event.text, MAX_CONTROLLER_CAPTURE_BYTES);
+				else this.#active.stderr = appendTailBounded(this.#active.stderr, event.text, MAX_CONTROLLER_CAPTURE_BYTES);
 				await this.#active.options?.onStream?.(event);
-			}
-			if (event.kind === "error") this.#active.errors.push(event);
+			} else retainRichEvent(this.#active.events, event);
+			if (event.kind === "error" && this.#active.errors.length < MAX_CONTROLLER_RICH_EVENTS)
+				this.#active.errors.push(event);
 			await this.#active.options?.onEvent?.(event);
 			if (event.kind === "result") {
 				const plain = event.data["text/plain"];
-				if (typeof plain === "string") this.#active.result = plain;
+				if (typeof plain === "string")
+					this.#active.result = appendTailBounded(this.#active.result ?? "", plain, MAX_CONTROLLER_CAPTURE_BYTES);
 			}
 			return;
 		}
@@ -932,6 +1076,7 @@ export class IpythonController {
 				events: active.events,
 				errors: active.errors,
 				hostArtifacts: active.hostArtifacts,
+				namespaceDelta: active.namespaceDelta,
 			});
 			active.resolveCompletion();
 			return;

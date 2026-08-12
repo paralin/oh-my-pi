@@ -329,6 +329,38 @@ class AnchoredLiveContainer extends Container implements NativeScrollbackLiveReg
 
 /** How long the ctrl+p model-role cycle chip track lingers above the editor
  *  before it auto-clears, mirroring the todo HUD's auto-clear timer. */
+class DeferredCommandPreview implements Component {
+	constructor(
+		private readonly items: readonly Component[],
+		private readonly maxRows: number,
+		private readonly commandCount: number,
+	) {}
+
+	render(width: number): readonly string[] {
+		const rows: string[] = [];
+		for (const item of this.items) rows.push(...item.render(width));
+		const queued = this.commandCount === 1 ? "1 command output" : `${this.commandCount} command outputs`;
+		if (rows.length <= this.maxRows) {
+			rows.push(
+				theme.fg("dim", truncateToWidth(`${queued} — repeated in the transcript when the agent pauses`, width)),
+			);
+			return rows;
+		}
+		const shown = rows.slice(0, Math.max(1, this.maxRows - 1));
+		const hidden = rows.length - shown.length;
+		shown.push(
+			theme.fg(
+				"dim",
+				truncateToWidth(`… ${hidden} more rows — ${queued} shown in full when the agent pauses`, width),
+			),
+		);
+		return shown;
+	}
+}
+
+const DEFERRED_PREVIEW_MIN_ROWS = 6;
+const DEFERRED_PREVIEW_VIEWPORT_FRACTION = 0.4;
+
 const MODEL_CYCLE_TRACK_CLEAR_MS = 4000;
 
 const SUBAGENT_HUD_VISIBLE_LIMIT = 8;
@@ -404,6 +436,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	omfgContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
+	deferredCommandContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -503,6 +536,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
+	#pendingCommandOutputCommands = 0;
 	#pendingSlashCommands: SlashCommand[] = [];
 	/** Built-in editor autocomplete provider, before extension wrapping. */
 	#baseAutocompleteProvider: AutocompleteProvider | undefined;
@@ -575,6 +609,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.pendingMessagesContainer.disposeChildren();
 		this.#cancelModelCycleClearTimer();
 		this.modelCycleContainer.disposeChildren();
+		this.deferredCommandContainer.disposeChildren();
+		this.#pendingCommandOutput = [];
+		this.#pendingCommandOutputSessionId = undefined;
+		this.#pendingCommandOutputCommands = 0;
 		this.compactionQueuedMessages = [];
 		this.streamingComponent = undefined;
 		this.streamingMessage = undefined;
@@ -660,6 +698,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.omfgContainer = new AnchoredLiveContainer();
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
+		this.deferredCommandContainer = new AnchoredLiveContainer();
 		this.editor = new CustomEditor(getEditorTheme());
 		this.ui.enableScopedInputRender(this.editor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
@@ -914,6 +953,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.omfgContainer);
 		this.ui.addChild(this.errorBannerContainer);
 		this.ui.addChild(this.modelCycleContainer);
+		this.ui.addChild(this.deferredCommandContainer);
 		// Working loader / transient status sits below the sticky todo + subagent
 		// HUDs, just above the editor's hook-widget top margin — so it reads next to
 		// the prompt while keeping the one-line gap above the editor.
@@ -2832,10 +2872,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		if (this.#pendingCommandOutput.length > 0 && this.#pendingCommandOutputSessionId !== sessionId) {
 			this.#pendingCommandOutput = [];
+			this.#pendingCommandOutputCommands = 0;
 		}
 		this.#pendingCommandOutputSessionId = sessionId;
 		const items = Array.isArray(content) ? content : [content as Component];
 		this.#pendingCommandOutput.push(...items);
+		this.#pendingCommandOutputCommands++;
+		this.#renderDeferredCommandNotice();
+		this.ui.requestRender();
+	}
+
+	#renderDeferredCommandNotice(): void {
+		this.deferredCommandContainer.clear();
+		if (this.#pendingCommandOutput.length === 0) return;
+		const maxRows = Math.max(
+			DEFERRED_PREVIEW_MIN_ROWS,
+			Math.floor(this.ui.terminal.rows * DEFERRED_PREVIEW_VIEWPORT_FRACTION),
+		);
+		this.deferredCommandContainer.addChild(new Spacer(1));
+		this.deferredCommandContainer.addChild(
+			new DeferredCommandPreview([...this.#pendingCommandOutput], maxRows, this.#pendingCommandOutputCommands),
+		);
 	}
 
 	/** Mount every command panel queued for the current session while the agent was streaming. */
@@ -2845,6 +2902,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const pendingSessionId = this.#pendingCommandOutputSessionId;
 		this.#pendingCommandOutput = [];
 		this.#pendingCommandOutputSessionId = undefined;
+		this.#pendingCommandOutputCommands = 0;
+		this.#renderDeferredCommandNotice();
 		if (pendingSessionId !== this.sessionManager.getSessionId()) return;
 		this.present(pending);
 	}

@@ -82,6 +82,7 @@ import type { AgentSessionEvent } from "./agent-session-events";
 import type { ClientBridge } from "./client-bridge";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
+import { RequestProfileOwner } from "./request-profile";
 import {
 	formatRetryFallbackSelector,
 	getRetryFallbackRevertPolicy,
@@ -729,20 +730,29 @@ export class SessionAdvisors {
 
 			const availableAdvisorToolNames = new Set<string>();
 			const baseAdvisorStreamFn = this.#advisorStreamFn ?? streamSimple;
-			const advisorStreamFn: StreamFn = (requestModel, context, options) =>
-				baseAdvisorStreamFn(
-					requestModel,
-					context,
-					requestModel.api === "openai-codex-responses"
-						? { ...options, codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS }
-						: options,
-				);
+			const advisorStreamFn: StreamFn = (requestModel, context, options) => {
+				if (requestModel.api === "openai-codex-responses") {
+					return baseAdvisorStreamFn(requestModel, context, {
+						...options,
+						codexSseMaxAttempts: ADVISOR_CODEX_SSE_MAX_ATTEMPTS,
+					});
+				}
+				if (
+					requestModel.api === "google-generative-ai" ||
+					requestModel.api === "google-gemini-cli" ||
+					requestModel.api === "google-vertex"
+				) {
+					return baseAdvisorStreamFn(requestModel, context, { ...options, acceptEmptyResponse: true });
+				}
+				return baseAdvisorStreamFn(requestModel, context, options);
+			};
+			const requestProfileOwner = RequestProfileOwner.noTools(systemPrompt);
 			const advisorAgent = new Agent({
 				initialState: {
-					systemPrompt,
+					systemPrompt: requestProfileOwner.request.systemPrompt,
 					model: advisorModel,
 					thinkingLevel: toReasoningEffort(advisorThinkingLevel),
-					tools: [],
+					tools: requestProfileOwner.request.tools,
 				},
 				appendOnlyContext,
 				sessionId: advisorProviderSessionId,
@@ -753,6 +763,12 @@ export class SessionAdvisors {
 				getApiKey: requestModel => this.#host.modelRegistry.resolver(requestModel, advisorProviderSessionId),
 				streamFn: advisorStreamFn,
 				onPayload: this.#host.onPayload,
+				onFinalPayload: (payload, requestModel) => {
+					requestProfileOwner.captureEffectiveRequest({
+						provider: requestModel?.provider ?? "unknown",
+						payload,
+					});
+				},
 				onResponse: this.#host.onResponse,
 				onSseEvent: this.#host.onSseEvent,
 				transformProviderContext: this.#transformProviderContext,

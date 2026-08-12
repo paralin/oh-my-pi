@@ -18,6 +18,8 @@ export interface IpythonSnapshotResult {
 	readonly bytes: number;
 	readonly path: string;
 	readonly manifestPath: string;
+	readonly pins?: readonly string[];
+	readonly latestScratch?: readonly string[];
 }
 
 export interface IpythonRestoreResult {
@@ -25,6 +27,8 @@ export interface IpythonRestoreResult {
 	readonly failed: readonly IpythonSnapshotIssue[];
 	readonly missing: boolean;
 	readonly path: string;
+	readonly pins?: readonly string[];
+	readonly latestScratch?: readonly string[];
 }
 
 /** JSON manifest beside a snapshot payload. */
@@ -58,7 +62,7 @@ def _omp_snapshot_state():
     import weakref as _weakref
 
     _marker = ${pythonString(SNAPSHOT_MARKER)}
-    _reserved = {"In", "Out", "get_ipython", "exit", "quit", "open", "rlm", "omp", "asyncio", "agent_message", "agent_observe", "attach_image", "compact", "edit", "goal", "refine", "rlm_heartbeat"}
+    _reserved = {"In", "Out", "get_ipython", "exit", "quit", "open", "rlm", "omp", "helpers", "show", "rg", "run", "asyncio", "agent_message", "agent_observe", "attach_image", "compact", "edit", "goal", "refine", "rlm_heartbeat", "websearch", "linear", "notion"}
     _credential_name = _re.compile(
         r"(?:api[_-]?key|apikey|secret|token|password|passwd|credential|access[_-]?key|private[_-]?key|session[_-]?key)",
         _re.IGNORECASE,
@@ -165,9 +169,20 @@ def _omp_snapshot_state():
 
         _bytes = _os.path.getsize(${pythonString(outPath)})
         _saved = _b.sorted(_payload.keys())
+        try:
+            _namespace_metadata = _b.__import__("omp").session._recovery_metadata()
+            _pins = _b.list(_namespace_metadata.get("pins", ()))
+            _latest_scratch = _b.list(_namespace_metadata.get("latestScratch", ()))
+        except _b.Exception:
+            _pins = []
+            _latest_scratch = []
+        _pins = _b.sorted(_name for _name in _pins if _name in _payload)
+        _latest_scratch = _b.sorted(_name for _name in _latest_scratch if _name in _payload)
         _manifest = {
-            "version": 1,
+            "version": 2,
             "saved": _saved,
+            "pins": _pins,
+            "latestScratch": _latest_scratch,
             "skipped": _skipped,
             "oversized": _oversized,
             "failed": _failed,
@@ -192,6 +207,8 @@ def _omp_snapshot_state():
             + _json.dumps(
                 {
                     "saved": _saved,
+                    "pins": _pins,
+                    "latestScratch": _latest_scratch,
                     "skipped": _skipped,
                     "oversized": _oversized,
                     "failed": _failed,
@@ -231,7 +248,7 @@ def _omp_restore_state():
     import re as _re
 
     _marker = ${pythonString(SNAPSHOT_MARKER)}
-    _reserved = {"In", "Out", "get_ipython", "exit", "quit", "open", "rlm", "omp", "asyncio", "agent_message", "agent_observe", "attach_image", "compact", "edit", "goal", "refine", "rlm_heartbeat"}
+    _reserved = {"In", "Out", "get_ipython", "exit", "quit", "open", "rlm", "omp", "helpers", "show", "rg", "run", "asyncio", "agent_message", "agent_observe", "attach_image", "compact", "edit", "goal", "refine", "rlm_heartbeat", "websearch", "linear", "notion"}
     _credential_name = _re.compile(
         r"(?:api[_-]?key|apikey|secret|token|password|passwd|credential|access[_-]?key|private[_-]?key|session[_-]?key)",
         _re.IGNORECASE,
@@ -258,6 +275,18 @@ def _omp_restore_state():
         )
         return
 
+    _pins = []
+    try:
+        _manifest_path = ${pythonString(snapshotManifestPath(inPath))}
+        with _b.open(_manifest_path, "r", encoding="utf-8") as _file:
+            _manifest = _json.load(_file)
+        if _b.isinstance(_manifest, _b.dict) and _manifest.get("version") == 2:
+            _raw_pins = _manifest.get("pins", [])
+            if _b.isinstance(_raw_pins, _b.list):
+                _pins = [_name for _name in _raw_pins if _b.isinstance(_name, _b.str)]
+    except (_b.OSError, _b.ValueError, _b.TypeError):
+        pass
+
     _ip = _b.__import__("IPython").get_ipython()
     _ns = _ip.user_ns if _ip is not None else _b.globals()
     _restored = []
@@ -279,7 +308,7 @@ def _omp_restore_state():
             _failed.append({"name": _name, "reason": _b.type(_err).__name__ + ": " + _b.str(_err)[:200]})
     _b.print(
         _marker
-        + _json.dumps({"restored": _b.sorted(_restored), "failed": _failed, "missing": False})
+        + _json.dumps({"restored": _b.sorted(_restored), "pins": _b.sorted(_name for _name in _pins if _name in _restored), "failed": _failed, "missing": False})
     )
 
 
@@ -296,12 +325,15 @@ interface RawSnapshotResult {
 	readonly oversized?: unknown;
 	readonly failed?: unknown;
 	readonly bytes?: unknown;
+	readonly pins?: unknown;
+	readonly latestScratch?: unknown;
 }
 
 interface RawRestoreResult {
 	readonly restored?: unknown;
 	readonly failed?: unknown;
 	readonly missing?: unknown;
+	readonly pins?: unknown;
 }
 
 function parseMarker<T>(stdout: string): T | undefined {
@@ -351,6 +383,8 @@ export function parseSnapshotResult(
 		bytes: typeof raw.bytes === "number" && Number.isFinite(raw.bytes) && raw.bytes >= 0 ? raw.bytes : 0,
 		path: snapshotPath,
 		manifestPath,
+		pins: names(raw.pins),
+		latestScratch: names(raw.latestScratch),
 	};
 }
 
@@ -362,5 +396,6 @@ export function parseRestoreResult(stdout: string, snapshotPath: string): Ipytho
 		failed: issues(raw.failed),
 		missing: raw.missing === true,
 		path: snapshotPath,
+		pins: names(raw.pins),
 	};
 }

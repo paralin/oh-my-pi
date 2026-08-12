@@ -14,6 +14,8 @@ import {
 import type { PythonSkillPackage } from "./python-packages";
 import { type EnsureIpythonRuntimeOptions, ensureIpythonRuntime, type IpythonRuntime } from "./runtime-bootstrap";
 
+export const IPYTHON_PRELOAD_NAMES = ["rlm", "omp", "helpers", "show", "rg", "run"] as const;
+
 const SESSION_BOOTSTRAP_CODE = `
 import asyncio as _omp_runtime_asyncio
 import importlib as _omp_runtime_importlib
@@ -28,6 +30,11 @@ for _omp_runtime_path in reversed(_omp_runtime_paths):
 asyncio = _omp_runtime_asyncio
 rlm = _omp_runtime_importlib.import_module("rlm")
 omp = _omp_runtime_importlib.import_module("omp")
+omp.session._install_namespace_tracker()
+helpers = _omp_runtime_importlib.import_module("helpers")
+show = helpers.show
+rg = helpers.rg
+run = helpers.run
 agent_message = _omp_runtime_importlib.import_module("agent_message")
 agent_observe = _omp_runtime_importlib.import_module("agent_observe")
 attach_image = _omp_runtime_importlib.import_module("attach_image")
@@ -62,6 +69,13 @@ export interface IpythonKernelController {
 	dispose(): Promise<void>;
 }
 
+export interface IpythonReadyStatus {
+	readonly restart: boolean;
+	readonly namespaceReset?: boolean;
+	readonly restoredPreloads?: readonly string[];
+	readonly recoveryError?: string;
+}
+
 export interface IpythonKernelProvisionerOptions {
 	readonly cwd: string;
 	readonly sessionId: string;
@@ -71,12 +85,13 @@ export interface IpythonKernelProvisionerOptions {
 	readonly environment?: Readonly<Record<string, string | undefined>>;
 	readonly hostHandlers?: Readonly<Record<string, IpythonHostHandler>>;
 	readonly extensionHostHandlerResolver?: IpythonExtensionHostHandlerResolver;
+	readonly extensionHostOperations?: () => readonly string[];
 	readonly bootstrapCode?: string;
 	readonly readyGate?: Promise<unknown>;
 	readonly runtime?: Omit<EnsureIpythonRuntimeOptions, "environment" | "signal" | "onProgress">;
 	readonly pythonPackages?: readonly PythonSkillPackage[];
 	readonly onRestore?: (result: IpythonRestoreResult) => void;
-	readonly onReady?: (processIds: IpythonProcessIds, status: { readonly restart: boolean }) => void;
+	readonly onReady?: (processIds: IpythonProcessIds, status: IpythonReadyStatus) => void;
 }
 
 export interface IpythonProvisionerDependencies {
@@ -347,16 +362,29 @@ export class IpythonKernelProvisioner {
 				]),
 				...(runtime.pythonPackagePaths ?? []),
 			].filter((entry, index, all) => all.indexOf(entry) === index);
+			const hostCapabilityCensus = (): string[] =>
+				[
+					"capability.census",
+					...Object.keys(this.#options.hostHandlers ?? {}),
+					...(this.#options.extensionHostOperations?.() ?? []),
+				]
+					.filter((entry, index, all) => all.indexOf(entry) === index)
+					.sort();
+			const negotiatedHostHandlers = Object.freeze({
+				...this.#options.hostHandlers,
+				"capability.census": () => ({ operations: hostCapabilityCensus() }),
+			});
 			const startingController = this.#createController({
 				pythonExecutable: runtime.pythonExecutable,
 				cwd: this.#options.cwd,
 				env: {
 					...runtime.environment,
+					OMP_HOST_CAPABILITY_CENSUS: JSON.stringify(hostCapabilityCensus()),
 					OMP_IPYTHON_RUNTIME_PATH: runtimePaths.join(path.delimiter),
 				},
-				hostHandlers: this.#options.hostHandlers,
+				hostHandlers: negotiatedHostHandlers,
 				extensionHostHandlerResolver: this.#options.extensionHostHandlerResolver,
-				onReady: this.#options.onReady,
+				onReady: (processIds, status) => this.#controllerReady(startingController, processIds, status),
 			});
 			controller = startingController;
 			this.#emitProgress("controller", "Starting the IPython controller and kernel...");
@@ -372,13 +400,17 @@ export class IpythonKernelProvisioner {
 			}
 
 			this.#emitProgress("bootstrap", "Preparing the session IPython namespace...");
-			const bootstrapCode = [SESSION_BOOTSTRAP_CODE, this.#options.bootstrapCode?.trim()]
-				.filter(Boolean)
-				.join("\n\n");
-			const bootstrap = await waitWithSignal(controller.execute(bootstrapCode), signal);
+			const bootstrap = await waitWithSignal(controller.execute(this.#bootstrapCode()), signal);
 			if (bootstrap.status !== "ok") {
 				throw new Error(`Failed to prepare the session IPython namespace:\n${errorText(bootstrap)}`);
 			}
+			const restoredPins = this.#lastRestore?.pins ?? [];
+			if (restoredPins.length > 0) {
+				const pinsCode = `import omp as _omp_runtime_pins; _omp_runtime_pins.session._restore_pins(tuple(${JSON.stringify(restoredPins)})); del _omp_runtime_pins`;
+				const pins = await waitWithSignal(controller.execute(pinsCode), signal);
+				if (pins.status !== "ok") throw new Error(`Failed to restore IPython pins:\n${errorText(pins)}`);
+			}
+
 			if (signal.aborted) throw abortError(signal);
 			this.#emitProgress("ready", "IPython kernel ready");
 			return controller;
@@ -386,6 +418,41 @@ export class IpythonKernelProvisioner {
 			await controller?.dispose().catch(() => undefined);
 			throw error;
 		}
+	}
+
+	#bootstrapCode(): string {
+		return [SESSION_BOOTSTRAP_CODE, this.#options.bootstrapCode?.trim()].filter(Boolean).join("\n\n");
+	}
+
+	#controllerReady(
+		controller: IpythonKernelController,
+		processIds: IpythonProcessIds,
+		status: { readonly restart: boolean },
+	): void {
+		if (!status.restart) {
+			this.#options.onReady?.(processIds, status);
+			return;
+		}
+		void this.#withControllerLock(async () => {
+			const bootstrap = await controller.execute(this.#bootstrapCode());
+			if (bootstrap.status !== "ok") {
+				throw new Error(`Failed to restore IPython preloads after restart: ${errorText(bootstrap)}`);
+			}
+		}).then(
+			() =>
+				this.#options.onReady?.(processIds, {
+					restart: true,
+					namespaceReset: true,
+					restoredPreloads: IPYTHON_PRELOAD_NAMES,
+				}),
+			error =>
+				this.#options.onReady?.(processIds, {
+					restart: true,
+					namespaceReset: true,
+					restoredPreloads: [],
+					recoveryError: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
+				}),
+		);
 	}
 
 	#emitProgress(stage: IpythonStartupStage, message: string): void {

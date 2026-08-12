@@ -47,7 +47,6 @@ test("keeps Gemini 3.6 advisor context and accepts a silent review", async () =>
 		sessionManager: SessionManager.create(temp.path(), temp.path()),
 		settings: Settings.isolated({ "compaction.enabled": false }),
 		modelRegistry: registry,
-		advisorTools: [],
 		advisorStreamFn,
 	});
 	try {
@@ -62,12 +61,8 @@ test("keeps Gemini 3.6 advisor context and accepts a silent review", async () =>
 			systemInstruction: {
 				parts: [{ text: expect.any(String) }],
 			},
-			tools: [
-				{
-					functionDeclarations: [{ name: "advise" }],
-				},
-			],
 		});
+		expect(bodies[0]).not.toHaveProperty("tools");
 	} finally {
 		await session.dispose();
 		auth.close();

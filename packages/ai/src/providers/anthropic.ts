@@ -2192,10 +2192,13 @@ const streamAnthropicOnce = (
 					maxRetries: 0,
 					...(perRequestHeaders ? { headers: perRequestHeaders } : {}),
 				};
+				params.stream = true;
+				if (rawRequestDump) rawRequestDump.body = params;
+				await options?.onFinalPayload?.(params, model);
 				const anthropicRequest: unknown =
 					isOAuthToken && client.beta
-						? client.beta.messages.create({ ...params, stream: true }, requestOptions)
-						: client.messages.create({ ...params, stream: true }, requestOptions);
+						? client.beta.messages.create(params, requestOptions)
+						: client.messages.create(params, requestOptions);
 				let streamedReplayUnsafeContent = false;
 
 				try {

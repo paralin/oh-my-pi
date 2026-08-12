@@ -4,7 +4,7 @@ import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mod
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 type Harness = {
@@ -123,6 +123,21 @@ describe("InteractiveMode deferred command preview", () => {
 		expect(rows.join("\n")).toContain("more rows");
 		// The tail is not silently dropped: it arrives in full at the settle.
 		expect(rows.join("\n")).not.toContain("row 199");
+	});
+
+	it("keeps normal and overflow status rows within narrow widths", async () => {
+		const { mode, setStreaming } = await createHarness();
+		setStreaming(true);
+		mode.presentCommandOutput(new Text("one", 1, 0));
+		for (const width of [1, 8, 24]) {
+			const rows = mode.deferredCommandContainer.render(width);
+			expect(visibleWidth(rows.at(-1) ?? "")).toBeLessThanOrEqual(width);
+		}
+		mode.presentCommandOutput(new Text(Array.from({ length: 200 }, (_, i) => `row ${i}`).join("\n"), 1, 0));
+		for (const width of [1, 8, 24]) {
+			const rows = mode.deferredCommandContainer.render(width);
+			expect(visibleWidth(rows.at(-1) ?? "")).toBeLessThanOrEqual(width);
+		}
 	});
 
 	it("clears the preview and mounts the panels once the turn settles", async () => {

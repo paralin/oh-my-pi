@@ -1900,6 +1900,7 @@ function mapOptionsForApi<TApi extends Api>(
 		providerSessionState: options?.providerSessionState,
 		maxInFlightRequests: options?.maxInFlightRequests,
 		onPayload: options?.onPayload,
+		onFinalPayload: options?.onFinalPayload,
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
 		fetch: options?.fetch,

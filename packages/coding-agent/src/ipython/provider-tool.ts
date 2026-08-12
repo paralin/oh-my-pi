@@ -4,8 +4,50 @@ import type { IpythonCellResult } from "./cell";
 import { createIpythonCellJournalDetail, type IpythonCellJournalDetail } from "./journal";
 
 const ipythonParameters = type({ code: "string" });
+const MAX_RECEIVED_PAYLOAD_BYTES = 512;
+const textEncoder = new TextEncoder();
 
 export type IpythonProviderTool = AgentTool<typeof ipythonParameters, IpythonCellJournalDetail>;
+
+function serializeReceivedPayload(args: unknown): string {
+	if (typeof args === "object" && args !== null && "__rawJson" in args) return String(args.__rawJson ?? "");
+	if (typeof args === "string") return args;
+	try {
+		return JSON.stringify(args) ?? String(args);
+	} catch {
+		return String(args);
+	}
+}
+
+function redactReceivedPayload(payload: string): string {
+	const credentialLabel =
+		/(["']?(?:(?:aws[-_]?)?secret[-_]?access[-_]?key|api[-_]?key|authorization|cookie|credential|password|passwd|private[-_]?key|access[-_]?key|secret|token|key)["']?\s*[:=]\s*)/gi;
+	return payload
+		.replace(credentialLabel, match => `${match}\u0000`)
+		.replace(/\u0000(["'])(?:\\.|(?!\1).)*(?:\1|$)/g, (_match, quote: string) => `${quote}[REDACTED]${quote}`)
+		.replace(/\u0000[^\n\r,}\]]*/g, "[REDACTED]")
+		.replace(/-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----[\s\S]*/gi, "[REDACTED PRIVATE KEY]")
+		.replace(/\bBearer\s+[^\s,;]+/gi, "Bearer [REDACTED]")
+		.replace(/\b(?:sk-[A-Za-z0-9_-]{8,}|AKIA[0-9A-Z]{16})\b/g, "[REDACTED]");
+}
+
+function unicodeBytePrefix(value: string, maxBytes: number): { prefix: string; bytes: number; truncated: boolean } {
+	let prefix = "";
+	let bytes = 0;
+	for (const character of value) {
+		const characterBytes = textEncoder.encode(character).byteLength;
+		if (bytes + characterBytes > maxBytes) return { prefix, bytes, truncated: true };
+		prefix += character;
+		bytes += characterBytes;
+	}
+	return { prefix, bytes, truncated: false };
+}
+
+function formatIpythonValidationError(args: unknown): string {
+	const received = redactReceivedPayload(serializeReceivedPayload(args));
+	const { prefix, bytes, truncated } = unicodeBytePrefix(received, MAX_RECEIVED_PAYLOAD_BYTES);
+	return `Invalid ipython payload; expected {code: string}. Received first ${bytes} bytes: ${prefix}${truncated ? "…" : ""}`;
+}
 
 type ProviderPayload = Record<string, unknown>;
 
@@ -64,6 +106,7 @@ export function createIpythonProviderTool(
 		parameters: ipythonParameters,
 		approval: "exec",
 		concurrency: "exclusive",
+		formatValidationError: formatIpythonValidationError,
 		async execute(_toolCallId, params, signal, _onUpdate): Promise<AgentToolResult<IpythonCellJournalDetail>> {
 			const result = await execute(params.code, signal, true);
 			return {

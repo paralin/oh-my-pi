@@ -9,6 +9,7 @@ import { createIpythonAstHostHandlers } from "../../src/ipython/ast-service.js";
 import { IpythonAutoQaService } from "../../src/ipython/autoqa-service.js";
 import { IpythonBootGate, resolveIpythonBootConcurrency } from "../../src/ipython/boot-gate.js";
 import { IpythonBrowserService } from "../../src/ipython/browser-service.js";
+import { IpythonCellService } from "../../src/ipython/cell.js";
 import { createIpythonCodeHostHandlers } from "../../src/ipython/code-service.js";
 import { IpythonComputerService } from "../../src/ipython/computer-service.js";
 import type {
@@ -219,6 +220,45 @@ describe("IPython kernel provisioner", () => {
 		};
 	}
 
+	test("negotiates the capability census from composed fixed and extension handlers", async () => {
+		const hostHandlers: IpythonHostHandlers = {
+			"web.search": () => ({}),
+			"process.run": () => ({}),
+		};
+		const extensionOperations = ["extension.autoresearch.run", "web.search"];
+		let controller: FakeController | undefined;
+		const provisioner = new IpythonKernelProvisioner(
+			{
+				cwd: "/work",
+				sessionId: "capability-census",
+				hostHandlers,
+				extensionHostOperations: () => extensionOperations,
+			},
+			{
+				ensureRuntime: async options => fakeRuntime(options),
+				createController: options => {
+					controller = new FakeController(options, []);
+					return controller;
+				},
+				withBootPermit: async boot => await boot(),
+			},
+		);
+		await provisioner.ensure();
+		if (!controller) throw new Error("controller was not created");
+		expect(JSON.parse(controller.options.env?.OMP_HOST_CAPABILITY_CENSUS ?? "null")).toEqual([
+			"capability.census",
+			"extension.autoresearch.run",
+			"process.run",
+			"web.search",
+		]);
+		extensionOperations.splice(0, extensionOperations.length, "extension.autoresearch.notes");
+		const census = await controller.options.hostHandlers?.["capability.census"]?.({} as IpythonHostRequest);
+		expect(census).toEqual({
+			operations: ["capability.census", "extension.autoresearch.notes", "process.run", "web.search"],
+		});
+		await provisioner.dispose();
+	});
+
 	test("does not interrupt a snapshot or run a queued cell after its signal aborts", async () => {
 		const snapshotStarted = Promise.withResolvers<void>();
 		const releaseSnapshot = Promise.withResolvers<void>();
@@ -389,6 +429,47 @@ describe("IPython kernel provisioner", () => {
 		await provisioner.dispose();
 	});
 
+	test("reports namespace reset only after restart preloads are restored", async () => {
+		const events: string[] = [];
+		const ready: Array<{ restart: boolean; namespaceReset?: boolean; restoredPreloads?: readonly string[] }> = [];
+		let controller: FakeController | undefined;
+		const provisioner = new IpythonKernelProvisioner(
+			{
+				cwd: "/work",
+				sessionId: "restart-recovery",
+				onReady: (_processIds, status) => ready.push(status),
+			},
+			{
+				ensureRuntime: async options => fakeRuntime(options),
+				createController: options => {
+					controller = new FakeController(options, events);
+					return controller;
+				},
+				withBootPermit: async boot => await boot(),
+			},
+		);
+		try {
+			await provisioner.ensure();
+			if (!controller?.processIds) throw new Error("controller did not start");
+			const beforeRestart = events.length;
+			controller.options.onReady?.(controller.processIds, { restart: true });
+			expect(ready).toEqual([]);
+			await provisioner.execute("after-restart");
+			const recoveryEvents = events.slice(beforeRestart);
+			expect(recoveryEvents[0]).toContain('helpers = _omp_runtime_importlib.import_module("helpers")');
+			expect(recoveryEvents.at(-1)).toBe("execute:after-restart");
+			expect(ready).toEqual([
+				{
+					restart: true,
+					namespaceReset: true,
+					restoredPreloads: ["rlm", "omp", "helpers", "show", "rg", "run"],
+				},
+			]);
+		} finally {
+			await provisioner.dispose();
+		}
+	});
+
 	test("disposes a failed generation and retries with a fresh controller", async () => {
 		const events: string[] = [];
 		const controllers: FakeController[] = [];
@@ -481,6 +562,7 @@ function pythonAbiSourcePath(): string {
 		"compact",
 		"edit",
 		"goal",
+		"helpers",
 		"refine",
 		"rlm-heartbeat",
 		"websearch",
@@ -492,6 +574,49 @@ function pythonAbiSourcePath(): string {
 const describeIntegration = integrationEnabled ? describe : describe.skip;
 
 describeIntegration("IPython provisioner real-kernel boundary", () => {
+	test("attaches model and direct namespace deltas and enforces pin cleanup rules", async () => {
+		const uvExecutable = Bun.env.OMP_IPYTHON_TEST_UV;
+		if (!uvExecutable) throw new Error("OMP_IPYTHON_TEST_UV is required");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-namespace-lifecycle-"));
+		const home = path.join(tempRoot, "home");
+		await fs.mkdir(home);
+		const provisioner = new IpythonKernelProvisioner({
+			cwd: tempRoot,
+			sessionId: "namespace-lifecycle",
+			environment: { HOME: home, PATH: Bun.env.PATH ?? "", UV_NO_CONFIG: "1" },
+			runtime: { runtimeRoot: path.join(tempRoot, "runtime"), uvExecutable },
+		});
+		const cells = new IpythonCellService(provisioner, { sessionId: "namespace-lifecycle", cwd: tempRoot });
+		try {
+			const model = await cells.execute({
+				code: 'pinned_value = 1; scratch_value = 2; provider_api_key = "hidden"; omp.session.pin("pinned_value")',
+				origin: "model",
+			});
+			expect(model.namespaceDelta?.origin).toBe("model");
+			expect(model.namespaceDelta?.added.map(item => item.name)).toEqual(["pinned_value", "scratch_value"]);
+			const cleaned = await cells.execute({ code: "omp.session.cleanup_scratch()", origin: "direct" });
+			expect(cleaned.namespaceDelta?.origin).toBe("direct");
+			expect(cleaned.namespaceDelta?.deleted).toEqual([{ name: "scratch_value", type: "int" }]);
+			const state = await cells.execute({
+				code: 'print(("pinned_value" in globals(), "scratch_value" in globals(), omp.session.list_pins()))',
+				origin: "direct",
+			});
+			expect(state.stdout).toContain("(True, False, ('pinned_value',))");
+			for (const code of [
+				'omp.session.cleanup_scratch("pinned_value")',
+				'omp.session.cleanup_scratch("unknown_name")',
+				'omp.session.pin("provider_api_key")',
+				'omp.session.pin("omp")',
+			]) {
+				const rejected = await cells.execute({ code, origin: "direct" });
+				expect(rejected.status).toBe("error");
+			}
+		} finally {
+			await cells.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 180_000);
+
 	test("reloads validated packages in one live heap and removes stale imports", async () => {
 		const uvExecutable = Bun.env.OMP_IPYTHON_TEST_UV;
 		if (!uvExecutable) throw new Error("OMP_IPYTHON_TEST_UV is required");
@@ -1706,6 +1831,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			expect(snapshot?.saved).not.toContain("asyncio");
 			expect(snapshot?.saved).not.toContain("rlm");
 			expect(snapshot?.saved).not.toContain("omp");
+			for (const name of ["helpers", "show", "rg", "run"]) expect(snapshot?.saved).not.toContain(name);
 			await first.dispose();
 
 			const second = new IpythonKernelProvisioner(baseOptions, { ensureRuntime });
@@ -1726,6 +1852,149 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			if (!ids) continue;
 			expect(processExists(ids.controllerPid)).toBe(false);
 			expect(processExists(ids.kernelPid)).toBe(false);
+		}
+	}, 120_000);
+
+	test("preloads bounded helpers and documents callable rlm", async () => {
+		const uvExecutable = Bun.env.OMP_IPYTHON_TEST_UV;
+		if (!uvExecutable) throw new Error("OMP_IPYTHON_TEST_UV is required when OMP_IPYTHON_INTEGRATION=1");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-helpers-"));
+		const sidecarDir = path.join(tempRoot, "sidecar");
+		const home = path.join(tempRoot, "home");
+		await fs.mkdir(home);
+		await fs.writeFile(path.join(tempRoot, "sample.txt"), "alpha\nneedle one\nneedle two\nomega\n");
+		await fs.writeFile(path.join(tempRoot, "many.txt"), `${"hit\n".repeat(300)}`);
+		await fs.writeFile(path.join(tempRoot, "huge.txt"), Buffer.alloc(20 * 1024 * 1024 + 1, 0x61));
+		await fs.writeFile(path.join(tempRoot, "binary.dat"), Buffer.from("text\0more"));
+		await fs.writeFile(path.join(tempRoot, "utf8.txt"), `${"x".repeat(16 * 1024 - 2)}😀\n`);
+		await fs.writeFile(path.join(tempRoot, "invalid-utf8.txt"), Buffer.from([0x61, 0xff, 0x62, 0x0a]));
+		const runs: Readonly<Record<string, unknown>>[] = [];
+		const ready: Array<{ restart: boolean; namespaceReset?: boolean; restoredPreloads?: readonly string[] }> = [];
+		const provisioner = new IpythonKernelProvisioner({
+			cwd: tempRoot,
+			sessionId: "helper-preloads",
+			sidecarDir,
+			hostHandlers: {
+				"process.run": request => {
+					runs.push(request.data);
+					return {
+						state: "exited",
+						exit_code: 0,
+						signal: null,
+						timed_out: false,
+						cancelled: false,
+						duration_ms: 2,
+						cwd: tempRoot,
+						stdout_tail: "ok",
+						stderr_tail: "",
+						stdout_bytes: 2,
+						stderr_bytes: 0,
+						transcript_artifact: { path: path.join(sidecarDir, "run.txt") },
+					};
+				},
+			},
+			onReady: (_processIds, status) => ready.push(status),
+			environment: {
+				HOME: home,
+				PATH: `${path.dirname(uvExecutable)}${path.delimiter}${Bun.env.PATH ?? ""}`,
+				UV_NO_CONFIG: "1",
+			},
+			runtime: { runtimeRoot: path.join(tempRoot, "runtime"), uvExecutable },
+		});
+		const hostContext = {
+			sessionId: "helper-preloads",
+			cwd: tempRoot,
+			cellId: "helper-cell",
+			sequence: 1,
+			origin: "model" as const,
+			authority: "trusted-cell" as const,
+		};
+		try {
+			await provisioner.ensure();
+			const cold = await provisioner.execute(
+				"(rlm.__name__, omp.__name__, helpers.__name__, show('sample.txt', 2, 3), rg('needle', 'sample.txt'))",
+			);
+			expect(cold.status).toBe("ok");
+			expect(cold.result).toContain("needle one");
+			expect(cold.result).toContain("sample.txt:2:needle one");
+			const showBounds = await provisioner.execute(
+				"huge = show('huge.txt', 1, 1)\nprint(len(huge.encode('utf-8')) <= 65536, 'scan stopped after 8388608 bytes' in huge)\nfor file in ('binary.dat',):\n    try: show(file, 1, 1)\n    except Exception as error: print(type(error).__name__, str(error))\ntry: show('huge.txt', 10**12, 10**12)\nexcept Exception as error: print(type(error).__name__, str(error))\nprint('😀' in show('utf8.txt', 1, 1), 'a�b' in show('invalid-utf8.txt', 1, 1))",
+			);
+			expect(showBounds.stdout).toContain("True True");
+			expect(showBounds.stdout).toContain("ValueError show only accepts text files; NUL byte detected");
+			expect(showBounds.stdout).toContain(
+				"RuntimeError show stopped after 8388608 scanned bytes before reaching start line 1000000000000",
+			);
+			expect(showBounds.stdout).toContain("True True");
+			const bounds = await provisioner.execute(
+				"bounded = rg('hit', 'many.txt')\nprint(len(bounded.encode('utf-8')) <= 65536, 'search stopped after 200 hits' in bounded)\ntry:\n    show('sample.txt', 1, 501)\nexcept Exception as error:\n    print(type(error).__name__, str(error))",
+			);
+			expect(bounds.stdout).toContain("True True");
+			expect(bounds.stdout).toContain("ValueError line range may contain at most 500 lines");
+			const help = await provisioner.execute("rlm.__doc__");
+			expect(help.result).toContain("handle confirms admission");
+			expect(help.result).toContain("list_subagents");
+			expect(help.result).toContain("rlm.harness");
+			const ran = await provisioner.execute("await run('printf ok')", { hostContext });
+			expect(ran.status).toBe("ok");
+			expect(ran.result).toContain("'transcript_path':");
+			expect(runs).toEqual([{ type: "process.run", application: "printf", args: ["ok"] }]);
+			const invalidRun = await provisioner.execute(
+				"try:\n    await run(['printf', 3])\nexcept Exception as error:\n    print(type(error).__name__, str(error))",
+			);
+			expect(invalidRun.stdout).toContain("TypeError every cmd argv entry must be a str");
+			expect(runs).toHaveLength(1);
+			const escaped = await provisioner.execute(
+				"try:\n    show('../outside', 1, 1)\nexcept Exception as error:\n    print(type(error).__name__, str(error))",
+			);
+			expect(escaped.stdout).toContain("ValueError path must stay inside");
+		} finally {
+			await provisioner.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 120_000);
+
+	test("restores real cold preloads after a managed kernel restart", async () => {
+		const uvExecutable = Bun.env.OMP_IPYTHON_TEST_UV;
+		if (!uvExecutable) throw new Error("OMP_IPYTHON_TEST_UV is required when OMP_IPYTHON_INTEGRATION=1");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-helper-restart-"));
+		const home = path.join(tempRoot, "home");
+		await fs.mkdir(home);
+		const ready: Array<{ restart: boolean; namespaceReset?: boolean; restoredPreloads?: readonly string[] }> = [];
+		const provisioner = new IpythonKernelProvisioner({
+			cwd: tempRoot,
+			sessionId: "helper-restart",
+			onReady: (_processIds, status) => ready.push(status),
+			environment: {
+				HOME: home,
+				PATH: `${path.dirname(uvExecutable)}${path.delimiter}${Bun.env.PATH ?? ""}`,
+				UV_NO_CONFIG: "1",
+			},
+			runtime: { runtimeRoot: path.join(tempRoot, "runtime"), uvExecutable },
+		});
+		try {
+			await provisioner.ensure();
+			const cold = await provisioner.execute(
+				"(rlm.__name__, omp.__name__, helpers.__name__, callable(show), callable(rg), callable(run))",
+			);
+			expect(cold.result).toBe("('rlm', 'omp', 'helpers', True, True, True)");
+			await expect(provisioner.execute("import os; os._exit(17)")).rejects.toThrow(
+				"IPython kernel exited unexpectedly; restarted",
+			);
+			const restored = await provisioner.execute(
+				"(rlm.__name__, omp.__name__, helpers.__name__, callable(show), callable(rg), callable(run))",
+			);
+			expect(restored.result).toBe(cold.result);
+			expect(ready.filter(status => status.namespaceReset)).toEqual([
+				{
+					restart: true,
+					namespaceReset: true,
+					restoredPreloads: ["rlm", "omp", "helpers", "show", "rg", "run"],
+				},
+			]);
+		} finally {
+			await provisioner.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
 		}
 	}, 120_000);
 });

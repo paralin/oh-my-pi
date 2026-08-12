@@ -358,6 +358,12 @@ export type OpenAIResponseInclude =
 	| "reasoning.encrypted_content"
 	| "message.output_text.logprobs";
 
+export interface FinalPayloadUnsupported {
+	kind: "unsupported";
+	transport: "pi-native";
+	reason: string;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -483,6 +489,11 @@ export interface StreamOptions {
 	 * Return undefined to keep the payload unchanged.
 	 */
 	onPayload?: (payload: unknown, model?: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
+	/**
+	 * Observes the final provider request body after all provider mutations, immediately before sending.
+	 * Remote transports that cannot return the provider body report {@link FinalPayloadUnsupported} instead.
+	 */
+	onFinalPayload?: (payload: unknown | FinalPayloadUnsupported, model?: Model<Api>) => void | Promise<void>;
 	/**
 	 * Optional callback for provider response metadata after headers are received.
 	 */

@@ -1,10 +1,10 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import analysisSystemPrompt from "../../commit/prompts/analysis-system.md" with { type: "text" };
 import analysisUserPrompt from "../../commit/prompts/analysis-user.md" with { type: "text" };
 import type { ConventionalAnalysis } from "../../commit/types";
+import { RequestProfileOwner } from "../../session/request-profile";
 import { toReasoningEffort } from "../../thinking";
 import { parseConventionalAnalysisResponse } from "../shared-llm";
 
@@ -46,12 +46,10 @@ export async function generateConventionalAnalysis({
 		diff,
 	});
 
-	const response = await completeSimple(
+	const requestProfile = RequestProfileOwner.noTools([prompt.render(analysisSystemPrompt)]);
+	const response = await requestProfile.complete(
 		model,
-		{
-			systemPrompt: [prompt.render(analysisSystemPrompt)],
-			messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
-		},
+		[{ role: "user", content: userContent, timestamp: Date.now() }],
 		{ apiKey, maxTokens: 2400, reasoning: toReasoningEffort(thinkingLevel) },
 	);
 

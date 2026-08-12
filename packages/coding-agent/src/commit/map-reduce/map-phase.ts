@@ -1,11 +1,11 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, Message, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import fileObserverSystemPrompt from "../../commit/prompts/file-observer-system.md" with { type: "text" };
 import fileObserverUserPrompt from "../../commit/prompts/file-observer-user.md" with { type: "text" };
 import type { FileDiff, FileObservation } from "../../commit/types";
 import { isExcludedFile } from "../../commit/utils/exclusions";
+import { RequestProfileOwner } from "../../session/request-profile";
 import { toReasoningEffort } from "../../thinking";
 import { truncateToTokenLimit } from "./utils";
 
@@ -61,14 +61,11 @@ export async function runMapPhase({
 			diff: truncated,
 			context_header: contextHeader,
 		});
-		const request = {
-			systemPrompt: [systemPrompt],
-			messages: [{ role: "user", content: userContent, timestamp: Date.now() }] as Message[],
-		};
+		const messages = [{ role: "user", content: userContent, timestamp: Date.now() }] as Message[];
 
 		const response = await withRetry(
 			() =>
-				completeSimple(model, request, {
+				RequestProfileOwner.noTools([systemPrompt]).complete(model, messages, {
 					apiKey,
 					maxTokens: 400,
 					reasoning: toReasoningEffort(thinkingLevel),

@@ -71,6 +71,27 @@ function cellResult(): IpythonCellResult {
 }
 
 describe("IPython replay journal", () => {
+	test("stores namespace metadata only on the completed cell detail", () => {
+		const result: IpythonCellResult = {
+			...cellResult(),
+			namespaceDelta: {
+				executionCount: 7,
+				origin: "direct",
+				added: [{ name: "answer", type: "int" }],
+				rebound: [],
+				deleted: [],
+				omitted: { added: 0, rebound: 0, deleted: 0 },
+			},
+		};
+		const prior = cellResult();
+		const priorBytes = JSON.stringify(prior);
+		const detail = createIpythonCellJournalDetail(result);
+		expect(detail.namespaceDelta).toEqual(result.namespaceDelta);
+		expect(isIpythonJournalDetail(detail)).toBe(true);
+		expect(JSON.stringify(prior)).toBe(priorBytes);
+		expect(createIpythonCellJournalDetail(prior).namespaceDelta).toBeUndefined();
+	});
+
 	beforeAll(async () => {
 		await Settings.init({ inMemory: true });
 		const selected = await getThemeByName("dark");
@@ -91,7 +112,7 @@ describe("IPython replay journal", () => {
 		const text = renderIpythonJournalText(detail);
 		expect(text).toContain("displayed MIME types: text/html");
 		expect(text).toContain("ValueError: broken");
-		expect(text).toContain("Artifact: plot (image/png)");
+		expect(text).toContain("Artifact: plot · /tmp/plot.png (image/png)");
 		expect(text).not.toContain(rawHtml);
 
 		const lifecycle = createIpythonLifecycleJournalDetail("restore", "warning", "2 names restored; 1 failed.", {
@@ -122,7 +143,7 @@ describe("IPython replay journal", () => {
 		component.setExpanded(true);
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
 		expect(expanded).toContain("startup · restore: Restoring IPython state...");
-		expect(expanded).toContain("artifact · plot (image/png)");
+		expect(expanded).toContain("artifact · plot · /tmp/plot.png (image/png)");
 		expect(expanded).toContain("artifact · ~/private.png (image/png)");
 		expect(expanded).not.toContain(os.homedir());
 		expect(expanded).not.toContain(rawHtml);
@@ -567,12 +588,12 @@ describe("IPython replay journal", () => {
 				traceback: [finalAssertion, exitSummary],
 			},
 		];
-		const safeText = createIpythonCellText(events, [], "error", 50 * 1024);
+		const artifactPath = "/tmp/full-ipython-result.txt";
+		const safeText = createIpythonCellText(events, [], "error", 50 * 1024, artifactPath);
 		const totalBytes = safeText.totalBytes;
-		const markerStart = safeText.text.indexOf("\n[IPython output truncated:");
-		const markerEnd = safeText.text.indexOf("]\n", markerStart) + 2;
-		const retainedBytes =
-			Buffer.byteLength(safeText.text.slice(0, markerStart)) + Buffer.byteLength(safeText.text.slice(markerEnd));
+		const headerEnd = safeText.text.indexOf("\n") + 1;
+		const gap = "\n[... IPython preview gap ...]\n";
+		const retainedBytes = Buffer.byteLength(safeText.text) - headerEnd - Buffer.byteLength(gap);
 
 		expect(totalBytes).toBeGreaterThanOrEqual(200 * 1024);
 		expect(safeText).toMatchObject({ truncated: true, omittedBytes: totalBytes - retainedBytes });
@@ -580,7 +601,9 @@ describe("IPython replay journal", () => {
 		expect(safeText.text).toContain(command.trim());
 		expect(safeText.text).toContain(finalAssertion.trim());
 		expect(safeText.text).toContain(exitSummary.trim());
-		expect(safeText.text).toContain(`${totalBytes} bytes total; ${totalBytes - retainedBytes} bytes omitted`);
+		expect(safeText.text.split("\n", 1)[0]).toContain(artifactPath);
+		expect(safeText.text.split("\n", 1)[0]).toContain(`${totalBytes} bytes total`);
+		expect(safeText.text.split("\n", 1)[0]).toContain(`${totalBytes - retainedBytes} bytes omitted`);
 	});
 
 	test("bounds live safe text and preserves empty abort status", () => {

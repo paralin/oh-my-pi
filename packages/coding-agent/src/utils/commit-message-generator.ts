@@ -4,7 +4,6 @@
  */
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -12,6 +11,7 @@ import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model
 import type { Settings } from "../config/settings";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
+import { RequestProfileOwner } from "../session/request-profile";
 import { concreteThinkingLevel, toReasoningEffort } from "../thinking";
 
 const COMMIT_SYSTEM_PROMPT = prompt.render(commitSystemPrompt);
@@ -106,12 +106,10 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
-			const response = await completeSimple(
+			const requestProfile = RequestProfileOwner.noTools([COMMIT_SYSTEM_PROMPT]);
+			const response = await requestProfile.complete(
 				candidate.model,
-				{
-					systemPrompt: [COMMIT_SYSTEM_PROMPT],
-					messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
-				},
+				[{ role: "user", content: userMessage, timestamp: Date.now() }],
 				{
 					apiKey: registry.resolver(candidate.model, sessionId),
 					maxTokens,

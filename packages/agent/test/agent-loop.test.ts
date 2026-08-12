@@ -521,6 +521,58 @@ describe("agentLoop with AgentMessage", () => {
 		expect(toolStart.args.__parseError).toBeDefined(); // keeps __parseError for visibility of parse failure
 	});
 
+	it("uses a tool's contextual validation diagnostic without executing invalid arguments", async () => {
+		let executed = false;
+		const toolSchema = type({ code: "string" });
+		const tool: AgentTool<typeof toolSchema> = {
+			name: "ipython",
+			label: "IPython",
+			description: "Execute code",
+			parameters: toolSchema,
+			concurrency: "exclusive",
+			formatValidationError: args => `contextual: ${JSON.stringify(args)}`,
+			async execute() {
+				executed = true;
+				return { content: [] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "tool-1",
+							name: "ipython",
+							arguments: { __parseError: "bad JSON", __rawJson: "/" },
+						},
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const events: AgentEvent[] = [];
+		for await (const event of agentLoop(
+			[createUserMessage("run code")],
+			context,
+			{ model: mock.model, convertToLlm: identityConverter },
+			undefined,
+			mock.stream,
+		)) {
+			events.push(event);
+		}
+		const toolResult = events.find(e => e.type === "message_start" && e.message.role === "toolResult");
+		if (toolResult?.type !== "message_start" || toolResult.message.role !== "toolResult") {
+			throw new Error("missing tool result");
+		}
+		expect(toolResult.message.content[0]).toMatchObject({
+			type: "text",
+			text: 'contextual: {"__parseError":"bad JSON","__rawJson":"/"}',
+		});
+		expect(executed).toBeFalse();
+	});
+
 	it("runs completed tool calls after a transient stream_read_error", async () => {
 		const executedParams: Array<{ value: string }> = [];
 		const toolSchema = type({ value: "string" });

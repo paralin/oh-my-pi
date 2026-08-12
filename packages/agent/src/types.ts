@@ -624,6 +624,9 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	/** Lines appended after the standard approval prompt header. */
 	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
 
+	/** Replaces the generic schema error when this tool can provide a safer, more actionable diagnostic. */
+	formatValidationError?: (args: unknown, error: unknown) => string | undefined;
+
 	/** The main execution callback for this tool. */
 	execute: AgentToolExecFn<TParameters, TDetails, TTheme>;
 }

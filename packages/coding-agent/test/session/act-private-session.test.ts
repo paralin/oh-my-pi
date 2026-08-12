@@ -1,11 +1,11 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai";
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
@@ -21,6 +21,7 @@ import { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 import type { IpythonSessionGeneration, IpythonSessionGenerationOptions } from "../../src/session/ipython-session";
 import { convertToLlm } from "../../src/session/messages";
+import { type EffectiveProviderRequest, RequestProfileOwner } from "../../src/session/request-profile";
 import { SessionManager } from "../../src/session/session-manager";
 
 function channel(): IpythonHostRequestChannel {
@@ -55,24 +56,26 @@ function session(_tool: AgentTool, dispose: () => Promise<void>): ActPrivateSess
 
 type ToolObservation = { tools: string[]; messages: number };
 
-function assistantReply(model: Model): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text: "provider text" }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		usage: {
-			input: 2,
-			output: 3,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 5,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+function openAiResponse(model: Model): Response {
+	const chunks = [
+		{
+			id: "act-final-wire",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: model.id,
+			choices: [{ index: 0, delta: { role: "assistant", content: "provider text" }, finish_reason: null }],
 		},
-		stopReason: "stop",
-		timestamp: Date.now(),
-	};
+		{
+			id: "act-final-wire",
+			object: "chat.completion.chunk",
+			created: 0,
+			model: model.id,
+			choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+		},
+	];
+	return new Response(`${chunks.map(chunk => `data: ${JSON.stringify(chunk)}`).join("\n\n")}\n\ndata: [DONE]\n\n`, {
+		headers: { "content-type": "text/event-stream" },
+	});
 }
 
 function hostChannel(): IpythonHostRequestChannel {
@@ -158,29 +161,45 @@ describe("production Act factory", () => {
 	it("uses the real handler, shared_ipython only, and retains provider transcript", async () => {
 		const temp = fs.mkdtempSync(path.join(os.tmpdir(), "omp-act-factory-"));
 		const auth = await AuthStorage.create(path.join(temp, "auth.db"));
-		auth.setRuntimeApiKey("anthropic", "test-key");
+		auth.setRuntimeApiKey("openai", "test-key");
 		const registry = new ModelRegistry(auth, path.join(temp, "models.yml"));
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("test model unavailable");
+		const bundled = getBundledModel<"openai-completions">("openai", "gpt-4o-mini");
+		if (!bundled) throw new Error("test model unavailable");
+		const model = { ...bundled, api: "openai-completions" as const };
 		const rootManager = SessionManager.create(temp, temp);
 		const observations: ToolObservation[] = [];
+		const captures: Array<{ declaredPrompt: string[]; effective: EffectiveProviderRequest }> = [];
+		const originalCapture = RequestProfileOwner.prototype.captureEffectiveRequest;
+		vi.spyOn(RequestProfileOwner.prototype, "captureEffectiveRequest").mockImplementation(function (
+			this: RequestProfileOwner,
+			input,
+		) {
+			originalCapture.call(this, input);
+			const effective = this.lastEffectiveRequest;
+			if (!effective) throw new Error("Act final observer did not capture the request");
+			captures.push({ declaredPrompt: [...this.request.systemPrompt], effective });
+		});
+		const wireBodies: Record<string, unknown>[] = [];
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			if (typeof init?.body !== "string") throw new Error("expected Act JSON request body");
+			wireBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+			return openAiResponse(model);
+		};
 		const createRootAgent = () =>
 			new Agent({
 				initialState: { model, systemPrompt: ["root"], tools: [], messages: [] },
 				convertToLlm,
 				getApiKey: () => "test-key",
-				streamFn: (_selectedModel, context) => {
+				streamFn: (_selectedModel, context, options) => {
 					observations.push({
 						tools: (context.tools ?? []).map(tool => tool.name),
 						messages: context.messages.length,
 					});
-					const response = assistantReply(model);
-					const stream = new AssistantMessageEventStream();
-					queueMicrotask(() => {
-						stream.push({ type: "start", partial: response });
-						stream.push({ type: "done", reason: "stop", message: response });
+					return streamOpenAICompletions(model, context, {
+						...options,
+						apiKey: "test-key",
+						fetch: fetchMock,
 					});
-					return stream;
 				},
 			});
 		let generationCount = 0;
@@ -193,6 +212,7 @@ describe("production Act factory", () => {
 					...(configureDefault ? { rlmActDefaultModel: `${model.provider}/${model.id}` } : {}),
 				}),
 				modelRegistry: registry,
+				onPayload: async payload => ({ ...(payload as Record<string, unknown>), extensionMarker: "after" }),
 				createIpythonSessionGeneration: options => {
 					generationCount++;
 					return new ProductionActGeneration(options);
@@ -211,6 +231,20 @@ describe("production Act factory", () => {
 			expect(observations).toHaveLength(2);
 			expect(observations.map(observation => observation.tools)).toEqual([["shared_ipython"], ["shared_ipython"]]);
 			expect(observations[1]?.messages ?? 0).toBeGreaterThan(observations[0]?.messages ?? 0);
+			expect(captures).toHaveLength(2);
+			const codeSchema = {
+				type: "object",
+				properties: { code: { type: "string" } },
+				required: ["code"],
+				additionalProperties: false,
+			};
+			for (const [index, capture] of captures.entries()) {
+				expect(capture.effective.profile).toBe("act");
+				expect(capture.effective.systemPrompt).toEqual([capture.declaredPrompt.join("\n\n")]);
+				expect(capture.effective.tools).toEqual([{ name: "shared_ipython", parameters: codeSchema }]);
+				expect(capture.effective.payload).toEqual(wireBodies[index]);
+				expect(capture.effective.payload).toHaveProperty("extensionMarker", "after");
+			}
 			const artifactsDir = rootManager.getArtifactsDir();
 			if (!artifactsDir) throw new Error("persistent root session has no artifact directory");
 			const actDirs = fs.readdirSync(artifactsDir).filter(name => name.startsWith("act-model-"));
@@ -261,6 +295,7 @@ describe("production Act factory", () => {
 			expect(noDefault.errors[0]?.evalue).toContain("No Act model configured");
 		} finally {
 			await session?.dispose();
+			vi.restoreAllMocks();
 			auth.close();
 			fs.rmSync(temp, { recursive: true, force: true });
 		}
