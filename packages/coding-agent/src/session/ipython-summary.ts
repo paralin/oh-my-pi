@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { IPYTHON_JOURNAL_MESSAGE_TYPE, type IpythonJournalDetail, isIpythonJournalDetail } from "../ipython/journal";
-import { projectIpythonCellPresentation } from "../ipython/projection";
+import { projectIpythonCellPresentation, renderIpythonHostOperationText } from "../ipython/projection";
 import { DEFAULT_MAX_BYTES, truncateHeadBytes } from "./streaming-output-constants";
 
 const IPYTHON_SUMMARY_TRUNCATION_MARKER = "[IPython summary truncated]";
@@ -8,6 +8,8 @@ const IPYTHON_SUMMARY_CODE_BYTES = 12 * 1024;
 const IPYTHON_SUMMARY_OUTPUT_BYTES = 24 * 1024;
 const IPYTHON_SUMMARY_ARTIFACT_BYTES = 1024;
 const IPYTHON_SUMMARY_ARTIFACTS = 8;
+const IPYTHON_SUMMARY_OPERATION_BYTES = 1024;
+const IPYTHON_SUMMARY_OPERATIONS = 8;
 
 function boundedSection(text: string, maxBytes: number, marker: string): string {
 	if (Buffer.byteLength(text, "utf-8") <= maxBytes) return text;
@@ -30,6 +32,13 @@ export function renderBoundedIpythonJournalSummary(detail: IpythonJournalDetail,
 	];
 	if (presentation.safeText.text) {
 		lines.push("```text", boundedSection(presentation.safeText.text, IPYTHON_SUMMARY_OUTPUT_BYTES, "output"), "```");
+	}
+	for (const operation of presentation.operations.slice(0, IPYTHON_SUMMARY_OPERATIONS)) {
+		const text = `Operation: ${renderIpythonHostOperationText(operation)}${operation.message ? ` · ${operation.message}` : ""}`;
+		lines.push(boundedSection(text, IPYTHON_SUMMARY_OPERATION_BYTES, "operation"));
+	}
+	if (presentation.operations.length > IPYTHON_SUMMARY_OPERATIONS) {
+		lines.push(`[${presentation.operations.length - IPYTHON_SUMMARY_OPERATIONS} more operations omitted]`);
 	}
 	for (const artifact of presentation.artifacts.slice(0, IPYTHON_SUMMARY_ARTIFACTS)) {
 		const label = `Artifact: ${artifact.label ?? artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`;

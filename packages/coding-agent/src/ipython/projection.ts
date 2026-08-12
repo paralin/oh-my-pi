@@ -7,7 +7,7 @@ import type {
 	IpythonCellText,
 	IpythonCellUpdate,
 } from "./cell";
-import type { IpythonErrorEvent, IpythonExecutionEvent } from "./controller";
+import type { IpythonErrorEvent, IpythonExecutionEvent, IpythonHostOperationSummary } from "./controller";
 import type { IpythonCellJournalDetail } from "./journal";
 import type { IpythonStartupProgress } from "./provisioner";
 
@@ -15,6 +15,21 @@ const TRUNCATION_MARKER = "\n[IPython output truncated]";
 const MIN_IPYTHON_PRESENTATION_BYTES = Buffer.byteLength(TRUNCATION_MARKER, "utf-8");
 
 export type IpythonCellPresentationStatus = "running" | "ok" | "error" | "aborted";
+
+/**
+ * One nested host operation of a cell, folded from its ordered lifecycle
+ * records. Carries only operation identity, status, duration, and the
+ * presentation-safe message and summary its handler published.
+ */
+export interface IpythonHostOperationPresentation {
+	readonly operationId: string;
+	readonly operation: string;
+	readonly status: IpythonCellPresentationStatus;
+	readonly startedAt: number;
+	readonly durationMs: number | undefined;
+	readonly message: string | undefined;
+	readonly summary: IpythonHostOperationSummary | undefined;
+}
 
 interface IpythonCellPresentationBase {
 	readonly kind: "cell";
@@ -24,6 +39,7 @@ interface IpythonCellPresentationBase {
 	readonly errors: readonly IpythonErrorEvent[];
 	readonly updates: readonly IpythonCellUpdate[];
 	readonly startupProgress: readonly IpythonStartupProgress[];
+	readonly operations: readonly IpythonHostOperationPresentation[];
 	readonly safeText: IpythonCellText;
 	readonly artifacts: readonly IpythonArtifactReference[];
 }
@@ -75,7 +91,9 @@ function renderIpythonExecutionEventText(event: IpythonExecutionEvent): string {
 	if (event.kind === "stream") return sanitizeText(event.text);
 	if (event.kind === "result") return safeResultText(event.data);
 	if (event.kind === "display") return sanitizeText(event.text);
+	// Sessions written before the nested lifecycle keep their flattened text.
 	if (event.kind === "host_progress") return sanitizeText(`[${event.operation}] ${event.message}`);
+	if (event.kind === "host_operation") return "";
 	return sanitizeText(event.traceback.length > 0 ? event.traceback.join("\n") : `${event.ename}: ${event.evalue}`);
 }
 
@@ -87,6 +105,8 @@ function executionSafeText(
 	let text = "";
 	let sawError = false;
 	for (const event of events) {
+		// Nested operations render as their own records, never as cell output.
+		if (event.kind === "host_operation") continue;
 		if (event.kind === "stream") {
 			text += renderIpythonExecutionEventText(event);
 			continue;
@@ -131,6 +151,79 @@ function startupProgress(updates: readonly IpythonCellUpdate[]): IpythonStartupP
 	return updates.flatMap(update => (update.kind === "startup" ? [update.progress] : []));
 }
 
+function sanitizeSummary(summary: IpythonHostOperationSummary): IpythonHostOperationSummary {
+	return {
+		...summary,
+		...(summary.path === undefined ? {} : { path: sanitizeText(summary.path) }),
+		...(summary.unit === undefined ? {} : { unit: sanitizeText(summary.unit) }),
+	};
+}
+
+/**
+ * Folds the ordered lifecycle records into one entry per host request, in the
+ * order the requests started. Concurrent operations stay separate because each
+ * record carries its own request identity.
+ */
+export function collectIpythonHostOperations(
+	events: readonly IpythonExecutionEvent[],
+): IpythonHostOperationPresentation[] {
+	const byOperationId = new Map<string, { presentation: IpythonHostOperationPresentation; terminal: boolean }>();
+	for (const event of events) {
+		if (event.kind !== "host_operation") continue;
+		const existing = byOperationId.get(event.operationId);
+		// A replay truncated before terminal stays live; the first terminal is final.
+		if ((event.phase === "start" && existing) || existing?.terminal) continue;
+		const current = existing?.presentation ?? {
+			operationId: event.operationId,
+			operation: sanitizeText(event.operation),
+			status: "running" as const,
+			startedAt: event.at,
+			durationMs: undefined,
+			message: undefined,
+			summary: undefined,
+		};
+		const presentation =
+			event.phase === "progress"
+				? {
+						...current,
+						...(event.message === undefined ? {} : { message: sanitizeText(event.message) }),
+						...(event.summary === undefined
+							? {}
+							: { summary: { ...current.summary, ...sanitizeSummary(event.summary) } }),
+					}
+				: event.phase === "terminal"
+					? { ...current, status: event.status ?? "error", durationMs: event.durationMs }
+					: current;
+		byOperationId.set(event.operationId, { presentation, terminal: event.phase === "terminal" });
+	}
+	return [...byOperationId.values()].map(entry => entry.presentation);
+}
+
+/**
+ * Orders the presentation-safe detail parts of one nested operation. Terminal
+ * surfaces pass `displayPath` to shorten the recorded path for their width.
+ */
+export function ipythonHostOperationDetails(
+	operation: IpythonHostOperationPresentation,
+	displayPath = operation.summary?.path,
+): string[] {
+	const details: string[] = [];
+	const summary = operation.summary;
+	if (displayPath) details.push(displayPath);
+	if (summary?.count !== undefined) {
+		details.push(summary.unit ? `${summary.count} ${summary.unit}` : String(summary.count));
+	}
+	if (summary?.dryRun !== undefined) details.push(summary.dryRun ? "dry run" : "applied");
+	return details;
+}
+
+/** Formats one operation's safe semantic record for plain-text consumers. */
+export function renderIpythonHostOperationText(operation: IpythonHostOperationPresentation): string {
+	const details = ipythonHostOperationDetails(operation);
+	const duration = operation.durationMs === undefined ? "" : ` (${operation.durationMs}ms)`;
+	return `${operation.operation} · ${operation.status}${details.map(detail => ` · ${detail}`).join("")}${duration}`;
+}
+
 function completedText(source: IpythonCellResult | IpythonCellJournalDetail): IpythonCellText {
 	if ("modelText" in source) return source.modelText;
 	const text = sanitizeText(source.safeText);
@@ -167,6 +260,7 @@ export function projectIpythonCellPresentation(
 		errors: source.errors,
 		updates: source.updates,
 		startupProgress: startupProgress(source.updates),
+		operations: collectIpythonHostOperations(source.events),
 		safeText: completedText(source),
 		artifacts: source.artifacts,
 	};
@@ -190,6 +284,7 @@ export function projectIpythonLiveCellPresentation(
 		errors,
 		updates: source.updates,
 		startupProgress: startupProgress(source.updates),
+		operations: collectIpythonHostOperations(events),
 		safeText: createIpythonCellText(events, errors, "running", maxBytes),
 		artifacts: [],
 	};

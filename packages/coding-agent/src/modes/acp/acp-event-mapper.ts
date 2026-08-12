@@ -9,7 +9,7 @@ import type {
 	ToolKind,
 } from "@oh-my-pi/pi-utils/acp";
 import { parseDiffHunks } from "../../edit/diff";
-import type { IpythonCellPresentation } from "../../ipython/projection";
+import { type IpythonCellPresentation, renderIpythonHostOperationText } from "../../ipython/projection";
 import type { ActProjectionEvent } from "../../session/act-events";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
@@ -480,6 +480,23 @@ function ipythonCellContent(
 		const text = limitText(sanitizeText(progress.message));
 		if (text && !hasEquivalentTextContent(content, text)) append(textToolCallContent(text));
 	}
+	let operationCount = 0;
+	for (const operation of presentation.operations) {
+		if (saturated) break;
+		if (operationCount >= IPYTHON_ACP_CATEGORY_MAX_ITEMS) {
+			omitted = true;
+			break;
+		}
+		const text = limitText(
+			sanitizeText(
+				`${renderIpythonHostOperationText(operation)}${operation.message ? ` · ${operation.message}` : ""}`,
+			),
+		);
+		if (text && !hasEquivalentTextContent(content, text)) {
+			operationCount++;
+			append(textToolCallContent(text));
+		}
+	}
 	const safeText = limitText(presentation.safeText.text).trimEnd();
 	if (safeText && !hasEquivalentTextContent(content, safeText)) append(textToolCallContent(safeText));
 	let artifactCount = 0;
@@ -590,6 +607,15 @@ function ipythonMimeContent(
 function ipythonCellLocations(presentation: IpythonCellPresentation, cwd?: string): ToolCallLocation[] {
 	const locations: ToolCallLocation[] = [];
 	const seen = new Set<string>();
+	for (const operation of presentation.operations) {
+		if (locations.length >= IPYTHON_ACP_LOCATION_MAX_ITEMS) break;
+		const raw = operation.summary?.path;
+		if (!raw || INTERNAL_URL_SUBJECT.test(raw)) continue;
+		const path = toAcpLocationPath(raw, cwd);
+		if (Buffer.byteLength(path) > IPYTHON_ACP_LOCATION_MAX_BYTES || seen.has(path)) continue;
+		seen.add(path);
+		locations.push({ path });
+	}
 	for (const event of presentation.events) {
 		if (locations.length >= IPYTHON_ACP_LOCATION_MAX_ITEMS) break;
 		if (event.kind !== "display" && event.kind !== "result") continue;

@@ -3,7 +3,11 @@ import type { IpythonArtifactReference, IpythonCellResult, IpythonCellUpdate } f
 export type { IpythonArtifactReference } from "./cell";
 
 import type { IpythonErrorEvent, IpythonExecutionEvent, IpythonProcessIds } from "./controller";
-import { type IpythonCompletedCellPresentation, projectIpythonCellPresentation } from "./projection";
+import {
+	type IpythonCompletedCellPresentation,
+	projectIpythonCellPresentation,
+	renderIpythonHostOperationText,
+} from "./projection";
 
 export const IPYTHON_JOURNAL_MESSAGE_TYPE = "ipython-cell";
 export const IPYTHON_JOURNAL_VERSION = 1;
@@ -113,6 +117,63 @@ function isErrorEvent(value: unknown): value is IpythonErrorEvent {
 	);
 }
 
+function isHostOperationSummary(value: unknown): boolean {
+	if (!isRecord(value)) return false;
+	const keys = Object.keys(value);
+	return (
+		keys.length > 0 &&
+		keys.every(key => ["path", "count", "unit", "dryRun"].includes(key)) &&
+		(value.path === undefined || (typeof value.path === "string" && value.path.length <= 200)) &&
+		(value.count === undefined ||
+			(typeof value.count === "number" && Number.isSafeInteger(value.count) && value.count >= 0)) &&
+		(value.unit === undefined || (typeof value.unit === "string" && value.unit.length <= 32)) &&
+		(value.dryRun === undefined || typeof value.dryRun === "boolean")
+	);
+}
+
+function isHostOperationEvent(value: Record<string, unknown>): boolean {
+	const phase = value.phase;
+	if (
+		!Object.keys(value).every(key =>
+			["kind", "operationId", "operation", "phase", "at", "status", "durationMs", "message", "summary"].includes(
+				key,
+			),
+		) ||
+		typeof value.operationId !== "string" ||
+		typeof value.operation !== "string" ||
+		(phase !== "start" && phase !== "progress" && phase !== "terminal") ||
+		!Number.isSafeInteger(value.at)
+	) {
+		return false;
+	}
+	if (phase === "start") {
+		return (
+			value.status === undefined &&
+			value.durationMs === undefined &&
+			value.message === undefined &&
+			value.summary === undefined
+		);
+	}
+	if (phase === "progress") {
+		return (
+			value.status === undefined &&
+			value.durationMs === undefined &&
+			typeof value.message === "string" &&
+			value.message.length > 0 &&
+			value.message.length <= 4_000 &&
+			(value.summary === undefined || isHostOperationSummary(value.summary))
+		);
+	}
+	return (
+		(value.status === "ok" || value.status === "error" || value.status === "aborted") &&
+		typeof value.durationMs === "number" &&
+		Number.isSafeInteger(value.durationMs) &&
+		value.durationMs >= 0 &&
+		value.message === undefined &&
+		value.summary === undefined
+	);
+}
+
 function isExecutionEvent(value: unknown): value is IpythonExecutionEvent {
 	if (!isRecord(value)) return false;
 	if (value.kind === "stream") {
@@ -131,6 +192,7 @@ function isExecutionEvent(value: unknown): value is IpythonExecutionEvent {
 	if (value.kind === "host_progress") {
 		return typeof value.operation === "string" && typeof value.message === "string" && isRecord(value.data);
 	}
+	if (value.kind === "host_operation") return isHostOperationEvent(value);
 	return isErrorEvent(value);
 }
 
@@ -219,6 +281,11 @@ export function renderIpythonJournalText(detail: IpythonJournalDetail): string {
 		"```",
 	];
 	if (presentation.safeText.text) lines.push("```text", presentation.safeText.text, "```");
+	for (const operation of presentation.operations) {
+		lines.push(
+			`Operation: ${renderIpythonHostOperationText(operation)}${operation.message ? ` · ${operation.message}` : ""}`,
+		);
+	}
 	for (const artifact of presentation.artifacts) {
 		lines.push(`Artifact: ${artifact.label ?? artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`);
 	}

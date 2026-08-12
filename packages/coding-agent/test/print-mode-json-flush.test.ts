@@ -95,6 +95,7 @@ function makeIpythonEnd(): AgentSessionEvent {
 			errors: [],
 			updates: [],
 			startupProgress: [],
+			operations: [],
 			safeText: { text: "early\nlate\n", truncated: false, totalBytes: 11, outputBytes: 11 },
 			artifacts: [{ path: "/tmp/print.txt", mimeType: "text/plain", bytes: 11 }],
 		},

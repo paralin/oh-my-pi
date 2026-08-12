@@ -18,7 +18,7 @@ export function createIpythonCellTelemetryRecord(
 	const operations: string[] = [];
 	const seen = new Set<string>();
 	for (const event of presentation.events) {
-		if (event.kind !== "host_progress") continue;
+		if (event.kind !== "host_operation" && event.kind !== "host_progress") continue;
 		const operation = sanitizeText(event.operation).slice(0, MAX_CAPABILITY_OPERATION_CHARS).trim();
 		if (!operation || seen.has(operation)) continue;
 		seen.add(operation);

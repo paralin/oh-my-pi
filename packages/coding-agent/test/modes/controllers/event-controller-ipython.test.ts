@@ -21,6 +21,7 @@ function live(text: string, updates: IpythonLiveCellPresentation["updates"]): Ip
 		errors: [],
 		updates,
 		startupProgress: [],
+		operations: [],
 		safeText: { text, truncated: false, totalBytes: Buffer.byteLength(text), outputBytes: Buffer.byteLength(text) },
 		artifacts: [],
 	};

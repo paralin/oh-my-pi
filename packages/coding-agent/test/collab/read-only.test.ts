@@ -225,6 +225,7 @@ describe("collab read-only links", () => {
 			errors: [],
 			updates: [],
 			startupProgress: [],
+			operations: [],
 			safeText: { text: "[displayed MIME types]\n", truncated: false, totalBytes: 23, outputBytes: 23 },
 			artifacts: [{ path: "/tmp/result.png", mimeType: "image/png", bytes: 3, label: "result" }],
 		};

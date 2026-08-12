@@ -36,6 +36,25 @@ function cellDetail() {
 				update: false,
 				text: "[displayed MIME types: text/html]",
 			},
+			{ kind: "host_operation", operationId: "comm-ast", operation: "ast.search", phase: "start", at: 13 },
+			{
+				kind: "host_operation",
+				operationId: "comm-ast",
+				operation: "ast.search",
+				phase: "progress",
+				at: 14,
+				message: "Syntax-tree search completed",
+				summary: { path: "src/app.ts", count: 1, unit: "matches" },
+			},
+			{
+				kind: "host_operation",
+				operationId: "comm-ast",
+				operation: "ast.search",
+				phase: "terminal",
+				at: 15,
+				status: "ok",
+				durationMs: 2,
+			},
 		],
 		errors: [{ kind: "error", ename: "ValueError", evalue: "bad value", traceback: ["ValueError: bad value"] }],
 		updates: [],
@@ -76,6 +95,9 @@ describe("IPython harness summary projection", () => {
 		expect(text).toContain("safe output");
 		expect(text).toContain("ValueError: bad value");
 		expect(text).toContain("Artifact: result (text/plain)");
+		expect(text).toContain(
+			"Operation: ast.search · ok · src/app.ts · 1 matches (2ms) · Syntax-tree search completed",
+		);
 		expect(text).not.toContain("<script>");
 	});
 

@@ -33,6 +33,7 @@ function presentation(origin: "model" | "direct"): IpythonCompletedCellPresentat
 		errors: [],
 		updates: [],
 		startupProgress: [],
+		operations: [],
 		safeText: { text: "", truncated: false, totalBytes: 0, outputBytes: 0 },
 		artifacts: [],
 	};

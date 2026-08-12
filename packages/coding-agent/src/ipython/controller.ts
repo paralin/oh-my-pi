@@ -27,6 +27,8 @@ const MAX_CONTROLLER_FRAME = 8 * 1024 * 1024;
 const MAX_HOST_REQUEST_BYTES = 1024 * 1024;
 const MAX_HOST_PROGRESS_BYTES = 64 * 1024;
 const MAX_HOST_MESSAGE_CHARS = 4_000;
+const MAX_HOST_SUMMARY_PATH_CHARS = 200;
+const MAX_HOST_SUMMARY_UNIT_CHARS = 32;
 // This wait covers the controller's bounded graceful and forced kernel shutdown phases.
 const SHUTDOWN_GRACE_MS = 7_000;
 const SHUTDOWN_ESCALATION_MS = 7_000;
@@ -66,6 +68,10 @@ export interface IpythonErrorEvent {
 	readonly traceback: readonly string[];
 }
 
+/**
+ * Flattened host progress recorded by sessions written before the nested
+ * operation lifecycle. Kept readable for replay; nothing produces it now.
+ */
 export interface IpythonHostProgressEvent {
 	readonly kind: "host_progress";
 	readonly operation: string;
@@ -73,12 +79,43 @@ export interface IpythonHostProgressEvent {
 	readonly data: Readonly<Record<string, unknown>>;
 }
 
+/**
+ * The only structured facts a handler may add to its operation's presentation.
+ * Every other field of a host request or response is dropped, so raw payloads
+ * and credential material cannot reach the journal or a renderer.
+ */
+export interface IpythonHostOperationSummary {
+	readonly path?: string;
+	readonly count?: number;
+	readonly unit?: string;
+	readonly dryRun?: boolean;
+}
+
+/**
+ * One record in a nested host operation's lifecycle. The controller owns
+ * `operationId` (the request's comm identity), phase order, timestamps, and
+ * terminal status; the handler contributes only `message` and {@link
+ * IpythonHostOperationSummary} fields it publishes on purpose.
+ */
+export interface IpythonHostOperationEvent {
+	readonly kind: "host_operation";
+	readonly operationId: string;
+	readonly operation: string;
+	readonly phase: "start" | "progress" | "terminal";
+	readonly at: number;
+	readonly status?: IpythonExecutionStatus;
+	readonly durationMs?: number;
+	readonly message?: string;
+	readonly summary?: IpythonHostOperationSummary;
+}
+
 export type IpythonExecutionEvent =
 	| IpythonStreamEvent
 	| IpythonResultEvent
 	| IpythonDisplayEvent
 	| IpythonErrorEvent
-	| IpythonHostProgressEvent;
+	| IpythonHostProgressEvent
+	| IpythonHostOperationEvent;
 
 export interface IpythonHostArtifact {
 	readonly id?: string;
@@ -317,6 +354,8 @@ interface PendingExecution {
 	readonly hostArtifacts: IpythonHostArtifact[];
 	readonly hostAbort: AbortController;
 	readonly hostChannels: Map<string, HostRequestChannel>;
+	/** Started operations awaiting a terminal record, keyed by request identity. */
+	readonly hostOperations: Map<string, { readonly operation: string; readonly startedAt: number }>;
 	readonly unlinkSignal: () => void;
 	stdout: string;
 	stderr: string;
@@ -353,6 +392,26 @@ function assertBoundedJson(value: unknown, label: string, maxBytes = MAX_HOST_RE
 	if (json === undefined) throw new IpythonControllerError(`${label} is not JSON-compatible`);
 	const bytes = Buffer.byteLength(json, "utf8");
 	if (bytes > maxBytes) throw new IpythonControllerError(`${label} exceeds ${maxBytes} bytes`);
+}
+
+/**
+ * Reduces the data a handler publishes to the presentation-safe summary
+ * allowlist. Unknown keys — request arguments, response bodies, tokens — are
+ * dropped rather than truncated, so no raw payload can leak through progress.
+ */
+export function ipythonHostOperationSummary(
+	data: Readonly<Record<string, unknown>>,
+): IpythonHostOperationSummary | undefined {
+	const summary: { path?: string; count?: number; unit?: string; dryRun?: boolean } = {};
+	const target = data.path;
+	if (typeof target === "string" && target.trim()) summary.path = target.trim().slice(0, MAX_HOST_SUMMARY_PATH_CHARS);
+	const count = data.count;
+	if (typeof count === "number" && Number.isSafeInteger(count) && count >= 0) summary.count = count;
+	const unit = data.unit;
+	if (typeof unit === "string" && unit.trim()) summary.unit = unit.trim().slice(0, MAX_HOST_SUMMARY_UNIT_CHARS);
+	const dryRun = data.dryRun ?? data.dry_run;
+	if (typeof dryRun === "boolean") summary.dryRun = dryRun;
+	return Object.keys(summary).length > 0 ? Object.freeze(summary) : undefined;
 }
 
 function asString(value: unknown): string | undefined {
@@ -560,6 +619,7 @@ export class IpythonController {
 			hostArtifacts: [],
 			hostAbort: new AbortController(),
 			hostChannels: new Map(),
+			hostOperations: new Map(),
 			unlinkSignal: () => signal?.removeEventListener("abort", onAbort),
 			stdout: "",
 			stderr: "",
@@ -860,6 +920,7 @@ export class IpythonController {
 					: frame.status === "error"
 						? "IPython cell failed"
 						: "IPython cell completed",
+				frame.status === "aborted" ? "aborted" : "error",
 			);
 			active.unlinkSignal();
 			active.resolve({
@@ -879,7 +940,7 @@ export class IpythonController {
 			if (this.#active?.id === frame.id) {
 				const active = this.#active;
 				const error = new IpythonControllerError(frame.error, { stderr: this.#stderr });
-				await this.#closeHostRequests(active, generation, error.message);
+				await this.#closeHostRequests(active, generation, error.message, "error");
 				active.unlinkSignal();
 				active.reject(error);
 				active.rejectCompletion(error);
@@ -891,14 +952,60 @@ export class IpythonController {
 		}
 	}
 
-	async #closeHostRequests(active: PendingExecution, generation: number, reason: string): Promise<void> {
+	/** Records one terminal operation event and stops any later duplicate. */
+	async #terminateHostOperation(
+		active: PendingExecution,
+		operationId: string,
+		status: IpythonExecutionStatus,
+	): Promise<void> {
+		const started = active.hostOperations.get(operationId);
+		if (!started) return;
+		active.hostOperations.delete(operationId);
+		const at = Date.now();
+		await this.#publishHostOperation(active, {
+			kind: "host_operation",
+			operationId,
+			operation: started.operation,
+			phase: "terminal",
+			at,
+			status,
+			durationMs: Math.max(0, at - started.startedAt),
+		});
+	}
+
+	async #publishHostOperation(active: PendingExecution, event: IpythonHostOperationEvent): Promise<void> {
+		active.events.push(event);
+		try {
+			await active.options?.onEvent?.(event);
+		} catch {
+			// Nested operation presentation cannot change host request handling.
+		}
+	}
+
+	async #closeHostRequests(
+		active: PendingExecution,
+		generation: number,
+		reason: string,
+		status: IpythonExecutionStatus,
+		sendReplies = true,
+	): Promise<void> {
+		// Terminal records are written before the abort so a handler that
+		// rejects from the same abort cannot report a different outcome.
+		for (const operationId of [...active.hostOperations.keys()]) {
+			await this.#terminateHostOperation(active, operationId, status);
+		}
 		active.hostAbort.abort(new Error(reason));
 		for (const channel of active.hostChannels.values()) channel.close(new IpythonControllerError(reason));
 		active.hostChannels.clear();
 		const commIds = [...this.#comms].filter(([, comm]) => comm.executionId === active.id).map(([commId]) => commId);
 		for (const commId of commIds) {
 			this.#comms.delete(commId);
-			await this.#write({ op: "comm_reply", comm_id: commId, data: { status: "error", error: reason } }, generation);
+			if (sendReplies) {
+				await this.#write(
+					{ op: "comm_reply", comm_id: commId, data: { status: "error", error: reason } },
+					generation,
+				);
+			}
 		}
 	}
 
@@ -909,6 +1016,7 @@ export class IpythonController {
 		const data = frame.data ?? {};
 		const type = data.type;
 		let response: Readonly<Record<string, unknown>>;
+		let terminalStatus: IpythonExecutionStatus = "ok";
 		try {
 			assertBoundedJson(data, "host request");
 			if (typeof type !== "string" || type.trim().length === 0) {
@@ -916,17 +1024,30 @@ export class IpythonController {
 			}
 			const operation = type.trim();
 			if (operation === "tool.call") throw new IpythonControllerError("host operation is reserved: tool.call");
-			if (active.hostAbort.signal.aborted) throw abortError(active.hostAbort.signal);
-			const context = active.options?.hostContext;
-			if (!context) throw new IpythonControllerError("host request has no active cell context");
 			const fixedHandler = this.#options.hostHandlers?.[operation];
 			const extensionHandler = fixedHandler ? undefined : this.#options.extensionHostHandlerResolver?.(operation);
 			if (!fixedHandler && !extensionHandler)
 				throw new IpythonControllerError(`unknown host request type: ${operation}`);
+			if (active.hostAbort.signal.aborted) throw abortError(active.hostAbort.signal);
+			const startedAt = Date.now();
+			active.hostOperations.set(frame.comm_id, { operation, startedAt });
+			await this.#publishHostOperation(active, {
+				kind: "host_operation",
+				operationId: frame.comm_id,
+				operation,
+				phase: "start",
+				at: startedAt,
+			});
+			const context = active.options?.hostContext;
+			if (!context) throw new IpythonControllerError("host request has no active cell context");
 			const publish = async (event: IpythonExecutionEvent): Promise<void> => {
 				if (active.hostAbort.signal.aborted) throw abortError(active.hostAbort.signal);
 				if (generation !== this.#generation || this.#active !== active) {
 					throw new IpythonControllerError("host request cell is no longer active");
+				}
+				if (event.kind === "host_operation") {
+					await this.#publishHostOperation(active, event);
+					return;
 				}
 				active.events.push(event);
 				await active.options?.onEvent?.(event);
@@ -945,7 +1066,16 @@ export class IpythonController {
 					throw new RangeError(`host progress message exceeds ${MAX_HOST_MESSAGE_CHARS} characters`);
 				}
 				assertBoundedJson(progressData, "host progress", MAX_HOST_PROGRESS_BYTES);
-				await publish({ kind: "host_progress", operation, message, data: progressData });
+				const summary = ipythonHostOperationSummary(progressData);
+				await publish({
+					kind: "host_operation",
+					operationId: frame.comm_id,
+					operation,
+					phase: "progress",
+					at: Date.now(),
+					message,
+					...(summary ? { summary } : {}),
+				});
 			};
 			const publishDisplay = async (display: Omit<IpythonDisplayEvent, "kind">): Promise<void> => {
 				assertBoundedJson(display, "host rich display");
@@ -1037,11 +1167,18 @@ export class IpythonController {
 			response = { ...resultObject, status: "ok" };
 		} catch (error) {
 			const message = errorMessage(error);
+			terminalStatus =
+				active.hostAbort.signal.aborted || (error instanceof Error && error.name === "AbortError")
+					? "aborted"
+					: "error";
 			response = {
 				status: "error",
 				error: message.length > MAX_HOST_MESSAGE_CHARS ? `${message.slice(0, MAX_HOST_MESSAGE_CHARS)}…` : message,
 			};
 		}
+		// The terminal record carries status and duration only: a thrown message
+		// may quote the request, so it stays with the cell's own traceback.
+		await this.#terminateHostOperation(active, frame.comm_id, terminalStatus);
 		assertBoundedJson(response, "host response");
 		if (generation !== this.#generation) return;
 		const finalComm = this.#comms.get(frame.comm_id);
@@ -1070,20 +1207,32 @@ export class IpythonController {
 				// The kernel may have already exited with its controller.
 			}
 		}
-		const error = new IpythonControllerError(
-			`IPython controller exited${code === 0 ? "" : ` with code ${code}`}${stderr ? `: ${stderr.trim()}` : ""}`,
-			{ exitCode: code, stderr },
-		);
-		this.#hostAbort.abort(error);
-		this.#active?.hostAbort.abort(error);
-		this.#ready?.reject(error);
-		this.#active?.unlinkSignal();
-		this.#active?.reject(error);
-		this.#active?.rejectCompletion(error);
-		for (const pending of this.#queue.splice(0)) {
-			pending.unlinkSignal();
-			pending.reject(error);
-			pending.rejectCompletion(error);
+		if (!this.#disposed) {
+			const error = new IpythonControllerError(
+				`IPython controller exited${code === 0 ? "" : ` with code ${code}`}${stderr ? `: ${stderr.trim()}` : ""}`,
+				{ exitCode: code, stderr },
+			);
+			const active = this.#active;
+			if (active) {
+				await this.#closeHostRequests(
+					active,
+					generation,
+					error.message,
+					active.hostAbort.signal.aborted ? "aborted" : "error",
+					false,
+				);
+			}
+			this.#hostAbort.abort(error);
+			active?.hostAbort.abort(error);
+			this.#ready?.reject(error);
+			active?.unlinkSignal();
+			active?.reject(error);
+			active?.rejectCompletion(error);
+			for (const pending of this.#queue.splice(0)) {
+				pending.unlinkSignal();
+				pending.reject(error);
+				pending.rejectCompletion(error);
+			}
 		}
 		this.#active = undefined;
 		this.#proc = undefined;
@@ -1123,8 +1272,12 @@ export class IpythonController {
 	async #disposeInternal(): Promise<void> {
 		this.#disposed = true;
 		const disposed = new IpythonControllerError("IPython controller disposed", { stderr: this.#stderr });
+		if (this.#active) {
+			await this.#closeHostRequests(this.#active, this.#generation, disposed.message, "aborted", false);
+		}
 		this.#hostAbort.abort(disposed);
 		this.#active?.hostAbort.abort(disposed);
+		this.#ready?.reject(disposed);
 		this.#active?.unlinkSignal();
 		this.#active?.reject(disposed);
 		this.#active?.rejectCompletion(disposed);

@@ -6,12 +6,22 @@ import { collectIpythonMimeItems } from "../../ipython/extension-registry";
 import type { IpythonCellJournalDetail, IpythonJournalDetail } from "../../ipython/journal";
 import {
 	type IpythonCellPresentation,
+	type IpythonHostOperationPresentation,
+	ipythonHostOperationDetails,
 	projectIpythonCellPresentation,
 	projectIpythonLiveCellPresentation,
 } from "../../ipython/projection";
 import type { ActProjectionEvent } from "../../session/act-events";
-import { PREVIEW_LIMITS, shortenPath, truncateToWidth } from "../../tools/render-utils";
-import { outputBlockContentWidth, renderCodeCell } from "../../tui";
+import {
+	formatDuration,
+	formatExpandHint,
+	formatMoreItems,
+	PREVIEW_LIMITS,
+	replaceTabs,
+	shortenPath,
+	truncateToWidth,
+} from "../../tools/render-utils";
+import { outputBlockContentWidth, renderCodeCell, renderStatusLine } from "../../tui";
 import { theme } from "../theme/theme";
 
 const MAX_DISPLAY_LINE_CHARS = 4_000;
@@ -36,6 +46,55 @@ function cellStatus(detail: IpythonCellJournalDetail): "complete" | "warning" | 
 	if (detail.status === "ok") return "complete";
 	if (detail.status === "aborted") return "warning";
 	return "error";
+}
+
+function operationStatus(status: IpythonHostOperationPresentation["status"]): "running" | "done" | "error" | "aborted" {
+	if (status === "running") return "running";
+	if (status === "ok") return "done";
+	if (status === "aborted") return "aborted";
+	return "error";
+}
+
+function operationRows(
+	operations: readonly IpythonHostOperationPresentation[],
+	expanded: boolean,
+	width: number,
+): string[] {
+	if (operations.length === 0) return [];
+	const visible = expanded ? operations : operations.slice(-PREVIEW_LIMITS.OUTPUT_COLLAPSED);
+	const hidden = operations.length - visible.length;
+	const rows = [theme.fg("toolTitle", "Operations")];
+	for (const operation of visible) {
+		const path = operation.summary?.path;
+		const details = ipythonHostOperationDetails(operation, path ? shortenPath(path) : undefined).map(detail =>
+			replaceTabs(sanitizeText(detail)),
+		);
+		if (operation.durationMs !== undefined) {
+			const duration = `(${formatDuration(operation.durationMs)})`;
+			if (details.length > 0) details[details.length - 1] = `${details.at(-1)} ${duration}`;
+			else details.push(duration);
+		}
+		const metadata =
+			details.length > 0 ? [`${theme.sep.dot.trimStart()}${details[0]}`, ...details.slice(1)] : details;
+		rows.push(
+			`  ${renderStatusLine(
+				{
+					icon: operationStatus(operation.status),
+					title: replaceTabs(sanitizeText(operation.operation)),
+					meta: metadata,
+				},
+				theme,
+			)}`,
+		);
+		if (expanded && operation.message) {
+			rows.push(`    ${theme.fg("dim", replaceTabs(sanitizeText(operation.message)))}`);
+		}
+	}
+	if (hidden > 0) {
+		const hint = formatExpandHint(theme, expanded, true);
+		rows.push(`  ${theme.fg("dim", `${formatMoreItems(hidden, "operation")}${hint ? ` ${hint}` : ""}`)}`);
+	}
+	return rows.map(row => truncateToWidth(row, width));
 }
 
 export interface IpythonLiveCellView {
@@ -140,6 +199,7 @@ export class IpythonCellMessageComponent extends Container {
 				),
 		};
 		this.addChild(cell);
+		this.#appendOperations(presentation);
 
 		if (this.#expanded) {
 			const progress = presentation.startupProgress.map(
@@ -193,6 +253,7 @@ export class IpythonCellMessageComponent extends Container {
 				),
 		};
 		this.addChild(cell);
+		this.#appendOperations(presentation);
 
 		const progress = presentation.startupProgress.at(-1);
 		if (progress) {
@@ -200,6 +261,13 @@ export class IpythonCellMessageComponent extends Container {
 		}
 		if (this.#expanded) this.#appendMimeComponents(presentation);
 		this.#rebuildActs();
+	}
+
+	#appendOperations(presentation: IpythonCellPresentation): void {
+		if (presentation.operations.length === 0) return;
+		this.addChild({
+			render: width => operationRows(presentation.operations, this.#expanded, width),
+		});
 	}
 
 	#appendMimeComponents(presentation: IpythonCellPresentation): void {

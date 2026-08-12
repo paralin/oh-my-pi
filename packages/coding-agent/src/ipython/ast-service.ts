@@ -166,7 +166,11 @@ export function createIpythonAstHostHandlers(options: IpythonAstServiceOptions):
 			const target = await workspacePath(options.cwd, input);
 			await request.publishProgress("Searching syntax trees", { path: input });
 			const result = await astGrep(searchOptions(request, target));
-			await request.publishProgress("Syntax-tree search completed", { path: input, matches: result.totalMatches });
+			await request.publishProgress("Syntax-tree search completed", {
+				path: input,
+				count: result.totalMatches,
+				unit: "matches",
+			});
 			return result as unknown as Readonly<Record<string, unknown>>;
 		},
 		"ast.rewrite": async request => {
@@ -186,12 +190,13 @@ export function createIpythonAstHostHandlers(options: IpythonAstServiceOptions):
 			const input = requiredString(request.data, "path", MAX_PATH_CHARS);
 			const target = await workspacePath(options.cwd, input);
 			const settings = rewriteOptions(request, target);
-			await request.publishProgress("Rewriting syntax trees", { path: input, dry_run: settings.dryRun });
+			await request.publishProgress("Rewriting syntax trees", { path: input, dryRun: settings.dryRun });
 			const result = await astEdit(settings);
 			await request.publishProgress("Syntax-tree rewrite completed", {
 				path: input,
-				replacements: result.totalReplacements,
-				dry_run: settings.dryRun,
+				count: result.totalReplacements,
+				unit: "replacements",
+				dryRun: settings.dryRun,
 			});
 			return result as unknown as Readonly<Record<string, unknown>>;
 		},

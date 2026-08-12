@@ -305,6 +305,7 @@ describe("RPC frame encoding", () => {
 			errors: [],
 			updates: [],
 			startupProgress: [],
+			operations: [],
 			safeText: { text: "image\n", truncated: false, totalBytes: 6, outputBytes: 6 },
 			artifacts: [{ path: "/tmp/ipython/image.png", mimeType: "image/png", bytes: 1024, label: "image" }],
 		} satisfies IpythonCompletedCellPresentation;

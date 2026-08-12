@@ -31,6 +31,7 @@ function eventLabel(event: IpythonExecutionEvent): string {
 	if (event.kind === "result") return `result:${event.data["text/plain"] ?? ""}`;
 	if (event.kind === "display") return `display:${event.text}`;
 	if (event.kind === "host_progress") return `progress:${event.operation}:${event.message}`;
+	if (event.kind === "host_operation") return `operation:${event.operation}:${event.phase}`;
 	return `error:${event.ename}:${event.evalue}`;
 }
 
@@ -399,13 +400,14 @@ async def host_request(data):
 					authority: "trusted-cell",
 				},
 			]);
-			const progress = comm.events.find(event => event.kind === "host_progress");
-			expect(progress).toEqual({
-				kind: "host_progress",
+			const operations = comm.events.filter(event => event.kind === "host_operation");
+			expect(operations.map(event => event.phase)).toEqual(["start", "progress", "terminal"]);
+			expect(operations[1]).toMatchObject({
 				operation: "echo",
+				phase: "progress",
 				message: "looking up answer",
-				data: { step: 1 },
 			});
+			expect(operations.at(-1)).toMatchObject({ operation: "echo", phase: "terminal", status: "ok" });
 			const hostDisplay = comm.events.find(event => event.kind === "display" && event.metadata.source === "host");
 			expect(hostDisplay?.kind === "display" ? hostDisplay.text : undefined).toBe(
 				"[displayed MIME types: application/json, text/html]",
@@ -631,11 +633,17 @@ async def extension_request(payload):
 			);
 			expect(completed.status).toBe("ok");
 			expect(completed.result).toBe("42");
-			expect(completed.events).toContainEqual({
-				kind: "host_progress",
+			const completedOperations = completed.events.filter(event => event.kind === "host_operation");
+			expect(completedOperations.map(event => event.phase)).toEqual(["start", "progress", "terminal"]);
+			expect(completedOperations[1]).toMatchObject({
 				operation: "extension.demo.run",
+				phase: "progress",
 				message: "extension started",
-				data: { value: 41 },
+			});
+			expect(completedOperations.at(-1)).toMatchObject({
+				operation: "extension.demo.run",
+				phase: "terminal",
+				status: "ok",
 			});
 			expect(completed.hostArtifacts).toMatchObject([
 				{
@@ -653,7 +661,13 @@ await extension_request({"block": True})`,
 			await blockingEntered.promise;
 			await controller.interrupt();
 			expect(await blockingAborted.promise).toBe("IPython cell interrupted");
-			expect((await blocking).status).toBe("aborted");
+			const aborted = await blocking;
+			expect(aborted.status).toBe("aborted");
+			expect(aborted.events.filter(event => event.kind === "host_operation").at(-1)).toMatchObject({
+				operation: "extension.demo.run",
+				phase: "terminal",
+				status: "aborted",
+			});
 			expect((await controller.execute("20 + 22")).result).toBe("42");
 
 			registry.replace(

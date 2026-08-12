@@ -110,6 +110,18 @@ describe("IPython structural AST service", () => {
 			"Rewriting syntax trees",
 			"Syntax-tree rewrite completed",
 		]);
+		expect(f.progress.map(item => item.data)).toEqual([
+			{ path: "fixture.ts" },
+			{ path: "fixture.ts", count: 1, unit: "matches" },
+			{ path: "fixture.py" },
+			{ path: "fixture.py", count: 1, unit: "matches" },
+			{ path: "fixture.ts", dryRun: true },
+			{ path: "fixture.ts", count: 1, unit: "replacements", dryRun: true },
+			{ path: "fixture.ts", dryRun: false },
+			{ path: "fixture.ts", count: 1, unit: "replacements", dryRun: false },
+			{ path: "fixture.py", dryRun: false },
+			{ path: "fixture.py", count: 1, unit: "replacements", dryRun: false },
+		]);
 	});
 
 	test("rejects paths outside the active workspace and unknown fields", async () => {

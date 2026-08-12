@@ -1119,6 +1119,17 @@ describe("ACP event mapper", () => {
 			errors: [],
 			updates,
 			startupProgress: [{ stage: "runtime", message: "Preparing runtime..." }],
+			operations: [
+				{
+					operationId: "comm-ast",
+					operation: "ast.search",
+					status: "ok",
+					startedAt: 11,
+					durationMs: 4,
+					message: "Syntax-tree search completed",
+					summary: { path: "src/operation.ts", count: 3, unit: "matches" },
+				},
+			],
 			safeText: {
 				text: "safe output\n[displayed MIME types]\n[omp.code.edit] Applied edit\n",
 				truncated: false,
@@ -1224,8 +1235,10 @@ describe("ACP event mapper", () => {
 		expect(serializedNotifications).not.toContain("a".repeat(300_000));
 		expect(serializedNotifications.length).toBeLessThan(800_000);
 		expect(JSON.stringify(content)).toContain("Preparing runtime");
+		expect(JSON.stringify(content)).toContain("ast.search · ok · src/operation.ts · 3 matches (4ms)");
 		expect(JSON.stringify(content)).toContain("Additional IPython cell content omitted");
 		expect(JSON.stringify(content)).toContain("omp.code.edit");
+		expect(endUpdate.locations).toContainEqual({ path: "/work/src/operation.ts" });
 		expect(buildToolCallStartUpdate({ toolCallId: "ip-1", toolName: "ipython", args: {} })).toMatchObject({
 			kind: "execute",
 		});
@@ -1253,6 +1266,7 @@ describe("ACP event mapper", () => {
 			errors: [],
 			updates: [],
 			startupProgress: [],
+			operations: [],
 			safeText: { text: "IPython cell aborted.\n", truncated: false, totalBytes: 23, outputBytes: 23 },
 			artifacts: [],
 		} satisfies IpythonCompletedCellPresentation;

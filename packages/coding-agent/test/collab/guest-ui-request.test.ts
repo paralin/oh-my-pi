@@ -584,6 +584,7 @@ describe("collab IPython cell replication", () => {
 			errors: [],
 			updates: [{ kind: "execution" as const, cellId: "cell-collab", origin: "model" as const, event: display }],
 			startupProgress: [],
+			operations: [],
 			safeText: { text: "[displayed MIME types]\n", truncated: false, totalBytes: 23, outputBytes: 23 },
 			artifacts: [],
 		};

@@ -371,6 +371,7 @@ describe("IPython event replication shrink", () => {
 					},
 				],
 				startupProgress: [],
+				operations: [],
 				safeText: {
 					text: "x".repeat(5 * 1024 * 1024),
 					truncated: true,
