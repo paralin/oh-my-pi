@@ -276,6 +276,7 @@ def _omp_restore_state():
         return
 
     _pins = []
+    _latest_scratch = []
     try:
         _manifest_path = ${pythonString(snapshotManifestPath(inPath))}
         with _b.open(_manifest_path, "r", encoding="utf-8") as _file:
@@ -284,6 +285,9 @@ def _omp_restore_state():
             _raw_pins = _manifest.get("pins", [])
             if _b.isinstance(_raw_pins, _b.list):
                 _pins = [_name for _name in _raw_pins if _b.isinstance(_name, _b.str)]
+            _raw_latest_scratch = _manifest.get("latestScratch", [])
+            if _b.isinstance(_raw_latest_scratch, _b.list):
+                _latest_scratch = [_name for _name in _raw_latest_scratch if _b.isinstance(_name, _b.str)]
     except (_b.OSError, _b.ValueError, _b.TypeError):
         pass
 
@@ -308,7 +312,7 @@ def _omp_restore_state():
             _failed.append({"name": _name, "reason": _b.type(_err).__name__ + ": " + _b.str(_err)[:200]})
     _b.print(
         _marker
-        + _json.dumps({"restored": _b.sorted(_restored), "pins": _b.sorted(_name for _name in _pins if _name in _restored), "failed": _failed, "missing": False})
+        + _json.dumps({"restored": _b.sorted(_restored), "pins": _b.sorted(_name for _name in _pins if _name in _restored), "latestScratch": _b.sorted(_name for _name in _latest_scratch if _name in _restored), "failed": _failed, "missing": False})
     )
 
 
@@ -334,6 +338,7 @@ interface RawRestoreResult {
 	readonly failed?: unknown;
 	readonly missing?: unknown;
 	readonly pins?: unknown;
+	readonly latestScratch?: unknown;
 }
 
 function parseMarker<T>(stdout: string): T | undefined {
@@ -397,5 +402,6 @@ export function parseRestoreResult(stdout: string, snapshotPath: string): Ipytho
 		missing: raw.missing === true,
 		path: snapshotPath,
 		pins: names(raw.pins),
+		latestScratch: names(raw.latestScratch),
 	};
 }

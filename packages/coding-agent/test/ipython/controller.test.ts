@@ -242,6 +242,18 @@ _omp_session._install_namespace_tracker()
 			const afterError = await controller.execute("print(beta)", { hostContext: context });
 			expect(afterError.status).toBe("ok");
 			expect(afterError.stdout).toBe("1\n");
+			await controller.execute("scratch_before_error = 7", { hostContext: context });
+			const failedScratch = await controller.execute("scratch_from_error = 8; 1 / 0", { hostContext: context });
+			expect(failedScratch.status).toBe("error");
+			const metadataAfterError = await controller.execute("print(_omp_session._recovery_metadata())");
+			expect(metadataAfterError.stdout).toContain("'scratch_before_error'");
+			const cleanupAfterError = await controller.execute("_omp_session.cleanup_scratch()", { hostContext: context });
+			expect(cleanupAfterError.namespaceDelta?.deleted).toEqual([{ name: "scratch_before_error", type: "int" }]);
+			const errorState = await controller.execute(
+				'print(("scratch_before_error" in globals(), scratch_from_error))',
+				{ hostContext: context },
+			);
+			expect(errorState.stdout).toBe("(False, 8)\n");
 			const deleted = await controller.execute("del alpha", { hostContext: context });
 			expect(deleted.namespaceDelta?.deleted).toEqual([{ name: "alpha", type: "list" }]);
 			const abort = new AbortController();
@@ -257,6 +269,26 @@ _omp_session._install_namespace_tracker()
 			const afterInterrupt = await controller.execute("print(gamma)", { hostContext: context });
 			expect(afterInterrupt.status).toBe("ok");
 			expect(afterInterrupt.stdout).toBe("3\n");
+			await controller.execute("scratch_before_interrupt = 9", { hostContext: context });
+			const cleanupAbort = new AbortController();
+			const failedInterrupt = controller.execute(
+				"scratch_from_interrupt = 10; import time; time.sleep(30)",
+				{ hostContext: context },
+				cleanupAbort.signal,
+			);
+			setTimeout(() => cleanupAbort.abort(), 250);
+			expect((await failedInterrupt).status).toBe("aborted");
+			const cleanupAfterInterrupt = await controller.execute("_omp_session.cleanup_scratch()", {
+				hostContext: context,
+			});
+			expect(cleanupAfterInterrupt.namespaceDelta?.deleted).toEqual([
+				{ name: "scratch_before_interrupt", type: "int" },
+			]);
+			const interruptState = await controller.execute(
+				'print(("scratch_before_interrupt" in globals(), scratch_from_interrupt))',
+				{ hostContext: context },
+			);
+			expect(interruptState.stdout).toBe("(False, 10)\n");
 		} finally {
 			await controller.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });
@@ -1175,6 +1207,7 @@ any = "shadowed any"
 			const manifestPath = path.join(tempRoot, "kernel-state.json");
 			const manifest = await Bun.file(manifestPath).json();
 			manifest.pins = ["good_value", "corrupt_value"];
+			manifest.latestScratch = ["good_value", "corrupt_value"];
 			await Bun.write(manifestPath, JSON.stringify(manifest));
 			const corrupt = await controller.execute(`
 import dill
@@ -1198,6 +1231,7 @@ os.replace(${JSON.stringify(snapshotPath)} + ".tmp", ${JSON.stringify(snapshotPa
 				expect(restore.failed.some(entry => entry.name === "corrupt_value")).toBe(true);
 				expect(restore.failed.some(entry => entry.name === "get_ipython")).toBe(true);
 				expect(restore.pins).toEqual(["good_value"]);
+				expect(restore.latestScratch).toEqual(["good_value"]);
 				const usable = await resumed.controller.execute("(good_value, callable(get_ipython))");
 				expect(usable.status).toBe("ok");
 				expect(usable.result).toBe("(42, True)");

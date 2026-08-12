@@ -405,10 +405,13 @@ export class IpythonKernelProvisioner {
 				throw new Error(`Failed to prepare the session IPython namespace:\n${errorText(bootstrap)}`);
 			}
 			const restoredPins = this.#lastRestore?.pins ?? [];
-			if (restoredPins.length > 0) {
-				const pinsCode = `import omp as _omp_runtime_pins; _omp_runtime_pins.session._restore_pins(tuple(${JSON.stringify(restoredPins)})); del _omp_runtime_pins`;
-				const pins = await waitWithSignal(controller.execute(pinsCode), signal);
-				if (pins.status !== "ok") throw new Error(`Failed to restore IPython pins:\n${errorText(pins)}`);
+			const restoredScratch = this.#lastRestore?.latestScratch ?? [];
+			if (restoredPins.length > 0 || restoredScratch.length > 0) {
+				const metadataCode = `import omp as _omp_runtime_metadata; _omp_runtime_metadata.session._restore_namespace_metadata(tuple(${JSON.stringify(restoredPins)}), tuple(${JSON.stringify(restoredScratch)})); del _omp_runtime_metadata`;
+				const metadata = await waitWithSignal(controller.execute(metadataCode), signal);
+				if (metadata.status !== "ok") {
+					throw new Error(`Failed to restore IPython namespace metadata:\n${errorText(metadata)}`);
+				}
 			}
 
 			if (signal.aborted) throw abortError(signal);

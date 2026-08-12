@@ -589,19 +589,82 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 		const cells = new IpythonCellService(provisioner, { sessionId: "namespace-lifecycle", cwd: tempRoot });
 		try {
 			const model = await cells.execute({
-				code: 'pinned_value = 1; scratch_value = 2; provider_api_key = "hidden"; omp.session.pin("pinned_value")',
+				code: [
+					"import inspect, sys",
+					'pinned_value = 1; scratch_auto_a = 2; scratch_auto_b = 3; provider_api_key = "hidden"',
+					"def scratch_function(): return 4",
+					"class ScratchClass: pass",
+					"@(decorator_name := (lambda value: value))",
+					"def Decorated(arg=(default_name := 1)):",
+					"    nested_function = 1",
+					"class Derived((base_name := object)):",
+					"    nested_class = 1",
+					"lambda_holder = lambda arg=(lambda_default := 2): (nested_lambda := 3)",
+					"target_list = [0]",
+					"target_list[(target_key := 0)] = 1",
+					"class TargetObject: pass",
+					"(target_object := TargetObject()).attribute = 1",
+					"target_augmented = [0]",
+					"target_augmented[(target_augmented_key := 0)] += 1",
+					'omp.session.pin("pinned_value")',
+				].join("\n"),
 				origin: "model",
 			});
 			expect(model.namespaceDelta?.origin).toBe("model");
-			expect(model.namespaceDelta?.added.map(item => item.name)).toEqual(["pinned_value", "scratch_value"]);
+			expect(model.namespaceDelta?.added.map(item => item.name)).toEqual([
+				"Decorated",
+				"Derived",
+				"ScratchClass",
+				"TargetObject",
+				"base_name",
+				"decorator_name",
+				"default_name",
+				"inspect",
+				"lambda_default",
+				"lambda_holder",
+				"pinned_value",
+				"scratch_auto_a",
+				"scratch_auto_b",
+				"scratch_function",
+				"sys",
+				"target_augmented",
+				"target_augmented_key",
+				"target_key",
+				"target_list",
+				"target_object",
+			]);
 			const cleaned = await cells.execute({ code: "omp.session.cleanup_scratch()", origin: "direct" });
 			expect(cleaned.namespaceDelta?.origin).toBe("direct");
-			expect(cleaned.namespaceDelta?.deleted).toEqual([{ name: "scratch_value", type: "int" }]);
+			expect(cleaned.namespaceDelta?.deleted).toEqual([
+				{ name: "Decorated", type: "function" },
+				{ name: "Derived", type: "type" },
+				{ name: "ScratchClass", type: "type" },
+				{ name: "TargetObject", type: "type" },
+				{ name: "base_name", type: "type" },
+				{ name: "decorator_name", type: "function" },
+				{ name: "default_name", type: "int" },
+				{ name: "lambda_default", type: "int" },
+				{ name: "lambda_holder", type: "function" },
+				{ name: "scratch_auto_a", type: "int" },
+				{ name: "scratch_auto_b", type: "int" },
+				{ name: "scratch_function", type: "function" },
+				{ name: "target_augmented", type: "list" },
+				{ name: "target_augmented_key", type: "int" },
+				{ name: "target_key", type: "int" },
+				{ name: "target_list", type: "list" },
+				{ name: "target_object", type: "TargetObject" },
+			]);
 			const state = await cells.execute({
-				code: 'print(("pinned_value" in globals(), "scratch_value" in globals(), omp.session.list_pins()))',
+				code: [
+					'print(("pinned_value" in globals(), "scratch_auto_a" in globals(), "scratch_auto_b" in globals(), "scratch_function" in globals(), "ScratchClass" in globals(), "Decorated" in globals(), "Derived" in globals(), "decorator_name" in globals(), "default_name" in globals(), "base_name" in globals(), "nested_function" in globals(), "nested_class" in globals(), "nested_lambda" in globals(), omp.session.list_pins()))',
+					"print((show is helpers.show, rg is helpers.rg, run is helpers.run, inspect.__name__, sys.__name__))",
+				].join("\n"),
 				origin: "direct",
 			});
-			expect(state.stdout).toContain("(True, False, ('pinned_value',))");
+			expect(state.stdout).toContain(
+				"(True, False, False, False, False, False, False, False, False, False, False, False, False, ('pinned_value',))",
+			);
+			expect(state.stdout).toContain("(True, True, True, 'inspect', 'sys')");
 			for (const code of [
 				'omp.session.cleanup_scratch("pinned_value")',
 				'omp.session.cleanup_scratch("unknown_name")',
@@ -613,6 +676,49 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			}
 		} finally {
 			await cells.dispose();
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}, 180_000);
+
+	test("restores the latest assignment cleanup cohort without admitting imports", async () => {
+		const uvExecutable = Bun.env.OMP_IPYTHON_TEST_UV;
+		if (!uvExecutable) throw new Error("OMP_IPYTHON_TEST_UV is required");
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-scratch-restore-"));
+		const home = path.join(tempRoot, "home");
+		const sidecarDir = path.join(tempRoot, "sidecar");
+		await fs.mkdir(home);
+		const options = {
+			cwd: tempRoot,
+			sessionId: "scratch-restore",
+			sidecarDir,
+			environment: { HOME: home, PATH: Bun.env.PATH ?? "", UV_NO_CONFIG: "1" },
+			runtime: { runtimeRoot: path.join(tempRoot, "runtime"), uvExecutable },
+		} as const;
+		const first = new IpythonKernelProvisioner(options);
+		const firstCells = new IpythonCellService(first, { sessionId: "scratch-restore", cwd: tempRoot });
+		try {
+			const created = await firstCells.execute({ code: "import inspect\nscratch_restore = 1", origin: "model" });
+			expect(created.status).toBe("ok");
+			const snapshot = await first.flushSnapshot();
+			expect(snapshot?.latestScratch).toEqual(["scratch_restore"]);
+		} finally {
+			await firstCells.dispose();
+		}
+
+		const second = new IpythonKernelProvisioner(options);
+		const secondCells = new IpythonCellService(second, { sessionId: "scratch-restore", cwd: tempRoot });
+		try {
+			await second.ensure();
+			expect(second.lastRestore?.latestScratch).toEqual(["scratch_restore"]);
+			const cleaned = await secondCells.execute({ code: "omp.session.cleanup_scratch()", origin: "direct" });
+			expect(cleaned.namespaceDelta?.deleted).toEqual([{ name: "scratch_restore", type: "int" }]);
+			const state = await secondCells.execute({
+				code: 'print(("scratch_restore" in globals(), show is helpers.show, rg is helpers.rg, run is helpers.run))',
+				origin: "direct",
+			});
+			expect(state.stdout).toContain("(False, True, True, True)");
+		} finally {
+			await secondCells.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}
 	}, 180_000);
@@ -1972,6 +2078,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 			},
 			runtime: { runtimeRoot: path.join(tempRoot, "runtime"), uvExecutable },
 		});
+		const cells = new IpythonCellService(provisioner, { sessionId: "helper-restart", cwd: tempRoot });
 		try {
 			await provisioner.ensure();
 			const cold = await provisioner.execute(
@@ -1985,6 +2092,18 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				"(rlm.__name__, omp.__name__, helpers.__name__, callable(show), callable(rg), callable(run))",
 			);
 			expect(restored.result).toBe(cold.result);
+			const created = await cells.execute({
+				code: "import inspect\nscratch_after_restart = 1",
+				origin: "model",
+			});
+			expect(created.namespaceDelta?.added.map(item => item.name)).toEqual(["inspect", "scratch_after_restart"]);
+			const cleaned = await cells.execute({ code: "omp.session.cleanup_scratch()", origin: "direct" });
+			expect(cleaned.namespaceDelta?.deleted).toEqual([{ name: "scratch_after_restart", type: "int" }]);
+			const restartState = await cells.execute({
+				code: 'print(("scratch_after_restart" in globals(), inspect.__name__, show is helpers.show, rg is helpers.rg, run is helpers.run))',
+				origin: "direct",
+			});
+			expect(restartState.stdout).toContain("(False, 'inspect', True, True, True)");
 			expect(ready.filter(status => status.namespaceReset)).toEqual([
 				{
 					restart: true,
@@ -1993,7 +2112,7 @@ describeIntegration("IPython provisioner real-kernel boundary", () => {
 				},
 			]);
 		} finally {
-			await provisioner.dispose();
+			await cells.dispose();
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}
 	}, 120_000);

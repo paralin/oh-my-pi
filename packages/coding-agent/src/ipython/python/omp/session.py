@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from typing import Any
 
@@ -43,6 +44,7 @@ _pins: set[str] = set()
 _safe_scratch: set[str] = set()
 _latest_scratch: tuple[str, ...] = ()
 _before_namespace: dict[str, tuple[int, str]] | None = None
+_before_scratch_candidates: frozenset[str] = frozenset()
 _MAX_NAMESPACE_NAMES = 100
 
 
@@ -86,10 +88,96 @@ def _admitted_namespace() -> dict[str, tuple[int, str]]:
     }
 
 
+def _assignment_names(code: str) -> frozenset[str]:
+    """Return names bound by explicit assignments in the executed module scope."""
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return frozenset()
+
+    names: set[str] = set()
+
+    def add_target(target: ast.expr) -> None:
+        if isinstance(target, ast.Name):
+            names.add(target.id)
+        elif isinstance(target, (ast.List, ast.Tuple)):
+            for element in target.elts:
+                add_target(element)
+        elif isinstance(target, ast.Starred):
+            add_target(target.value)
+
+    class AssignmentVisitor(ast.NodeVisitor):
+        def visit_Assign(self, node: ast.Assign) -> None:
+            for target in node.targets:
+                add_target(target)
+                self.visit(target)
+            self.visit(node.value)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            add_target(node.target)
+            self.visit(node.target)
+            self.visit(node.annotation)
+            if node.value is not None:
+                self.visit(node.value)
+
+        def visit_AugAssign(self, node: ast.AugAssign) -> None:
+            self.visit(node.target)
+            self.visit(node.value)
+
+        def visit_NamedExpr(self, node: ast.NamedExpr) -> None:
+            add_target(node.target)
+            self.visit(node.value)
+
+        def _visit_function_signature(
+            self, node: ast.FunctionDef | ast.AsyncFunctionDef
+        ) -> None:
+            for decorator in node.decorator_list:
+                self.visit(decorator)
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                if default is not None:
+                    self.visit(default)
+            arguments = (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+            if node.args.vararg is not None:
+                arguments = (*arguments, node.args.vararg)
+            if node.args.kwarg is not None:
+                arguments = (*arguments, node.args.kwarg)
+            for argument in arguments:
+                if argument.annotation is not None:
+                    self.visit(argument.annotation)
+            if node.returns is not None:
+                self.visit(node.returns)
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            names.add(node.name)
+            self._visit_function_signature(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            names.add(node.name)
+            self._visit_function_signature(node)
+
+        def visit_ClassDef(self, node: ast.ClassDef) -> None:
+            names.add(node.name)
+            for expression in (*node.decorator_list, *node.bases):
+                self.visit(expression)
+            for keyword in node.keywords:
+                self.visit(keyword.value)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            for default in (*node.args.defaults, *node.args.kw_defaults):
+                if default is not None:
+                    self.visit(default)
+
+    AssignmentVisitor().visit(tree)
+    return frozenset(names)
+
+
 def _before_run_cell(info: Any) -> None:
-    global _before_namespace
+    global _before_namespace, _before_scratch_candidates
     metadata = getattr(info, "cell_meta", None)
-    _before_namespace = _admitted_namespace() if isinstance(metadata, dict) and metadata.get("omp_track_namespace") is True else None
+    tracked = isinstance(metadata, dict) and metadata.get("omp_track_namespace") is True
+    _before_namespace = _admitted_namespace() if tracked else None
+    raw_cell = getattr(info, "raw_cell", "")
+    _before_scratch_candidates = _assignment_names(raw_cell) if tracked and isinstance(raw_cell, str) else frozenset()
 
 
 def _namespace_group(names: list[str], namespace: dict[str, tuple[int, str]]) -> list[dict[str, str]]:
@@ -97,9 +185,11 @@ def _namespace_group(names: list[str], namespace: dict[str, tuple[int, str]]) ->
 
 
 def _after_run_cell(result: Any) -> None:
-    global _before_namespace
+    global _before_namespace, _before_scratch_candidates
     before = _before_namespace
+    scratch_candidates = _before_scratch_candidates
     _before_namespace = None
+    _before_scratch_candidates = frozenset()
     if before is None:
         return
     try:
@@ -109,7 +199,10 @@ def _after_run_cell(result: Any) -> None:
             name for name in after.keys() & before.keys() if after[name][0] != before[name][0]
         )
         deleted_names = sorted(before.keys() - after.keys())
-        _record_namespace_delta(tuple(added_names), tuple(deleted_names))
+        if getattr(result, "success", False) is True:
+            _record_namespace_delta(tuple(added_names), tuple(deleted_names), scratch_candidates)
+        else:
+            _discard_namespace_delta(tuple(deleted_names))
         groups = (
             _namespace_group(added_names, after),
             _namespace_group(rebound_names, after),
@@ -203,12 +296,24 @@ def cleanup_scratch(*names: str) -> tuple[str, ...]:
     return tuple(removed)
 
 
-def _record_namespace_delta(added: tuple[str, ...], deleted: tuple[str, ...]) -> None:
+def _record_namespace_delta(
+    added: tuple[str, ...], deleted: tuple[str, ...], scratch_candidates: frozenset[str]
+) -> None:
     """Record admitted identity changes after one completed user cell."""
     global _latest_scratch
     _safe_scratch.update(added)
     _safe_scratch.difference_update(deleted)
-    _latest_scratch = tuple(name for name in added if name in _safe_scratch)
+    _latest_scratch = tuple(
+        name for name in added if name in scratch_candidates and name in _safe_scratch
+    )
+
+
+def _discard_namespace_delta(deleted: tuple[str, ...]) -> None:
+    """Reject failed-cell additions while reconciling names it removed."""
+    global _latest_scratch
+    _safe_scratch.difference_update(deleted)
+    deleted_names = frozenset(deleted)
+    _latest_scratch = tuple(name for name in _latest_scratch if name not in deleted_names)
 
 
 def _recovery_metadata() -> dict[str, tuple[str, ...]]:
@@ -216,11 +321,23 @@ def _recovery_metadata() -> dict[str, tuple[str, ...]]:
     return {"pins": list_pins(), "latestScratch": _latest_scratch}
 
 
-def _restore_pins(names: tuple[str, ...]) -> None:
-    """Restore only pins whose values are present after snapshot restore."""
+def _restore_namespace_metadata(pins: tuple[str, ...], latest_scratch: tuple[str, ...]) -> None:
+    """Restore admitted pins and the latest cleanup cohort after snapshot restore."""
+    global _latest_scratch
     namespace = _namespace()
     _pins.clear()
-    _pins.update(name for name in names if _rejection(name, namespace) is None)
+    _pins.update(name for name in pins if _rejection(name, namespace) is None)
+    restored_scratch = tuple(
+        name for name in latest_scratch if _rejection(name, namespace) is None
+    )
+    _safe_scratch.clear()
+    _safe_scratch.update(restored_scratch)
+    _latest_scratch = restored_scratch
+
+
+def _restore_pins(names: tuple[str, ...]) -> None:
+    """Restore pins from snapshots written before cleanup cohorts were persisted."""
+    _restore_namespace_metadata(names, ())
 
 
 async def info() -> dict[str, Any]:
