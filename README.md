@@ -41,9 +41,6 @@ how models act inside a session:
 - **Retained coordination.** Parent-agent messaging, subagents, goals, skills,
   MCP, browser automation, and the other OMP services remain available through
   Python packages and typed host calls.
-- **Fork runtime work.** The fork carries its own persistent-kernel lifecycle,
-  Claude runtime, World coordination, process cleanup, provider-neutral parent
-  environment, and cross-platform runtime smoke coverage.
 
 ## Install
 
