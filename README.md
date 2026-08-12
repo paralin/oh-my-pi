@@ -89,8 +89,6 @@ The main capability surfaces are:
 - **Retained agent operations.** `rlm` provides task and agent-family operations. Focused packages such as `agent_message`, `agent_observe`, `attach_image`, `compact`, `edit`, `goal`, and `websearch` provide documented workflows.
 - **Runtime discovery.** `omp.capabilities()` returns the capability index available in the current session.
 
-Read a focused package's `SKILL.md` before calling it. Prefer a typed `omp.*` or skill API when one exists.
-
 ## Models and providers
 
 OMP supports direct model APIs, subscription-backed coding plans, gateways, and local OpenAI-compatible servers. Model roles route work by purpose. `default` handles normal turns, while `smol` and `slow` can select inexpensive or deeper-reasoning models. Other supported roles include `vision`, `designer`, `commit`, `tiny`, `task`, and `advisor`.
@@ -149,32 +147,32 @@ OMP also supports fallback chains, path-scoped model and provider rules, and mul
 
 `await omp.web.search(query, provider="auto")` searches through the configured provider chain. Pass a provider ID to select one explicitly. Search handlers can extract structured Markdown from code hosts, package registries, research sources, forums, and documentation sites while retaining links and anchors.
 
-| Provider     | Authentication                                      |
-| ------------ | --------------------------------------------------- |
-| `auto`       | Configured chain                                    |
-| `perplexity` | `PERPLEXITY_API_KEY` or anonymous fallback          |
-| `gemini`     | OAuth                                               |
-| `anthropic`  | OAuth                                               |
-| `codex`      | OAuth                                               |
-| `xai`        | OAuth or `XAI_API_KEY`                              |
-| `zai`        | `ZAI_API_KEY`                                       |
-| `exa`        | `EXA_API_KEY`, `/login exa`, or public MCP fallback |
-| `tinyfish`   | `TINYFISH_API_KEY`                                  |
-| `jina`       | `JINA_API_KEY`                                      |
-| `kagi`       | `KAGI_API_KEY`                                      |
-| `tavily`     | `TAVILY_API_KEY`                                    |
-| `firecrawl`  | `FIRECRAWL_API_KEY` or keyless fallback             |
-| `brave`      | `BRAVE_API_KEY`                                     |
-| `kimi`       | `/login kimi-code` or search key                    |
-| `parallel`   | `PARALLEL_API_KEY`                                  |
-| `synthetic`  | `SYNTHETIC_API_KEY`                                 |
-| `searxng`    | Self-hosted                                         |
-| `duckduckgo` | No key                                              |
-| `startpage`  | No key                                              |
-| `google`     | No key, browser-backed                              |
-| `ecosia`     | No key, browser-backed                              |
-| `mojeek`     | No key, browser-backed                              |
-| `public`     | Consolidated keyless search                         |
+| Provider     | Authentication or endpoint                                 |
+| ------------ | ---------------------------------------------------------- |
+| `auto`       | Configured chain                                           |
+| `perplexity` | Configured auth; explicit selection can use anonymous mode |
+| `gemini`     | Gemini CLI or Google Antigravity OAuth                     |
+| `anthropic`  | Anthropic OAuth or `ANTHROPIC_API_KEY`                     |
+| `codex`      | ChatGPT OAuth through `/login openai-codex`                |
+| `xai`        | xAI OAuth or `XAI_API_KEY`                                 |
+| `zai`        | `ZAI_API_KEY` or `/login zai`                              |
+| `exa`        | `EXA_API_KEY`, `/login exa`, or public MCP fallback        |
+| `tinyfish`   | `TINYFISH_API_KEY`                                         |
+| `jina`       | `JINA_API_KEY`                                             |
+| `kagi`       | `KAGI_API_KEY`                                             |
+| `tavily`     | `TAVILY_API_KEY`                                           |
+| `firecrawl`  | `FIRECRAWL_API_KEY` or keyless fallback                    |
+| `brave`      | `BRAVE_API_KEY`                                            |
+| `kimi`       | `/login kimi-code` or a Kimi search key                    |
+| `parallel`   | `PARALLEL_API_KEY`                                         |
+| `synthetic`  | `SYNTHETIC_API_KEY` or `/login synthetic`                  |
+| `searxng`    | `SEARXNG_ENDPOINT` or `searxng.endpoint`                   |
+| `startpage`  | No key                                                     |
+| `duckduckgo` | No key                                                     |
+| `ecosia`     | No key, browser-backed                                     |
+| `google`     | No key, browser-backed                                     |
+| `mojeek`     | No key, browser-backed                                     |
+| `public`     | Consolidated keyless search                                |
 
 Specialized handlers cover GitHub, GitLab, npm, PyPI, crates.io, Hex, Hackage, NuGet, Maven, RubyGems, Packagist, pub.dev, Go packages, arXiv, Semantic Scholar, Stack Overflow, Reddit, Hacker News, MDN, Read the Docs, and docs.rs. Security lookups use NVD, OSV, and CISA KEV data.
 
