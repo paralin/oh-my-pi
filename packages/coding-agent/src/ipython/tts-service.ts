@@ -1,8 +1,9 @@
 import { type ApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import { ProviderHttpError } from "@oh-my-pi/pi-ai/error";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
-import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials, type XAIHttpProvider } from "../lib/xai-http";
+import { resolveXAIHttpCredentials, type XAIHttpProvider } from "../lib/xai-http";
 import { confineToWorkspace } from "../tools/path-utils";
 import { DEFAULT_TTS_LOCAL_MODEL_KEY, DEFAULT_TTS_VOICE, isTtsLocalModelKey } from "../tts/models";
 import { type TtsClient, ttsClient } from "../tts/tts-client";
@@ -219,7 +220,7 @@ class SessionTtsSynthesisOwner implements IpythonTtsSynthesisOwner {
 					headers: {
 						Authorization: `Bearer ${key}`,
 						"Content-Type": "application/json",
-						"User-Agent": ohMyPiXAIUserAgent(),
+						"User-Agent": USER_AGENT,
 					},
 					body: JSON.stringify(payload),
 					signal: combinedSignal,

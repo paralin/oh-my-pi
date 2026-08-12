@@ -1138,6 +1138,20 @@ function resolveEffectiveAgentModelSelection(
 	return { patterns: resolveConfiguredModelPatterns(fallback, settings) };
 }
 
+/** Effective agent model patterns paired with the pre-expansion role alias behind them. */
+export interface AgentModelSelection {
+	/** Expanded model patterns to spawn with. */
+	patterns: string[];
+	/** Role alias the patterns came from (`@task` -> `task`), when the source named one. */
+	role: string | undefined;
+}
+
+/** Resolve an agent's patterns with the role identity that supplied them. */
+export function resolveAgentModelSelection(options: AgentModelPatternResolutionOptions): AgentModelSelection {
+	const { source, patterns } = resolveEffectiveAgentModelSelection(options);
+	return { patterns, role: resolveExplicitModelRole(source, options.settings) };
+}
+
 /** Return the raw selector source that supplies the effective agent patterns. */
 export function resolveAgentModelSource(options: AgentModelPatternResolutionOptions): string | string[] | undefined {
 	return resolveEffectiveAgentModelSelection(options).source;

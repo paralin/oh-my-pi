@@ -11,11 +11,19 @@ import {
 	URL_PATHS,
 } from "@oh-my-pi/pi-catalog/wire/codex";
 import { getAntigravityUserAgent } from "@oh-my-pi/pi-catalog/wire/gemini-headers";
-import { $env, isEnoent, parseImageMetadata, ptree, readSseJson, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
-import packageJson from "../../package.json" with { type: "json" };
+import {
+	$env,
+	isEnoent,
+	parseImageMetadata,
+	ptree,
+	readSseJson,
+	Snowflake,
+	USER_AGENT,
+	untilAborted,
+} from "@oh-my-pi/pi-utils";
 import { isAuthenticated, type ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
-import { ohMyPiXAIUserAgent, resolveXAIHttpCredentials } from "../lib/xai-http";
+import { resolveXAIHttpCredentials } from "../lib/xai-http";
 import { AUTO_IMAGE_PROVIDER_ORDER, type ImageProvider, isImageProviderId } from "./image-providers";
 import { resolveReadPath } from "./path-utils";
 import type { HostExecutionContext, HostResult } from "./tool-types";
@@ -899,7 +907,7 @@ function buildOpenAIImageHeaders(model: Model, apiKey: string, sessionId: string
 		}
 		headers.set(OPENAI_HEADERS.BETA, OPENAI_HEADER_VALUES.BETA_RESPONSES);
 		headers.set(OPENAI_HEADERS.ORIGINATOR, OPENAI_HEADER_VALUES.ORIGINATOR_CODEX);
-		headers.set("User-Agent", `pi/${packageJson.version} (${os.platform()} ${os.release()}; ${os.arch()})`);
+		headers.set("User-Agent", USER_AGENT);
 		if (sessionId) {
 			headers.set(OPENAI_HEADERS.CONVERSATION_ID, sessionId);
 			headers.set(OPENAI_HEADERS.SESSION_ID, sessionId);
@@ -1384,7 +1392,7 @@ export async function executeImageGeneration(
 								headers: {
 									Authorization: `Bearer ${key}`,
 									"Content-Type": "application/json",
-									"User-Agent": ohMyPiXAIUserAgent(),
+									"User-Agent": USER_AGENT,
 								},
 								body: JSON.stringify(xaiBody),
 								signal: requestSignal,
