@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>A coding agent with the IDE wired in.</strong>
+  <strong>Oh My Python</strong>
   <strong><a href="https://omp.sh">omp.sh</a></strong>
 </p>
 
@@ -19,12 +19,14 @@
 </p>
 
 <p align="center">
-  Fork of <a href="https://github.com/badlogic/pi-mono">Pi</a> by <a href="https://github.com/mariozechner">@mariozechner</a> 
+  Downstream fork of <a href="https://github.com/can1357/oh-my-pi">Oh My Pi</a>.
+  This fork regularly merges changes from upstream Oh My Pi.
 </p>
 
-The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
-
-**60+** providers · **one fixed IPython provider interface** · **~80k** lines of Rust core.
+Oh My Python adopts [Prime Agent's](https://github.com/PrimeIntellect-ai/prime-agent)
+persistent IPython single-tool approach: every model receives one `ipython` tool.
+The existing OMP filesystem, shell, browser, subagent, extension, and other host
+capabilities are mapped into typed Python APIs available in the persistent kernel.
 
 > [!NOTE]
 > Pull requests are **temporarily open to everyone** as a trial. We previously
@@ -400,7 +402,7 @@ Full reference: [omp.sh/docs/sdk](https://omp.sh/docs/sdk).
 
 Pick it up at **[omp.sh](https://omp.sh)**.
 
-omp is a fork of [Pi](https://github.com/badlogic/pi-mono) by [Mario Zechner](https://github.com/mariozechner), rewritten as a coding-first surface: sessions, subagents, slash commands, extensions — all TypeScript, all MIT, all on [GitHub](https://github.com/can1357/oh-my-pi). Shape it from config, hook it from outside, or read the source when you need to.
+Oh My Python is a downstream fork of [Oh My Pi](https://github.com/can1357/oh-my-pi) that regularly merges upstream changes. It keeps the coding-first surface with sessions, subagents, slash commands, and extensions. It uses the persistent IPython runtime described above.
 
 ### Primitives
 
@@ -416,7 +418,7 @@ Ask omp to write the piece you're missing, then `/reload-plugins`. Keep it local
 
 ## Philosophy
 
-omp is a fork of [pi-mono](https://github.com/badlogic/pi-mono) by [Mario Zechner](https://github.com/mariozechner), extended with a batteries-included coding workflow.
+Oh My Python extends [Oh My Pi](https://github.com/can1357/oh-my-pi) with the persistent IPython runtime and the coding workflow described above.
 
 Key ideas:
 
