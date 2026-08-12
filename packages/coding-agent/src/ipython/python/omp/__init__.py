@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import importlib
+import inspect
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 from rlm import host_request
 
@@ -38,10 +41,44 @@ from . import (
 
 @dataclass(frozen=True)
 class Capability:
+    """A static Python capability available in every OMP kernel."""
+
     name: str
     module: str
     summary: str
     skill_path: Path | None = None
+
+    @property
+    def category(self) -> str:
+        """Return this capability's stable discovery category."""
+        if self.name == "rlm":
+            return "agent"
+        if self.name.startswith("omp."):
+            return "host"
+        return "skill"
+
+
+@dataclass(frozen=True)
+class CapabilityCall:
+    """One bounded public callable exposed by a capability module."""
+
+    name: str
+    signature: str
+    documentation: str
+    is_async: bool
+
+
+@dataclass(frozen=True)
+class CapabilityDetail:
+    """Bounded discovery detail for one indexed OMP capability."""
+
+    name: str
+    module: str
+    category: str
+    summary: str
+    skill_path: Path | None
+    calls: tuple[CapabilityCall, ...]
+    omitted_calls: int
 
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -215,9 +252,98 @@ _CAPABILITIES = (
 )
 
 
-def capabilities() -> tuple[Capability, ...]:
-    """Return OMP's bounded Python capability index."""
-    return _CAPABILITIES
+_MAX_CAPABILITY_CALLS = 16
+_MAX_CAPABILITY_DOCUMENTATION_CHARS = 256
+_MAX_CAPABILITY_SIGNATURE_CHARS = 512
+
+
+def _bounded_text(value: str, maximum: int) -> str:
+    if len(value) <= maximum:
+        return value
+    return f"{value[: maximum - 1]}…"
+
+
+def _call_detail(name: str, value: object) -> CapabilityCall | None:
+    try:
+        signature = str(inspect.signature(value))
+    except (TypeError, ValueError):
+        return None
+    documentation = inspect.getdoc(value)
+    first_line = documentation.splitlines()[0] if documentation else ""
+    return CapabilityCall(
+        name=name,
+        signature=_bounded_text(signature, _MAX_CAPABILITY_SIGNATURE_CHARS),
+        documentation=_bounded_text(first_line, _MAX_CAPABILITY_DOCUMENTATION_CHARS),
+        is_async=inspect.iscoroutinefunction(value)
+        or inspect.iscoroutinefunction(getattr(value, "__call__", None)),
+    )
+
+
+def _public_calls(capability: Capability, module: ModuleType) -> tuple[CapabilityCall, ...]:
+    calls: list[CapabilityCall] = []
+    if callable(module):
+        detail = _call_detail(capability.name, module)
+        if detail is not None:
+            calls.append(detail)
+    exported = getattr(module, "__all__", None)
+    names = exported if isinstance(exported, (list, tuple)) else tuple(vars(module))
+    for name in names:
+        if not isinstance(name, str) or name.startswith("_"):
+            continue
+        try:
+            value = getattr(module, name)
+        except AttributeError:
+            continue
+        if not inspect.isroutine(value):
+            continue
+        detail = _call_detail(name, value)
+        if detail is not None:
+            calls.append(detail)
+    return tuple(calls)
+
+
+def capabilities(query: str | None = None) -> tuple[Capability, ...]:
+    """Return the static index, optionally casefold-searching its indexed metadata."""
+    if query is None:
+        return _CAPABILITIES
+    if not isinstance(query, str):
+        raise TypeError("query must be str or None")
+    needle = query.casefold().strip()
+    if not needle:
+        return _CAPABILITIES
+    return tuple(
+        capability
+        for capability in _CAPABILITIES
+        if needle
+        in "\n".join(
+            (
+                capability.name,
+                capability.module,
+                capability.category,
+                capability.summary,
+                str(capability.skill_path or ""),
+            )
+        ).casefold()
+    )
+
+
+def describe(name: str) -> CapabilityDetail | None:
+    """Return bounded public call detail for one exact indexed capability name."""
+    if not isinstance(name, str):
+        raise TypeError("name must be str")
+    capability = next((item for item in _CAPABILITIES if item.name == name), None)
+    if capability is None:
+        return None
+    calls = _public_calls(capability, importlib.import_module(capability.module))
+    return CapabilityDetail(
+        name=capability.name,
+        module=capability.module,
+        category=capability.category,
+        summary=capability.summary,
+        skill_path=capability.skill_path,
+        calls=calls[:_MAX_CAPABILITY_CALLS],
+        omitted_calls=max(0, len(calls) - _MAX_CAPABILITY_CALLS),
+    )
 
 
 def skill_path(name: str) -> Path:
@@ -230,6 +356,8 @@ def skill_path(name: str) -> Path:
 
 __all__ = [
     "Capability",
+    "CapabilityCall",
+    "CapabilityDetail",
     "ask",
     "ast",
     "autoresearch",
@@ -239,6 +367,7 @@ __all__ = [
     "computer",
     "cron",
     "debug",
+    "describe",
     "github",
     "harness",
     "host_request",

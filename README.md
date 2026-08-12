@@ -87,7 +87,7 @@ The main capability surfaces are:
 
 - **Typed OMP capabilities.** The kernel exposes `omp.*` services for structural AST work, LSP, process control, speech synthesis, and long-term memory.
 - **Retained agent operations.** `rlm` provides task and agent-family operations. Focused packages such as `agent_message`, `agent_observe`, `attach_image`, `compact`, `edit`, `goal`, and `websearch` provide documented workflows.
-- **Runtime discovery.** `omp.capabilities()` returns the capability index available in the current session.
+- **Runtime discovery.** `omp.capabilities()` returns the capability index available in the current session; pass a query to case-insensitively search it, then use `omp.describe(name)` for bounded public-call detail.
 
 ## Models and providers
 

@@ -392,6 +392,37 @@ describeIntegration("IPython managed runtime bootstrap", () => {
 				capabilities: { ast: true, long_term_memory: true, lsp: true, process: true, tts: true },
 				edit: [true, true],
 			});
+			const discovery = await controller.execute(
+				[
+					"import json, omp",
+					"web = omp.describe('omp.web')",
+					"edit = omp.describe('edit')",
+					"debug = omp.describe('omp.debug')",
+					"details = [omp.describe(item.name) for item in omp.capabilities()]",
+					"search = next(call for call in web.calls if call.name == 'search')",
+					"print(json.dumps({'matches': [item.name for item in omp.capabilities('WeB')], 'web': {'category': web.category, 'documentation': search.documentation, 'is_async': search.is_async, 'signature': search.signature}, 'edit_skill_path': edit.skill_path.is_file(), 'debug': {'calls': len(debug.calls), 'omitted': debug.omitted_calls}, 'all_details': all(detail is not None for detail in details), 'process_run': hasattr(omp.process, 'run')}))",
+				].join("\n"),
+			);
+			expect(discovery.status).toBe("ok");
+			const discoveryDetail = JSON.parse(discovery.stdout.trim()) as {
+				matches: string[];
+				web: { category: string; documentation: string; is_async: boolean; signature: string };
+				edit_skill_path: boolean;
+				debug: { calls: number; omitted: number };
+				all_details: boolean;
+				process_run: boolean;
+			};
+			expect(discoveryDetail.matches).toEqual(["websearch", "omp.web"]);
+			expect(discoveryDetail.web).toMatchObject({
+				category: "host",
+				documentation: "Search through the session's configured provider chain.",
+				is_async: true,
+			});
+			expect(discoveryDetail.web.signature).toContain("query");
+			expect(discoveryDetail.edit_skill_path).toBe(true);
+			expect(discoveryDetail.debug).toEqual({ calls: 16, omitted: 15 });
+			expect(discoveryDetail.all_details).toBe(true);
+			expect(discoveryDetail.process_run).toBe(false);
 			const structural = await controller.execute(
 				[
 					"import json",

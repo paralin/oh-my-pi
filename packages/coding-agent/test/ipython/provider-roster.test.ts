@@ -55,6 +55,8 @@ describe("IPython provider roster", () => {
 		expect(session.agent.state.tools.map(tool => tool.name)).toEqual(["ipython"]);
 		expect(session.agent.state.tools[0]?.concurrency).toBe("exclusive");
 
-		expect(session.systemPrompt.join("\n")).toContain("The only provider tool is exclusive `ipython`.");
+		expect(session.systemPrompt.join("\n")).toContain(
+			"The provider exposes exactly one tool: the exclusive `ipython` interface.",
+		);
 	});
 });
