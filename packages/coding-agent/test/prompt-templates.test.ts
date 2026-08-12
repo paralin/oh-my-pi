@@ -363,7 +363,9 @@ describe("subagent-system-prompt.md", () => {
 
 	test("instructs native children to complete with the final assistant response", async () => {
 		const rendered = await renderSubagentPrompt(undefined);
-		expect(rendered).toContain("Your final assistant response completes this Task run.");
+		expect(rendered).toContain(
+			"Your final assistant response completes this Task run only after the assignment is complete or you have reported a required blocking gate.",
+		);
 		expect(rendered).not.toContain("`yield`");
 		expect(rendered).not.toContain("`hub`");
 	});

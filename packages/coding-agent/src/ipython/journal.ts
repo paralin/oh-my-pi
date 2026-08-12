@@ -35,6 +35,7 @@ export interface IpythonCellJournalDetail {
 	readonly safeText: string;
 	readonly safeTextTruncated: boolean;
 	readonly totalOutputBytes: number;
+	readonly omittedOutputBytes?: number;
 	readonly artifacts: readonly IpythonArtifactReference[];
 }
 
@@ -78,6 +79,7 @@ export function createIpythonCellJournalDetail(
 		safeText: safeText.text,
 		safeTextTruncated: safeText.truncated,
 		totalOutputBytes: safeText.totalBytes,
+		...(safeText.omittedBytes === undefined ? {} : { omittedOutputBytes: safeText.omittedBytes }),
 		artifacts: [...artifacts],
 	};
 }
@@ -264,6 +266,11 @@ export function isIpythonJournalDetail(value: unknown): value is IpythonJournalD
 		typeof value.safeText === "string" &&
 		typeof value.safeTextTruncated === "boolean" &&
 		typeof value.totalOutputBytes === "number" &&
+		(value.omittedOutputBytes === undefined ||
+			(typeof value.omittedOutputBytes === "number" &&
+				Number.isSafeInteger(value.omittedOutputBytes) &&
+				value.omittedOutputBytes >= 0 &&
+				value.omittedOutputBytes <= value.totalOutputBytes)) &&
 		Array.isArray(value.events) &&
 		value.events.every(isExecutionEvent) &&
 		Array.isArray(value.errors) &&
@@ -294,7 +301,12 @@ export function renderIpythonJournalText(detail: IpythonJournalDetail): string {
 		lines.push(`Artifact: ${artifact.label ?? artifact.path}${artifact.mimeType ? ` (${artifact.mimeType})` : ""}`);
 	}
 	if (presentation.safeText.truncated) {
-		lines.push(`Output truncated from ${presentation.safeText.totalBytes} bytes.`);
+		const omitted = presentation.safeText.omittedBytes;
+		lines.push(
+			omitted === undefined
+				? `Output truncated from ${presentation.safeText.totalBytes} bytes.`
+				: `Output truncated from ${presentation.safeText.totalBytes} bytes; ${omitted} bytes omitted.`,
+		);
 	}
 	return lines.join("\n");
 }

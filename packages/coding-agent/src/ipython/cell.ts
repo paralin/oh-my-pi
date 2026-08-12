@@ -41,6 +41,8 @@ export interface IpythonCellText {
 	readonly text: string;
 	readonly truncated: boolean;
 	readonly totalBytes: number;
+	/** Bytes omitted between the retained head and tail when text is truncated. */
+	readonly omittedBytes?: number;
 	readonly outputBytes: number;
 }
 

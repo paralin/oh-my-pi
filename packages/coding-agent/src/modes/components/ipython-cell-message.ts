@@ -77,6 +77,53 @@ function operationStatus(status: IpythonHostOperationPresentation["status"]): "r
 	return "error";
 }
 
+function progressSignature(progress: IpythonHostOperationPresentation["progress"][number]): string {
+	const summary = progress.summary;
+	return `${progress.message}\u0000${summary?.path ?? ""}\u0000${summary?.count ?? ""}\u0000${summary?.unit ?? ""}\u0000${summary?.dryRun ?? ""}`;
+}
+
+function coalesceProgress(
+	progress: readonly IpythonHostOperationPresentation["progress"][number][],
+): Array<{ progress: IpythonHostOperationPresentation["progress"][number]; repetitions: number }> {
+	const collapsed: Array<{ progress: IpythonHostOperationPresentation["progress"][number]; repetitions: number }> = [];
+	for (const snapshot of progress) {
+		const previous = collapsed.at(-1);
+		if (previous && progressSignature(previous.progress) === progressSignature(snapshot)) {
+			previous.repetitions++;
+			continue;
+		}
+		collapsed.push({ progress: snapshot, repetitions: 1 });
+	}
+	return collapsed;
+}
+
+function operationProgressRows(
+	progress: IpythonHostOperationPresentation["progress"][number],
+	repetitions: number,
+	expanded: boolean,
+	width: number,
+): string[] {
+	const details = ipythonHostOperationDetails(
+		{ summary: progress.summary },
+		progress.summary?.path ? shortenPath(progress.summary.path) : undefined,
+	).map(detail => replaceTabs(sanitizeText(detail)));
+	const suffix = `${details.length > 0 ? ` · ${details.join(" · ")}` : ""}${
+		repetitions > 1 ? ` · ×${repetitions} identical` : ""
+	}`;
+	if (!expanded) {
+		const compact = replaceTabs(sanitizeText(progress.message)).replaceAll(/\s+/g, " ").trim();
+		return [truncateToWidth(`    ${theme.fg("dim", `${compact}${suffix}`)}`, width)];
+	}
+
+	const lines = replaceTabs(sanitizeText(progress.message)).split("\n");
+	return lines.map((line, index) =>
+		truncateToWidth(
+			`${index === 0 ? "    " : "      "}${theme.fg("dim", `${line}${index === 0 ? suffix : ""}`)}`,
+			width,
+		),
+	);
+}
+
 function operationRows(
 	operations: readonly IpythonHostOperationPresentation[],
 	expanded: boolean,
@@ -108,8 +155,19 @@ function operationRows(
 				theme,
 			)}`,
 		);
-		if (expanded && operation.message) {
-			rows.push(`    ${theme.fg("dim", replaceTabs(sanitizeText(operation.message)))}`);
+
+		const progress = expanded
+			? operation.progress.map(snapshot => ({ progress: snapshot, repetitions: 1 }))
+			: coalesceProgress(operation.progress);
+		const visibleProgress = expanded ? progress : progress.slice(-PREVIEW_LIMITS.OUTPUT_COLLAPSED);
+		const hiddenProgress = progress.length - visibleProgress.length;
+		if (hiddenProgress > 0) {
+			rows.push(
+				`    ${theme.fg("dim", `${formatMoreItems(hiddenProgress, "progress update")} ${formatExpandHint(theme, expanded, true)}`)}`,
+			);
+		}
+		for (const snapshot of visibleProgress) {
+			rows.push(...operationProgressRows(snapshot.progress, snapshot.repetitions, expanded, width));
 		}
 	}
 	if (hidden > 0) {
@@ -241,9 +299,12 @@ export class IpythonCellMessageComponent extends Container {
 		}
 
 		if (presentation.safeText.truncated) {
-			this.addChild(
-				new Text(theme.fg("warning", `\nOutput truncated from ${presentation.safeText.totalBytes} bytes.`), 1, 0),
-			);
+			const omitted = presentation.safeText.omittedBytes;
+			const notice =
+				omitted === undefined
+					? `Output truncated from ${presentation.safeText.totalBytes} bytes.`
+					: `Output truncated from ${presentation.safeText.totalBytes} bytes; ${omitted} bytes omitted.`;
+			this.addChild(new Text(theme.fg("warning", `\n${notice}`), 1, 0));
 		}
 		if (this.#expanded) this.#appendMimeComponents(presentation);
 		this.#rebuildActs();

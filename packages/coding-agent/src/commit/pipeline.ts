@@ -8,13 +8,8 @@ import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 import { loadProjectContextFiles } from "../system-prompt";
 import * as git from "../utils/git";
 import { runAgenticCommit } from "./agentic";
-import {
-	extractScopeCandidates,
-	generateConventionalAnalysis,
-	generateSummary,
-	validateAnalysis,
-	validateSummary,
-} from "./analysis";
+import { validateSummaryRules } from "./agentic/validation";
+import { extractScopeCandidates, generateConventionalAnalysis, generateSummary, validateAnalysis } from "./analysis";
 import { runChangelogFlow } from "./changelog";
 import { runMapReduceAnalysis, shouldUseMapReduce } from "./map-reduce";
 import { formatCommitMessage } from "./message";
@@ -224,8 +219,8 @@ async function generateSummaryWithRetry(input: {
 			maxChars: SUMMARY_MAX_CHARS,
 			userContext: context,
 		});
-		const validation = validateSummary(result.summary, SUMMARY_MAX_CHARS);
-		if (validation.valid) {
+		const validation = validateSummaryRules(result.summary);
+		if (validation.errors.length === 0) {
 			return result;
 		}
 		if (attempt === 2) {

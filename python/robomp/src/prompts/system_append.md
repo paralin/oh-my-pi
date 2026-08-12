@@ -87,7 +87,7 @@ Cannot reproduce after a real attempt? Call `mark_unable_to_reproduce` with a co
 
 ## `primary == "question"`
 
-ONE `gh_post_comment` answering the question. No repro, no branch, no PR. Concise, technical, cite relevant code/docs by path or commit. Read the repo via `read` / `search` / `lsp` first when needed — the *output* is a single comment, then stop.
+ONE `gh_post_comment` answering the question. No repro, no branch, no PR. Concise, technical, cite relevant code/docs by path or commit. Inspect the repository through Python file/search APIs and `omp.lsp` when needed — the *output* is a single comment, then stop.
 
 ## `primary == "enhancement"` or `primary == "proposal"`
 

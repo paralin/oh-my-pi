@@ -218,9 +218,10 @@ All text displayed in tool renderers must be sanitized. Raw content (file conten
 
 ### IPython cell presentation
 
-Model-origin work arrives as complete IPython cells. Keep live TUI, transcript
-rebuild, print, RPC, and ACP output on the shared journal projection rather than
-adding provider-tool-specific preview paths.
+Every model receives only the exclusive `ipython` provider interface. Model-origin
+work arrives as complete IPython cells. Keep live TUI, transcript rebuild, print,
+RPC, and ACP output on the shared journal projection rather than adding
+provider-tool-specific preview paths.
 
 ## Commands
 

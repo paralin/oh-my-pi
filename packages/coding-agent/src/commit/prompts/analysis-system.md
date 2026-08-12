@@ -15,20 +15,20 @@ Use null for: cross-cutting changes, project-wide refactoring.
 Forbidden scopes (use null): src, lib, include, tests, benches, examples, docs, project name, app, main, entire, all, misc.
 
 Prefer scopes from <common-scopes> over inventing new.
-## 2. Generate Details (0-6 items)
+## 2. Generate Body Paragraphs (0-6 items)
 
-Each detail:
-1. Past-tense verb, ends with period
-2. Explains impact/rationale (skip trivial what-changed)
+Each body paragraph:
+1. Is concise declarative prose, not a bullet, and ends with a period
+2. Explains impact or rationale (skip trivial what-changed)
 3. Uses precise names (modules, APIs, files)
-4. Under 120 characters
+4. Is a single paragraph under 120 characters
 
 Abstraction preference:
-- BEST: "Replaced polling with event-driven model for 10x throughput."
-- GOOD: "Consolidated three HTTP builders into unified API."
-- SKIP: "Renamed workspacePath to locate."
+- BEST: "The event-driven model replaces polling and increases throughput by 10x."
+- GOOD: "The unified API replaces three HTTP builders."
+- SKIP: "The workspacePath rename is mechanical."
 
-Group 3+ similar changes: "Updated 5 test files for new API." (not five bullets).
+Group 3+ similar changes in one paragraph; do not make a list.
 
 Issue references inline: (#123), (#123, #456), (#123-#125).
 
@@ -36,7 +36,7 @@ Priority: user-visible → perf/security → architecture → internal.
 
 Exclude: import changes, whitespace, formatting, trivial renames, debug prints, comment-only, file moves without modification.
 
-State only visible rationale. If unclear, use neutral: "Updated logic for correctness."
+State only visible rationale. If unclear, use neutral: "The logic changes to preserve correctness."
 ## 3. Assign Changelog Metadata
 
 |Condition|changelog_category|
@@ -63,7 +63,7 @@ Return ONLY the following valid JSON object, with no Markdown fence or prose:
 "scope": "component-name" | null,
 "details": [
 {
-"text": "Past-tense description ending with period.",
+"text": "A declarative body paragraph ending with a period.",
 "changelog_category": "Added|Changed|Fixed|Deprecated|Removed|Security",
 "user_visible": true
 },
@@ -82,17 +82,17 @@ Return ONLY the following valid JSON object, with no Markdown fence or prose:
   "scope": "api",
   "details": [
     {
-      "text": "Added TLS mutual authentication to prevent man-in-the-middle attacks (#100).",
+      "text": "TLS mutual authentication prevents man-in-the-middle attacks (#100).",
       "changelog_category": "Added",
       "user_visible": true
     },
     {
-      "text": "Implemented builder pattern to simplify transport configuration (#101).",
+      "text": "The builder pattern simplifies transport configuration (#101).",
       "changelog_category": "Added",
       "user_visible": true
     },
     {
-      "text": "Migrated 6 integration tests to exercise new security features.",
+      "text": "Six integration tests exercise the new security features.",
       "user_visible": false
     }
   ],
@@ -106,11 +106,11 @@ Return ONLY the following valid JSON object, with no Markdown fence or prose:
   "scope": "parser",
   "details": [
     {
-      "text": "Extracted validation logic into separate module for reusability.",
+      "text": "A separate module holds reusable validation logic.",
       "user_visible": false
     },
     {
-      "text": "Consolidated error handling across 12 functions to reduce duplication.",
+      "text": "Twelve functions share error handling to reduce duplication.",
       "user_visible": false
     }
   ],
@@ -124,12 +124,12 @@ Return ONLY the following valid JSON object, with no Markdown fence or prose:
   "scope": "parser",
   "details": [
     {
-      "text": "Corrected off-by-one error causing buffer overflow on large inputs (#456).",
+      "text": "The parser avoids an off-by-one buffer overflow on large inputs (#456).",
       "changelog_category": "Fixed",
       "user_visible": true
     },
     {
-      "text": "Added bounds checking to prevent panic on empty files (#457).",
+      "text": "Bounds checking prevents a panic on empty files (#457).",
       "changelog_category": "Fixed",
       "user_visible": true
     }

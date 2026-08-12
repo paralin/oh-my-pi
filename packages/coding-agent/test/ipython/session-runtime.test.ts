@@ -74,6 +74,31 @@ class MemoryProvisioner implements IpythonCellProvisioner {
 
 	async execute(code: string): Promise<IpythonExecutionResult> {
 		const [operation, name, ...rest] = code.split(":");
+		if (operation === "fail-large") {
+			const error = {
+				kind: "error" as const,
+				ename: "AssertionError",
+				evalue: "final failing assertion",
+				traceback: ["AssertionError: final failing assertion", "gh run watch exited with status 1"],
+			};
+			return {
+				id: code,
+				status: "error",
+				stdout: "",
+				stderr: "",
+				result: undefined,
+				events: [
+					{
+						kind: "stream",
+						name: "stdout",
+						text: `$ gh run watch 481516 --exit-status\n${"x".repeat(200 * 1024)}`,
+					},
+					error,
+				],
+				errors: [error],
+				hostArtifacts: [],
+			};
+		}
 		if (operation === "set" && name) {
 			this.names.set(name, rest.join(":"));
 			return execution(code, undefined);
@@ -258,6 +283,26 @@ describe("session IPython runtime", () => {
 			]);
 		} finally {
 			await harness.runtime.dispose();
+		}
+	});
+
+	test("returns a bounded failure with its deterministic full-result artifact path", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-session-artifact-"));
+		const sessionFile = path.join(root, "session.jsonl");
+		const harness = runtimeHarness({ sessionId: "root", cwd: root, sessionFile, sessionDir: root });
+		try {
+			const result = await harness.runtime.execute({ code: "fail-large", origin: "model" });
+			const full = result.artifacts.find(artifact => artifact.label === "Full IPython result");
+			if (!full) throw new Error("full result artifact was not returned");
+			expect(result.modelText.outputBytes).toBeLessThanOrEqual(50 * 1024);
+			expect(result.modelText.text).toContain(`full result: ${full.path}`);
+			expect(full.path).toBe(
+				path.join(sessionSidecarDir(sessionFile), "ipython", "artifacts", result.cellId, "full-result.json"),
+			);
+			expect(JSON.parse(await fs.readFile(full.path, "utf8")).events).toHaveLength(2);
+		} finally {
+			await harness.runtime.dispose();
+			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
 

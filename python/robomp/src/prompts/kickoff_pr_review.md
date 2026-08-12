@@ -17,7 +17,7 @@ PR head checked out at cwd. Read-only review: classify, rank, comment; NEVER mer
 # Phase 0 — orient
 
 1. `fetch_pr`: title, body, linked issue (`Fixes #N`); understand claimed behavior before judging it.
-2. Diff: prefer `git diff origin/{{pr.base_ref}}...HEAD` for all changed files. Without local `origin/{{pr.base_ref}}`, use `fetch_pr` file list plus targeted `read`/`search` on changed files. Note size, file count, coherence vs grab-bag.
+2. Diff: prefer `git diff origin/{{pr.base_ref}}...HEAD` for all changed files. Without local `origin/{{pr.base_ref}}`, use the `fetch_pr` file list plus targeted Python file/search inspection of changed files. Note size, file count, coherence vs grab-bag.
 3. Check prior resolution: skim `git log origin/{{repo.default_branch}}` and open PRs for same fix. Landed/superseded: still review; rank **P3**, summary points to commit/PR.
 
 # Phase 1 — classify & rank

@@ -39,10 +39,11 @@ Flow: webhook → HMAC verify → `github_events.route` → sqlite `events`
 → `worker.run_task` spawns `omp --mode rpc` with `cwd=worktree`,
 persistent `session_dir`, model randomly drawn from `ROBOMP_MODEL` (CSV).
 
-The agent uses omp's built-in tools (`read`/`edit`/`bash`/`lsp`, scoped to
-the worktree) plus the operations in `src/operations.py` — the
-exclusive surface for GitHub writes. Every operation invocation is audited
-into the `tool_calls` table with credential-redacted args and results.
+The agent receives only the `ipython` provider interface. It works in complete
+Python or `%%bash` cells and calls the typed task-local operations backed by
+`src/operations.py`, the exclusive surface for GitHub writes. Every operation
+invocation is audited in the `tool_calls` table with credential-redacted
+arguments and results.
 
 ## Setup
 

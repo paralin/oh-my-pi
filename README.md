@@ -15,7 +15,7 @@
   <a href="https://bun.sh"><img src="https://img.shields.io/badge/runtime-Bun-f472b6?style=flat&colorA=222222" alt="Bun"></a>
 </p>
 
-Oh My Python is a terminal coding agent built around a persistent IPython session. Every model works through one fixed `ipython` interface, while typed Python packages provide code intelligence, browser control, long-running processes, search, subagents, and other host services.
+Oh My Python is a terminal coding agent built around a persistent IPython session. Every model receives only the exclusive `ipython` provider interface; typed Python packages provide code intelligence, browser control, long-running processes, search, subagents, and other host services without adding separate provider tools.
 
 This design keeps imports, variables, working directories, and useful results available across turns. It also gives different models the same provider-visible interface, even when you add skills, extensions, or host integrations.
 
@@ -59,7 +59,7 @@ Use `/login` to add provider credentials, `/model` to select models for configur
 
 ## Persistent IPython
 
-Each model receives one function named `ipython`. A call runs one complete Python or `%%bash` cell in the session's retained IPython process. Cells run in order, so later cells can reuse earlier imports, variables, objects, and the current directory.
+Each model receives only the exclusive `ipython` function, not separate file, browser, shell, subagent, or extension tools. A call runs one complete Python or `%%bash` cell in the session's retained IPython process. Cells run in order, so later cells can reuse earlier imports, variables, objects, and the current directory.
 
 ```python
 from pathlib import Path

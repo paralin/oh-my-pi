@@ -11,7 +11,11 @@ import {
 	type IpythonHostRequest,
 	ipythonHostOperationSummary,
 } from "../../src/ipython/controller.js";
-import { createIpythonCellJournalDetail, isIpythonJournalDetail } from "../../src/ipython/journal.js";
+import {
+	createIpythonCellJournalDetail,
+	isIpythonJournalDetail,
+	renderIpythonJournalText,
+} from "../../src/ipython/journal.js";
 import { projectIpythonCellPresentation, projectIpythonLiveCellPresentation } from "../../src/ipython/projection.js";
 import { IpythonCellMessageComponent } from "../../src/modes/components/ipython-cell-message.js";
 import { initTheme } from "../../src/modes/theme/theme.js";
@@ -109,6 +113,14 @@ describe("IPython nested host-operation lifecycle", () => {
 				status: "ok",
 				startedAt: 1_000,
 				durationMs: 30,
+				progress: [
+					{ at: 1_010, message: "Searching syntax trees", summary: { path: "src/app.ts" } },
+					{
+						at: 1_020,
+						message: "Syntax-tree search completed",
+						summary: { path: "src/app.ts", count: 3, unit: "matches" },
+					},
+				],
 				message: "Syntax-tree search completed",
 				summary: { path: "src/app.ts", count: 3, unit: "matches" },
 			},
@@ -118,6 +130,14 @@ describe("IPython nested host-operation lifecycle", () => {
 				status: "error",
 				startedAt: 1_005,
 				durationMs: 35,
+				progress: [
+					{ at: 1_015, message: "Rewriting syntax trees", summary: { path: "src/lib.ts", dryRun: true } },
+					{
+						at: 1_035,
+						message: "Syntax-tree rewrite completed",
+						summary: { path: "src/lib.ts", count: 2, unit: "replacements", dryRun: false },
+					},
+				],
 				message: "Syntax-tree rewrite completed",
 				summary: { path: "src/lib.ts", count: 2, unit: "replacements", dryRun: false },
 			},
@@ -215,18 +235,59 @@ describe("IPython nested host-operation lifecycle", () => {
 		expect(collapsed).toContain("Operations");
 		expect(collapsed).toContain("ast.search · src/app.ts · 3 matches (30ms)");
 		expect(collapsed).toContain("ast.rewrite · src/lib.ts · 2 replacements · applied (35ms)");
-		// The compact card never repeats operation records as ordinary output.
-		expect(collapsed).not.toContain("Searching syntax trees");
+		// Compact presentation keeps each distinct progress snapshot beside its operation.
+		expect(collapsed).toContain("Searching syntax trees");
 		expect(collapsed).toContain("ordinary output");
 
 		component.setExpanded(true);
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain("Searching syntax trees");
 		expect(expanded).toContain("Syntax-tree search completed");
 		expect(expanded).toContain("Syntax-tree rewrite completed");
 
 		for (const width of [40, 16]) {
 			const rows = component.render(width).map(line => Bun.stripANSI(line));
 			expect(rows.every(line => Bun.stringWidth(line) <= width)).toBe(true);
+		}
+	});
+
+	test("coalesces repeated gh watch tables only in compact live and replay cards", () => {
+		const runningTable = "NAME              STATUS   ELAPSED\nunit / linux      pending  00:42";
+		const failingTable = "NAME              STATUS   ELAPSED\nunit / linux      failed   00:43";
+		const events: IpythonExecutionEvent[] = [
+			operation("gh-watch", "gh.run.watch", "start", 1_000),
+			...Array.from({ length: 8 }, (_, index) =>
+				operation("gh-watch", "gh.run.watch", "progress", 1_010 + index, {
+					message: runningTable,
+					summary: { path: "acme/omp/actions/runs/481516" },
+				}),
+			),
+			operation("gh-watch", "gh.run.watch", "progress", 1_020, {
+				message: failingTable,
+				summary: { path: "acme/omp/actions/runs/481516", count: 1, unit: "failed check" },
+			}),
+			operation("gh-watch", "gh.run.watch", "terminal", 1_030, { status: "error", durationMs: 30 }),
+		];
+		const result = cellResult(events, { status: "error" });
+		const detail = createIpythonCellJournalDetail(result);
+		const replayed = new IpythonCellMessageComponent(detail);
+		const live = new IpythonCellMessageComponent({ code: result.code, origin: result.origin });
+		for (const update of result.updates) live.applyUpdate(update);
+
+		expect(projectIpythonCellPresentation(detail).operations[0]?.progress).toHaveLength(9);
+		const compactJournal = renderIpythonJournalText(detail);
+		expect(compactJournal).not.toContain("pending");
+		expect(compactJournal).toContain("failed");
+		for (const component of [live, replayed]) {
+			const compact = Bun.stripANSI(component.render(100).join("\n"));
+			expect(compact.match(/unit \/ linux/g)).toHaveLength(2);
+			expect(compact).toContain("×8 identical");
+			expect(compact).toContain("failed check");
+
+			component.setExpanded(true);
+			const expanded = Bun.stripANSI(component.render(100).join("\n"));
+			expect(expanded.match(/unit \/ linux/g)).toHaveLength(9);
+			expect(expanded).not.toContain("×8 identical");
 		}
 	});
 

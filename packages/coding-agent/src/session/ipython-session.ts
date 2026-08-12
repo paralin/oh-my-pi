@@ -6,6 +6,7 @@ import { escapeXmlText, sanitizeText } from "@oh-my-pi/pi-utils";
 import {
 	allocateIpythonHostArtifact,
 	finalizeIpythonHostArtifacts,
+	IPYTHON_FULL_RESULT_ARTIFACT_LABEL,
 	spillIpythonCellArtifacts,
 } from "../ipython/artifacts";
 import { type IpythonCellRequest, type IpythonCellResult, IpythonCellService } from "../ipython/cell";
@@ -16,6 +17,7 @@ import type {
 	IpythonRestoreResult,
 	IpythonSnapshotResult,
 } from "../ipython/controller";
+import { createIpythonCellText } from "../ipython/projection";
 import { IpythonKernelProvisioner, ipythonSnapshotPath } from "../ipython/provisioner";
 import type { PythonSkillPackage } from "../ipython/python-packages";
 import { snapshotManifestPath } from "../ipython/state-snapshot";
@@ -280,7 +282,22 @@ export class IpythonSessionRuntime {
 			const hostArtifacts = await finalizeIpythonHostArtifacts(result.artifacts, active.sidecarDir);
 			const finalized = { ...result, artifacts: hostArtifacts };
 			const artifacts = await spillIpythonCellArtifacts(finalized, active.sidecarDir);
-			return { ...finalized, artifacts: [...hostArtifacts, ...artifacts] };
+			const fullResult = artifacts.find(artifact => artifact.label === IPYTHON_FULL_RESULT_ARTIFACT_LABEL);
+			return {
+				...finalized,
+				artifacts: [...hostArtifacts, ...artifacts],
+				...(fullResult
+					? {
+							modelText: createIpythonCellText(
+								finalized.events,
+								finalized.errors,
+								finalized.status,
+								finalized.modelText.outputBytes,
+								fullResult.path,
+							),
+						}
+					: {}),
+			};
 		} catch (error) {
 			this.#host.onArtifactFailure(error instanceof Error ? error.message : String(error));
 			return result;

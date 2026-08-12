@@ -6,7 +6,7 @@ Given map-phase observations, produce unified commit classification with changel
 Determine:
 1. TYPE: Single classification
 2. SCOPE: Primary component
-3. DETAILS: 3–4 summary points (max 6)
+3. BODY: 3–4 prose paragraphs (max 6)
 4. CHANGELOG: Metadata for user-visible changes
 </instructions>
 <scope-rules>
@@ -17,10 +17,10 @@ Determine:
 </scope-rules>
 <output-format>
 Return ONLY one valid JSON object with no Markdown fence or prose.
-Each detail point:
-- Start with past-tense verb (added, fixed, moved, extracted)
-- Under 120 chars, ends with period
-- Group related cross-file changes
+Each body paragraph:
+- Use concise declarative prose, not a bullet
+- Stay under 120 chars and end with a period
+- Group related cross-file changes in one paragraph
 Priority: user-visible behavior > performance/security > architecture > internal implementation
 changelog_category: Added|Changed|Fixed|Deprecated|Removed|Security
 user_visible: true for features, user-facing bugs, breaking changes, security
@@ -36,12 +36,12 @@ Output:
 "scope": "api",
 "details": [
 {
-"text": "Added token refresh guard to prevent duplicate refreshes.",
+"text": "The token refresh guard prevents duplicate refreshes.",
 "changelog_category": "Fixed",
 "user_visible": true
 },
 {
-"text": "Introduced retry wrapper for 429 responses.",
+"text": "The retry wrapper handles 429 responses.",
 "changelog_category": "Fixed",
 "user_visible": true
 }

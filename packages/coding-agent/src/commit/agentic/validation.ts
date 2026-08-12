@@ -60,7 +60,6 @@ const pastTenseVerbs = new Set([
 	"upgraded",
 	"validated",
 ]);
-const pastTenseEdExceptions = new Set(["hundred", "red", "bed"]);
 
 export function normalizeSummary(summary: string, type: CommitType, scope: string | null): string {
 	const stripped = stripTypePrefix(summary, type, scope);
@@ -75,14 +74,13 @@ export function validateSummaryRules(summary: string): { errors: string[]; warni
 		errors.push(...basic.errors);
 	}
 
-	const words = summary.trim().split(/\s+/);
-	const firstWord = words[0]?.toLowerCase() ?? "";
-	const normalizedFirst = firstWord.replace(/[^a-z]/g, "");
-	const hasPastTense =
-		pastTenseVerbs.has(normalizedFirst) ||
-		(normalizedFirst.endsWith("ed") && !pastTenseEdExceptions.has(normalizedFirst));
-	if (!hasPastTense) {
-		errors.push("Summary must start with a past-tense verb");
+	const firstWord = summary.trim().split(/\s+/)[0] ?? "";
+	const normalizedFirst = firstWord.replace(/[^a-z]/gi, "").toLowerCase();
+	if (firstWord !== firstWord.toLowerCase()) {
+		errors.push("Summary must start with a lowercase word");
+	}
+	if (pastTenseVerbs.has(normalizedFirst)) {
+		errors.push("Summary must not start with a recognized past-tense verb");
 	}
 
 	const lowerSummary = summary.toLowerCase();

@@ -1,10 +1,10 @@
-From provided diff, generate concise git commit message.
+From provided diff, generate a concise Git commit subject.
 
 Format: `type(scope): description`
 Type: feat|fix|refactor|chore|test|docs. Scope optional.
-Description MUST lowercase, imperative mood, no trailing period. Message <72 characters.
+Description MUST use lowercase imperative mood, no trailing period, and fewer than 72 characters. This path emits a subject only; the commit formatter supplies any body paragraphs.
 
-MUST output ONLY commit message.
+MUST output ONLY the commit subject.
 
 Good examples:
 feat(auth): add token refresh on expiry

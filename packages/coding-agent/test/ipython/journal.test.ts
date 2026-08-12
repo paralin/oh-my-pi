@@ -4,7 +4,7 @@ import { Text, type TUI } from "@oh-my-pi/pi-tui";
 import { Settings } from "../../src/config/settings.js";
 import type { IpythonMimeRenderer } from "../../src/extensibility/extensions/types.js";
 import type { IpythonCellResult, IpythonCellUpdate } from "../../src/ipython/cell.js";
-import type { IpythonErrorEvent } from "../../src/ipython/controller.js";
+import type { IpythonErrorEvent, IpythonExecutionEvent } from "../../src/ipython/controller.js";
 import {
 	createIpythonCellJournalDetail,
 	createIpythonLifecycleJournalDetail,
@@ -547,6 +547,40 @@ describe("IPython replay journal", () => {
 		expect(rendered.match(/In \[7\]/g)).toHaveLength(1);
 		expect(rendered).not.toContain("Removed tool: ipython");
 		expect(rendered.length).toBeLessThan(9_000);
+	});
+
+	test("keeps the command head and failure tail inside the bounded 200 KiB result", () => {
+		const command = "$ gh run watch 481516 --exit-status\n";
+		const finalAssertion = "AssertionError: final failing assertion: expected check deploy to pass\n";
+		const exitSummary = "gh run watch exited with status 1\n";
+		const table = "NAME                STATUS  ELAPSED\nunit / linux        pending  00:42\n";
+		const bodyBytes =
+			200 * 1024 - Buffer.byteLength(command) - Buffer.byteLength(finalAssertion) - Buffer.byteLength(exitSummary);
+		const repeatedTables = table.repeat(Math.ceil(bodyBytes / Buffer.byteLength(table))).slice(0, bodyBytes);
+		const events: IpythonExecutionEvent[] = [
+			{ kind: "stream", name: "stdout", text: command },
+			{ kind: "stream", name: "stdout", text: repeatedTables },
+			{
+				kind: "error",
+				ename: "AssertionError",
+				evalue: "final failing assertion",
+				traceback: [finalAssertion, exitSummary],
+			},
+		];
+		const safeText = createIpythonCellText(events, [], "error", 50 * 1024);
+		const totalBytes = safeText.totalBytes;
+		const markerStart = safeText.text.indexOf("\n[IPython output truncated:");
+		const markerEnd = safeText.text.indexOf("]\n", markerStart) + 2;
+		const retainedBytes =
+			Buffer.byteLength(safeText.text.slice(0, markerStart)) + Buffer.byteLength(safeText.text.slice(markerEnd));
+
+		expect(totalBytes).toBeGreaterThanOrEqual(200 * 1024);
+		expect(safeText).toMatchObject({ truncated: true, omittedBytes: totalBytes - retainedBytes });
+		expect(safeText.outputBytes).toBeLessThanOrEqual(50 * 1024);
+		expect(safeText.text).toContain(command.trim());
+		expect(safeText.text).toContain(finalAssertion.trim());
+		expect(safeText.text).toContain(exitSummary.trim());
+		expect(safeText.text).toContain(`${totalBytes} bytes total; ${totalBytes - retainedBytes} bytes omitted`);
 	});
 
 	test("bounds live safe text and preserves empty abort status", () => {

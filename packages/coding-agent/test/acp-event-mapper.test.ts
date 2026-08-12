@@ -1126,6 +1126,7 @@ describe("ACP event mapper", () => {
 					status: "ok",
 					startedAt: 11,
 					durationMs: 4,
+					progress: [],
 					message: "Syntax-tree search completed",
 					summary: { path: "src/operation.ts", count: 3, unit: "matches" },
 				},

@@ -1,4 +1,5 @@
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { truncateTailBytes } from "../session/streaming-output";
 import { DEFAULT_MAX_BYTES, truncateHeadBytes } from "../session/streaming-output-constants";
 import type {
 	IpythonArtifactReference,
@@ -11,15 +12,26 @@ import type { IpythonErrorEvent, IpythonExecutionEvent, IpythonHostOperationSumm
 import type { IpythonCellJournalDetail } from "./journal";
 import type { IpythonStartupProgress } from "./provisioner";
 
-const TRUNCATION_MARKER = "\n[IPython output truncated]";
-const MIN_IPYTHON_PRESENTATION_BYTES = Buffer.byteLength(TRUNCATION_MARKER, "utf-8");
+function truncationMarker(totalBytes: number, omittedBytes: number, fullResultPath?: string): string {
+	const artifact = fullResultPath ? `; full result: ${sanitizeText(fullResultPath)}` : "";
+	return `\n[IPython output truncated: ${totalBytes} bytes total; ${omittedBytes} bytes omitted${artifact}]\n`;
+}
+
+const MIN_IPYTHON_PRESENTATION_BYTES = Buffer.byteLength(truncationMarker(0, 0), "utf-8");
 
 export type IpythonCellPresentationStatus = "running" | "ok" | "error" | "aborted";
 
+/** One presentation-safe progress snapshot published by a nested host operation. */
+export interface IpythonHostOperationProgress {
+	readonly at: number;
+	readonly message: string;
+	readonly summary: IpythonHostOperationSummary | undefined;
+}
+
 /**
  * One nested host operation of a cell, folded from its ordered lifecycle
- * records. Carries only operation identity, status, duration, and the
- * presentation-safe message and summary its handler published.
+ * records. `progress` retains every published snapshot for journal and replay
+ * diagnosis; `message` and `summary` remain the latest compact snapshot.
  */
 export interface IpythonHostOperationPresentation {
 	readonly operationId: string;
@@ -27,6 +39,7 @@ export interface IpythonHostOperationPresentation {
 	readonly status: IpythonCellPresentationStatus;
 	readonly startedAt: number;
 	readonly durationMs: number | undefined;
+	readonly progress: readonly IpythonHostOperationProgress[];
 	readonly message: string | undefined;
 	readonly summary: IpythonHostOperationSummary | undefined;
 }
@@ -132,19 +145,41 @@ export function createIpythonCellText(
 	errors: readonly IpythonErrorEvent[],
 	status: IpythonCellPresentationStatus,
 	maxBytes = DEFAULT_MAX_BYTES,
+	fullResultPath?: string,
 ): IpythonCellText {
 	validateIpythonCellTextBudget(maxBytes);
 	const text = executionSafeText(events, errors, status);
 	const totalBytes = Buffer.byteLength(text, "utf-8");
 	if (totalBytes <= maxBytes) return { text, truncated: false, totalBytes, outputBytes: totalBytes };
-	const head = truncateHeadBytes(text, maxBytes - MIN_IPYTHON_PRESENTATION_BYTES);
-	const output = `${head.text}${TRUNCATION_MARKER}`;
-	return {
-		text: output,
-		truncated: true,
-		totalBytes,
-		outputBytes: Buffer.byteLength(output, "utf-8"),
-	};
+
+	const artifactPath =
+		fullResultPath && Buffer.byteLength(truncationMarker(totalBytes, totalBytes, fullResultPath), "utf-8") <= maxBytes
+			? fullResultPath
+			: undefined;
+	let omittedBytes = totalBytes;
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const marker = truncationMarker(totalBytes, omittedBytes, artifactPath);
+		const markerBytes = Buffer.byteLength(marker, "utf-8");
+		const contentBytes = maxBytes - markerBytes;
+
+		const head = truncateHeadBytes(text, Math.ceil(contentBytes / 2));
+		const tail = truncateTailBytes(text, Math.floor(contentBytes / 2));
+		const nextOmittedBytes = totalBytes - head.bytes - tail.bytes;
+		if (nextOmittedBytes !== omittedBytes) {
+			omittedBytes = nextOmittedBytes;
+			continue;
+		}
+
+		const output = `${head.text}${marker}${tail.text}`;
+		return {
+			text: output,
+			truncated: true,
+			totalBytes,
+			omittedBytes,
+			outputBytes: Buffer.byteLength(output, "utf-8"),
+		};
+	}
+	throw new Error("IPython output truncation did not converge");
 }
 
 function startupProgress(updates: readonly IpythonCellUpdate[]): IpythonStartupProgress[] {
@@ -179,13 +214,26 @@ export function collectIpythonHostOperations(
 			status: "running" as const,
 			startedAt: event.at,
 			durationMs: undefined,
+			progress: [],
 			message: undefined,
 			summary: undefined,
 		};
+		const progress =
+			event.phase === "progress" && event.message !== undefined
+				? [
+						...current.progress,
+						{
+							at: event.at,
+							message: sanitizeText(event.message),
+							summary: event.summary === undefined ? undefined : sanitizeSummary(event.summary),
+						},
+					]
+				: current.progress;
 		const presentation =
 			event.phase === "progress"
 				? {
 						...current,
+						progress,
 						...(event.message === undefined ? {} : { message: sanitizeText(event.message) }),
 						...(event.summary === undefined
 							? {}
@@ -204,7 +252,7 @@ export function collectIpythonHostOperations(
  * surfaces pass `displayPath` to shorten the recorded path for their width.
  */
 export function ipythonHostOperationDetails(
-	operation: IpythonHostOperationPresentation,
+	operation: Pick<IpythonHostOperationPresentation, "summary">,
 	displayPath = operation.summary?.path,
 ): string[] {
 	const details: string[] = [];
@@ -231,6 +279,7 @@ function completedText(source: IpythonCellResult | IpythonCellJournalDetail): Ip
 		text,
 		truncated: source.safeTextTruncated,
 		totalBytes: source.totalOutputBytes,
+		...(source.omittedOutputBytes === undefined ? {} : { omittedBytes: source.omittedOutputBytes }),
 		outputBytes: Buffer.byteLength(text, "utf-8"),
 	};
 }

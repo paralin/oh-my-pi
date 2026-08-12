@@ -8,6 +8,7 @@ import {
 	spillIpythonCellArtifacts,
 } from "../../src/ipython/artifacts.js";
 import type { IpythonCellResult } from "../../src/ipython/cell.js";
+import { createIpythonCellText } from "../../src/ipython/projection.js";
 
 function result(): IpythonCellResult {
 	return {
@@ -111,12 +112,51 @@ describe("IPython artifact spill", () => {
 			const png = artifacts.find(artifact => artifact.mimeType === "image/png");
 			const json = artifacts.find(artifact => artifact.mimeType === "application/json" && artifact !== full);
 			if (!full || !html || !png || !json) throw new Error("artifact spill omitted a required payload");
+			expect(full.path).toBe(path.join(root, "ipython", "artifacts", "cell_unsafe", "full-result.json"));
 			expect(JSON.parse(await fs.readFile(full.path, "utf8")).stdout).toBe("full output");
 			expect(await fs.readFile(html.path, "utf8")).toBe("<script>unsafe()</script>");
 			expect(await fs.readFile(png.path, "utf8")).toBe("png-bytes");
 			expect(JSON.parse(await fs.readFile(json.path, "utf8"))).toEqual({ ok: true });
 			const remaining = (await fs.readdir(path.dirname(full.path))).filter(name => name.endsWith(".tmp"));
 			expect(remaining).toEqual([]);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test("puts the deterministic full-result path in the bounded projection", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ipython-full-result-"));
+		try {
+			const command = "$ gh run watch 481516 --exit-status\n";
+			const failing = "AssertionError: final failing assertion\ngh run watch exited with status 1\n";
+			const error = {
+				kind: "error" as const,
+				ename: "AssertionError",
+				evalue: "final failing assertion",
+				traceback: [failing],
+			};
+			const events = [
+				{ kind: "stream" as const, name: "stdout" as const, text: `${command}${"x".repeat(200 * 1024)}` },
+				error,
+			] satisfies IpythonCellResult["events"];
+			const modelText = createIpythonCellText(events, [], "error");
+			const artifacts = await spillIpythonCellArtifacts(
+				{
+					...result(),
+					status: "error",
+					events,
+					errors: [error],
+					modelText,
+				},
+				root,
+			);
+			const full = artifacts.find(artifact => artifact.label === "Full IPython result");
+			if (!full) throw new Error("full result artifact was not written");
+			const withPath = createIpythonCellText(events, [], "error", modelText.outputBytes, full.path);
+
+			expect(withPath.outputBytes).toBeLessThanOrEqual(modelText.outputBytes);
+			expect(withPath.text).toContain(`full result: ${full.path}`);
+			expect(JSON.parse(await fs.readFile(full.path, "utf8")).events).toEqual(events);
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

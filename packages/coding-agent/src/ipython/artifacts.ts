@@ -3,6 +3,8 @@ import * as path from "node:path";
 import type { IpythonArtifactReference, IpythonCellResult } from "./cell";
 import type { IpythonHostArtifact, IpythonHostArtifactRequest } from "./controller";
 
+export const IPYTHON_FULL_RESULT_ARTIFACT_LABEL = "Full IPython result";
+
 function cellDirectoryName(cellId: string): string {
 	const safe = cellId.replaceAll(/[^a-zA-Z0-9._-]/g, "_").slice(0, 160);
 	return safe || "cell";
@@ -96,7 +98,7 @@ export async function spillIpythonCellArtifacts(
 			path: artifactPath,
 			mimeType: "application/json",
 			bytes: bytes.byteLength,
-			label: "Full IPython result",
+			label: IPYTHON_FULL_RESULT_ARTIFACT_LABEL,
 		});
 	}
 	let displayIndex = 0;

@@ -285,7 +285,8 @@ describe("IPython cell service", () => {
 			expect(bounded.modelText.truncated).toBe(true);
 			expect(bounded.modelText.totalBytes).toBe(600);
 			expect(bounded.modelText.outputBytes).toBeLessThanOrEqual(128);
-			expect(bounded.modelText.text).toEndWith("[IPython output truncated]");
+			expect(bounded.modelText.text).toContain("[IPython output truncated: 600 bytes total; 540 bytes omitted]");
+			expect(bounded.modelText.text).toEndWith("界界界界界界界界界界");
 		} finally {
 			await service.dispose();
 		}

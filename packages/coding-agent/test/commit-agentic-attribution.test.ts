@@ -75,10 +75,10 @@ describe("commit agent IPython proposal contract", () => {
 									proposal: {
 										type: "fix",
 										scope: "commit",
-										summary: "Restored agentic commit proposals",
+										summary: "restore agentic commit proposals",
 										details: [
 											{
-												text: "Parsed final assistant commit proposals.",
+												text: "The final assistant proposal supplies the commit classification.",
 												changelog_category: "Fixed",
 												user_visible: true,
 											},
@@ -131,13 +131,13 @@ describe("commit agent IPython proposal contract", () => {
 		expect(sessionOptions).not.toHaveProperty("customTools");
 		expect(sessionOptions).not.toHaveProperty("toolNames");
 		expect(state.proposal).toMatchObject({
-			summary: "Restored agentic commit proposals",
+			summary: "restore agentic commit proposals",
 			analysis: {
 				type: "fix",
 				scope: "commit",
 				details: [
 					{
-						text: "Parsed final assistant commit proposals.",
+						text: "The final assistant proposal supplies the commit classification.",
 						changelogCategory: "Fixed",
 						userVisible: true,
 					},

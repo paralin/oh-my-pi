@@ -16,7 +16,7 @@ tasks = [
 [[review_pr]]
 name = "Orient"
 tasks = [
-  "Call fetch_pr and read the changed files",
+  "Call fetch_pr and inspect the changed files",
   "Compare the PR head against its base",
 ]
 

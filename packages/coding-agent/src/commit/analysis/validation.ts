@@ -51,14 +51,21 @@ export function validateAnalysis(analysis: ConventionalAnalysis): ValidationResu
 		errors.push(...scopeResult.errors);
 	}
 	for (const detail of analysis.details) {
-		if (!detail.text.trim()) {
+		const paragraph = detail.text.trim();
+		if (!paragraph) {
 			errors.push("Detail text is empty");
 			continue;
 		}
-		if (!detail.text.trim().endsWith(".")) {
+		if (/[\r\n]/.test(paragraph)) {
+			errors.push(`Detail must be a single paragraph: ${detail.text}`);
+		}
+		if (/^(?:[-*+]|\d+[.)])\s/u.test(paragraph)) {
+			errors.push(`Detail must be prose, not a list item: ${detail.text}`);
+		}
+		if (!paragraph.endsWith(".")) {
 			errors.push(`Detail must end with a period: ${detail.text}`);
 		}
-		if (detail.text.length > 120) {
+		if (paragraph.length > 120) {
 			errors.push(`Detail exceeds 120 characters: ${detail.text}`);
 		}
 	}

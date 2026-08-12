@@ -14,7 +14,7 @@ Working branch: `{{workspace.branch}}` — checked out at cwd.
 
 Worktree: cwd; working branch ready for commits if classification calls for code. MUST complete:
 
-1. **Triage first.** Read body and comments via `read` / `fetch_issue_thread`; run `gh_search_issues` for duplicates and already-merged fixes — reporter may use an older release than worktree; then call `classify_issue(primary=..., priority=..., functional=[...], rationale=...)`.
+1. **Triage first.** Read the supplied body and comments; call `fetch_issue_thread` when current thread state is needed; run `gh_search_issues` for duplicates and already-merged fixes — reporter may use an older release than worktree; then call `classify_issue(primary=..., priority=..., functional=[...], rationale=...)`.
 
    Before `bug`, system-prompt merit gate: ALL pass — broken contract, demonstrated impact, deliberate-tradeoff check, upstream vs this-repo cause, premise verification. NEVER comment, push, or open a PR before classification.
 
