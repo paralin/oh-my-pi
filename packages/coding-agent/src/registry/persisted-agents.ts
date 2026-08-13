@@ -14,6 +14,7 @@ import {
 	type AgentHistorySummary,
 	type AgentMetricsSummary,
 	type AgentRegistry,
+	getAgentDeletionPath,
 	getAgentTombstonePath,
 	MAIN_AGENT_ID,
 } from "./agent-registry";
@@ -377,6 +378,12 @@ async function registerPersistedSubagentsFromDir(
 		if (!shouldContinue()) return;
 		if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.includes(".bak")) continue;
 		const sessionFile = path.join(dir, entry.name);
+		if (await Bun.file(getAgentDeletionPath(sessionFile)).exists()) {
+			const deletedId = entry.name.slice(0, -6);
+			const deletedRef = registry.get(deletedId);
+			if (deletedRef?.sessionFile === sessionFile) registry.unregister(deletedId, deletedRef);
+			continue;
+		}
 		// The advisor transcript is observability-only: register it as a non-peer
 		// `advisor` kind under its owning session so the Hub can show its read-only
 		// transcript, but it never joins agent-facing rosters and is not revivable.

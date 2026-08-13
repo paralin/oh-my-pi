@@ -39,7 +39,7 @@ import {
 import "../tools/review";
 import type { AsyncJobManager } from "../async";
 import { hasResolvableTranscript } from "../internal-urls/registry-helpers";
-import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRef, AgentRegistry, getAgentDeletionPath, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 import type {
 	SubagentRuntimeAdmission,
@@ -728,6 +728,9 @@ export class TaskService implements TaskAdmissionService {
 			}
 			const current = registry.get(ref.id);
 			if (current?.kind === "sub" && current.parentId === parentId) {
+				if (current.sessionFile && (await Bun.file(current.sessionFile).exists())) {
+					await Bun.write(getAgentDeletionPath(current.sessionFile), "");
+				}
 				if (current.status === "running" && current.session) {
 					await current.session.abort({ reason: USER_INTERRUPT_LABEL });
 				}

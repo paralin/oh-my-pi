@@ -21,6 +21,13 @@ export function getAgentTombstonePath(sessionFile: string): string {
 	return `${sessionFile}${AGENT_TOMBSTONE_SUFFIX}`;
 }
 
+/** Sidecar marker that removes an explicitly deleted RLM child from persisted rosters. */
+export const AGENT_DELETION_SUFFIX = ".deleted";
+
+export function getAgentDeletionPath(sessionFile: string): string {
+	return `${sessionFile}${AGENT_DELETION_SUFFIX}`;
+}
+
 /**
  * - `running`: a turn is in flight.
  * - `idle`: live peer session in memory, awaiting work. Finished agents are

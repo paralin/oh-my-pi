@@ -86,6 +86,7 @@
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
 ### Fixed
 
+- Prevented explicitly deleted RLM children from reappearing in agent rosters after persisted transcript scans.
 - Added compact RLM heartbeat state to the status bar.
 - Removed repeated process-exit narration from completed IPython cells while keeping output tails and transcripts.
 - Replaced subagent prompt boilerplate with a concise task summary in the default HUD.

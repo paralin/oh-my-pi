@@ -7,6 +7,7 @@ import { TaskService } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../src/session/tool-session.js";
 
 const taskAgent: AgentDefinition = {
@@ -75,6 +76,7 @@ describe("Task-backed RLM admission", () => {
 	});
 
 	test("returns after runtime publication while the existing Task job continues", async () => {
+		using tempDir = TempDir.createSync("@omp-rlm-delete-");
 		let disposed = false;
 		let aborted = false;
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
@@ -89,7 +91,8 @@ describe("Task-backed RLM admission", () => {
 					disposed = true;
 				},
 			};
-			const sessionFile = `/sessions/${options.id}.jsonl`;
+			const sessionFile = tempDir.join(`${options.id}.jsonl`);
+			await Bun.write(sessionFile, "");
 			AgentRegistry.global().register({
 				id: options.id,
 				displayName: options.id,
@@ -103,7 +106,7 @@ describe("Task-backed RLM admission", () => {
 				id: options.id,
 				name: options.id,
 				sessionId: "child-session",
-				sessionDir: "/sessions",
+				sessionDir: tempDir.path(),
 				sessionFile,
 				model: "provider/model",
 				cwd: options.cwd,
@@ -129,7 +132,7 @@ describe("Task-backed RLM admission", () => {
 			name: "reviewer",
 			jobId: "reviewer",
 			sessionId: "child-session",
-			sessionDir: "/sessions",
+			sessionDir: tempDir.path(),
 			model: "provider/model",
 		});
 		expect(manager.getJob("reviewer")?.status).toBe("running");
@@ -146,6 +149,7 @@ describe("Task-backed RLM admission", () => {
 		expect(deleted).toMatchObject({ id: "reviewer", status: "error", lifecycleStatus: "aborted" });
 		expect(manager.getJob("reviewer")?.status).toBe("cancelled");
 		expect(AgentRegistry.global().get("reviewer")).toBeUndefined();
+		expect(await Bun.file(`${tempDir.join("reviewer.jsonl")}.deleted`).exists()).toBe(true);
 		expect(aborted).toBe(true);
 		expect(disposed).toBe(true);
 	});

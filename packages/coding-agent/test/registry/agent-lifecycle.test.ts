@@ -759,4 +759,25 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("Next-Owner")).toMatchObject({ status: "idle", session: revived.session });
 		expect(revived.disposeCalls()).toBe(0);
 	});
+
+	it("does not restore an explicitly deleted RLM transcript", async () => {
+		using tempDir = TempDir.createSync("@omp-lifecycle-deleted-");
+		const rootSessionFile = path.join(tempDir.path(), "main.jsonl");
+		const workerId = "Deleted-Sub";
+		const workerSessionFile = path.join(tempDir.path(), "main", `${workerId}.jsonl`);
+		await Bun.write(rootSessionFile, "");
+		await Bun.write(workerSessionFile, "");
+		await Bun.write(`${workerSessionFile}.deleted`, "");
+
+		registry.register({
+			id: workerId,
+			displayName: workerId,
+			kind: "sub",
+			session: null,
+			sessionFile: workerSessionFile,
+			status: "parked",
+		});
+		await registerPersistedSubagents(registry, rootSessionFile);
+		expect(registry.get(workerId)).toBeUndefined();
+	});
 });
