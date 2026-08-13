@@ -475,6 +475,7 @@ export class TaskService implements TaskAdmissionService {
 
 	private constructor(private readonly session: ToolSession) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
+		this.session.settings.onChange("task.maxConcurrency", max => this.#spawnSemaphore?.resize(max));
 	}
 
 	#isBatchEnabled(): boolean {
@@ -814,6 +815,7 @@ export class TaskService implements TaskAdmissionService {
 			if (duplicate) throw new Error(`RLM name ${JSON.stringify(requestedName)} is already in use by a sibling`);
 			this.#pendingAdmissionNames.add(requestedName);
 		}
+		let jobRegistered = false;
 		try {
 			let outputManager = this.session.agentOutputManager;
 			if (!outputManager) {
@@ -847,17 +849,15 @@ export class TaskService implements TaskAdmissionService {
 				progress: [{ ...progress }],
 				async: { state: "running", jobId: agentId, type: "task" },
 			});
-			const admitted = Promise.withResolvers<TaskChildAdmission>();
-			let settled = false;
-			let jobId = agentId;
+			const clearPendingName = () => {
+				if (requestedName) this.#pendingAdmissionNames.delete(requestedName);
+			};
 			overrides.onAdmission = runtime => {
-				if (settled) return;
-				settled = true;
 				const metadata = { ...runtime, name: requestedName ?? runtime.name };
 				this.#admissionMetadata.set(runtime.id, metadata);
-				admitted.resolve({ ...metadata, jobId });
+				clearPendingName();
 			};
-			jobId = this.#registerSpawnJob({
+			const jobId = this.#registerSpawnJob({
 				manager,
 				requestId: request.sourceId,
 				spawnParams,
@@ -875,28 +875,21 @@ export class TaskService implements TaskAdmissionService {
 					}
 				},
 			});
+			jobRegistered = true;
 			const job = manager.getJob(jobId);
 			if (!job) throw new Error(`RLM Task job was not registered: ${jobId}`);
-			void job.promise.then(() => {
-				if (settled) return;
-				settled = true;
-				admitted.reject(new Error(job.errorText || `RLM Task ${agentId} ended before admission`));
-			});
 			const abort = () => {
-				if (settled) return;
-				settled = true;
 				manager.cancel(jobId, { ownerId: this.session.getAgentId?.() ?? MAIN_AGENT_ID });
-				admitted.reject(new Error(request.signal ? abortMessage(request.signal) : "RLM admission was interrupted"));
 			};
 			request.signal?.addEventListener("abort", abort, { once: true });
-			if (request.signal?.aborted) abort();
-			try {
-				return await admitted.promise;
-			} finally {
+			void job.promise.then(() => {
 				request.signal?.removeEventListener("abort", abort);
-			}
+				clearPendingName();
+			});
+			if (request.signal?.aborted) abort();
+			return { id: agentId, name: requestedName ?? agentId, jobId };
 		} finally {
-			if (requestedName) this.#pendingAdmissionNames.delete(requestedName);
+			if (requestedName && !jobRegistered) this.#pendingAdmissionNames.delete(requestedName);
 		}
 	}
 

@@ -54,8 +54,8 @@ class ActCancelledError(ActError):
 class RLMSpawnHandle:
     rlm_child_id: str
     name: str
-    session_dir: Path
-    model: str
+    session_dir: Path | None = None
+    model: str | None = None
 
 
 RLM_SERVICE_TIERS = ("auto", "default", "flex", "scale", "priority")
@@ -186,10 +186,17 @@ def host_request_sync(request_type: str, payload: dict[str, Any] | None = None) 
 def _spawn_handle(payload: Any) -> RLMSpawnHandle:
     if not isinstance(payload, dict):
         raise RuntimeError("rlm.run returned an invalid spawn handle")
-    values = [payload.get(key) for key in ("rlm_child_id", "name", "session_dir", "model")]
-    if not all(isinstance(value, str) and value for value in values):
+    child_id = payload.get("rlm_child_id")
+    name = payload.get("name")
+    session_dir = payload.get("session_dir")
+    model = payload.get("model")
+    if not all(isinstance(value, str) and value for value in (child_id, name)):
         raise RuntimeError("rlm.run returned an invalid spawn handle")
-    return RLMSpawnHandle(values[0], values[1], Path(values[2]), values[3])  # type: ignore[arg-type]
+    if session_dir is not None and (not isinstance(session_dir, str) or not session_dir):
+        raise RuntimeError("rlm.run returned an invalid spawn handle")
+    if model is not None and (not isinstance(model, str) or not model):
+        raise RuntimeError("rlm.run returned an invalid spawn handle")
+    return RLMSpawnHandle(child_id, name, Path(session_dir) if session_dir else None, model)  # type: ignore[arg-type]
 
 
 class _ActExchange:

@@ -117,8 +117,8 @@ export function createRlmIpythonHostHandlers(task: TaskAdmissionService | undefi
 			return {
 				rlm_child_id: admitted.id,
 				name: admitted.name,
-				session_dir: admitted.sessionDir,
-				model: admitted.model,
+				...(admitted.sessionDir ? { session_dir: admitted.sessionDir } : {}),
+				...(admitted.model ? { model: admitted.model } : {}),
 			};
 		},
 		"rlm.find_models": request => {

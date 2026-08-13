@@ -336,6 +336,7 @@ export class Settings {
 	#merged: RawSettings = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	readonly #changeListeners = new Map<SettingPath, Set<(value: unknown, prev: unknown) => void>>();
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
@@ -545,8 +546,33 @@ export class Settings {
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
 
+	/** Subscribe to effective changes for one setting on this instance. */
+	onChange<P extends SettingPath>(
+		path: P,
+		listener: (value: SettingValue<P>, prev: SettingValue<P>) => void,
+	): () => void {
+		const listeners = this.#changeListeners.get(path) ?? new Set();
+		listeners.add(listener as (value: unknown, prev: unknown) => void);
+		this.#changeListeners.set(path, listeners);
+		return () => {
+			listeners.delete(listener as (value: unknown, prev: unknown) => void);
+			if (listeners.size === 0) this.#changeListeners.delete(path);
+		};
+	}
+
+	#notifyChangeListeners(path: SettingPath, value: unknown, prev: unknown): void {
+		for (const listener of [...(this.#changeListeners.get(path) ?? [])]) {
+			try {
+				listener(value, prev);
+			} catch (error) {
+				logger.warn("Settings: change listener failed", { path, error: String(error) });
+			}
+		}
+	}
+
 	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {
 		if (Object.is(value, prev)) return;
+		this.#notifyChangeListeners(path, value, prev);
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
@@ -674,6 +700,9 @@ export class Settings {
 		}
 		const previousModelRoles = this.get("modelRoles");
 		const previousSessionAccent = this.get("statusLine.sessionAccent");
+		const previousListenerValues = new Map(
+			[...this.#changeListeners.keys()].map(path => [path, this.get(path)] as const),
+		);
 
 		this.#configPath = loaded.configPath;
 		this.#global = loaded.settings;
@@ -683,6 +712,10 @@ export class Settings {
 			const next = this.get(key);
 			if (Bun.deepEquals(next, previous)) continue;
 			SETTING_HOOKS[key]?.(next, previous);
+		}
+		for (const [key, previous] of previousListenerValues) {
+			const next = this.get(key);
+			if (!Bun.deepEquals(next, previous)) this.#notifyChangeListeners(key, next, previous);
 		}
 		if (!Bun.deepEquals(this.get("modelRoles"), previousModelRoles)) {
 			modelRolesSignal.fire();

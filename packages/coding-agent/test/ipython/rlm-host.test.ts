@@ -43,15 +43,7 @@ function fakeService(): TaskAdmissionService & { admissions: TaskAdmissionReques
 		deleted,
 		async admit(request) {
 			admissions.push(request);
-			return {
-				id: child.id,
-				name: child.name,
-				jobId: child.id,
-				sessionId: child.sessionId,
-				sessionDir: child.sessionDir,
-				model: child.model!,
-				cwd: "/workspace",
-			};
+			return { id: child.id, name: child.name, jobId: child.id };
 		},
 		findModels(query, limit) {
 			return [{ provider: "provider", id: "model", name: `Model ${query}`, selector: "provider/model" }].slice(
@@ -83,8 +75,6 @@ describe("RLM IPython host handlers", () => {
 		expect(result).toEqual({
 			rlm_child_id: "reviewer",
 			name: "reviewer",
-			session_dir: "/sessions/child",
-			model: "provider/model",
 		});
 		expect(task.admissions).toHaveLength(1);
 		expect(task.admissions[0]).toMatchObject({

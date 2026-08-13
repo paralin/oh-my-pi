@@ -28,8 +28,16 @@ export interface SubagentRuntimeAdmission {
 	cwd: string;
 }
 
-export interface TaskChildAdmission extends SubagentRuntimeAdmission {
+/** Receipt for a registered Task job; runtime facts appear later in the child roster. */
+export interface TaskChildAdmission {
+	id: string;
+	name: string;
 	jobId: string;
+	sessionId?: string;
+	sessionDir?: string;
+	sessionFile?: string;
+	model?: string;
+	cwd?: string;
 }
 
 export type TaskChildStatus = "running" | "completed" | "error";

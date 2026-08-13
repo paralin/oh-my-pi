@@ -36,6 +36,29 @@ function result(id: string): SingleResult {
 	};
 }
 
+function gatedExecutor() {
+	const entered = Array.from({ length: 5 }, () => Promise.withResolvers<void>());
+	const releases = Array.from({ length: 5 }, () => Promise.withResolvers<void>());
+	let active = 0;
+	let highWater = 0;
+	let invocations = 0;
+	vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+		const index = invocations++;
+		active++;
+		highWater = Math.max(highWater, active);
+		entered[index]?.resolve();
+		await releases[index]?.promise;
+		active--;
+		return result(options.id);
+	});
+	return {
+		entered: (index: number) => entered[index]!.promise,
+		release: (index: number) => releases[index]!.resolve(),
+		invocations: () => invocations,
+		highWater: () => highWater,
+	};
+}
+
 function session(manager: AsyncJobManager): ToolSession {
 	const registry = AgentRegistry.global();
 	return {
@@ -75,10 +98,11 @@ describe("Task-backed RLM admission", () => {
 		AgentRegistry.resetGlobalForTests();
 	});
 
-	test("returns after runtime publication while the existing Task job continues", async () => {
+	test("returns a queued receipt while the existing Task job publishes runtime facts later", async () => {
 		using tempDir = TempDir.createSync("@omp-rlm-delete-");
 		let disposed = false;
 		let aborted = false;
+		const runtimePublished = Promise.withResolvers<void>();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			expect(options.keepAlive).toBe(true);
 			const peer: AgentPeer = {
@@ -111,6 +135,7 @@ describe("Task-backed RLM admission", () => {
 				model: "provider/model",
 				cwd: options.cwd,
 			});
+			runtimePublished.resolve();
 			if (!options.signal?.aborted) {
 				await new Promise<void>(resolve =>
 					options.signal?.addEventListener("abort", () => resolve(), { once: true }),
@@ -127,15 +152,9 @@ describe("Task-backed RLM admission", () => {
 			sourceId: "ipython:root:cell:1",
 		});
 
-		expect(handle).toMatchObject({
-			id: "reviewer",
-			name: "reviewer",
-			jobId: "reviewer",
-			sessionId: "child-session",
-			sessionDir: tempDir.path(),
-			model: "provider/model",
-		});
+		expect(handle).toEqual({ id: "reviewer", name: "reviewer", jobId: "reviewer" });
 		expect(manager.getJob("reviewer")?.status).toBe("running");
+		await runtimePublished.promise;
 		expect(await tool.listDirectChildren()).toEqual([
 			expect.objectContaining({
 				id: "reviewer",
@@ -155,6 +174,7 @@ describe("Task-backed RLM admission", () => {
 	});
 
 	test("keeps Prime-shaped display names separate from filesystem-safe Task ids", async () => {
+		const runtimePublished = Promise.withResolvers<void>();
 		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
 			const peer: AgentPeer = {
 				messages: [],
@@ -181,6 +201,7 @@ describe("Task-backed RLM admission", () => {
 				model: "provider/model",
 				cwd: options.cwd,
 			});
+			runtimePublished.resolve();
 			if (!options.signal?.aborted) {
 				await new Promise<void>(resolve =>
 					options.signal?.addEventListener("abort", () => resolve(), { once: true }),
@@ -197,6 +218,7 @@ describe("Task-backed RLM admission", () => {
 		expect(handle.name).toBe("../API reviewer");
 		expect(handle.id).toMatch(/^[A-Za-z0-9_-]+$/);
 		expect(handle.id).not.toContain("..");
+		await runtimePublished.promise;
 		expect(AgentRegistry.global().get(handle.id)?.displayName).toBe("../API reviewer");
 		await expect(
 			tool.admit({
@@ -263,18 +285,96 @@ describe("Task-backed RLM admission", () => {
 		);
 	});
 
-	test("rejects instead of hanging when Task fails before publishing a child", async () => {
+	test("keeps startup failure on the registered Task job after returning its receipt", async () => {
 		vi.spyOn(executorModule, "runSubprocess").mockRejectedValue(new Error("startup failed"));
 		const tool = await TaskService.create(session(manager));
-		await expect(
-			tool.admit({
-				assignment: "work",
-				name: "failed-child",
-				sourceId: "ipython:root:cell:failed",
-			}),
-		).rejects.toThrow("startup failed");
+		const handle = await tool.admit({
+			assignment: "work",
+			name: "failed-child",
+			sourceId: "ipython:root:cell:failed",
+		});
+		await manager.getJob(handle.jobId)?.promise;
 		expect(manager.getJob("failed-child")?.status).toBe("failed");
+		expect(manager.getJob("failed-child")?.errorText).toContain("startup failed");
 		expect(AgentRegistry.global().get("failed-child")).toBeUndefined();
+	});
+
+	test("returns three receipts promptly at cap two and starts the third only after release", async () => {
+		const toolSession = session(manager);
+		toolSession.settings.set("task.maxConcurrency", 2);
+		const executor = gatedExecutor();
+		const tool = TaskService.create(toolSession);
+
+		const receipts = await Promise.all(
+			["first", "second", "third"].map((name, index) =>
+				tool.admit({ assignment: name, name, sourceId: `ipython:root:cell:cap-${index}` }),
+			),
+		);
+		expect(receipts.map(receipt => receipt.name)).toEqual(["first", "second", "third"]);
+		await executor.entered(1);
+		await Bun.sleep(0);
+		expect(executor.invocations()).toBe(2);
+		expect(executor.highWater()).toBe(2);
+
+		executor.release(0);
+		await executor.entered(2);
+		expect(executor.invocations()).toBe(3);
+		expect(executor.highWater()).toBe(2);
+		executor.release(1);
+		executor.release(2);
+	});
+
+	test("raising task concurrency wakes an existing queued admission", async () => {
+		const toolSession = session(manager);
+		toolSession.settings.set("task.maxConcurrency", 2);
+		const executor = gatedExecutor();
+		const tool = TaskService.create(toolSession);
+
+		await Promise.all(
+			["first", "second", "third"].map((name, index) =>
+				tool.admit({ assignment: name, name, sourceId: `ipython:root:cell:resize-${index}` }),
+			),
+		);
+		await executor.entered(1);
+		expect(executor.invocations()).toBe(2);
+		toolSession.settings.set("task.maxConcurrency", 3);
+		await executor.entered(2);
+		expect(executor.highWater()).toBe(3);
+		executor.release(0);
+		executor.release(1);
+		executor.release(2);
+	});
+
+	test("Comm close cancels a queued admission and removes its semaphore waiter", async () => {
+		const toolSession = session(manager);
+		toolSession.settings.set("task.maxConcurrency", 2);
+		const executor = gatedExecutor();
+		const tool = TaskService.create(toolSession);
+		await Promise.all(
+			["first", "second"].map((name, index) =>
+				tool.admit({ assignment: name, name, sourceId: `ipython:root:cell:close-${index}` }),
+			),
+		);
+		await executor.entered(1);
+		const closed = new AbortController();
+		const queued = await tool.admit({
+			assignment: "queued",
+			name: "queued",
+			sourceId: "ipython:root:cell:close-queued",
+			signal: closed.signal,
+		});
+		closed.abort(new Error("Comm closed"));
+		await manager.getJob(queued.jobId)?.promise;
+		expect(manager.getJob(queued.jobId)?.status).toBe("cancelled");
+		expect(executor.invocations()).toBe(2);
+
+		executor.release(0);
+		await tool.admit({ assignment: "replacement", name: "replacement", sourceId: "ipython:root:cell:replacement" });
+		await executor.entered(2);
+		expect(executor.invocations()).toBe(3);
+		expect(executor.highWater()).toBe(2);
+		executor.release(1);
+		executor.release(2);
 	});
 
 	test("does not register a child for an already interrupted cell", async () => {
@@ -506,13 +606,14 @@ describe("RLM model projection and service-tier policy", () => {
 		const tool = await TaskService.create(
 			modelSession(manager, { models: [vertexClaude], allowedTiers: ["priority"] }),
 		);
-		await tool.admit({
+		const handle = await tool.admit({
 			assignment: "x",
 			model: "google-vertex/claude-test",
 			serviceTier: "priority",
 			name: "clamped",
 			sourceId: "ipython:r:1:h",
 		});
+		await manager.getJob(handle.jobId)?.promise;
 		expect(spawn.mock.calls.at(-1)?.[0].parentServiceTier).toEqual({ openai: "default" });
 	});
 });
