@@ -2494,6 +2494,24 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				sessionManager.adoptArtifactManager(options.parentArtifactManager);
 			}
 			sessionOpenedAt = performance.now();
+			if (options.onAdmission) {
+				const admittedSessionFile = sessionManager.getSessionFile();
+				const admittedModel =
+					progress.resolvedModel ??
+					(typeof options.modelOverride === "string" ? options.modelOverride : options.modelOverride?.[0]);
+				if (!admittedModel) throw new Error(`Subagent ${id} started without a resolved model.`);
+				options.onAdmission({
+					id,
+					name: id,
+					sessionId: sessionManager.getSessionId(),
+					sessionDir: admittedSessionFile
+						? path.dirname(admittedSessionFile)
+						: sessionManager.getSessionDir() || worktree || options.artifactsDir || options.cwd,
+					...(admittedSessionFile ? { sessionFile: admittedSessionFile } : {}),
+					model: admittedModel,
+					cwd: worktree ?? options.cwd,
+				});
+			}
 
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
@@ -2511,25 +2529,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			monitor.setActiveSession(session);
 			installRegistryStatusSync(session);
-			if (options.onAdmission) {
-				const admittedSessionFile = session.sessionManager.getSessionFile();
-				const admittedModel =
-					progress.resolvedModel ??
-					(session.model ? formatModelStringWithRouting(session.model) : undefined) ??
-					(typeof options.modelOverride === "string" ? options.modelOverride : options.modelOverride?.[0]);
-				if (!admittedModel) throw new Error(`Subagent ${id} started without a resolved model.`);
-				options.onAdmission({
-					id,
-					name: id,
-					sessionId: session.sessionManager.getSessionId(),
-					sessionDir: admittedSessionFile
-						? path.dirname(admittedSessionFile)
-						: session.sessionManager.getSessionDir(),
-					...(admittedSessionFile ? { sessionFile: admittedSessionFile } : {}),
-					model: admittedModel,
-					cwd: worktree ?? options.cwd,
-				});
-			}
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
