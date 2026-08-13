@@ -1,4 +1,3 @@
-- Fixed sequential IPython `await rlm(...)` admissions waiting for full child session construction.
 # Changelog
 
 ## [Unreleased]

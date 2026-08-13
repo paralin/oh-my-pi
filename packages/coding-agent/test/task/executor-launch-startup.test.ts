@@ -38,7 +38,6 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 	});
 
 	const sessionCreationStarted = Promise.withResolvers<void>();
-	const sessionCreationGate = Promise.withResolvers<void>();
 	let sessionCreated = false;
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	const childSessionFile = tempDir.join("child.jsonl");
@@ -69,7 +68,6 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 	} as unknown as AgentSession;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
 		sessionCreationStarted.resolve();
-		await sessionCreationGate.promise;
 		sessionCreated = true;
 		const result: CreateAgentSessionResult = {
 			session,
@@ -81,10 +79,6 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 	});
 
 	const admission = Promise.withResolvers<SubagentRuntimeAdmission>();
-	let admitted = false;
-	void admission.promise.then(() => {
-		admitted = true;
-	});
 	const run = runSubprocess({
 		cwd: tempDir.path(),
 		artifactsDir: tempDir.path(),
@@ -105,18 +99,16 @@ it("overlaps registry refresh with session-file opening and session setup", asyn
 
 	openGate.resolve(sessionManager);
 	await sessionCreationStarted.promise;
-	await Promise.resolve();
-	expect(admitted).toBe(true);
-	expect(sessionCreated).toBe(false);
+	expect(sessionCreated).toBe(true);
 
-	sessionCreationGate.resolve();
 	refreshGate.resolve();
 	expect((await run).exitCode).toBe(0);
 	expect(await admission.promise).toEqual({
 		id: "task-launch-overlap",
 		name: "task-launch-overlap",
-		sessionId: sessionManager.getSessionId(),
+		sessionId: "child-session",
 		sessionDir: tempDir.path(),
+		sessionFile: childSessionFile,
 		model: "provider/model",
 		cwd: tempDir.path(),
 	});

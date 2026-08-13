@@ -17,7 +17,7 @@ export interface TaskAdmissionRequest {
 	onProgress?: (message: string) => void | Promise<void>;
 }
 
-/** Child identity published after Task allocates its session, while runtime construction continues. */
+/** Child identity published after Task has constructed and registered its runtime. */
 export interface SubagentRuntimeAdmission {
 	id: string;
 	name: string;
