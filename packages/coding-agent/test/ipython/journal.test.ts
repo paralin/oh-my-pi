@@ -184,13 +184,13 @@ describe("IPython replay journal", () => {
 			},
 		});
 		const running = Bun.stripANSI(component.render(100).join("\n"));
-		expect(running).toContain("python · display(unsafe_html) · direct · ↑ 1 ↓ 1 lines");
+		expect(running).toContain("python · display(unsafe_html) · ↑ 1 ↓ 1 lines");
 		expect(running).not.toContain("Preparing runtime...");
 		expect(running).not.toContain("displayed MIME types: text/html");
 		expect(running).not.toContain(rawHtml);
 		component.complete(createIpythonCellJournalDetail(cellResult()));
 		const complete = Bun.stripANSI(component.render(100).join("\n"));
-		expect(complete).toContain("✘ python · raise ValueError('broken') · direct");
+		expect(complete).toContain("✘ python · raise ValueError('broken')");
 		expect(complete).not.toContain("ValueError: broken");
 		expect(complete).toContain("25ms");
 		component.setExpanded(true);
@@ -350,9 +350,28 @@ describe("IPython replay journal", () => {
 			createIpythonCellJournalDetail({ ...result, origin: "direct", cellId: "cell-direct" }),
 		);
 		const directCollapsed = Bun.stripANSI(direct.render(100).join("\n"));
-		expect(directCollapsed).toContain("value_24 = 24 · direct · ↑ 25 ↓ 30 lines");
+		expect(directCollapsed).toContain("value_24 = 24 · ↑ 25 ↓ 30 lines");
 		expect(directCollapsed).not.toContain("value_0 = 0");
 		expect(directCollapsed).not.toContain("output-29");
+	});
+
+	test("counts a bash cell body without its magic header", () => {
+		const result: IpythonCellResult = {
+			...cellResult(),
+			code: "%%bash\nprintf hi",
+			status: "ok",
+			stdout: "",
+			events: [],
+			errors: [],
+			modelText: { text: "", truncated: false, totalBytes: 0, outputBytes: 0 },
+		};
+		const component = new IpythonCellMessageComponent(createIpythonCellJournalDetail(result));
+		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
+		expect(collapsed).toContain("bash · printf hi · ↑ 1 lines");
+		expect(collapsed).not.toContain("direct");
+
+		component.setExpanded(true);
+		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("%%bash");
 	});
 
 	test("projects ordered live and replayed output through one structured record", () => {

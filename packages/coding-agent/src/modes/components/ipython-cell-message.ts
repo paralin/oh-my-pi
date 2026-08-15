@@ -52,8 +52,12 @@ function operationStatus(status: IpythonHostOperationPresentation["status"]): "r
 	return "error";
 }
 
-function sourceLineCount(code: string): number {
-	return displayText(code)
+function sourceLineCount(code: string, language: "bash" | "python"): number {
+	const source =
+		language === "bash" && /^\s*%%bash\b[^\n]*(?:\n|$)/u.test(code)
+			? code.replace(/^\s*%%bash\b[^\n]*(?:\n|$)/u, "")
+			: code;
+	return displayText(source)
 		.split("\n")
 		.filter(line => line.trim().length > 0).length;
 }
@@ -66,9 +70,8 @@ function cellSummary(presentation: IpythonCellPresentation, expanded: boolean, w
 			: formatStatusIcon(cellStatus(presentation.status), theme);
 	const parts = [`${marker} ${theme.fg("muted", preview.language)}`];
 	if (preview.text) parts.push(theme.fg("pythonMode", replaceTabs(preview.text)));
-	if (presentation.origin === "direct") parts.push(theme.fg("muted", "direct"));
 
-	const inputLines = sourceLineCount(presentation.code);
+	const inputLines = sourceLineCount(presentation.code, preview.language);
 	const outputLines = presentation.safeText.totalLines ?? 0;
 	const counts = [inputLines > 0 ? `↑ ${inputLines}` : "", outputLines > 0 ? `↓ ${outputLines}` : ""].filter(Boolean);
 	if (counts.length > 0) parts.push(theme.fg("muted", `${counts.join(" ")} lines`));
@@ -96,7 +99,7 @@ function cellRows(presentation: IpythonCellPresentation, expanded: boolean, widt
 	const code = displayText(sanitizeText(presentation.code));
 	if (code) {
 		rows.push("");
-		const highlighted = highlightCode(code, "python");
+		const highlighted = highlightCode(code, previewIpythonCode(code).language);
 		for (const [index, line] of highlighted.entries()) {
 			appendWrapped(rows, index === 0 ? "› " : BODY_INDENT, line, width);
 		}

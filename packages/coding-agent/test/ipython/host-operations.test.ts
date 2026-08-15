@@ -342,7 +342,7 @@ subprocess.run(
 			const collapsed = Bun.stripANSI(component.render(100).join("\n"));
 			expect(collapsed).toContain("rg -n needle src");
 			expect(collapsed).not.toContain("subprocess.run(");
-			expect(collapsed).toContain("· direct");
+			expect(collapsed).not.toContain("· direct");
 			expect(collapsed).not.toContain("Operations");
 			expect(collapsed).not.toContain("ast.search · src/app.ts");
 			for (const width of [40, 16]) {
@@ -389,7 +389,7 @@ subprocess.run(
 		);
 		const component = new IpythonCellMessageComponent(detail);
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
-		expect(collapsed).toContain("· direct");
+		expect(collapsed).not.toContain("· direct");
 		expect(collapsed).not.toContain("operations");
 		expect(collapsed).not.toContain("omp.files.read");
 
