@@ -8,11 +8,12 @@
  */
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
-<<<<<<< HEAD
-import type { ExtensionError, ExtensionMode, ExtensionUIContext } from "../extensibility/extensions/types";
-=======
-import type { CompactOptions, ExtensionError, ExtensionUIContext } from "../extensibility/extensions/types";
->>>>>>> 15b80d2b2d (fix(coding-agent): harden session scheduling and RPC custody)
+import type {
+	CompactOptions,
+	ExtensionError,
+	ExtensionMode,
+	ExtensionUIContext,
+} from "../extensibility/extensions/types";
 import type { AgentSession } from "../session/agent-session";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
 

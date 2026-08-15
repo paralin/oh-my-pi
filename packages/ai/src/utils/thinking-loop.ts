@@ -102,6 +102,10 @@ const CONCRETE_ANCHOR =
  * Model identity is derived only from its id; provider and compatibility metadata
  * do not opt opaque aliases into the guard.
  */
+export function isGeminiThinkingModel(model: Model<Api>): boolean {
+	return modelFamilyToken(model.id) === "gemini";
+}
+
 export function isLoopGuardedModel(model: Model<Api>, options?: StreamOptions): boolean {
 	if (options?.loopGuard?.enabled === false) return false;
 	switch (modelFamilyToken(model.id)) {

@@ -1181,7 +1181,7 @@ export class SessionMaintenance {
 		const localEstimate = this.estimateStoredContextTokens(messages);
 		// Floor by the local estimate: a payload-shrinking before_provider_request
 		// hook deflates the provider-anchored breakdown, which must not suppress
-		// pre-prompt compaction (see #estimateStoredContextTokens).
+		// pre-prompt compaction (see estimateStoredContextTokens).
 		return compactionContextTokens(breakdown?.usedTokens ?? 0, localEstimate);
 	}
 
@@ -1280,7 +1280,7 @@ export class SessionMaintenance {
 		// a slow message_end listener leave the TUI "generating" with no provider
 		// request or tool running.
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
-		const storedContextTokens = this.#estimateStoredContextTokens();
+		const storedContextTokens = this.estimateStoredContextTokens();
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		const scratch = this.#host.scratchHandoff();
 		const scratchPath = scratch.displayPath;
@@ -2095,7 +2095,7 @@ export class SessionMaintenance {
 		const compactionSettings = this.#host.settings.getGroup("compaction");
 		const residualTokens = compactionContextTokens(
 			Math.max(0, (this.#host.getContextUsage({ contextWindow })?.tokens ?? 0) - providerExcludedTokens),
-			Math.max(0, this.#estimateStoredContextTokens() - storedExcludedTokens),
+			Math.max(0, this.estimateStoredContextTokens() - storedExcludedTokens),
 		);
 		const fitBudget = Math.max(0, contextWindow - resolveBudgetReserveTokens(contextWindow, compactionSettings));
 		return residualTokens <= fitBudget;
