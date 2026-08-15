@@ -228,20 +228,22 @@ describe("IPython nested host-operation lifecycle", () => {
 		]);
 	});
 
-	test("renders compact nested operations inside the framed cell and expands with Ctrl-O", () => {
+	test("keeps nested operations behind the compact cell summary", () => {
 		const result = cellResult(astEvents());
 		const component = new IpythonCellMessageComponent(createIpythonCellJournalDetail(result));
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
-		expect(collapsed).toContain("Operations");
-		expect(collapsed).toContain("ast.search · src/app.ts · 3 matches (30ms)");
-		expect(collapsed).toContain("ast.rewrite · src/lib.ts · 2 replacements · applied (35ms)");
-		// Compact presentation keeps only the latest allowlisted result beside each operation.
-		expect(collapsed).not.toContain("Searching syntax trees");
-		expect(collapsed).toContain("Syntax-tree search completed");
-		expect(collapsed).toContain("ordinary output");
+		expect(collapsed).toContain("✓ python · omp.ast.search");
+		expect(collapsed).toContain("↑ 1 ↓ 1 lines · 150ms");
+		expect(collapsed).not.toContain("Operations");
+		expect(collapsed).not.toContain("Syntax-tree search completed");
+		expect(collapsed).not.toContain("ordinary output");
 
 		component.setExpanded(true);
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain("Operations");
+		expect(expanded).toContain("ast.search src/app.ts · 3 matches · 30ms");
+		expect(expanded).toContain("ast.rewrite src/lib.ts · 2 replacements · applied · 35ms");
+		expect(expanded).toContain("ordinary output");
 		expect(expanded).toContain("Searching syntax trees");
 		expect(expanded).toContain("Syntax-tree search completed");
 		expect(expanded).toContain("Syntax-tree rewrite completed");
@@ -268,18 +270,19 @@ describe("IPython nested host-operation lifecycle", () => {
 		];
 		const component = new IpythonCellMessageComponent(createIpythonCellJournalDetail(cellResult(events)));
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
-		expect(collapsed).toContain("process.run · /tmp/ipython/process-run.txt · 6 bytes (30ms)");
+		expect(collapsed).not.toContain("process.run");
 		expect(collapsed).not.toContain("Process run exited");
-		expect(collapsed).toContain("hello");
+		expect(collapsed).not.toContain("hello");
 
 		component.setExpanded(true);
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
+		expect(expanded).toContain("process.run /tmp/ipython/process-run.txt · 6 bytes · 30ms");
 		expect(expanded).toContain("Process run started");
 		expect(expanded).toContain("Process run exited");
 		expect(expanded).toContain("hello");
 	});
 
-	test("coalesces repeated gh watch tables only in the compact current result", () => {
+	test("keeps repeated watch progress out of the compact row and available when expanded", () => {
 		const runningTable = "NAME              STATUS   ELAPSED\nunit / linux      pending  00:42";
 		const failingTable = "NAME              STATUS   ELAPSED\nunit / linux      failed   00:43";
 		const events: IpythonExecutionEvent[] = [
@@ -302,8 +305,8 @@ describe("IPython nested host-operation lifecycle", () => {
 		const live = new IpythonCellMessageComponent({ code: result.code, origin: result.origin });
 		for (const update of result.updates.slice(0, 9)) live.applyUpdate(update);
 		const repeatedCurrent = Bun.stripANSI(live.render(100).join("\n"));
-		expect(repeatedCurrent.match(/unit \/ linux/g)).toHaveLength(1);
-		expect(repeatedCurrent).toContain("×8 identical");
+		expect(repeatedCurrent).not.toContain("unit / linux");
+		expect(repeatedCurrent).not.toContain("Operations");
 		for (const update of result.updates.slice(9)) live.applyUpdate(update);
 
 		expect(projectIpythonCellPresentation(detail).operations[0]?.progress).toHaveLength(9);
@@ -312,9 +315,8 @@ describe("IPython nested host-operation lifecycle", () => {
 		expect(compactJournal).toContain("failed");
 		for (const component of [live, replayed]) {
 			const compact = Bun.stripANSI(component.render(100).join("\n"));
-			expect(compact.match(/unit \/ linux/g)).toHaveLength(1);
-			expect(compact).not.toContain("×8 identical");
-			expect(compact).toContain("failed check");
+			expect(compact).not.toContain("unit / linux");
+			expect(compact).not.toContain("failed check");
 
 			component.setExpanded(true);
 			const expanded = Bun.stripANSI(component.render(100).join("\n"));
@@ -341,8 +343,8 @@ subprocess.run(
 			expect(collapsed).toContain("rg -n needle src");
 			expect(collapsed).not.toContain("subprocess.run(");
 			expect(collapsed).toContain("· direct");
-			expect(collapsed).toContain("Operations");
-			expect(collapsed).toContain("ast.search · src/app.ts · 3 matches (30ms)");
+			expect(collapsed).not.toContain("Operations");
+			expect(collapsed).not.toContain("ast.search · src/app.ts");
 			for (const width of [40, 16]) {
 				const rows = component.render(width).map(line => Bun.stripANSI(line));
 				expect(rows.every(line => Bun.stringWidth(line) <= width)).toBe(true);
@@ -388,8 +390,8 @@ subprocess.run(
 		const component = new IpythonCellMessageComponent(detail);
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
 		expect(collapsed).toContain("· direct");
-		expect(collapsed).toContain("… 3 more operations");
-		expect(collapsed.match(/omp\.files\.read/g)).toHaveLength(3);
+		expect(collapsed).not.toContain("operations");
+		expect(collapsed).not.toContain("omp.files.read");
 
 		component.setExpanded(true);
 		const expanded = Bun.stripANSI(component.render(100).join("\n"));
@@ -425,7 +427,7 @@ subprocess.run(
 
 		for (const component of [live, replay]) {
 			const compact = Bun.stripANSI(component.render(120).join("\n"));
-			expect(compact).toContain("stdout: build 2 stderr: warning");
+			expect(compact).not.toContain("stdout: build 2 stderr: warning");
 			expect(compact).not.toContain("Process run timed_out");
 			expect(compact).not.toContain("build 1");
 			const narrow = component.render(48).map(Bun.stripANSI);
@@ -461,7 +463,7 @@ subprocess.run(
 		const detail = createIpythonCellJournalDetail(cellResult(progressEvents, { artifacts }));
 		const component = new IpythonCellMessageComponent(detail);
 		const collapsed = Bun.stripANSI(component.render(100).join("\n"));
-		expect(collapsed).toContain("evidence 0 evidence 1");
+		expect(collapsed).not.toContain("evidence 0 evidence 1");
 		expect(collapsed).not.toContain("step 18");
 		expect(collapsed).not.toContain("/tmp/omp-artifacts");
 

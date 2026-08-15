@@ -1,4 +1,4 @@
-import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
+import { type Component, Container, Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { IpythonMimeRenderer } from "../../extensibility/extensions/types";
 import type { IpythonCellUpdate } from "../../ipython/cell";
@@ -17,15 +17,18 @@ import {
 	formatDuration,
 	formatExpandHint,
 	formatMoreItems,
+	formatStatusIcon,
 	PREVIEW_LIMITS,
 	replaceTabs,
 	shortenPath,
 	truncateToWidth,
+	wrapTextWithAnsi,
 } from "../../tools/render-utils";
-import { outputBlockContentWidth, renderCodeCell, renderStatusLine } from "../../tui";
-import { theme } from "../theme/theme";
+import { renderStatusLine } from "../../tui";
+import { highlightCode, theme } from "../theme/theme";
 
 const MAX_DISPLAY_LINE_CHARS = 4_000;
+const BODY_INDENT = "  ";
 
 function clampLine(line: string): string {
 	return truncateToWidth(line, MAX_DISPLAY_LINE_CHARS);
@@ -35,38 +38,10 @@ function displayText(text: string): string {
 	return text.endsWith("\n") ? text.slice(0, -1) : text;
 }
 
-function clampPreviewLines(text: string, width: number): string {
-	const contentWidth = outputBlockContentWidth(width);
-	return displayText(text)
-		.split("\n")
-		.map(line => truncateToWidth(line, contentWidth))
-		.join("\n");
-}
-
-function cellCodePreview(
-	code: string,
-	expanded: boolean,
-	width: number,
-): {
-	code: string;
-	language: string;
-	codeHiddenLines?: number;
-} {
-	const safeCode = sanitizeText(code);
-	if (expanded) return { code: safeCode, language: "python" };
-	const preview = previewIpythonCode(safeCode);
-	const text = clampPreviewLines(preview.text, width);
-	const sourceLines = displayText(safeCode).split("\n").length;
-	return {
-		code: text,
-		language: preview.language,
-		codeHiddenLines: text ? sourceLines : undefined,
-	};
-}
-
-function cellStatus(detail: IpythonCellJournalDetail): "complete" | "warning" | "error" {
-	if (detail.status === "ok") return "complete";
-	if (detail.status === "aborted") return "warning";
+function cellStatus(status: IpythonCellPresentation["status"]): "running" | "success" | "error" | "aborted" {
+	if (status === "running") return "running";
+	if (status === "ok") return "success";
+	if (status === "aborted") return "aborted";
 	return "error";
 }
 
@@ -77,44 +52,73 @@ function operationStatus(status: IpythonHostOperationPresentation["status"]): "r
 	return "error";
 }
 
-function progressSignature(progress: IpythonHostOperationPresentation["progress"][number]): string {
-	const summary = progress.summary;
-	return `${progress.message}\u0000${summary?.path ?? ""}\u0000${summary?.count ?? ""}\u0000${summary?.unit ?? ""}\u0000${summary?.dryRun ?? ""}`;
+function sourceLineCount(code: string): number {
+	return displayText(code)
+		.split("\n")
+		.filter(line => line.trim().length > 0).length;
 }
 
-function coalesceProgress(
-	progress: readonly IpythonHostOperationPresentation["progress"][number][],
-): Array<{ progress: IpythonHostOperationPresentation["progress"][number]; repetitions: number }> {
-	const collapsed: Array<{ progress: IpythonHostOperationPresentation["progress"][number]; repetitions: number }> = [];
-	for (const snapshot of progress) {
-		const previous = collapsed.at(-1);
-		if (previous && progressSignature(previous.progress) === progressSignature(snapshot)) {
-			previous.repetitions++;
-			continue;
-		}
-		collapsed.push({ progress: snapshot, repetitions: 1 });
+function cellSummary(presentation: IpythonCellPresentation, expanded: boolean, width: number): string {
+	const preview = previewIpythonCode(sanitizeText(presentation.code));
+	const marker =
+		presentation.status === "ok"
+			? theme.fg("success", "✓")
+			: formatStatusIcon(cellStatus(presentation.status), theme);
+	const parts = [`${marker} ${theme.fg("muted", preview.language)}`];
+	if (preview.text) parts.push(theme.fg("pythonMode", replaceTabs(preview.text)));
+	if (presentation.origin === "direct") parts.push(theme.fg("muted", "direct"));
+
+	const inputLines = sourceLineCount(presentation.code);
+	const outputLines = presentation.safeText.totalLines ?? 0;
+	const counts = [inputLines > 0 ? `↑ ${inputLines}` : "", outputLines > 0 ? `↓ ${outputLines}` : ""].filter(Boolean);
+	if (counts.length > 0) parts.push(theme.fg("muted", `${counts.join(" ")} lines`));
+	if (presentation.phase === "complete") parts.push(theme.fg("muted", formatDuration(presentation.durationMs)));
+
+	const separator = theme.fg("dim", " · ");
+	let summary = ` ${parts.join(separator)}`;
+	const hint = formatExpandHint(theme, expanded, true);
+	if (hint && visibleWidth(`${summary}${separator}${hint}`) <= width) summary += `${separator}${hint}`;
+	return truncateToWidth(summary, width);
+}
+
+function appendWrapped(rows: string[], prefix: string, text: string, width: number): void {
+	const available = Math.max(1, width - 1 - prefix.length);
+	const wrapped = wrapTextWithAnsi(text || " ", available);
+	for (const [index, row] of (wrapped.length > 0 ? wrapped : [""]).entries()) {
+		rows.push(truncateToWidth(` ${index === 0 ? prefix : " ".repeat(prefix.length)}${row}`, width));
 	}
-	return collapsed;
+}
+
+function cellRows(presentation: IpythonCellPresentation, expanded: boolean, width: number): string[] {
+	const rows = [cellSummary(presentation, expanded, width)];
+	if (!expanded) return rows;
+
+	const code = displayText(sanitizeText(presentation.code));
+	if (code) {
+		rows.push("");
+		const highlighted = highlightCode(code, "python");
+		for (const [index, line] of highlighted.entries()) {
+			appendWrapped(rows, index === 0 ? "› " : BODY_INDENT, line, width);
+		}
+	}
+
+	const output = displayText(sanitizeText(presentation.safeText.text));
+	if (output) {
+		rows.push("");
+		for (const line of output.split("\n")) appendWrapped(rows, BODY_INDENT, theme.fg("toolOutput", line), width);
+	}
+	return rows;
 }
 
 function operationProgressRows(
 	progress: IpythonHostOperationPresentation["progress"][number],
-	repetitions: number,
-	expanded: boolean,
 	width: number,
 ): string[] {
 	const details = ipythonHostOperationDetails(
 		{ summary: progress.summary },
 		progress.summary?.path ? shortenPath(progress.summary.path) : undefined,
 	).map(detail => replaceTabs(sanitizeText(detail)));
-	const suffix = `${details.length > 0 ? ` · ${details.join(" · ")}` : ""}${
-		repetitions > 1 ? ` · ×${repetitions} identical` : ""
-	}`;
-	if (!expanded) {
-		const compact = replaceTabs(sanitizeText(progress.message)).replaceAll(/\s+/g, " ").trim();
-		return [truncateToWidth(`    ${theme.fg("dim", `${compact}${suffix}`)}`, width)];
-	}
-
+	const suffix = details.length > 0 ? ` · ${details.join(" · ")}` : "";
 	const lines = replaceTabs(sanitizeText(progress.message)).split("\n");
 	const visible = lines.slice(0, PREVIEW_LIMITS.EXPANDED_LINES);
 	const rows = visible.map((line, index) =>
@@ -134,72 +138,33 @@ function operationProgressRows(
 	return rows;
 }
 
-function operationRows(
-	operations: readonly IpythonHostOperationPresentation[],
-	expanded: boolean,
-	width: number,
-): string[] {
+function operationRows(operations: readonly IpythonHostOperationPresentation[], width: number): string[] {
 	if (operations.length === 0) return [];
-	const operationLimit = expanded ? PREVIEW_LIMITS.OUTPUT_EXPANDED : PREVIEW_LIMITS.OUTPUT_COLLAPSED;
-	const visible = operations.slice(-operationLimit);
+	const visible = operations.slice(-PREVIEW_LIMITS.OUTPUT_EXPANDED);
 	const hidden = operations.length - visible.length;
-	const rows = [theme.fg("toolTitle", "Operations")];
+	const rows = ["", theme.fg("toolTitle", " Operations")];
 	for (const operation of visible) {
 		const path = operation.summary?.path;
 		const details = ipythonHostOperationDetails(operation, path ? shortenPath(path) : undefined).map(detail =>
 			replaceTabs(sanitizeText(detail)),
 		);
-		if (operation.durationMs !== undefined) {
-			const duration = `(${formatDuration(operation.durationMs)})`;
-			if (details.length > 0) details[details.length - 1] = `${details.at(-1)} ${duration}`;
-			else details.push(duration);
-		}
-		const metadata =
-			details.length > 0 ? [`${theme.sep.dot.trimStart()}${details[0]}`, ...details.slice(1)] : details;
+		if (operation.durationMs !== undefined) details.push(formatDuration(operation.durationMs));
 		rows.push(
 			`  ${renderStatusLine(
 				{
 					icon: operationStatus(operation.status),
 					title: replaceTabs(sanitizeText(operation.operation)),
-					meta: metadata,
+					meta: details,
 				},
 				theme,
 			)}`,
 		);
-
-		const progress = expanded
-			? operation.progress.map(snapshot => ({ progress: snapshot, repetitions: 1 }))
-			: coalesceProgress(operation.progress);
-		const progressLimit = expanded ? PREVIEW_LIMITS.OUTPUT_EXPANDED : 1;
-		const visibleProgress = progress.slice(-progressLimit);
-		const hiddenProgress = progress.length - visibleProgress.length;
-		if (hiddenProgress > 0) {
-			rows.push(
-				`    ${theme.fg("dim", `${formatMoreItems(hiddenProgress, "progress update")} ${formatExpandHint(theme, expanded, true)}`)}`,
-			);
-		}
-		for (const snapshot of visibleProgress) {
-			if (!expanded && operation.operation === "process.run" && operation.status !== "running") {
-				const message = snapshot.progress.message.replace(/^Process run [^\n]*\n?/u, "").trim();
-				if (message) {
-					rows.push(
-						...operationProgressRows(
-							{ ...snapshot.progress, message, summary: undefined },
-							snapshot.repetitions,
-							false,
-							width,
-						),
-					);
-				}
-				continue;
-			}
-			rows.push(...operationProgressRows(snapshot.progress, snapshot.repetitions, expanded, width));
-		}
+		const progress = operation.progress.slice(-PREVIEW_LIMITS.OUTPUT_EXPANDED);
+		const hiddenProgress = operation.progress.length - progress.length;
+		if (hiddenProgress > 0) rows.push(`    ${theme.fg("dim", formatMoreItems(hiddenProgress, "progress update"))}`);
+		for (const snapshot of progress) rows.push(...operationProgressRows(snapshot, width));
 	}
-	if (hidden > 0) {
-		const hint = formatExpandHint(theme, expanded, true);
-		rows.push(`  ${theme.fg("dim", `${formatMoreItems(hidden, "operation")}${hint ? ` ${hint}` : ""}`)}`);
-	}
+	if (hidden > 0) rows.push(`  ${theme.fg("dim", formatMoreItems(hidden, "operation"))}`);
 	return rows.map(row => truncateToWidth(row, width));
 }
 
@@ -283,34 +248,9 @@ export class IpythonCellMessageComponent extends Container {
 		}
 
 		const presentation = projectIpythonCellPresentation(detail);
-		const cell: Component = {
-			render: width => {
-				const code = cellCodePreview(presentation.code, this.#expanded, width);
-				return renderCodeCell(
-					{
-						code: code.code,
-						language: code.language,
-						codeHiddenLines: code.codeHiddenLines,
-						showLanguage: true,
-						title: `In [${presentation.sequence}]${presentation.origin === "direct" ? " · direct" : ""}`,
-						status: cellStatus(detail),
-						duration: presentation.durationMs,
-						output: this.#expanded
-							? displayText(sanitizeText(presentation.safeText.text))
-							: clampPreviewLines(sanitizeText(presentation.safeText.text), width),
-						codeMaxLines: PREVIEW_LIMITS.COLLAPSED_LINES,
-						outputMaxLines: PREVIEW_LIMITS.OUTPUT_COLLAPSED,
-						codeTail: true,
-						outputTail: true,
-						expanded: this.#expanded,
-						width,
-					},
-					theme,
-				);
-			},
-		};
+		const cell: Component = { render: width => cellRows(presentation, this.#expanded, width) };
 		this.addChild(cell);
-		this.#appendOperations(presentation);
+		if (this.#expanded) this.#appendOperations(presentation);
 
 		if (this.#expanded) {
 			const visibleStartupProgress = presentation.startupProgress.slice(-PREVIEW_LIMITS.OUTPUT_EXPANDED);
@@ -353,46 +293,23 @@ export class IpythonCellMessageComponent extends Container {
 		const live = this.#live;
 		if (!live) return;
 		const presentation = projectIpythonLiveCellPresentation(live);
-		const cell: Component = {
-			render: width => {
-				const code = cellCodePreview(live.code, this.#expanded, width);
-				return renderCodeCell(
-					{
-						code: code.code,
-						language: code.language,
-						codeHiddenLines: code.codeHiddenLines,
-						showLanguage: true,
-						title: `IPython${live.origin === "direct" ? " · direct" : ""}`,
-						status: "running",
-						output: this.#expanded
-							? displayText(sanitizeText(presentation.safeText.text))
-							: clampPreviewLines(sanitizeText(presentation.safeText.text), width),
-						codeMaxLines: PREVIEW_LIMITS.COLLAPSED_LINES,
-						outputMaxLines: PREVIEW_LIMITS.OUTPUT_COLLAPSED,
-						codeTail: true,
-						outputTail: true,
-						expanded: this.#expanded,
-						width,
-					},
-					theme,
-				);
-			},
-		};
+		const cell: Component = { render: width => cellRows(presentation, this.#expanded, width) };
 		this.addChild(cell);
-		this.#appendOperations(presentation);
-
-		const progress = presentation.startupProgress.at(-1);
-		if (progress) {
-			this.addChild(new Text(theme.fg("dim", `\n${progress.stage}: ${sanitizeText(progress.message)}`), 1, 0));
+		if (this.#expanded) {
+			this.#appendOperations(presentation);
+			const progress = presentation.startupProgress.at(-1);
+			if (progress) {
+				this.addChild(new Text(theme.fg("dim", `\n${progress.stage}: ${sanitizeText(progress.message)}`), 1, 0));
+			}
+			this.#appendMimeComponents(presentation);
 		}
-		if (this.#expanded) this.#appendMimeComponents(presentation);
 		this.#rebuildActs();
 	}
 
 	#appendOperations(presentation: IpythonCellPresentation): void {
 		if (presentation.operations.length === 0) return;
 		this.addChild({
-			render: width => operationRows(presentation.operations, this.#expanded, width),
+			render: width => operationRows(presentation.operations, width),
 		});
 	}
 
